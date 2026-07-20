@@ -68,7 +68,12 @@
 ///   instead of a `SemanticNodeId(value_node)` arena ordinal. The
 ///   `ShapeSubject` key identity changed, so any stale entry stored under
 ///   the old ordinal key must fail closed.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 3;
+/// - `4` — exact top-level lexical-owner identity across parser facts,
+///   declaration preparation, route results, semantic query identities, and
+///   module-augmentation contributors. Version `3` entries lack the owner
+///   discriminator and must fail closed rather than alias module and instance
+///   declarations with the same spelling.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 4;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

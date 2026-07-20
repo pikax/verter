@@ -158,7 +158,10 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
     let type_of = |ctx: ProjectionReductionContext| SemanticQueryKey::TypeOf {
         value_root: ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: ScopeId::file(Arc::from("/classifier/value.ts")),
+                scope: ScopeId::file(
+                    Arc::from("/classifier/value.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::from("sample"),
             },
             0,
@@ -920,7 +923,10 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
         .expect("schema.ts must have shallow file state");
     let app_config = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
         crate::semantic_query::ResolveDeclKey {
-            scope: crate::semantic_query::ScopeId::file(Arc::from("/workspace/src/schema.ts")),
+            scope: crate::semantic_query::ScopeId::file(
+                Arc::from("/workspace/src/schema.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
             name: Arc::from("AppConfig"),
         },
     )) {
@@ -935,6 +941,7 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
     // demand point materialises.
     let builtin_record_identity = || DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
         decl_name: Arc::from("Record"),
     };
@@ -1012,7 +1019,11 @@ fn skeleton_instantiate(
     host.shallow_file_state("/workspace/src/sel.ts")
         .expect("sel.ts must have shallow file state");
     let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        dispatch.type_slot_for(Arc::from("/workspace/src/sel.ts"), Arc::from(decl_name)),
+        dispatch.type_slot_for(
+            Arc::from("/workspace/src/sel.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(decl_name),
+        ),
         Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
         InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Skeleton),
@@ -1068,6 +1079,7 @@ fn root_conditional_still_distributes() {
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/workspace/src/sel.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from(name),
@@ -1463,6 +1475,7 @@ fn typeof_value_graph_lowers_at_requested_demand() {
         crate::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/workspace/src/factory.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("FactoryBag"),
             ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),

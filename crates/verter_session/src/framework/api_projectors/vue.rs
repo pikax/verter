@@ -16,7 +16,10 @@ use crate::framework::api_projector::{
 pub struct VueComponentApiProjector;
 
 impl ComponentApiProjector for VueComponentApiProjector {
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection> {
+    fn render_api(
+        &self,
+        cx: ComponentApiProjectorCtx<'_>,
+    ) -> Result<Option<ComponentApiProjection>, crate::PublicApiProjectionError> {
         let ComponentApiProjectorCtx {
             host,
             resolved_canonical,
@@ -33,7 +36,7 @@ impl ComponentApiProjector for VueComponentApiProjector {
         // (adapter routing happens at dispatch; carrier match happens here).
         let descriptor = crate::framework::descriptor::vue_descriptor();
         if file_language.carrier_language_id() != descriptor.carrier_language.as_ref() {
-            return None;
+            return Ok(None);
         }
         // Render against the ALREADY-resolved canonical the host classified —
         // not the raw alias id — so the language gate and the render share one
@@ -41,10 +44,12 @@ impl ComponentApiProjector for VueComponentApiProjector {
         // batch-shared cold seed + session view ride on `render_seed` so the
         // macro-deps path takes ZERO per-call store-view reads.
         host.render_vue_public_api_legacy(resolved_canonical, mode, profile, render_seed)
-            .map(|response| ComponentApiProjection {
-                response,
-                // Preserve the established Vue public/hover contract exactly.
-                contract: None,
+            .map(|response| {
+                response.map(|response| ComponentApiProjection {
+                    response,
+                    // Preserve the established Vue public/hover contract exactly.
+                    contract: None,
+                })
             })
     }
 }

@@ -76,9 +76,10 @@ pub(super) fn collect_snippet_candidate_members_from_lowered(
 /// empty producing canonical = the component's own file). Mirrors the Vue
 /// analyzer's macro-payload anchor — the owning declaration is the
 /// component's synthesized default-export value symbol.
-pub(super) fn local_default_anchor() -> AuthoredAnchor {
+pub(super) fn local_default_anchor(owner: verter_type_expr::TopLevelOwnerId) -> AuthoredAnchor {
     AuthoredAnchor {
         canonical_id: Arc::from(""),
+        owner,
         symbol: Arc::from("default"),
         space: LocatorSymbolSpace::Value,
     }
@@ -157,11 +158,12 @@ pub(super) fn fill_empty_payload_ref_anchor(
 pub(super) fn authored_type_payload_ref(
     ty: &TSType<'_>,
     source: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     macro_index: u32,
     payload: MacroPayloadPosition,
 ) -> AuthoredTypePayloadRef {
     let lowered: TypeExpr = lower_ts_type(ty, source);
-    authored_type_payload_ref_from_lowered(&lowered, macro_index, payload)
+    authored_type_payload_ref_from_lowered(&lowered, owner, macro_index, payload)
 }
 
 /// Stamp an already-lowered authored payload onto the Svelte macro-position
@@ -170,13 +172,14 @@ pub(super) fn authored_type_payload_ref(
 /// the TypeScript spelling.
 pub(super) fn authored_type_payload_ref_from_lowered(
     lowered: &TypeExpr,
+    owner: verter_type_expr::TopLevelOwnerId,
     macro_index: u32,
     payload: MacroPayloadPosition,
 ) -> AuthoredTypePayloadRef {
     let outcome = compute_semantic_hash(lowered, SymbolSpace::Type, &UnresolvedLens);
     AuthoredTypePayloadRef {
         locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
-            anchor: local_default_anchor(),
+            anchor: local_default_anchor(owner),
             macro_index,
             payload,
         }),
@@ -259,8 +262,18 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
         c.import_source.hash(&mut hasher);
         c.member_name.hash(&mut hasher);
     }
-    candidates.instance_exports.hash(&mut hasher);
-    candidates.module_exports.hash(&mut hasher);
+    for export in &candidates.instance_exports {
+        export.exported_name.hash(&mut hasher);
+        export.local_name.hash(&mut hasher);
+        export.owner.hash(&mut hasher);
+        export.binding_key.hash(&mut hasher);
+    }
+    for export in &candidates.module_exports {
+        export.exported_name.hash(&mut hasher);
+        export.local_name.hash(&mut hasher);
+        export.owner.hash(&mut hasher);
+        export.binding_key.hash(&mut hasher);
+    }
     for p in &candidates.legacy_props {
         p.name.hash(&mut hasher);
         p.has_default.hash(&mut hasher);

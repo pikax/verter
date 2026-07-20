@@ -64,6 +64,7 @@ use smallvec::SmallVec;
 use verter_language::FileLanguage;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::registry as fact_registry;
+use verter_type_expr::TopLevelOwnerId;
 
 use crate::project_type_store::IndexedReady;
 
@@ -293,7 +294,11 @@ impl FileArtifactKey {
 /// post-parse artifact's spans are SFC-absolute rather than compact-relative.
 /// The bump evicts any pre-existing compact-layout artifact so a stale entry
 /// cannot serve eval-relative spans after the change.
-pub const CURRENT_PARSER_VERSION: u32 = 2;
+///
+/// Bumped 2 → 3: parse facts and declaration inventories now retain exact
+/// top-level lexical owners. An artifact produced under version 2 cannot
+/// distinguish same-name module and instance declarations.
+pub const CURRENT_PARSER_VERSION: u32 = 3;
 
 /// Parser version stamped on the canonical-keyed legacy surface that
 /// builds [`FileArtifactKey`] inline (the env-hash-threading entry
@@ -308,7 +313,11 @@ pub const CURRENT_PARSER_VERSION: u32 = 2;
 /// changes — a parser-behavior change is exactly what this dimension
 /// owns, so the bump evicts every artifact parsed under the old
 /// uniform-TS dialect.
-pub const LEGACY_PARSER_VERSION: u32 = 3;
+///
+/// Bumped 3 → 4: carrier script facts and declaration inventories retain exact
+/// top-level lexical owners. Version 3 candidates can alias same-name module
+/// and instance bindings and therefore cannot remain warm.
+pub const LEGACY_PARSER_VERSION: u32 = 4;
 
 /// `parse_env_hash` sentinel marking a BASE artifact key
 /// ([`FileArtifactKey::base`]) — used by the canonical-keyed surface
@@ -454,6 +463,7 @@ impl FileFacts {
 /// Fields:
 ///
 /// - `specifier` — the syntactic specifier inside `declare module "X" {}`.
+/// - `owner` — the lexical top-level owner that authored the declaration.
 /// - `augmented_name` — the name of an augmented binding inside the block.
 /// - `space` — which symbol space the augmented binding occupies.
 /// - `augmented_member_shape_fingerprint` — alpha-normalised fingerprint
@@ -463,6 +473,7 @@ impl FileFacts {
 #[derive(Debug, Clone)]
 pub struct ModuleAugmentationFact {
     pub specifier: InternedSpecifier,
+    pub owner: TopLevelOwnerId,
     pub augmented_name: InternedName,
     pub space: SymbolSpace,
     pub augmented_member_shape_fingerprint: Hash16,
@@ -761,7 +772,7 @@ fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool 
 /// every call site (an augmenter artifact only ever replaces itself at its own
 /// canonical), so comparing `parse_stable_hash` here is exactly comparing the
 /// per-augmenter fingerprint contribution. The fact compare is order-
-/// INDEPENDENT (a multiset over the four fact dimensions) and CONSERVATIVE:
+/// INDEPENDENT (a multiset over the five fact dimensions) and CONSERVATIVE:
 /// any genuine membership change makes the multisets differ. The lockstep unit
 /// invariant
 /// `file_artifact_store_tests::augmentation_contribution_equivalence_tracks_fingerprint_inputs`
@@ -782,13 +793,20 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
     if prev_facts.len() != next_facts.len() {
         return false;
     }
-    // Multiset compare keyed by the four fact dimensions (all `Eq + Hash`).
+    // Multiset compare keyed by the five fact dimensions (all `Eq + Hash`).
     // `ModuleAugmentationFact` is not `Eq`, so fold a per-fact count map and
     // confirm `next` exactly drains it.
-    type FactKey = (InternedSpecifier, InternedName, SymbolSpace, Hash16);
+    type FactKey = (
+        InternedSpecifier,
+        TopLevelOwnerId,
+        InternedName,
+        SymbolSpace,
+        Hash16,
+    );
     let key_of = |fact: &ModuleAugmentationFact| -> FactKey {
         (
             fact.specifier.clone(),
+            fact.owner,
             fact.augmented_name.clone(),
             fact.space,
             fact.augmented_member_shape_fingerprint,
@@ -1538,10 +1556,18 @@ impl FileArtifactStore {
         // `artifact_generation` is unchanged (no-op → no bump), caching an
         // incomplete snapshot under the unchanged token. Leaving the
         // base-equivalent current-key entry untouched closes that gap.
-        let current_key_is_base_equivalent = self
-            .artifacts
-            .get(&current_key)
-            .map(|entry| {
+        // Presence of ANY entry at the current content key, captured with
+        // the same read as the equivalence probe. Discriminates a genuine
+        // BUILD of this content version (no entry at the current key — a
+        // fresh insert or a content-changed rebuild) from a REFRESH
+        // re-insert of an already-stored version (edge-refresh materialise
+        // reusing the content-addressed payload, base-equivalent no-op):
+        // the audit `IndexedReadyBuilt` event below fires only for the
+        // former.
+        let current_key_prior_entry_present;
+        let current_key_is_base_equivalent = match self.artifacts.get(&current_key) {
+            Some(entry) => {
+                current_key_prior_entry_present = true;
                 let equivalent = base_snapshot_equivalent(&entry.value().payload, &payload);
                 if equivalent {
                     // The no-op path leaves the entry untouched below;
@@ -1551,8 +1577,12 @@ impl FileArtifactStore {
                     entry.value().record_access(tick);
                 }
                 equivalent
-            })
-            .unwrap_or(false);
+            }
+            None => {
+                current_key_prior_entry_present = false;
+                false
+            }
+        };
 
         // Legacy semantics: exactly one entry per canonical regardless of
         // content_hash. Drain every prior version EXCEPT the current key
@@ -1679,8 +1709,19 @@ impl FileArtifactStore {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
-            // Audit event fires on FRESH inserts only (matches retired
-            // FileArtifactStore::insert behaviour).
+        }
+        // Audit event fires whenever a genuinely NEW content version was
+        // built and inserted — a fresh insert OR a content-changed
+        // replacement (the edit-cycle rebuild of an already-tracked
+        // canonical): the current content key held NO entry before this
+        // insert. Re-inserts of an already-stored version record NOTHING —
+        // a base-equivalent reinsert is a literal no-op serve, and an
+        // edge-refresh re-materialise reuses the content-addressed payload
+        // (no shallow re-processing happened). `indexed_ready_builds`
+        // keeps the read-once meaning "this request BUILT the artifact for
+        // this (canonical, whole_hash)", never "this request re-served or
+        // edge-refreshed an already-built version".
+        if !current_key_prior_entry_present {
             crate::component_meta_audit::record_indexed_ready_built(
                 Arc::clone(&canonical_for_event),
                 whole_hash,

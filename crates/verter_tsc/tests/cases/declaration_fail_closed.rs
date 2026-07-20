@@ -108,7 +108,7 @@ fn run_declaration(
     cmd.output().expect("failed to execute verter-tsc")
 }
 
-// ── DISCRIMINATING (B1a): a tier-1 candidate that passes `--version` but
+// ── DISCRIMINATING: a tier-1 candidate that passes `--version` but
 //    FAILS capability validation must NOT mask the working project-local
 //    candidate. Today the declaration stage selects the first candidate passing
 //    only `--version` + policy (the `mismatch` fake: version 7.0.2, serverInfo
@@ -150,7 +150,7 @@ fn declaration_resolution_skips_a_version_passing_but_invalid_candidate() {
     );
 }
 
-// ── DISCRIMINATING (B1b): an engine that VALIDATES but then FAILS the
+// ── DISCRIMINATING: an engine that VALIDATES but then FAILS the
 //    declaration invocation (the `declfail` fake exits 2 with no output) must
 //    make verter-tsc exit NON-ZERO — never exit 0 with empty diagnostics and
 //    zero declarations (a broken engine masquerading as a clean emit).

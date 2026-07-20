@@ -182,6 +182,7 @@ fn decl_body_source(canonical: &str, symbol: &str) -> SemanticTypeSource {
     SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -222,6 +223,7 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
             declaration_id: None,
             resolved_name: name.to_string(),
             canonical_source: canonical_source.to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             span: verter_span::Span::default(),
             kind: ResolvedDeclarationKind::TypeAlias,
             text: None,
@@ -240,6 +242,7 @@ fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeI
                 source,
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: "/owner.vue",
+                    scope_owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     context:
                         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                             crate::semantic_query::ProjectionMode::Navigate,

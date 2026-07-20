@@ -119,6 +119,7 @@ pub(super) struct LocatorViewInputs<'a> {
     pub(super) name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
     pub(super) scope_payload: Option<&'a DeclarationScopePayload>,
     pub(super) shadowing: &'a ScopeShadowing,
+    pub(super) authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
 }
 
 /// Per-projection memo so shared sub-graphs project once per context.
@@ -186,6 +187,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             .lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(canonical_id),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
@@ -203,6 +205,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             .unwrap_or_default();
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(canonical_id),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
         };
@@ -211,7 +214,11 @@ impl<'a> ProjectionBenchHarness<'a> {
             .map(|(local_name, defining_canonical, defining_symbol)| {
                 (
                     Arc::from(*local_name),
-                    ResolvedRootIdentity::new(*defining_canonical, *defining_symbol),
+                    ResolvedRootIdentity::new_in_owner(
+                        *defining_canonical,
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        *defining_symbol,
+                    ),
                 )
             })
             .collect();
@@ -270,6 +277,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             name_resolution: &case.name_resolution,
             scope_payload: case.scope_payload.as_ref(),
             shadowing: &case.shadowing,
+            authored_resolution_debt: None,
         };
         let outcome = self.dispatch.project_view_node_worklist(
             case.root,
@@ -487,9 +495,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 }
                                 other => other,
                             };
-                            arm_ctx =
-                                ProjectionReductionContext::structural_transit_with_mode(mode)
-                                    .with_merge_role(arm_ctx.merge_role);
+                            arm_ctx = arm_ctx.into_structural_transit_with_mode(mode);
                         }
                         self.project_view_node(
                             *arm,

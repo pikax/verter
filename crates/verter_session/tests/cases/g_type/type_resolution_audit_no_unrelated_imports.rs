@@ -61,6 +61,7 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("UseB"),
@@ -120,6 +121,7 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
     let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/c.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("C"),

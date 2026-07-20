@@ -480,11 +480,22 @@ fn root_attrs_dynamic_component_prop_binding_prefixed() {
     // When a prop is used in `:is="propName"`, the generated Comp function
     // and getRootComponentPassedProps must emit `__props.propName` (not bare
     // `propName`) because props are not destructured at script scope.
-    let (code, _, _tc) = gen_tsx_script_full(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "tag",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let (code, _, _tc) = gen_tsx_script_full_with_runtime(
         r#"<script setup lang="ts">
 defineProps<{ tag?: string }>()
 </script>
 <template><component :is="tag"><slot /></component></template>"#,
+        &runtime,
     );
     // Positive: props literal should reference __props.tag, not bare tag
     let _passed_section = code
@@ -1398,6 +1409,7 @@ const color = ref('red')
             scope_id: "data-v-abc123",
             has_scoped_style: false,
             runtime_module_name: "vue",
+            macro_runtime: None,
             types_module_name: "@verter/types",
             is_vapor: false,
             embed_ambient_types: true,

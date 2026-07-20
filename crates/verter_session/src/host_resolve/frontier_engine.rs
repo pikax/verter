@@ -1,17 +1,6 @@
-//! `impl VerterHost` — frontier closure, materialisation, and named-type
-//! export route resolution.
+//! `impl VerterHost` — named-type export route resolution.
 //!
-//! Owns the BFS / route-resolution layer that sits below
-//! `resolve_external_type_from_loaded_files`:
-//! - `run_external_type_frontier_closure` drives layered frontier
-//!   discovery via [`HostFrontierAdapter`].
-//! - `collect_frontier_companion_seeds` /
-//!   `materialize_frontier_resolved_type` /
-//!   `materialize_frontier_resolved_type_with_memo` walk the resolved
-//!   frontier and project the companion shape.
-//! - `planned_frontier_companions` caches per-`(canonical, exported, route)`
-//!   companion plans on the request-scoped
-//!   [`FrontierCompanionPlans`].
+//! Owns the routing/index-fact layer shared by TypeInfo and component-meta:
 //! - `append_route_participant_fact_versions` fans the touched canonical
 //!   set into `FactVersionRef` entries for cache-fence accounting.
 //! - `resolve_route_type_edge` drives the live-host shallow + workspace
@@ -28,503 +17,23 @@
 //!   `resolve_named_type_export_target_shallow` — host-level binding into
 //!   the route-DB cooperative resolve.
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
-use super::frontier_adapter::HostFrontierAdapter;
 use super::frontier_helpers::{
-    external_type_debug, external_type_debug_enabled, external_type_frontier_layer_result_detail,
-    external_type_frontier_layer_start_detail, ordered_wildcard_indices_for_exported_name,
-    FrontierCompanionPlans, FrontierRequestedRoutes, PlannedFrontierCompanion,
-    ResolvedExternalTypes, RouteShallowStateCache, RoutedShallowServe,
+    ordered_wildcard_indices_for_exported_name, RouteShallowStateCache, RoutedShallowServe,
 };
-use super::test_guards::assert_route_frontier_allowed;
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
-use verter_parser::utils::oxc::script::type_surface::{
-    imported_member_name_for_required_alias, required_import_alias_names_for_binding,
-};
 
 impl VerterHost {
-    /// Base wrapper that fixes `view = None`. Test-only — production paths
-    /// flow through the view-aware variant.
-    #[cfg(test)]
-    #[allow(clippy::type_complexity)]
-    pub(super) fn run_external_type_frontier_closure(
+    fn append_route_participant_fact_versions_with_context(
         &self,
-        dep_canonical: &str,
-        type_name: &str,
-        requested_routes: &mut FrontierRequestedRoutes,
-        companion_plans: &mut FrontierCompanionPlans,
-    ) -> Result<
-        (
-            crate::resolver_core::ExternalTypeFrontier,
-            Option<(String, String)>,
-            bool,
-        ),
-        crate::types::ExternalTypeResolveError,
-    > {
-        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
-            self.run_external_type_frontier_closure_with_view(
-                ctx,
-                dep_canonical,
-                type_name,
-                requested_routes,
-                companion_plans,
-                None,
-            )
-        })
-    }
-
-    /// View-aware variant of run_external_type_frontier_closure.
-    ///
-    /// Constructs the [`HostFrontierAdapter`] with `view` plumbed in so the
-    /// frontier reads shallow state through the session overlay when an
-    /// overlay candidate is published.
-    #[allow(clippy::type_complexity)]
-    pub(super) fn run_external_type_frontier_closure_with_view(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dep_canonical: &str,
-        type_name: &str,
-        requested_routes: &mut FrontierRequestedRoutes,
-        companion_plans: &mut FrontierCompanionPlans,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Result<
-        (
-            crate::resolver_core::ExternalTypeFrontier,
-            Option<(String, String)>,
-            bool,
-        ),
-        crate::types::ExternalTypeResolveError,
-    > {
-        assert_route_frontier_allowed();
-        // Per-request audit attribution: every invocation of the
-        // cross-file external-type frontier closure bumps the total
-        // counter on the active observer. Near-zero cost when no
-        // observer is installed.
-        if let Some(obs) = verter_audit::current_observer() {
-            obs.record_event(verter_audit::AuditEvent::FrontierClosureInvocation);
-        }
-        let adapter = HostFrontierAdapter {
-            host: self,
-            materialize_symbols: false,
-            // Frontier discovery stays route-only. Materialization resolves only
-            // the demanded companion targets after the route is known.
-            route_exports_only: true,
-            view,
-            ctx,
-            route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
-        };
-        // The frontier step budget is `None` in production (selecting the
-        // `MAX_EXTERNAL_TYPE_RESOLVE_STEPS` default baked into
-        // `ResolutionBudgets::default`), so the construction here is
-        // byte-identical to `ExternalTypeFrontier::new()` for every
-        // production caller. Tests inject a small ceiling via
-        // `HostConfig::external_resolution_step_budget` to drive the hard
-        // frontier step-limit on a small hermetic fixture.
-        let mut frontier = match ctx.config().external_resolution_step_budget {
-            Some(limit) => crate::resolver_core::ExternalTypeFrontier::with_budgets(
-                crate::resolver_core::ResolutionBudgets {
-                    frontier_symbol_visits: limit,
-                    ..crate::resolver_core::ResolutionBudgets::default()
-                },
-            ),
-            None => crate::resolver_core::ExternalTypeFrontier::new(),
-        };
-        let mut inspected_symbols = rustc_hash::FxHashSet::default();
-        frontier.seed(std::iter::once(
-            crate::resolver_core::PendingExternalSymbol {
-                canonical_id: dep_canonical.to_string(),
-                exported_name: type_name.to_string(),
-                route: Some(
-                    requested_routes
-                        .get(&(dep_canonical.to_string(), type_name.to_string()))
-                        .cloned()
-                        .unwrap_or_default(),
-                ),
-            },
-        ));
-
-        let mut frontier_layer = 0usize;
-        loop {
-            let (target, had_route_cycle) = loop {
-                frontier_layer += 1;
-                component_meta_trace_custom!(
-                    "external_type_frontier_layer_start",
-                    external_type_frontier_layer_start_detail(
-                        dep_canonical,
-                        type_name,
-                        frontier_layer,
-                        frontier.pending_count(),
-                        frontier.resolved_count(),
-                    ),
-                );
-                let has_more = frontier.run_one_level(&adapter).map_err(|failure| {
-                    crate::types::ExternalTypeResolveError::StepLimitExceeded {
-                        limit: failure.limit,
-                        type_name: type_name.to_string(),
-                        last_dep: failure.context,
-                    }
-                })?;
-                let (target, had_route_cycle) =
-                    frontier.final_target_for_with_cycle(&adapter, dep_canonical, type_name);
-                component_meta_trace_custom!(
-                    "external_type_frontier_layer_result",
-                    external_type_frontier_layer_result_detail(
-                        dep_canonical,
-                        type_name,
-                        frontier_layer,
-                        frontier.pending_count(),
-                        frontier.resolved_count(),
-                        has_more,
-                        target.is_some(),
-                        had_route_cycle,
-                    ),
-                );
-                if target.is_some() || !has_more {
-                    break (target, had_route_cycle);
-                }
-            };
-            if target.is_none() {
-                return Ok((frontier, None, had_route_cycle));
-            }
-
-            frontier.clear_pending();
-
-            let companion_seeds = self.collect_frontier_companion_seeds(
-                &frontier,
-                &adapter,
-                &mut inspected_symbols,
-                requested_routes,
-                companion_plans,
-            );
-            if crate::host_manage::component_meta_debug_enabled() {
-                crate::host_manage::component_meta_debug(format!(
-                    "frontier_closure source={} exported={} resolved={} new_companions={}",
-                    dep_canonical,
-                    type_name,
-                    frontier.resolved_count(),
-                    companion_seeds.len(),
-                ));
-            }
-            if companion_seeds.is_empty() {
-                return Ok((frontier, target, had_route_cycle));
-            }
-
-            for seed in &companion_seeds {
-                let seed_route = seed.route.clone().unwrap_or_default();
-                requested_routes
-                    .entry((seed.canonical_id.clone(), seed.exported_name.clone()))
-                    .and_modify(|existing| {
-                        *existing =
-                            crate::resolver_core::merge_route_demands(existing, &seed_route);
-                    })
-                    .or_insert(seed_route);
-            }
-            frontier.seed(companion_seeds);
-        }
-    }
-
-    pub(crate) fn collect_frontier_companion_seeds(
-        &self,
-        frontier: &crate::resolver_core::ExternalTypeFrontier,
-        adapter: &HostFrontierAdapter<'_>,
-        inspected_symbols: &mut rustc_hash::FxHashSet<(String, String)>,
-        requested_routes: &mut FrontierRequestedRoutes,
-        companion_plans: &mut FrontierCompanionPlans,
-    ) -> Vec<crate::resolver_core::PendingExternalSymbol> {
-        let mut seeds = Vec::new();
-        let requested_symbols: Vec<_> = requested_routes
-            .iter()
-            .map(|((canonical_id, exported_name), route)| {
-                (canonical_id.clone(), exported_name.clone(), route.clone())
-            })
-            .collect();
-
-        for (requested_canonical_id, requested_exported_name, requested_route) in requested_symbols
-        {
-            let Some((canonical_id, exported_name)) = frontier.final_target_for(
-                adapter,
-                &requested_canonical_id,
-                &requested_exported_name,
-            ) else {
-                continue;
-            };
-            requested_routes
-                .entry((canonical_id.clone(), exported_name.clone()))
-                .and_modify(|existing| {
-                    *existing =
-                        crate::resolver_core::merge_route_demands(existing, &requested_route);
-                })
-                .or_insert_with(|| requested_route.clone());
-            if !inspected_symbols.insert((canonical_id.clone(), exported_name.clone())) {
-                continue;
-            }
-
-            let planned_companions = self.planned_frontier_companions(
-                adapter.ctx,
-                &canonical_id,
-                &exported_name,
-                &requested_route,
-                companion_plans,
-                adapter.view,
-            );
-            for companion in planned_companions.iter() {
-                let (target_canonical, target_name) = frontier
-                    .final_target_for(
-                        adapter,
-                        &companion.resolved_canonical,
-                        &companion.resolved_exported_name,
-                    )
-                    .unwrap_or((
-                        companion.resolved_canonical.clone(),
-                        companion.resolved_exported_name.clone(),
-                    ));
-                seeds.push(crate::resolver_core::PendingExternalSymbol {
-                    canonical_id: target_canonical,
-                    exported_name: target_name,
-                    route: Some(companion.route.clone()),
-                });
-            }
-        }
-
-        seeds
-    }
-
-    /// View-aware materializer for resolved frontier elements.
-    ///
-    /// Constructs the [`HostFrontierAdapter`] with `view`, and passes `view`
-    /// down into [`Self::materialize_frontier_resolved_type_with_memo`] so
-    /// the indexed-ready fall-through reads the overlay candidate.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn materialize_frontier_resolved_type_with_view(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        frontier: &crate::resolver_core::ExternalTypeFrontier,
-        requested_routes: &FrontierRequestedRoutes,
-        companion_plans: &mut FrontierCompanionPlans,
-        canonical_id: &str,
-        exported_name: &str,
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements> {
-        let adapter = HostFrontierAdapter {
-            host: self,
-            // Frontier routing is already complete before materialization starts.
-            // Keep final-target checks on the same shallow/export-owned path so
-            // package declaration files do not reopen full imported-state
-            // materialization while companion targets are selected.
-            materialize_symbols: false,
-            route_exports_only: true,
-            view,
-            ctx,
-            route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
-        };
-        let mut memo = rustc_hash::FxHashMap::default();
-        let mut active = rustc_hash::FxHashSet::default();
-        self.materialize_frontier_resolved_type_with_memo(
-            frontier,
-            requested_routes,
-            companion_plans,
-            &adapter,
-            canonical_id,
-            exported_name,
-            tracked_deps,
-            resolution_deps,
-            &mut memo,
-            &mut active,
-            view,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn materialize_frontier_resolved_type_with_memo(
-        &self,
-        frontier: &crate::resolver_core::ExternalTypeFrontier,
-        requested_routes: &FrontierRequestedRoutes,
-        companion_plans: &mut FrontierCompanionPlans,
-        adapter: &HostFrontierAdapter<'_>,
-        canonical_id: &str,
-        exported_name: &str,
-        tracked_deps: &mut std::collections::BTreeSet<String>,
-        resolution_deps: &mut std::collections::BTreeSet<String>,
-        memo: &mut rustc_hash::FxHashMap<
-            (String, String),
-            Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements>,
-        >,
-        active: &mut rustc_hash::FxHashSet<(String, String)>,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements> {
-        let cache_key = (canonical_id.to_string(), exported_name.to_string());
-        if let Some(cached) = memo.get(&cache_key) {
-            return cached.clone();
-        }
-        if !active.insert(cache_key.clone()) {
-            self.provenance
-                .resolver_cycle_detections
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return None;
-        }
-
-        tracked_deps.insert(canonical_id.to_string());
-        resolution_deps.insert(canonical_id.to_string());
-
-        let resolved = {
-            let route = requested_routes
-                .get(&(canonical_id.to_string(), exported_name.to_string()))
-                .cloned()
-                .unwrap_or_default();
-            let planned_companions = self.planned_frontier_companions(
-                adapter.ctx,
-                canonical_id,
-                exported_name,
-                &route,
-                companion_plans,
-                view,
-            );
-            let mut companion_types = ResolvedExternalTypes::default();
-            for companion in planned_companions.iter() {
-                let (target_canonical, target_name) = frontier
-                    .final_target_for(
-                        adapter,
-                        &companion.resolved_canonical,
-                        &companion.resolved_exported_name,
-                    )
-                    .unwrap_or((
-                        companion.resolved_canonical.clone(),
-                        companion.resolved_exported_name.clone(),
-                    ));
-                if frontier
-                    .get_resolved(&target_canonical, &target_name)
-                    .is_none()
-                {
-                    continue;
-                }
-                if let Some(resolved_companion) = self.materialize_frontier_resolved_type_with_memo(
-                    frontier,
-                    requested_routes,
-                    companion_plans,
-                    adapter,
-                    &target_canonical,
-                    &target_name,
-                    tracked_deps,
-                    resolution_deps,
-                    memo,
-                    active,
-                    view,
-                ) {
-                    tracked_deps.insert(target_canonical.clone());
-                    resolution_deps.insert(target_canonical.clone());
-                    if external_type_debug_enabled() {
-                        external_type_debug(format!(
-                            "frontier_materialize companion owner={} exported={} alias={} target={}:{} cached_member_count={}",
-                            canonical_id,
-                            exported_name,
-                            companion.alias,
-                            target_canonical,
-                            target_name,
-                            resolved_companion.props.len(),
-                        ));
-                    }
-                    companion_types
-                        .entry(companion.alias.clone())
-                        .or_insert(resolved_companion);
-                }
-            }
-
-            // The terminal element EXPANSION this materializer used to run here
-            // (the parser's structural element expander over the routed target
-            // + `companion_types`) is severed: query-time member/type authority
-            // is owned by the ONE shared dispatch (`ProjectSemanticDispatch`),
-            // and a parser-side structural expansion is a forbidden second
-            // resolver. The frontier keeps producing ROUTES + dependency facts
-            // (the companion walk above still records them); its legacy
-            // element payload is an honest miss.
-            let _ = companion_types;
-            None
-        };
-
-        active.remove(&cache_key);
-        memo.insert(cache_key, resolved.clone());
-        resolved
-    }
-
-    fn planned_frontier_companions(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        canonical_id: &str,
-        exported_name: &str,
-        route: &crate::resolver_core::RouteDemand,
-        companion_plans: &mut FrontierCompanionPlans,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Arc<[PlannedFrontierCompanion]> {
-        companion_plans.get_or_compute(canonical_id, exported_name, route, || {
-            let Some(analysis) = self.external_type_analysis_with_view(canonical_id, view) else {
-                return Vec::new();
-            };
-            let required_import_routes = self.required_import_routes_for_exported_route_with_view(
-                canonical_id,
-                exported_name,
-                route,
-                view,
-            );
-            let required_import_names = required_import_routes
-                .keys()
-                .cloned()
-                .collect::<rustc_hash::FxHashSet<_>>();
-            let mut attempted_requests = rustc_hash::FxHashSet::default();
-            let mut planned = Vec::new();
-
-            for binding in &analysis.extracted.bindings {
-                let required_aliases =
-                    required_import_alias_names_for_binding(binding, &required_import_names);
-                for required_alias in required_aliases {
-                    let Some(imported_name) =
-                        imported_member_name_for_required_alias(binding, &required_alias)
-                    else {
-                        continue;
-                    };
-                    let request_key = (
-                        required_alias.clone(),
-                        binding.source.clone(),
-                        imported_name.clone(),
-                    );
-                    if !attempted_requests.insert(request_key) {
-                        continue;
-                    }
-
-                    let Some(dep_canonical) =
-                        self.resolve_type_dependency_canonical(canonical_id, &binding.source)
-                    else {
-                        continue;
-                    };
-                    let (resolved_canonical, resolved_name) = ctx
-                        .resolve_imported_type_root(dep_canonical.as_str(), imported_name.as_str());
-                    planned.push(PlannedFrontierCompanion {
-                        alias: required_alias.clone(),
-                        resolved_canonical,
-                        resolved_exported_name: resolved_name,
-                        route: required_import_routes
-                            .get(&required_alias)
-                            .cloned()
-                            .unwrap_or_default(),
-                    });
-                }
-            }
-
-            planned
-        })
-    }
-
-    fn append_route_participant_fact_versions(
-        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         canonical: &str,
         facts: &mut Vec<crate::resolver_core::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
     ) {
-        if let Some(hash) = self.current_or_read_whole_hash(canonical) {
+        if let Some(hash) = ctx.authoritative_current_content_hash(canonical) {
             let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
@@ -534,14 +43,11 @@ impl VerterHost {
             }
         }
 
-        // Route fact production routes through the single
-        // `current_route_surface_hash` helper — the SAME source order
-        // (content-pinned `IndexedReady` for a scheduler-tracked
-        // canonical, the artifact-only authority otherwise) the
-        // `HostStoreView` validator snapshots route facts in. A
-        // divergent source order here would record a hash the
-        // validator could not reproduce.
-        if let Some(hash) = self.current_route_surface_hash(canonical) {
+        if let Some(hash) = ctx
+            .indexed_for_current_content(canonical)
+            .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
+            .and_then(|indexed| indexed.route_hash)
+        {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
                 kind: crate::resolver_core::DerivedFactKind::Route,
@@ -551,6 +57,29 @@ impl VerterHost {
                 facts.push(fact);
             }
         }
+    }
+
+    fn generation_current_import_route_hash_covering_sources_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical: &str,
+        required_sources: &[String],
+    ) -> Option<crate::types::Hash16> {
+        let session_masks_canonical = ctx.active_session_view().is_some_and(|view| {
+            view.overlay_content_hash_for(canonical).is_some() || view.is_tombstoned(canonical)
+        });
+        if session_masks_canonical {
+            let indexed = ctx.indexed_for_current_content(canonical)?;
+            if required_sources
+                .iter()
+                .any(|source| !indexed.import_routes.contains_key(source))
+            {
+                return None;
+            }
+            return indexed.import_route_hash;
+        }
+
+        self.generation_current_import_route_hash_covering_sources(canonical, required_sources)
     }
 
     pub(crate) fn resolve_route_type_edge(
@@ -598,8 +127,26 @@ impl VerterHost {
         Some(resolved)
     }
 
+    fn resolve_route_type_edge_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        owner_canonical: &str,
+        source_specifier: &str,
+    ) -> Option<String> {
+        let resolved = ctx.resolve_type_dependency_canonical(owner_canonical, source_specifier)?;
+        if ctx
+            .authoritative_current_content_hash(resolved.as_str())
+            .is_none()
+            && !ctx.ensure_loaded(resolved.as_str())
+        {
+            return None;
+        }
+        Some(resolved)
+    }
+
     fn resolve_named_type_export_route_from_target(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         provider_canonical: &str,
         target: &crate::resolver_core::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -608,12 +155,17 @@ impl VerterHost {
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
-            crate::resolver_core::ExportTarget::Local { symbol_name } => {
-                let state = self.route_shallow_state(provider_canonical, route_shallow_cache)?;
-                if state.is_import_local(symbol_name) {
-                    let import_target = state.import_target(symbol_name)?;
+            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
+                let state = self.route_shallow_state_with_context(
+                    ctx,
+                    provider_canonical,
+                    route_shallow_cache,
+                )?;
+                if state.is_import_local_in(*owner, symbol_name) {
+                    let import_target = state.import_target_in(*owner, symbol_name)?;
                     let target_canonical = if import_target.canonical_id.is_empty() {
-                        self.resolve_route_type_edge(
+                        self.resolve_route_type_edge_with_context(
+                            ctx,
                             provider_canonical,
                             import_target.source_specifier.as_str(),
                         )?
@@ -621,6 +173,7 @@ impl VerterHost {
                         import_target.canonical_id.clone()
                     };
                     return self.resolve_named_type_export_route_uncached(
+                        ctx,
                         target_canonical.as_str(),
                         import_target.imported_name.as_str(),
                         active,
@@ -632,6 +185,7 @@ impl VerterHost {
 
                 Some(crate::resolver_core::RouteResult::Resolved {
                     defining_canonical: provider_canonical.to_string(),
+                    defining_owner: *owner,
                     defining_symbol: symbol_name.clone(),
                 })
             }
@@ -642,11 +196,16 @@ impl VerterHost {
                 ..
             } => {
                 let target_canonical = if canonical_id.is_empty() {
-                    self.resolve_route_type_edge(provider_canonical, source_specifier.as_str())?
+                    self.resolve_route_type_edge_with_context(
+                        ctx,
+                        provider_canonical,
+                        source_specifier.as_str(),
+                    )?
                 } else {
                     canonical_id.clone()
                 };
                 self.resolve_named_type_export_route_uncached(
+                    ctx,
                     target_canonical.as_str(),
                     original_name.as_str(),
                     active,
@@ -739,8 +298,7 @@ impl VerterHost {
                 .cloned();
         }
 
-        // Request-scoped memo (frontier engine de-dupe). NOT a host-side
-        // mirror — see `HostFrontierAdapter::route_shallow_cache` doc-comment.
+        // Request-scoped route memo, never a host-side mirror.
         // Memo entries carry their publication status by value; the fenced
         // observation was already recorded at insert time.
         if let Some(cached) = route_shallow_cache.get(normalized_canonical.as_str()) {
@@ -757,22 +315,6 @@ impl VerterHost {
         Some(serve)
     }
 
-    /// Thin wrapper over [`Self::route_shallow_state_serve`] that drops
-    /// the publication status from the RETURN value. The fenced
-    /// observation still lands on the threaded `route_shallow_cache`,
-    /// so walk-level consumers stay covered; callers that derive
-    /// SHARED-cache entries from the returned state directly must use
-    /// the serve variant and gate admission on `store_published` (see
-    /// [`RoutedShallowServe`]).
-    pub(super) fn route_shallow_state(
-        &self,
-        canonical_id: &str,
-        route_shallow_cache: &mut RouteShallowStateCache,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.route_shallow_state_serve(canonical_id, route_shallow_cache)
-            .map(|serve| serve.state)
-    }
-
     /// One-shot [`Self::route_shallow_state_serve`] with a fresh memo —
     /// the publication status reflects exactly the requested
     /// canonical's serve.
@@ -782,6 +324,50 @@ impl VerterHost {
     ) -> Option<RoutedShallowServe> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state_serve(canonical_id, &mut route_shallow_cache)
+    }
+
+    /// Context-preserving routed shallow serve used by imported-root cold
+    /// producers. The context remains the semantic read authority; its
+    /// `StoreView` is not used as a substitute for overlay-aware artifact
+    /// lookup.
+    pub(crate) fn routed_shallow_state_serve_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+    ) -> Option<RoutedShallowServe> {
+        let mut route_shallow_cache = RouteShallowStateCache::default();
+        self.route_shallow_state_serve_with_context(ctx, canonical_id, &mut route_shallow_cache)
+    }
+
+    fn route_shallow_state_serve_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<RoutedShallowServe> {
+        let cache_key = ctx.normalized_analysis_canonical(canonical_id).into_owned();
+        if let Some(cached) = route_shallow_cache.get(cache_key.as_str()) {
+            return Some(cached.clone());
+        }
+
+        let indexed_serve = ctx.ensure_indexed_ready_serve(canonical_id)?;
+        let serve = RoutedShallowServe {
+            state: Arc::clone(&indexed_serve.indexed.shallow_state),
+            store_published: indexed_serve.store_published,
+        };
+        route_shallow_cache.observe_serve(&serve);
+        route_shallow_cache.insert(cache_key, serve.clone());
+        Some(serve)
+    }
+
+    fn route_shallow_state_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        self.route_shallow_state_serve_with_context(ctx, canonical_id, route_shallow_cache)
+            .map(|serve| serve.state)
     }
 
     /// Thin wrapper over [`Self::routed_shallow_state_serve`] that drops
@@ -861,6 +447,7 @@ impl VerterHost {
 
     fn resolve_named_type_export_route_uncached(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         provider_canonical: &str,
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -890,9 +477,11 @@ impl VerterHost {
                 let mut layer_states = Vec::with_capacity(layer.len());
                 for canonical in &layer {
                     participants.insert(canonical.clone());
-                    let state = self.route_shallow_state(canonical, route_shallow_cache)?;
+                    let state =
+                        self.route_shallow_state_with_context(ctx, canonical, route_shallow_cache)?;
                     if let Some(target) = state.export_target(exported_name) {
                         return self.resolve_named_type_export_route_from_target(
+                            ctx,
                             canonical,
                             target,
                             active,
@@ -915,7 +504,8 @@ impl VerterHost {
                     for wildcard_index in wildcard_indices {
                         let wildcard = &state.wildcard_reexports[wildcard_index];
                         let target_canonical = if wildcard.canonical_id.is_empty() {
-                            self.resolve_route_type_edge(
+                            self.resolve_route_type_edge_with_context(
+                                ctx,
                                 canonical.as_str(),
                                 wildcard.source_specifier.as_str(),
                             )
@@ -974,11 +564,24 @@ impl VerterHost {
         crate::resolver_core::RouteResult,
         Vec<crate::resolver_core::FactVersionRef>,
     )> {
+        self.build_named_type_export_route_entry_with_context(self, dep_canonical, requested_name)
+    }
+
+    pub(crate) fn build_named_type_export_route_entry_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<(
+        crate::resolver_core::RouteResult,
+        Vec<crate::resolver_core::FactVersionRef>,
+    )> {
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
         let mut unresolved_edge_owners = rustc_hash::FxHashSet::default();
         let mut route_shallow_cache = RouteShallowStateCache::default();
         let route_result = self.resolve_named_type_export_route_uncached(
+            ctx,
             dep_canonical,
             requested_name,
             &mut active,
@@ -1008,7 +611,12 @@ impl VerterHost {
         participants.sort();
         participants.dedup();
         for canonical in participants {
-            self.append_route_participant_fact_versions(canonical.as_str(), &mut facts, &mut seen);
+            self.append_route_participant_fact_versions_with_context(
+                ctx,
+                canonical.as_str(),
+                &mut facts,
+                &mut seen,
+            );
         }
 
         // Root any unresolved `export *` wildcard edge the traversal hit in the
@@ -1050,7 +658,11 @@ impl VerterHost {
         }
         for (owner, sources) in owner_sources {
             let Some(import_route_hash) = self
-                .generation_current_import_route_hash_covering_sources(owner.as_str(), &sources)
+                .generation_current_import_route_hash_covering_sources_with_context(
+                    ctx,
+                    owner.as_str(),
+                    &sources,
+                )
             else {
                 // The empty-facts signal alone only protects the caches
                 // that inspect route facts directly (`RouteDb` /
@@ -1144,7 +756,7 @@ impl VerterHost {
         let cached_route = cached_route?;
         cached_route
             .resolved()
-            .map(|(defining_canonical, defining_symbol)| {
+            .map(|(defining_canonical, _defining_owner, defining_symbol)| {
                 (defining_canonical.to_owned(), defining_symbol.to_owned())
             })
     }

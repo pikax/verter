@@ -21,6 +21,8 @@ use std::sync::Arc;
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
+use crate::TopLevelOwnerId;
+
 /// Which authored top-level statement (contributor) in the producing snapshot
 /// holds the decl body an origin addresses. Producer-emitted; indexes
 /// `program.body[contributor_index]`. A small named index, never a byte span.
@@ -40,6 +42,11 @@ pub struct DeclContributorAnchor {
     /// Index into the retained `Program` body identifying the contributing
     /// statement whose declaration body this origin descends from.
     pub contributor_index: u32,
+    /// Lexical owner of the contributing statement.
+    pub owner: TopLevelOwnerId,
+    /// Zero-based statement ordinal inside `owner`, independent of statements
+    /// belonging to other owners in the same combined carrier program.
+    pub owner_local_ordinal: u32,
 }
 
 /// Marker for a truly synthetic node with no authored origin. Recovery of a

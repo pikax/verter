@@ -285,6 +285,41 @@ fn mcp_tool_success(
     })
 }
 
+fn public_api_projection_mcp_error(
+    canonical: &str,
+    error: verter_session::PublicApiProjectionError,
+) -> ErrorData {
+    let unavailable_outcome = error.unavailable_outcome();
+    let subject = match error.subject() {
+        verter_session::PublicApiProjectionSubject::Macro { syntax_index } => {
+            serde_json::json!({ "kind": "macro", "syntaxIndex": syntax_index })
+        }
+        verter_session::PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
+            serde_json::json!({
+                "kind": "scriptSetupAttrs",
+                "sourceRange": { "start": source_range.start, "end": source_range.end },
+            })
+        }
+    };
+    ErrorData {
+        code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+        message: format!("public API projection failed for {canonical}").into(),
+        data: Some(serde_json::json!({
+            "source": canonical,
+            "code": error.code(),
+            "detailCode": error.detail_code(),
+            "subject": subject,
+            "declarationShapeReason": error
+                .declaration_shape_reason()
+                .map(|reason| reason.code()),
+            "memberOrdinal": error.member_ordinal(),
+            "outcomeKind": unavailable_outcome.map(|outcome| outcome.kind_code()),
+            "outcomeReason": unavailable_outcome.map(|outcome| outcome.reason_code()),
+            "outcomeDiagnostic": unavailable_outcome.and_then(|outcome| outcome.diagnostic()),
+        })),
+    }
+}
+
 // ── Tool implementations ───────────────────────────────────────────
 
 #[tool_router]
@@ -449,6 +484,27 @@ impl VerterMcpServer {
         self.host
             .audit_mcp_tool_call("get_component_api", &canonical, args_size, |host| {
                 let result: Result<CallToolResult, ErrorData> = (|| {
+                    if host.get_source(&canonical).is_none() {
+                        if let Err(error) = ensure_loaded(host, &canonical) {
+                            // A path absent from both the host and workspace is
+                            // ordinary API absence. If the workspace can read it,
+                            // the failure came from ingestion and remains an MCP
+                            // infrastructure error rather than collapsing to null.
+                            if host.workspace_read().read_file(&canonical).is_none() {
+                                return Ok(CallToolResult::success(vec![Content::text("null")]));
+                            }
+                            return Err(error);
+                        }
+                    }
+                    match host.get_public_api(&canonical) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Ok(CallToolResult::success(vec![Content::text("null")]))
+                        }
+                        Err(error) => {
+                            return Err(public_api_projection_mcp_error(&canonical, error))
+                        }
+                    }
                     ensure_template_analysis(host, &canonical)?;
                     let analysis = host
                         .get_analysis(&canonical)
@@ -3454,6 +3510,12 @@ impl ServerHandler for VerterMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_compiler::tsc::{
+        TscFailureSubject, TscGenerationError, TscInvalidOutcome, TscUnavailableOutcome,
+    };
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroPartialReason, UnresolvedReason, UnsupportedReason,
+    };
     use verter_semantic::analysis::types::TypeResolutionSource;
     use verter_session::{HostConfig, UpsertRequest};
 
@@ -3487,6 +3549,148 @@ mod tests {
             ..verter_session::CompileProfile::default()
         };
         let _ = host.ensure_compiled(id, &profile);
+    }
+
+    #[tokio::test]
+    async fn component_api_projection_failure_is_structured_and_missing_is_absence() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/test/UnsafeEnum.vue",
+            r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>"#,
+        );
+        let server = VerterMcpServer::new(
+            Arc::clone(&host),
+            Arc::new(verter_diagnostics::Linter::default()),
+            McpServerConfig::default(),
+        );
+
+        let error = server
+            .get_component_api(Parameters(FilePathParams {
+                path: "/test/UnsafeEnum.vue".to_string(),
+            }))
+            .await
+            .expect_err("unsafe enum projection must be an MCP error");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "source": "/test/UnsafeEnum.vue",
+                "code": "tsc-generation",
+                "detailCode": "unsupported-declaration-shape",
+                "subject": { "kind": "macro", "syntaxIndex": 0 },
+                "declarationShapeReason": "unsupported-enum-shape",
+                "memberOrdinal": null,
+                "outcomeKind": null,
+                "outcomeReason": null,
+                "outcomeDiagnostic": null,
+            }))
+        );
+
+        let absent = server
+            .get_component_api(Parameters(FilePathParams {
+                path: "/test/Missing.vue".to_string(),
+            }))
+            .await
+            .expect("missing canonical is ordinary absence");
+        let text = absent.content[0].as_text().expect("text result");
+        assert_eq!(text.text, "null");
+    }
+
+    #[test]
+    fn component_api_error_preserves_all_unavailable_outcome_arms() {
+        let cases = [
+            (
+                TscUnavailableOutcome::Partial(MacroFailure::new(
+                    MacroPartialReason::IncompleteTraversal,
+                    Some("partial detail".to_string()),
+                )),
+                "partial",
+                "incomplete-traversal",
+                "partial detail",
+            ),
+            (
+                TscUnavailableOutcome::Unresolved(MacroFailure::new(
+                    UnresolvedReason::AmbiguousReference,
+                    Some("unresolved detail".to_string()),
+                )),
+                "unresolved",
+                "ambiguous-reference",
+                "unresolved detail",
+            ),
+            (
+                TscUnavailableOutcome::Unsupported(MacroFailure::new(
+                    UnsupportedReason::SemanticConstruct,
+                    Some("unsupported detail".to_string()),
+                )),
+                "unsupported",
+                "semantic-construct",
+                "unsupported detail",
+            ),
+            (
+                TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(MacroFailure::new(
+                    MacroInvalidReason::NonObjectRoot,
+                    Some("invalid detail".to_string()),
+                ))),
+                "invalid",
+                "non-object-root",
+                "invalid detail",
+            ),
+        ];
+
+        for (syntax_index, (outcome, kind, reason, diagnostic)) in cases.into_iter().enumerate() {
+            let error = public_api_projection_mcp_error(
+                "/test/Unavailable.vue",
+                TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::Macro {
+                        syntax_index: syntax_index as u32,
+                    },
+                    outcome,
+                }
+                .into(),
+            );
+
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({
+                    "source": "/test/Unavailable.vue",
+                    "code": "tsc-generation",
+                    "detailCode": "unavailable-outcome",
+                    "subject": { "kind": "macro", "syntaxIndex": syntax_index },
+                    "declarationShapeReason": null,
+                    "memberOrdinal": null,
+                    "outcomeKind": kind,
+                    "outcomeReason": reason,
+                    "outcomeDiagnostic": diagnostic,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn component_api_error_preserves_script_setup_attrs_subject() {
+        let error = public_api_projection_mcp_error(
+            "/test/MalformedAttrs.vue",
+            TscGenerationError::UnavailableOutcome {
+                subject: TscFailureSubject::ScriptSetupAttrs {
+                    source_range: verter_span::Span::new(31, 37),
+                },
+                outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(
+                    verter_compiler::tsc::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+                )),
+            }
+            .into(),
+        );
+        assert_eq!(
+            error.data.expect("structured data")["subject"],
+            serde_json::json!({
+                "kind": "scriptSetupAttrs",
+                "sourceRange": { "start": 31, "end": 37 },
+            })
+        );
     }
 
     // ── Bug 1: get_component_summary API section should use macros ──
@@ -3650,6 +3854,7 @@ const count = ref(0)
             module_references: Vec::new(),
             macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![
                     "Type1".into(),

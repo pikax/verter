@@ -113,6 +113,7 @@ fn make_macro_type_dep(name: &str) -> MacroTypeDep {
 
 fn make_alias_import(spec: &str) -> AnalyzedImport {
     AnalyzedImport {
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         source: spec.to_string(),
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {

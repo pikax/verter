@@ -547,6 +547,33 @@ use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VE
 const STALE_SCHEMA_VERSION: u32 = CACHE_CLUSTER_SCHEMA_VERSION - 1;
 
 #[test]
+fn owner_identity_schema_v3_artifacts_are_rejected_by_v4() {
+    use verter_session::file_artifact_store::FileArtifactStore;
+
+    const OWNER_IDENTITY_PREVIOUS_SCHEMA: u32 = 3;
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 4);
+    assert_eq!(STALE_SCHEMA_VERSION, OWNER_IDENTITY_PREVIOUS_SCHEMA);
+
+    let stale = FileArtifactStore::new_with_schema_version_for_test(OWNER_IDENTITY_PREVIOUS_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/owner-v3.ts");
+    assert_eq!(
+        stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        1,
+        "a v3 artifact cannot be read under the owner-exact v4 schema"
+    );
+    assert_eq!(stale.len(), 0);
+
+    let current = FileArtifactStore::new();
+    current.insert_synthetic_for_schema_test("/workspace/owner-v4.ts");
+    assert_eq!(
+        current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        0,
+        "a v4 artifact survives a matching-schema roundtrip"
+    );
+    assert_eq!(current.len(), 1);
+}
+
+#[test]
 fn schema_bump_evicts_indexed_ready_db_stale_entries() {
     use verter_session::file_artifact_store::FileArtifactStore;
 

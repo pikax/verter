@@ -175,6 +175,20 @@ impl SchedulerCpuPool {
         Ok(SchedulerPoolSubmitResult::Submitted)
     }
 
+    /// Execute a non-`'static` scoped operation on this scheduler CPU pool.
+    ///
+    /// Unlike [`Self::try_submit`], `install` blocks until the operation
+    /// returns, so the closure may borrow caller-owned state. This is the
+    /// execution substrate for request-scoped semantic producers whose
+    /// resolver context cannot be promoted to `'static`.
+    pub fn install<OP, R>(&self, operation: OP) -> R
+    where
+        OP: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.pool.install(operation)
+    }
+
     /// Process-unique identity of this pool. Pair with
     /// [`scheduler_cpu_pool_token`] read from inside a submitted task to
     /// assert a worker is running on THIS specific injected pool.

@@ -19,9 +19,8 @@ use verter_session::file_artifact_store::{InternedName, InternedSpecifier};
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::{ImportTarget, ShallowFileState};
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
+fn empty_routes() -> Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory> {
+    Arc::new(verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default())
 }
 
 fn build_with_import(
@@ -36,6 +35,7 @@ fn build_with_import(
         ImportTarget {
             source_specifier: specifier.to_string(),
             imported_name: imported.to_string(),
+            is_namespace: false,
             canonical_id: resolved_canonical.to_string(),
         },
     );
@@ -47,14 +47,13 @@ fn build_with_import(
         Vec::new(),
         import_locals,
         import_targets,
-        empty_external(),
+        empty_routes(),
     );
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
         Arc::new(shallow),
         Arc::from(""),
         Arc::from(""),
-        empty_external(),
     ))
 }
 

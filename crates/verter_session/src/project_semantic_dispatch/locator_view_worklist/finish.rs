@@ -46,15 +46,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let decl = match inputs.scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::from("<script-setup>"),
                     },
                     NodeScopeId::File {
                         canonical_id,
+                        owner,
                         whole_hash,
                         ..
                     } => DeclIdentity {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         whole_hash: *whole_hash,
                         decl_name: Arc::from("<script-setup>"),
                     },
@@ -78,7 +81,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inputs.scope_payload,
             inputs.shadowing,
             context,
-        );
+        )
+        .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_bare_ref_head(&resolver_context, &name, type_args.len()) {
             CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
             CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
@@ -114,7 +118,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             inputs.scope_payload,
             inputs.shadowing,
             context,
-        );
+        )
+        .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_import_type_head(
             &resolver_context,
             owner_canonical.as_ref(),
@@ -471,6 +476,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::InstantiateKey::new(
                             self.type_slot_for(
                                 Arc::clone(&base.canonical_id),
+                                base.owner,
                                 Arc::clone(&base.decl_name),
                             ),
                             projected_args,
@@ -491,6 +497,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::InstantiateKey::new(
                             self.type_slot_for(
                                 Arc::clone(&base.canonical_id),
+                                base.owner,
                                 Arc::clone(&base.decl_name),
                             ),
                             projected_args,

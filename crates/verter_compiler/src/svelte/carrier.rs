@@ -387,10 +387,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             // requested through a dedicated signal the neutral carrier does not carry,
             // so `dev_codegen` stays false.
             dev_codegen: false,
-            // The neutral options carry no `customElement` compile-option axis;
-            // an in-source `<svelte:options customElement>` still activates the
-            // custom-element output (its value wins over the option anyway).
-            custom_element: false,
+            // Explicit carrier profile axis. An in-source
+            // `<svelte:options customElement>` value still wins over this
+            // compile option, matching official precedence.
+            custom_element: opts.custom_element,
             // The RESOLVED Svelte cssHash override (from the host/session boundary,
             // preserved byte-exact) threads verbatim into the style-plan scope class.
             css_hash_override: opts.svelte_css_hash_override.clone(),

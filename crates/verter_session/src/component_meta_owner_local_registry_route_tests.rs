@@ -25,8 +25,8 @@ use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use crate::capture_token::CaptureToken;
 use crate::resolver_core::component_meta_registry::{
-    ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER, ROUTE_DEMAND_EMITTED_PICK_COUNTER,
-    ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
+    RegistryProducerScope, ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER,
+    ROUTE_DEMAND_EMITTED_PICK_COUNTER, ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
 };
 use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;
@@ -86,6 +86,44 @@ fn route_counters_for(host: &Arc<VerterHost>, canonical: &str) -> RouteCounters 
         pick: snapshot.counter(ROUTE_DEMAND_EMITTED_PICK_COUNTER),
         member_path: snapshot.counter(ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER),
     }
+}
+
+fn macro_root_refs_for(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+) -> Vec<crate::resolver_core::component_meta_registry::PendingComponentMetaRegistryRef> {
+    let snapshot = host
+        .get_raw_analysis_snapshot(canonical)
+        .expect("component analysis snapshot");
+    let published_names = rustc_hash::FxHashSet::default();
+    let mut queued_names = rustc_hash::FxHashSet::default();
+    let mut output = std::collections::VecDeque::new();
+    crate::resolver_core::component_meta_registry::collect_component_meta_registry_public_macro_root_refs(
+        host.as_ref(),
+        canonical,
+        &snapshot,
+        &published_names,
+        &mut queued_names,
+        &mut output,
+    );
+    output.into_iter().collect()
+}
+
+fn first_macro_utility_route_for(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+) -> (String, crate::resolver_core::RouteDemand) {
+    let _ = host
+        .get_raw_analysis_snapshot(canonical)
+        .expect("component analysis snapshot");
+    let hot =
+        crate::structural_carrier_producer::macro_type_arg_hot_ref(host.as_ref(), canonical, 0)
+            .expect("first macro structural type argument");
+    crate::resolver_core::component_meta_registry::component_meta_registry_node_utility_route(
+        host.as_ref(),
+        hot.node(),
+    )
+    .expect("first macro must retain its authored Pick route")
 }
 
 // ── Positive #1: owner-local indexed-access → Whole ──
@@ -163,6 +201,31 @@ defineProps<Pick<Foo, 'slots' | 'variants'>>()
 fn public_field_refs_rewrite_owner_local_component_config_utility_routes_to_whole_root() {
     let host = build_workspace_host(&[("/workspace/src/Comp.vue", OWNER_LOCAL_PICK_VUE)]);
 
+    assert_eq!(
+        first_macro_utility_route_for(&host, "/workspace/src/Comp.vue"),
+        (
+            "Foo".to_string(),
+            crate::resolver_core::RouteDemand::pick(vec![
+                "slots".to_string(),
+                "variants".to_string(),
+            ]),
+        ),
+        "the structural macro carrier must preserve Pick<Foo, K> before rewrite",
+    );
+
+    let macro_refs = macro_root_refs_for(&host, "/workspace/src/Comp.vue");
+    assert_eq!(
+        macro_refs.len(),
+        1,
+        "the owner-local Pick macro root must enqueue one effective registry route",
+    );
+    assert_eq!(macro_refs[0].name, "Foo");
+    assert_eq!(
+        macro_refs[0].route,
+        crate::resolver_core::RouteDemand::Whole,
+        "the effective owner-local Pick route must be Whole(Foo)",
+    );
+
     let counters = route_counters_for(&host, "/workspace/src/Comp.vue");
 
     assert!(
@@ -207,6 +270,34 @@ defineProps<{
 </script>
 <template><div /></template>
 "#;
+
+const EXTERNAL_PICK_VUE: &str = r#"<script setup lang="ts">
+import type { Foo } from '/workspace/src/types'
+defineProps<Pick<Foo, 'slots' | 'variants'>>()
+</script>
+<template><div /></template>
+"#;
+
+#[test]
+fn public_macro_root_refs_do_not_rewrite_external_pick_to_whole() {
+    let host = build_workspace_host(&[
+        ("/workspace/src/theme.ts", EXTERNAL_THEME_TS),
+        ("/workspace/src/types.ts", EXTERNAL_TYPES_TS),
+        ("/workspace/src/Comp.vue", EXTERNAL_PICK_VUE),
+    ]);
+
+    assert_eq!(
+        first_macro_utility_route_for(&host, "/workspace/src/Comp.vue").0,
+        "Foo",
+        "the imported counterfixture must reach the same authored Pick root",
+    );
+
+    let macro_refs = macro_root_refs_for(&host, "/workspace/src/Comp.vue");
+    assert!(
+        macro_refs.is_empty(),
+        "an imported Pick root must decline the owner-local Whole rewrite: {macro_refs:?}",
+    );
+}
 
 #[test]
 fn public_field_refs_keep_external_indexed_access_routes() {
@@ -254,12 +345,15 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
+    let producer_scope = RegistryProducerScope::explicit(
+        "/workspace/src/Comp.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+    );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
-        "/workspace/src/Comp.vue",
+        &producer_scope,
         &analysis,
         Some("Foo"),
-        None,
     );
     assert!(
         owner_local.is_none(),
@@ -335,12 +429,15 @@ fn owner_local_alias_of_alias_external_import_declines() {
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
+    let producer_scope = RegistryProducerScope::explicit(
+        "/workspace/src/Comp.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+    );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
-        "/workspace/src/Comp.vue",
+        &producer_scope,
         &analysis,
         Some("Foo"),
-        None,
     );
     assert!(
         owner_local.is_none(),
@@ -379,12 +476,15 @@ fn owner_local_generic_typeparameter_body_declines() {
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
+    let producer_scope = RegistryProducerScope::explicit(
+        "/workspace/src/Comp.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+    );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext,
-        "/workspace/src/Comp.vue",
+        &producer_scope,
         &analysis,
         Some("T"),
-        None,
     );
     assert!(
         owner_local.is_none(),

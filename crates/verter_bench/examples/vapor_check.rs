@@ -8,7 +8,9 @@ use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{
+    compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput,
+};
 
 // ── File discovery ──────────────────────────────────────────────────
 
@@ -212,7 +214,13 @@ fn main() {
                 force_vapor: true,
                 ..Default::default()
             };
-            compile(&content, &options, &verter_opts, &allocator)
+            compile(
+                &content,
+                &options,
+                &verter_opts,
+                &VueMacroSemanticInput::Unavailable,
+                &allocator,
+            )
         }));
 
         match result {

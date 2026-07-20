@@ -36,6 +36,8 @@ pub(super) enum Chunk<'a> {
         start: u32,
         end: u32,
         content: &'a str,
+        /// Whether the moved bytes were replacement text before the move.
+        replacement: bool,
     },
     /// Inserted content mapped to a specific source position.
     /// Unlike `Inserted` (unmapped), this emits a source map token at `source_start`.
@@ -99,6 +101,16 @@ impl<'a> Chunk<'a> {
             start,
             end,
             content,
+            replacement: false,
+        }
+    }
+
+    pub fn moved_replacement(start: u32, end: u32, content: &'a str) -> Self {
+        Self::Moved {
+            start,
+            end,
+            content,
+            replacement: true,
         }
     }
 

@@ -36,6 +36,7 @@ fn carrier_wrapping(
             ValueRootKey {
                 scope: ScopeId {
                     canonical_id: Arc::from("/v.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                 },
                 name: Arc::from("factory"),
@@ -71,6 +72,7 @@ fn accumulate_carrier_deps_descends_carrier_args() {
         let dep_id = DeclIdentity::from_scope(
             &NodeScopeId::File {
                 canonical_id: Arc::from("/dep.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [9u8; 16],
                 local_scope: None,
             },

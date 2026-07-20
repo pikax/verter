@@ -207,20 +207,18 @@ fn extract_component_meta_from_inputs(
 /// Cross-file resolution goes through `host.resolve_local_import_symbol_target`
 /// (cache-backed). No fresh resolver; no duplicate route discovery.
 pub(crate) fn resolve_ref_to_root_identity(
-    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-
-    if host
-        .local_type_declaration_id(owner_canonical, name)
-        .is_some()
-    {
-        return Some(ResolvedRootIdentity::new(owner_canonical, name));
-    }
-    host.resolve_local_import_symbol_target(owner_canonical, name)
-        .map(|(canonical_id, exported_name)| ResolvedRootIdentity::new(canonical_id, exported_name))
+    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        ctx,
+        owner_canonical,
+        owner,
+        None,
+        name,
+    )
 }
 
 fn build_public_instance_slots_member(
@@ -308,9 +306,9 @@ pub(crate) fn populate_public_instance_sidecar(
 pub(crate) struct ComponentMetaExtractOutcome {
     /// The projected component-meta analysis.
     pub(crate) analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    /// The fallthrough resolution's fact versions when the caller threads them
-    /// (the payload surface stores Full payloads under this fact set); `None`
-    /// for the analysis-surface entry that does not request facts.
+    /// The fallthrough resolution's fact versions. Both the analysis and
+    /// payload extraction entries publish this call-owned dependency lane so
+    /// their caller can merge it into the resolved-state signature.
     pub(crate) fallthrough_fact_versions: Option<Vec<crate::resolver_core::FactVersionRef>>,
     /// The COMPUTE completeness observed across the WHOLE extract body — the
     /// macro-DTO read, projection, policy, and the folded fallthrough compute.
@@ -350,7 +348,6 @@ pub(crate) fn extract_component_meta_from_resolved(
         ctx,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
-        &resolved.resolved_macros,
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
@@ -362,6 +359,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
     );
+    let mut fallthrough_facts = None;
     if include_fallthrough {
         let mut visiting = rustc_hash::FxHashSet::default();
         // The completeness travels WITH the resolution via the outcome carrier
@@ -377,6 +375,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             ctx,
         );
         if let Some(resolution) = outcome.resolution {
+            fallthrough_facts = Some(resolution.fact_versions.clone());
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
@@ -407,7 +406,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     extract_scope.discard();
     ComponentMetaExtractOutcome {
         analysis: meta,
-        fallthrough_fact_versions: None,
+        fallthrough_fact_versions: fallthrough_facts,
         completeness,
     }
 }
@@ -432,7 +431,6 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         ctx,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
-        &resolved.resolved_macros,
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
@@ -503,9 +501,10 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
 pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
     host: &VerterHost,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    resolve_ref_to_root_identity(host, owner_canonical, name)
+    resolve_ref_to_root_identity(host, owner_canonical, owner, name)
 }
 
 #[cfg(test)]

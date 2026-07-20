@@ -230,6 +230,8 @@ export interface CompileBatchRenderProfile {
    */
   filename?: string;
   isProduction: boolean;
+  /** Vue custom-element script policy; unrelated to template `customElements`. */
+  customElement: boolean;
   ssr: boolean;
   forceJs: boolean;
   forceVapor: boolean;
@@ -403,6 +405,160 @@ export interface NativeBlockOverrideRequest {
 
 export type HostPublicApiMode = "public" | "testing" | "declaration";
 
+export interface HostTscResponse {
+  code: string;
+  sourceMap: string | null;
+}
+
+export type HostTscDeclarationShapeReason =
+  | "semantic-inference-depth-budget-exceeded"
+  | "semantic-inference-work-budget-exceeded"
+  | "semantic-inference-unsupported-macro-kind"
+  | "semantic-inference-unsupported-construct"
+  | "semantic-inference-missing-type-argument"
+  | "semantic-inference-missing-declaration"
+  | "semantic-inference-ambiguous-reference"
+  | "semantic-inference-missing-dependency"
+  | "owner-value-dependency-unavailable"
+  | "class-decorator"
+  | "complex-class-heritage"
+  | "decorated-class-member"
+  | "computed-class-member"
+  | "private-class-member"
+  | "rest-class-parameter"
+  | "destructured-class-parameter"
+  | "decorated-class-parameter"
+  | "constructor-overload"
+  | "unsupported-class-shape"
+  | "unsupported-enum-shape"
+  | "inconsistent-class-inference";
+
+export type HostTscProjectionDetailCode =
+  | "missing-authoritative-semantics"
+  | "missing-entry"
+  | "duplicate-entry"
+  | "unavailable-outcome"
+  | "role-mismatch"
+  | "macro-identity-mismatch"
+  | "unexpected-entry"
+  | "missing-scope-binding"
+  | "value-scope-binding-unavailable"
+  | "missing-scope-declaration"
+  | "unsupported-declaration-shape"
+  | "invalid-authored-member-ordinal"
+  | "invalid-macro-anchor"
+  | "missing-authored-argument-geometry";
+
+export type HostMacroPartialReason =
+  | "budget-exceeded"
+  | "cancelled"
+  | "superseded-generation"
+  | "unstable-state"
+  | "recursion"
+  | "incomplete-traversal";
+
+export type HostMacroUnresolvedReason =
+  | "missing-type-argument"
+  | "missing-declaration"
+  | "ambiguous-reference"
+  | "missing-dependency";
+
+export type HostMacroUnsupportedReason = "macro-kind" | "semantic-construct";
+export type HostMacroInvalidReason = "non-object-root";
+export type HostAuthoredTypeSyntaxInvalidReason = "malformed-or-recovered-type-syntax";
+
+export interface HostTscMacroFailureSubject {
+  kind: "macro";
+  syntaxIndex: number;
+}
+
+export interface HostTscScriptSetupAttrsFailureSubject {
+  kind: "scriptSetupAttrs";
+  sourceRange: { start: number; end: number };
+}
+
+export type HostTscFailureSubject =
+  | HostTscMacroFailureSubject
+  | HostTscScriptSetupAttrsFailureSubject;
+
+export type HostTscUnavailableOutcome =
+  | {
+      subject: HostTscMacroFailureSubject;
+      outcomeKind: "partial";
+      outcomeReason: HostMacroPartialReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: HostTscMacroFailureSubject;
+      outcomeKind: "unresolved";
+      outcomeReason: HostMacroUnresolvedReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: HostTscMacroFailureSubject;
+      outcomeKind: "unsupported";
+      outcomeReason: HostMacroUnsupportedReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: HostTscMacroFailureSubject;
+      outcomeKind: "invalid";
+      outcomeReason: HostMacroInvalidReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: HostTscScriptSetupAttrsFailureSubject;
+      outcomeKind: "invalid";
+      outcomeReason: HostAuthoredTypeSyntaxInvalidReason;
+      outcomeDiagnostic: null;
+    };
+
+interface HostNoTscUnavailableOutcome {
+  outcomeKind: null;
+  outcomeReason: null;
+  outcomeDiagnostic: null;
+}
+
+interface HostPublicApiProjectionErrorBase {
+  code: "tsc-generation";
+}
+
+/** Closed structured identity for a failed public-API projection. */
+export type HostPublicApiProjectionError =
+  | (HostPublicApiProjectionErrorBase & {
+      detailCode: "unsupported-declaration-shape";
+      subject: HostTscFailureSubject;
+      declarationShapeReason: HostTscDeclarationShapeReason;
+      memberOrdinal: null;
+    } & HostNoTscUnavailableOutcome)
+  | (HostPublicApiProjectionErrorBase & {
+      detailCode: "invalid-authored-member-ordinal";
+      subject: HostTscFailureSubject;
+      declarationShapeReason: null;
+      memberOrdinal: number;
+    } & HostNoTscUnavailableOutcome)
+  | (HostPublicApiProjectionErrorBase &
+      HostTscUnavailableOutcome & {
+        detailCode: "unavailable-outcome";
+        declarationShapeReason: null;
+        memberOrdinal: null;
+      })
+  | (HostPublicApiProjectionErrorBase & {
+      detailCode: Exclude<
+        HostTscProjectionDetailCode,
+        "unavailable-outcome" | "unsupported-declaration-shape" | "invalid-authored-member-ordinal"
+      >;
+      subject: HostTscFailureSubject;
+      declarationShapeReason: null;
+      memberOrdinal: null;
+    } & HostNoTscUnavailableOutcome);
+
+/** Explicit tri-state result: value, ordinary absence, or typed failure. */
+export interface HostPublicApiResult {
+  value: HostTscResponse | null;
+  error: HostPublicApiProjectionError | null;
+}
+
 // =============================================================================
 // Workspace (filesystem-backed VFS)
 // =============================================================================
@@ -521,10 +677,7 @@ export declare class VerterHost {
    */
   compileMany(files: CompileBatchInput[], options?: CompileBatchOptions): CompileBatchEntry[];
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
-  getPublicApi(
-    canonicalId: string,
-    mode?: HostPublicApiMode,
-  ): { code: string; sourceMap?: string } | null;
+  getPublicApi(canonicalId: string, mode?: HostPublicApiMode): HostPublicApiResult;
   getIde(
     canonicalId: string,
     profile?: import("./host-types").HostCompileProfile,

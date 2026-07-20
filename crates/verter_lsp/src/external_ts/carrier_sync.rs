@@ -528,7 +528,17 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         // receipt never precedes its buffer opens.
         let transition =
             prepare_sync_transition(req.provider_sync_states, req.canonical_id, next_state);
-        let api = block_in_place_if_available(|| req.host.get_public_api(req.canonical_id));
+        let api = match block_in_place_if_available(|| req.host.get_public_api(req.canonical_id)) {
+            Ok(api) => api,
+            Err(error) => {
+                crate::report_public_api_projection_error(
+                    "carrier_sync.direct_open",
+                    req.canonical_id,
+                    &error,
+                );
+                return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+            }
+        };
         let companions = build_carrier_companions(&transition.next, req.ide, api.as_ref());
         // The source revision is the carrier source's AUTHORITATIVE per-canonical content
         // freshness rail (the workspace's `last_content_transition_generation`), captured
@@ -556,7 +566,17 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     let transition =
         prepare_sync_transition(req.provider_sync_states, req.canonical_id, next_state);
     let mut committed_state = transition.next.clone();
-    let api = block_in_place_if_available(|| req.host.get_public_api(req.canonical_id));
+    let api = match block_in_place_if_available(|| req.host.get_public_api(req.canonical_id)) {
+        Ok(api) => api,
+        Err(error) => {
+            crate::report_public_api_projection_error(
+                "carrier_sync.publish",
+                req.canonical_id,
+                &error,
+            );
+            return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+        }
+    };
 
     // A tsserver membership publish must advertise the COMPLETE companion set: the
     // store membership REPLACES (does not merge) a source's prior companions, so an

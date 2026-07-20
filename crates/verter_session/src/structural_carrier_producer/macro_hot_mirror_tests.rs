@@ -106,6 +106,23 @@ fn macro_type_arg(host: &VerterHost, canonical: &str, macro_index: usize) -> Arc
     }
 }
 
+fn macro_owner(
+    host: &VerterHost,
+    canonical: &str,
+    macro_index: usize,
+) -> verter_type_expr::TopLevelOwnerId {
+    host.ensure_indexed_ready(canonical)
+        .and_then(|indexed| {
+            indexed
+                .script_analysis
+                .as_ref()?
+                .macros
+                .get(macro_index)
+                .map(|mac| mac.owner)
+        })
+        .expect("type-based macro must have an exact owner")
+}
+
 fn node_data(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -139,11 +156,13 @@ fn eager_resolved(
     dispatch: &ProjectSemanticDispatch<'_>,
     expr: &TypeExpr,
     canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_context(
+        .lower_type_expr_in_owner_scope_with_context(
             canonical,
+            owner,
             expr,
             ProjectionReductionContext::structural_transit_with_mode(mode),
         )
@@ -193,7 +212,32 @@ fn bare_ref_macro_arg_mirrors_to_bare_ref_carrier_and_reentry_matches_eager() {
     // body — identical to the eager macro-arg lowering.
     let arg = macro_type_arg(&host, "/C.vue", macro_index);
     let via_mirror = mirror_resolved(&dispatch, handle, ProjectionMode::Navigate);
-    let via_eager = eager_resolved(&dispatch, arg.as_ref(), "/C.vue", ProjectionMode::Navigate);
+    let wrong_owner = eager_resolved(
+        &dispatch,
+        arg.as_ref(),
+        "/C.vue",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        ProjectionMode::Navigate,
+    );
+    assert_ne!(
+        via_mirror, wrong_owner,
+        "an ordinary-script lowering must not resolve a script-setup import"
+    );
+    assert!(
+        matches!(
+            node_data(&dispatch, wrong_owner),
+            Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::Opaque(_))
+        ),
+        "the wrong-owner control must remain an unresolved carrier"
+    );
+    let macro_owner = macro_owner(&host, "/C.vue", macro_index);
+    let via_eager = eager_resolved(
+        &dispatch,
+        arg.as_ref(),
+        "/C.vue",
+        macro_owner,
+        ProjectionMode::Navigate,
+    );
     assert_eq!(
         via_mirror, via_eager,
         "re-entering the dispatch from the mirror handle must match the eager macro-arg resolution"
@@ -639,7 +683,14 @@ fn barrel_reexport_macro_arg_flows_through_mirror_smoke() {
     // Re-entry matches eager (the shared dispatch walks the barrel hop).
     let arg = macro_type_arg(&host, "/B.vue", macro_index);
     let via_mirror = mirror_resolved(&dispatch, handle, ProjectionMode::Navigate);
-    let via_eager = eager_resolved(&dispatch, arg.as_ref(), "/B.vue", ProjectionMode::Navigate);
+    let macro_owner = macro_owner(&host, "/B.vue", macro_index);
+    let via_eager = eager_resolved(
+        &dispatch,
+        arg.as_ref(),
+        "/B.vue",
+        macro_owner,
+        ProjectionMode::Navigate,
+    );
     assert_eq!(
         via_mirror, via_eager,
         "barrel-reexport macro-arg re-entry must match the eager resolution"
@@ -667,7 +718,14 @@ fn namespace_member_macro_arg_flows_through_mirror_smoke() {
         .expect("the namespace-member macro arg must mirror to a hot ref");
     let arg = macro_type_arg(&host, "/N.vue", macro_index);
     let via_mirror = mirror_resolved(&dispatch, handle, ProjectionMode::Navigate);
-    let via_eager = eager_resolved(&dispatch, arg.as_ref(), "/N.vue", ProjectionMode::Navigate);
+    let macro_owner = macro_owner(&host, "/N.vue", macro_index);
+    let via_eager = eager_resolved(
+        &dispatch,
+        arg.as_ref(),
+        "/N.vue",
+        macro_owner,
+        ProjectionMode::Navigate,
+    );
     assert_eq!(
         via_mirror, via_eager,
         "namespace-member macro-arg re-entry must match the eager resolution"
@@ -703,8 +761,11 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     // Pin the retained parse-snapshot lease with one successful decl-body demand,
     // then break it so the macro-arg transient demand lease-misses.
     let memo = indexed.shallow_state.decl_bodies();
+    // The `<script setup>` local type declares under the setup Instance
+    // owner in the owner-aware inventory.
     assert!(
-        memo.type_decl("Local").is_some(),
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::instance(0), "Local",)
+            .is_some(),
         "the local type body must lower under a live lease (this pins the retained snapshot)"
     );
     memo.release_retained_snapshot_for_test();
@@ -766,12 +827,15 @@ fn broken_lease_type_decl_accessor_marks_non_cacheability_via_into_option() {
     // Pin the retained parse-snapshot lease with A, then break it so a demand for a
     // DIFFERENT not-yet-lowered symbol (B) lease-misses through `into_option`.
     assert!(
-        memo.type_decl("A").is_some(),
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "A")
+            .is_some(),
         "A's body must lower under a live lease (pins the retained snapshot)"
     );
     memo.release_retained_snapshot_for_test();
 
-    let (result, read_set) = host.with_fact_tracer(|| memo.type_decl("B"));
+    let (result, read_set) = host.with_fact_tracer(|| {
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B")
+    });
     assert!(
         result.is_none(),
         "a broken-lease type_decl demand reads as None (fail-closed)"

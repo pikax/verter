@@ -15,7 +15,8 @@
 //! - [`CompileTarget::ANALYSIS`] — script + template data (MCP static analysis)
 
 mod helpers;
-mod macro_type_diagnostics;
+mod macro_scope_check;
+mod macro_semantic_diagnostics;
 pub(crate) mod style_usage;
 pub mod template_data;
 pub(crate) mod template_expr_overlay;
@@ -58,9 +59,8 @@ use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 use crate::tsc;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
-use macro_type_diagnostics::{
-    collect_invalid_macro_type_diagnostics, collect_invalid_options_scope_diagnostics,
-};
+use macro_scope_check::collect_invalid_options_scope_diagnostics;
+use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -217,6 +217,7 @@ pub fn compile(
     input: &str,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
 ) -> VerterCompileResult {
     let parse_start = Instant::now();
@@ -237,6 +238,7 @@ pub fn compile(
         &parsed,
         options,
         verter_options,
+        macro_semantics,
         allocator,
         parse_duration_ms,
     )
@@ -253,9 +255,18 @@ pub fn compile_from_parsed(
     parsed: &ParsedSfc,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
 ) -> VerterCompileResult {
-    compile_inner(input, parsed, options, verter_options, allocator, 0.0)
+    compile_inner(
+        input,
+        parsed,
+        options,
+        verter_options,
+        macro_semantics,
+        allocator,
+        0.0,
+    )
 }
 
 /// Internal compilation driver. Borrows a pre-parsed [`ParsedSfc`] — no cloning
@@ -266,6 +277,7 @@ fn compile_inner(
     parsed: &ParsedSfc,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
     parse_duration_ms: f64,
 ) -> VerterCompileResult {
@@ -282,22 +294,21 @@ fn compile_inner(
     let options = &*options;
 
     // Prepare the setup + companion script blocks once. This single parse backs
-    // the invalid-macro-type diagnostics (below, on every target), the script
-    // codegen macro surfaces and bindings, and the force-js type-stripping
-    // inputs — replacing the per-consumer re-parses that ran here before.
-    let prepared_script = PreparedScript::build(
-        input,
-        parsed.script(),
-        parsed.script_setup(),
-        allocator,
-        verter_options.external_types.as_ref(),
-    );
+    // script codegen syntax ownership, bindings, and force-js type stripping.
+    let prepared_script =
+        PreparedScript::build(input, parsed.script(), parsed.script_setup(), allocator);
 
     // Clone diagnostics — this is the only clone needed from ParsedSfc.
     let mut all_diagnostics = parsed.clone_diagnostics();
     let has_parse_errors = parsed.has_errors();
-    all_diagnostics.extend(collect_invalid_macro_type_diagnostics(&prepared_script));
-    // Official `checkInvalidScopeReference`: `defineOptions()` arguments are
+    let macro_validation =
+        collect_macro_semantic_diagnostics(&prepared_script, options.target, macro_semantics);
+    all_diagnostics.extend(macro_validation.diagnostics);
+    let validated_runtime = macro_validation
+        .runtime_valid
+        .then(|| macro_semantics.runtime())
+        .flatten();
+    // Official `checkInvalidScopeReference`: runtime macro arguments are
     // hoisted outside `setup()` — reject setup-scope references.
     all_diagnostics.extend(collect_invalid_options_scope_diagnostics(&prepared_script));
 
@@ -511,6 +522,9 @@ fn compile_inner(
         };
 
         let script_options = ScriptCodeGenOptions {
+            macro_runtime: validated_runtime,
+            is_production: options.is_production,
+            custom_element: options.custom_element,
             component_name: &component_name,
             scope_id: &scope_id_full,
             keep_ts_types: !verter_options.force_js,
@@ -604,7 +618,11 @@ fn compile_inner(
         // programs instead of re-parsing here.
         if verter_options.force_js {
             if let Some(setup) = prepared_script.setup() {
-                crate::strip_types::typescript::strip_typescript_types(
+                // `generate_script` owns setup imports (type-only removal,
+                // value/mixed reconstruction + hoist), so the body strip skips
+                // import declarations — editing an import twice corrupts the
+                // transform and no-ops later body strips.
+                crate::strip_types::typescript::strip_typescript_body_types(
                     setup.program(),
                     &mut ct,
                     setup.content_start(),
@@ -612,6 +630,8 @@ fn compile_inner(
                 );
             }
             if let Some(companion) = prepared_script.companion() {
+                // The Options-API companion is emitted at module scope with its
+                // imports in place, so the full strip owns its imports too.
                 crate::strip_types::typescript::strip_typescript_types(
                     companion.program(),
                     &mut ct,
@@ -1130,6 +1150,7 @@ fn compile_inner(
             scope_id: &scope_id_full,
             has_scoped_style,
             runtime_module_name: options.runtime_module_name.as_deref().unwrap_or("vue"),
+            macro_runtime: validated_runtime,
             types_module_name: options
                 .types_module_name
                 .as_deref()
@@ -1374,21 +1395,30 @@ fn compile_inner(
             &tsc::TscGenOptions {
                 conditional_root_narrowing: options.conditional_root_narrowing,
                 filename: options.filename.clone(),
-                external_types: verter_options.external_types.clone(),
                 mode: tsc::TscMode::Public,
             },
+            macro_semantics.tsc().map_or(
+                tsc::MacroTscInput::NotRequired,
+                tsc::MacroTscInput::Authoritative,
+            ),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_phase_timing("compile.codegen", tsc_dur);
         }
-        Some(VerterTsxBlock {
-            code: tsc_out.code,
-            source_map: tsc_out.source_map,
-            duration_ms: tsc_dur,
-            is_jsx: false,
-            destructured_block: None,
-        })
+        match tsc_out {
+            Ok(tsc_out) => Some(VerterTsxBlock {
+                code: tsc_out.code,
+                source_map: tsc_out.source_map,
+                duration_ms: tsc_dur,
+                is_jsx: false,
+                destructured_block: None,
+            }),
+            Err(error) => {
+                all_diagnostics.push(tsc_generation_diagnostic(error));
+                None
+            }
+        }
     } else {
         None
     };
@@ -1439,6 +1469,3 @@ mod tests;
 #[cfg(test)]
 #[path = "../compile_template_error_tests.rs"]
 mod compile_template_error_tests;
-
-#[cfg(test)]
-mod script_preparation_tests;

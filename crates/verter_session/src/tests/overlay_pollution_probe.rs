@@ -82,7 +82,7 @@ pub fn overlay_prepared_decl_bundle_probe(
     );
 
     let bundle = ResolverContext::prepared_decl_bundle(&session_ctx, raw_canonical)?;
-    let prepared = bundle.prepared_type_decls.get(symbol_name)?;
+    let prepared = bundle.prepared_type_decls.get(symbol_name).ok()??;
     let root_canonical_id = prepared.root_identity.canonical_id.to_string();
 
     Some(OverlayPreparedDeclProbe {

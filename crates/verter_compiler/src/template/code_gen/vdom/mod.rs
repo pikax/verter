@@ -136,9 +136,28 @@ pub struct VdomCodeGen<'ast, 'alloc> {
     /// Emitted as `const _component_x = _resolveComponent("x")` at the top
     /// of the render function body. Insertion-ordered.
     resolved_components: Vec<(String, String)>,
+    /// Per-item v-memo close suffix for a `v-for` + `v-memo` element, keyed by
+    /// AST node index. Built in `enter_element` (where the v-for prefix and memo
+    /// index are computed) and applied in `leave_element` in place of the normal
+    /// `_renderList` fragment close.
+    memo_for_suffixes: FxHashMap<usize, String>,
 }
 
 impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
+    /// True when the single logical root element carries a `v-memo` directive.
+    /// Used by leave_template to suppress the outer single-root `_openBlock()`
+    /// wrapper (a v-memo factory owns its own openBlock inside the memo closure).
+    fn root_element_has_v_memo(&self, root_children: &[NodeId], source: &str) -> bool {
+        for &cid in root_children {
+            if let AstNodeKind::Element(el) = &self.ast.nodes[cid.0].kind {
+                return el.props.iter().any(|p| {
+                    p.is_directive && &source[p.start as usize..p.name_end as usize] == "v-memo"
+                });
+            }
+        }
+        false
+    }
+
     pub fn new(
         ast: &'ast TemplateAst,
         oxc_ast: &'ast crate::template::oxc::types::OxcParsedAst<'alloc>,
@@ -159,6 +178,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             cache_index: 0,
             in_slot_context_stack: Vec::new(),
             resolved_components: Vec::new(),
+            memo_for_suffixes: FxHashMap::default(),
         }
     }
 
@@ -320,7 +340,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     }
                 }
                 AstNodeKind::Interpolation(_) => effective += 1,
-                AstNodeKind::Comment(_) => {} // Comments don't count as roots
+                AstNodeKind::Comment(_) => {
+                    // An EMITTED comment is a real root node — it forces a
+                    // multi-node root Fragment, so the sole non-comment root
+                    // becomes a Fragment child (`_createVNode`), not a block.
+                    // When comments are stripped they emit nothing and never
+                    // affect single-root block topology.
+                    if self.options.comments {
+                        effective += 1;
+                    }
+                }
             }
         }
         self.single_root = effective == 1;
@@ -523,6 +552,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     }
 
                     out.overwrite(close_start, close_end, "\n}");
+                } else if self.root_element_has_v_memo(root_children, source) {
+                    // v-memo root: `_withMemo(..., () => (_openBlock(), …))`
+                    // owns its openBlock inside the memo factory (emitted by
+                    // leave_element), so leave_template must NOT add an outer
+                    // `(_openBlock(), …)` wrapper — just `return`.
+                    let mut prefix = String::with_capacity(full_prefix.len() + 8);
+                    prefix.push_str(&full_prefix);
+                    prefix.push_str("return ");
+                    out.overwrite(tag_open.start, child.start, &prefix);
+                    out.overwrite(close_start, close_end, "\n}");
                 } else {
                     // Single root — block root with _openBlock + _createElementBlock
                     out.add_vdom_import(VdomHelper::OpenBlock);
@@ -560,12 +599,35 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     root_children,
                 );
 
-                // Close fragment + render function
-                let flag_str = helpers::format_patch_flag(
-                    helpers::PATCH_STABLE_FRAGMENT,
-                    self.options.is_production,
-                    |s| out.alloc_str(s),
-                );
+                // Close fragment + render function.
+                //
+                // Official Vue flags a root Fragment `STABLE_FRAGMENT |
+                // DEV_ROOT_FRAGMENT` (2112) when it exists ONLY because comments
+                // sit beside a SINGLE logical non-comment root — so the runtime
+                // filters to the real root for fallthrough / HMR. A v-if/v-else
+                // chain counts as ONE logical root (its continuation arms do not
+                // add). Two or more real roots stay a plain STABLE_FRAGMENT (64).
+                let has_comment = children.iter().any(|c| c.kind == ChildKind::Comment);
+                let logical_root_count = children
+                    .iter()
+                    .filter(|c| {
+                        !matches!(
+                            c.kind,
+                            ChildKind::Comment
+                                | ChildKind::WhitespaceNewline
+                                | ChildKind::WhitespaceSpace
+                        ) && c.condition != Some(ConditionChainRole::Continuation)
+                    })
+                    .count();
+                let frag_flag = if has_comment && logical_root_count == 1 {
+                    helpers::PATCH_STABLE_FRAGMENT | helpers::PATCH_DEV_ROOT_FRAGMENT
+                } else {
+                    helpers::PATCH_STABLE_FRAGMENT
+                };
+                let flag_str =
+                    helpers::format_patch_flag(frag_flag, self.options.is_production, |s| {
+                        out.alloc_str(s)
+                    });
                 let mut close_buf = String::with_capacity(32);
                 close_buf.push_str("\n], ");
                 close_buf.push_str(flag_str);
@@ -670,8 +732,20 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                         false
                     }
                 });
-                let (prefix, _for_close, iterable_src) =
-                    directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver);
+                // v-for on a conditional branch: the outer `_renderList`
+                // Fragment carries the if-branch `{ key: n }` (official Vue puts
+                // the branch key on the Fragment even when items have their own
+                // `:key`).
+                let branch_key = directives::condition_branch_index(self.ast, id);
+                let (prefix, _for_close, iterable_src) = directives::build_for_prefix(
+                    v_for,
+                    source,
+                    is_keyed,
+                    oxc,
+                    &self.resolver,
+                    branch_key,
+                    None,
+                );
                 let condition = match close {
                     ScopeClose::IfTernary => {
                         crate::template::code_gen::types::ConditionBranchClose::IfTernary
@@ -704,8 +778,68 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     false
                 }
             });
-            let (prefix, close, iterable_src) =
-                directives::build_for_prefix(v_for, source, is_keyed, oxc, &self.resolver);
+            // v-memo inside v-for → per-item memoization topology (official Vue:
+            // `_renderList(src, (i, __, ___, _cached) => { const _memo = deps;
+            // if (_cached && _cached.key === KEY && _isMemoSame(...)) return
+            // _cached; const _item = <vnode>; _item.memo = _memo; return _item },
+            // _cache, N)`), NOT a single global `_cache[N]`.
+            let memo_deps = element::resolve_v_memo_deps(
+                element,
+                source,
+                oxc,
+                &self.resolver,
+                self.options.force_js,
+            );
+            let (prefix, close, iterable_src) = if let Some(deps) = &memo_deps {
+                let key_expr = element::resolve_v_for_key(
+                    element,
+                    source,
+                    oxc,
+                    &self.resolver,
+                    self.options.force_js,
+                )
+                .unwrap_or_else(|| "undefined".to_string());
+                let memo_idx = self.cache_index;
+                self.cache_index += 1;
+                let (prefix, close, iterable_src) = directives::build_for_prefix(
+                    v_for,
+                    source,
+                    is_keyed,
+                    oxc,
+                    &self.resolver,
+                    None,
+                    Some((deps, &key_expr)),
+                );
+                // Memo close replaces the normal `_renderList` fragment close.
+                let flag = if is_keyed {
+                    if self.options.is_production {
+                        "128"
+                    } else {
+                        "128 /* KEYED_FRAGMENT */"
+                    }
+                } else if self.options.is_production {
+                    "256"
+                } else {
+                    "256 /* UNKEYED_FRAGMENT */"
+                };
+                let suffix = format!(
+                    "\n_item.memo = _memo\nreturn _item\n}}, _cache, {memo_idx}), {flag}))"
+                );
+                self.memo_for_suffixes.insert(id.0, suffix);
+                out.add_vdom_import(VdomHelper::IsMemoSame);
+                out.add_vdom_import(VdomHelper::WithMemo);
+                (prefix, close, iterable_src)
+            } else {
+                directives::build_for_prefix(
+                    v_for,
+                    source,
+                    is_keyed,
+                    oxc,
+                    &self.resolver,
+                    None,
+                    None,
+                )
+            };
             directives::collect_scope_imports(&close, out);
             // NOTE: v-for prefix is NOT prepended here. It is stored and
             // included in the open tag overwrite by process_element_leave.
@@ -720,8 +854,12 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
 
         // Track slot context: components and <template v-slot> create slot
         // contexts where children should use grouped caching instead of
-        // individual _cache[N] wrapping.
-        let is_slot_parent = element.tag_type.is_component()
+        // individual _cache[N] wrapping. Teleport/KeepAlive take raw VNode-array
+        // children (not slot objects), so they stay OUT of slot context.
+        let tag_name =
+            &source[element.tag_open.start as usize + 1..element.tag_open.name_end as usize];
+        let is_slot_parent = (element.tag_type.is_component()
+            && !helpers::is_raw_children_builtin(tag_name))
             || (element.tag_type == TagType::Template && element.v_slot.is_some());
         self.in_slot_context_stack.push(is_slot_parent);
 
@@ -780,6 +918,19 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             return;
         }
 
+        // Synthetic v-if branch key (official Vue injects `{ key: n }` on a
+        // conditional-branch root that has no explicit `:key`). Only for a plain
+        // conditional branch — when v-for also applies, the key rides the outer
+        // `_renderList` Fragment built in enter_element.
+        let injected_key = if el.v_condition.is_some()
+            && el.v_for.is_none()
+            && !directives::element_has_vnode_key(el, source)
+        {
+            directives::condition_branch_index(self.ast, _id)
+        } else {
+            None
+        };
+
         // Handle <template v-if> / <template v-for>: renders as Fragment, not
         // as a <template> element. These are transparent structural wrappers
         // whose children become the Fragment's children.
@@ -787,7 +938,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             && el.v_slot.is_none()
             && (el.v_condition.is_some() || el.v_for.is_some())
         {
-            self.leave_template_fragment(el, source, out);
+            self.leave_template_fragment(el, source, out, injected_key);
             return;
         }
 
@@ -800,18 +951,81 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         // Determine if this element is at a block-tree root position.
         // Block roots use _createElementBlock/_createBlock (with _openBlock())
         // instead of _createElementVNode/_createVNode.
+        //
+        // Teleport/KeepAlive are ALWAYS block roots — official Vue emits
+        // `(_openBlock(), _createBlock(_Teleport, …))` at ANY nesting depth,
+        // not just at a single-root/v-if/v-for position.
+        let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+        let raw_children_builtin = helpers::is_raw_children_builtin(tag_name);
         let is_root_child = self.ast.nodes[_id.0].parent.is_none();
-        let is_block_root =
-            el.v_condition.is_some() || el.v_for.is_some() || (is_root_child && self.single_root);
+        let is_single_template_root = is_root_child && self.single_root;
 
-        // Handle component with slot children: wrap in slot object instead of array
-        if el.tag_type.is_component() && self.has_slot_children(el_children) {
-            self.leave_component_with_slots(_id, el, oxc, el_children, source, out, is_block_root);
+        // v-memo: the element's vnode factory is wrapped in
+        // `_withMemo([deps], () => <vnode>, _cache, N)`. Native elements are
+        // block-forced (official Vue: the memoized factory returns a block);
+        // components keep their normal topology (a nested childless/default-slot
+        // component memo stays `_createVNode`). A v-memo block owns its openBlock
+        // INSIDE the factory, so the single-root openBlock is suppressed in
+        // leave_template for a v-memo root. (v-for + v-memo uses per-item cache
+        // topology and is not handled on this path.)
+        let memo_deps = if el.v_for.is_none() {
+            element::resolve_v_memo_deps(el, source, oxc, &self.resolver, self.options.force_js)
+        } else {
+            None
+        };
+        let native_memo = memo_deps.is_some() && !el.tag_type.is_component();
+
+        let is_block_root = el.v_condition.is_some()
+            || el.v_for.is_some()
+            || is_single_template_root
+            || raw_children_builtin
+            || native_memo;
+        // Local `_openBlock()`: v-if/v-for branches always; a raw-children
+        // built-in whenever it is NOT the sole single template root (the
+        // single-root open block is provided once by leave_template); a v-memo
+        // block owns its own openBlock inside the memo factory.
+        let force_open_block = (raw_children_builtin && !is_single_template_root)
+            || (memo_deps.is_some() && is_block_root);
+
+        // Emit the `_withMemo([deps], () => ` prefix and `, _cache, N)` suffix
+        // around the whole vnode expression. Applied before dispatch so the
+        // leave path's overwrites compose inside the wrapper.
+        if let Some(deps) = &memo_deps {
+            let memo_idx = self.cache_index;
+            self.cache_index += 1;
+            let vnode_end = el
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(el.tag_open.end);
+            out.add_vdom_import(VdomHelper::WithMemo);
+            out.prepend_alloc(el.tag_open.start, &format!("_withMemo({deps}, () => "));
+            out.prepend_alloc(vnode_end, &format!(", _cache, {memo_idx})"));
+        }
+
+        // Handle component with slot children: wrap in slot object instead of array.
+        // Teleport/KeepAlive are excluded — they take raw array children below.
+        if el.tag_type.is_component()
+            && !raw_children_builtin
+            && self.has_slot_children(el_children)
+        {
+            self.leave_component_with_slots(
+                _id,
+                el,
+                oxc,
+                el_children,
+                source,
+                out,
+                is_block_root,
+                force_open_block,
+                injected_key,
+            );
             return;
         }
 
-        // Handle component with implicit default slot (non-slot children)
-        if el.tag_type.is_component() && !el_children.is_empty() {
+        // Handle component with implicit default slot (non-slot children).
+        // Teleport/KeepAlive fall through to the element path (raw array children).
+        if el.tag_type.is_component() && !raw_children_builtin && !el_children.is_empty() {
             self.leave_component_with_default_slot(
                 _id,
                 el,
@@ -820,6 +1034,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 source,
                 out,
                 is_block_root,
+                force_open_block,
+                injected_key,
             );
             return;
         }
@@ -913,6 +1129,8 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             v_for_prefix.as_ref().map(|(s, _)| s.as_str()),
             self.ast,
             is_block_root,
+            force_open_block,
+            injected_key,
             Some(&mut self.hoisted_constants),
             cache_idx,
             Some(&mut self.resolved_components),
@@ -921,8 +1139,13 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         buf.clear();
         self.buf = buf;
 
-        // Emit scope close suffix for structural directives
-        if let Some(scope_close) = self.scope_closes.pop().flatten() {
+        // Emit scope close suffix for structural directives. A v-for + v-memo
+        // element uses its per-item memo close instead of the normal
+        // `_renderList` fragment close.
+        let scope_close = self.scope_closes.pop().flatten();
+        if let Some(memo_suffix) = self.memo_for_suffixes.remove(&_id.0) {
+            out.prepend_alloc(record.end, &memo_suffix);
+        } else if let Some(scope_close) = scope_close {
             let suffix = directives::format_scope_close(&scope_close, self.options.is_production);
             if !suffix.is_empty() {
                 out.prepend_static(record.end, suffix);

@@ -172,6 +172,9 @@ impl RouteFactLens for MockFile {
     fn own_canonical_id(&self) -> Arc<str> {
         Arc::from("mock:file")
     }
+    fn own_top_level_owner(&self) -> verter_type_expr::TopLevelOwnerId {
+        verter_type_expr::TopLevelOwnerId::ordinary_file()
+    }
 }
 
 impl RouteClosureProvider for MockFile {

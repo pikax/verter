@@ -376,7 +376,13 @@ fn gen_vdom_template(source: &str) -> String {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(source, &options, &verter_opts, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -387,6 +393,383 @@ fn gen_vdom_template(source: &str) -> String {
         .as_ref()
         .expect("should have template block");
     tpl.code.clone()
+}
+
+/// F5 regression guard: a lone `<li v-if v-for>` (no v-else) must still emit
+/// the ternary FALSE edge. Dropping it (grok's `let _ = close`) produces an
+/// unterminated `cond ? (...)` — a syntax error at runtime.
+#[test]
+fn v_if_v_for_lone_element_emits_balanced_ternary_false_edge() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-if="ok" v-for="x in xs">{{x}}</li></ul></template>
+<script setup>const ok = 1; const xs = [];</script>"#,
+    );
+    // TRUE branch: the v-if-over-v-for fragment.
+    assert!(
+        code.contains("? (_openBlock(true), _createElementBlock(_Fragment"),
+        "v-if+v-for must open its true branch as a fragment block.\n{code}"
+    );
+    // FALSE branch: the ternary must be terminated with a comment vnode.
+    assert!(
+        code.contains(": _createCommentVNode(\"v-if\", true)"),
+        "lone v-if+v-for must terminate the ternary with a comment false-edge.\n{code}"
+    );
+    // NEGATIVE: the fragment close must be followed by ` : ` (the else edge),
+    // never immediately by the enclosing array/paren close (unterminated ternary).
+    assert!(
+        !code.contains("UNKEYED_FRAGMENT */))]") && !code.contains("UNKEYED_FRAGMENT */)))\n}"),
+        "v-if+v-for ternary must not be unterminated.\n{code}"
+    );
+}
+
+/// F19 regression guard: two genuine element roots with a leading comment are a
+/// plain STABLE_FRAGMENT (64). DEV_ROOT_FRAGMENT (2112 = 2048|64) must NOT be
+/// over-triggered — it applies only when comments surround a SINGLE logical root.
+#[test]
+fn multi_root_fragment_with_comment_stays_stable_not_dev_root() {
+    let code = gen_vdom_template(
+        r#"<template><!--c--><div>a</div><span>b</span></template><script setup></script>"#,
+    );
+    assert!(
+        code.contains("64 /* STABLE_FRAGMENT */"),
+        "multi-root fragment with a comment must be plain STABLE_FRAGMENT (64).\n{code}"
+    );
+    // NEGATIVE: must not over-trigger DEV_ROOT_FRAGMENT.
+    assert!(
+        !code.contains("2112") && !code.contains("2048"),
+        "two element roots must NOT flag DEV_ROOT_FRAGMENT.\n{code}"
+    );
+}
+
+/// F19 (ported from grok spec, verified against official @vue/compiler-dom):
+/// a comment beside a SINGLE logical root (here a v-if/v-else chain, which is
+/// ONE logical root) flags the Fragment `STABLE_FRAGMENT | DEV_ROOT_FRAGMENT`
+/// (2112) so fallthrough / single-root filtering ignore the comment vnode.
+#[test]
+fn dev_root_fragment_comment_plus_single_conditional_root() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- note -->
+  <div v-if="a" />
+  <div v-else />
+</template>
+<script setup>const a = true;</script>"#,
+    );
+    assert!(
+        code.contains("2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */"),
+        "comment + single conditional root must be DEV_ROOT_FRAGMENT (2112).\n{code}"
+    );
+}
+
+/// F19 (ported from grok spec): a comment beside a SINGLE component root flags
+/// DEV_ROOT_FRAGMENT (2112), and the component is a plain `_createVNode`
+/// (fragment child), never a bare `_createBlock` without `_openBlock`.
+#[test]
+fn dev_root_fragment_comment_plus_single_component_root() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- no scoped styles -->
+  <CheckboxRoot name="test" />
+</template>
+<script setup>import CheckboxRoot from './CheckboxRoot.vue'</script>"#,
+    );
+    assert!(
+        code.contains("2112 /* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */"),
+        "comment + single component root must be DEV_ROOT_FRAGMENT (2112).\n{code}"
+    );
+    assert!(
+        code.contains("_createVNode("),
+        "the component beside a root comment must be a _createVNode fragment child.\n{code}"
+    );
+    // NEGATIVE: must not be a bare block without openBlock.
+    assert!(
+        !code.contains("_createBlock($setup.CheckboxRoot") || code.contains("_createVNode("),
+        "component next to a root comment must not be a bare _createBlock.\n{code}"
+    );
+}
+
+/// F13: sibling v-if/v-else chains under one parent get a GLOBAL running branch
+/// key (0,1 then 2,3), never a per-chain reset (0,1,0,1). Duplicate keys break
+/// Vue's keyed patching and log "Duplicate keys".
+#[test]
+fn sibling_v_if_chains_get_global_running_branch_keys() {
+    let code = gen_vdom_template(
+        r#"<template><div><p v-if="a">A</p><p v-else>B</p><span v-if="c">C</span><span v-else>D</span></div></template>
+<script setup>const a = 1; const c = 2;</script>"#,
+    );
+    assert!(
+        code.contains("{ key: 0 }"),
+        "first branch must be key 0.\n{code}"
+    );
+    assert!(
+        code.contains("{ key: 1 }"),
+        "second branch must be key 1.\n{code}"
+    );
+    // The counter must CONTINUE across the sibling chain, not reset.
+    assert!(
+        code.contains("{ key: 2 }"),
+        "third branch must be key 2 (counter must not reset to 0).\n{code}"
+    );
+    assert!(
+        code.contains("{ key: 3 }"),
+        "fourth branch must be key 3.\n{code}"
+    );
+}
+
+/// F13: a lone v-if branch (native element) is keyed `{ key: 0 }` and keeps its
+/// comment false-edge.
+#[test]
+fn single_v_if_branch_element_gets_key_zero() {
+    let code = gen_vdom_template(
+        r#"<template><div><p v-if="a">A</p></div></template><script setup>const a = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(\"p\", { key: 0 }"),
+        "lone v-if <p> branch must carry {{ key: 0 }}.\n{code}"
+    );
+    assert!(
+        code.contains(": _createCommentVNode(\"v-if\", true)"),
+        "false edge must remain.\n{code}"
+    );
+}
+
+/// F8: `<template v-if>` routes through key injection — its Fragment carries
+/// `{ key: 0 }`, and the following `<p v-else>` continues the counter to key 1.
+#[test]
+fn template_v_if_injects_fragment_branch_key() {
+    let code = gen_vdom_template(
+        r#"<template><div><template v-if="a"><b>x</b><i>y</i></template><p v-else>z</p></div></template><script setup>const a = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(_Fragment, { key: 0 }"),
+        "<template v-if> Fragment must carry {{ key: 0 }} (not null).\n{code}"
+    );
+    assert!(
+        code.contains("{ key: 1 }"),
+        "the <p v-else> must continue the branch counter to key 1.\n{code}"
+    );
+}
+
+/// F5/F13: a lone `<li v-if v-for>` injects the branch key on the OUTER
+/// `_renderList` Fragment (`{ key: 0 }`), matching official Vue.
+#[test]
+fn v_if_v_for_outer_fragment_gets_branch_key() {
+    let code = gen_vdom_template(
+        r#"<template><ul><li v-if="ok" v-for="x in xs">{{x}}</li></ul></template><script setup>const ok = 1; const xs = [];</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(_Fragment, { key: 0 }, _renderList"),
+        "v-if+v-for outer Fragment must carry branch key 0.\n{code}"
+    );
+}
+
+/// F13: a v-if branch with an explicit `:key` uses the user key — no synthetic
+/// branch key is injected.
+#[test]
+fn v_if_branch_with_user_key_is_not_double_keyed() {
+    let code = gen_vdom_template(
+        r#"<template><div><p v-if="a" :key="myKey">A</p></div></template><script setup>const a = 1; const myKey = 'k';</script>"#,
+    );
+    assert!(
+        !code.contains("{ key: 0 }"),
+        "explicit :key must suppress the synthetic branch key.\n{code}"
+    );
+    assert!(
+        code.contains("key: $setup.myKey") || code.contains("key: myKey"),
+        "the user-authored key must be emitted.\n{code}"
+    );
+}
+
+/// F13: a v-if branch that is a COMPONENT gets the injected key inside the
+/// component props object (official Vue `_createBlock(_Hidden, { key: 0 })`).
+#[test]
+fn v_if_component_branch_gets_injected_key() {
+    let code = gen_vdom_template(
+        r#"<template><div>a</div><Hidden v-if="show" /></template>
+<script setup>import Hidden from './Hidden.vue'; const show = true;</script>"#,
+    );
+    assert!(
+        code.contains("{ key: 0 }"),
+        "v-if component branch must carry {{ key: 0 }}.\n{code}"
+    );
+    assert!(
+        !code.contains("_createBlock($setup.Hidden, null")
+            && !code.contains("_createBlock($setup.Hidden)"),
+        "component branch props must not be null/absent when a key is injected.\n{code}"
+    );
+}
+
+/// F13 (ported from grok spec, verified against official @vue/compiler-dom):
+/// when v-for coexists with v-else, the OUTER `_renderList` Fragment carries the
+/// branch key `{ key: 1 }` while loop items keep their own `:key`. Official Vue
+/// output: `_createElementBlock(_Fragment, { key: 1 }, _renderList(...))` with
+/// item `key: parsed.name`.
+#[test]
+fn v_for_on_v_else_fragment_gets_branch_key() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- comment forces multi-root fragment -->
+  <Comp v-if="empty" :key="name" />
+  <Comp v-for="parsed in items" v-else :key="parsed.name" />
+</template>
+<script setup>
+import Comp from './Comp.vue'
+const empty = false
+const name = 'n'
+const items = [{ name: 'a' }]
+</script>"#,
+    );
+    assert!(
+        code.contains("_createElementBlock(_Fragment, { key: 1 }, _renderList"),
+        "v-else v-for Fragment must carry branch key 1 (Vue parity).\n{code}"
+    );
+    // The v-if arm keeps its user-authored :key (no synthetic branch key).
+    assert!(
+        code.contains("key: $setup.name") || code.contains("key: name"),
+        "the v-if arm must keep its explicit :key.\n{code}"
+    );
+}
+
+/// F6: v-memo on a NESTED native element wraps the block vnode factory in
+/// `_withMemo([deps], () => (_openBlock(), _createElementBlock(...)), _cache, N)`.
+#[test]
+fn v_memo_native_element_emits_with_memo_block() {
+    let code = gen_vdom_template(
+        r#"<template><section><div v-memo="[x]">{{ x }}</div></section></template>
+<script setup>const x = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.x], () => "),
+        "native v-memo must wrap in _withMemo with resolved deps.\n{code}"
+    );
+    // Native element memo factory returns a BLOCK.
+    assert!(
+        code.contains("_withMemo([$setup.x], () => (_openBlock(), _createElementBlock(\"div\""),
+        "native v-memo factory must return a block.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "v-memo must pass the _cache slot.\n{code}"
+    );
+}
+
+/// F6: v-memo on a CHILDLESS component wraps `_createVNode` (no block) —
+/// `_withMemo([deps], () => _createVNode(Comp), _cache, N)`.
+#[test]
+fn v_memo_childless_component_emits_with_memo() {
+    let code = gen_vdom_template(
+        r#"<template><section><Comp v-memo="[x]"/></section></template>
+<script setup>import Comp from './Comp.vue'; const x = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.x], () => _createVNode($setup.Comp"),
+        "childless component v-memo must wrap a plain _createVNode.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "must pass _cache slot.\n{code}"
+    );
+    // NEGATIVE: a childless component memo must NOT force a block.
+    assert!(
+        !code.contains("() => (_openBlock(), _createBlock($setup.Comp"),
+        "nested childless component v-memo must not be block-forced.\n{code}"
+    );
+}
+
+/// F6: v-memo on a NAMED-slot component wraps the component vnode (with its slot
+/// object) in _withMemo.
+#[test]
+fn v_memo_named_slot_component_emits_with_memo() {
+    let code = gen_vdom_template(
+        r#"<template><section><Comp v-memo="[x]"><template #foo>hi</template></Comp></section></template>
+<script setup>import Comp from './Comp.vue'; const x = 1;</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.x], () => "),
+        "named-slot component v-memo must wrap in _withMemo.\n{code}"
+    );
+    assert!(
+        code.contains("foo: _withCtx("),
+        "the named slot must still be emitted inside the memo factory.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "must pass _cache slot.\n{code}"
+    );
+}
+
+/// F6 (ported from grok spec): v-memo on a ROOT component (with default slot)
+/// emits `return _withMemo([deps], () => (_openBlock(), _createBlock(...)), _cache, N)`
+/// — a single openBlock INSIDE the memo factory, never a double openBlock.
+#[test]
+fn v_memo_on_root_component_emits_with_memo() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <MyComp v-memo="[a, b]" :class="cls">
+    <slot />
+  </MyComp>
+</template>
+<script setup>
+import MyComp from './MyComp.vue'
+const a = 1
+const b = 2
+const cls = 'x'
+</script>"#,
+    );
+    assert!(
+        code.contains("_withMemo([$setup.a, $setup.b], () => "),
+        "root component v-memo must wrap with resolved deps.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "must pass _cache slot.\n{code}"
+    );
+    // Exactly ONE openBlock inside the memo factory — never a double openBlock.
+    assert!(
+        !code.contains("(_openBlock(), _withMemo"),
+        "root v-memo must not double-wrap openBlock outside the memo factory.\n{code}"
+    );
+}
+
+/// F7: v-memo INSIDE v-for uses per-item cache topology — the `_renderList`
+/// callback receives a 4th `_cached` param, compares the item key, uses
+/// `_isMemoSame`, stores `_item.memo`, and passes `_cache, N` to `_renderList`.
+/// It must NOT collapse to a single global `_withMemo([deps], ...)` wrap.
+#[test]
+fn v_memo_in_v_for_emits_per_item_cache() {
+    let code = gen_vdom_template(
+        r#"<template><div v-for="i in list" :key="i" v-memo="[i]">{{ i }}</div></template>
+<script setup>const list = [];</script>"#,
+    );
+    assert!(
+        code.contains("_cached) => {"),
+        "renderList callback must receive the _cached param.\n{code}"
+    );
+    assert!(
+        code.contains("const _memo = ([i])"),
+        "must compute _memo from the (loop-local) deps.\n{code}"
+    );
+    assert!(
+        code.contains("_isMemoSame(_cached, _memo)"),
+        "must short-circuit via _isMemoSame.\n{code}"
+    );
+    assert!(
+        code.contains("_cached.key === i"),
+        "must compare the item key.\n{code}"
+    );
+    assert!(
+        code.contains("_item.memo = _memo"),
+        "must stamp _item.memo.\n{code}"
+    );
+    assert!(
+        code.contains(", _cache, "),
+        "renderList must receive the _cache slot.\n{code}"
+    );
+    // NEGATIVE: per-item cache, NOT a single global _withMemo wrap.
+    assert!(
+        !code.contains("_withMemo([i], () =>"),
+        "v-for + v-memo must use per-item cache, not a _withMemo wrap.\n{code}"
+    );
 }
 
 #[test]

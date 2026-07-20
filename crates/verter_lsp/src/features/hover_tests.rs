@@ -85,6 +85,7 @@ fn test_hover_on_import() {
         vec![],
         vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
@@ -402,6 +403,7 @@ fn child_component_hover_recovers_import_source_from_script_binding() {
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
             source: "./components/DirectChild.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "DirectChild".to_string(),
@@ -1045,6 +1047,7 @@ fn test_hover_on_ref_attr_does_not_show_import() {
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
@@ -1540,6 +1543,7 @@ fn test_hover_on_ref_in_interpolation_still_shows_import() {
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),

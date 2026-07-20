@@ -56,6 +56,7 @@ mod tests {
     fn make_props_macro(is_type_based: bool) -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based,
             type_references: vec![],
             binding_name: None,

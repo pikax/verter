@@ -62,4 +62,5 @@ mod typeinfo_ignored_test_manifest;
 mod typeinfo_manifest_freshness;
 mod virtual_file_naming_characterization;
 mod virtual_file_naming_ts_freshness;
+mod vue_macro_tsc_typecheck_gate;
 mod whole_env_consumer_graph_native_inventory;

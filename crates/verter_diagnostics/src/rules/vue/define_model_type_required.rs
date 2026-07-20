@@ -82,6 +82,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineModel,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,
                 type_references: vec![],
                 binding_name: Some("model".to_string()),
@@ -123,6 +124,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineModel,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec!["string".to_string()],
                 binding_name: Some("model".to_string()),
@@ -155,6 +157,7 @@ mod tests {
             macros: vec![
                 AnalyzedMacro {
                     kind: AnalyzedMacroKind::DefineModel,
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_based: true,
                     type_references: vec!["string".to_string()],
                     binding_name: Some("model".to_string()),
@@ -173,6 +176,7 @@ mod tests {
                 },
                 AnalyzedMacro {
                     kind: AnalyzedMacroKind::DefineModel,
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_based: false,
                     type_references: vec![],
                     binding_name: Some("title".to_string()),
@@ -206,6 +210,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: Some("props".to_string()),
@@ -241,6 +246,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineModel,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,
                 type_references: vec![],
                 binding_name: Some("model".to_string()),

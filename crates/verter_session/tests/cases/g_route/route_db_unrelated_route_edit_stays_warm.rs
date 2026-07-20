@@ -66,6 +66,7 @@ fn original_fact() -> FactVersionRef {
 fn original_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "orig_dep.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "OrigExport".to_string(),
     }
 }
@@ -84,6 +85,7 @@ fn foreign_fact() -> FactVersionRef {
 fn foreign_route() -> RouteResult {
     RouteResult::Resolved {
         defining_canonical: "foreign_dep.ts".to_string(),
+        defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         defining_symbol: "ForeignExport".to_string(),
     }
 }

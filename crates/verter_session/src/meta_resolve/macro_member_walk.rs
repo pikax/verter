@@ -106,6 +106,7 @@ pub(crate) fn collect_define_props_root_names(
 pub(crate) fn slot_binding_targets_define_props_root(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     define_props_roots: &rustc_hash::FxHashSet<String>,
 ) -> bool {
@@ -133,6 +134,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
                 field.r#type.present()?,
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
+                    scope_owner: owner,
                     context: transit_ctx,
                     interior_failures: None,
                 },

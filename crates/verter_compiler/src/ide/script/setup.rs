@@ -22,7 +22,7 @@ use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::bindings::collect_setup_binding_refs;
-use crate::utils::oxc::vue::{parse_script_with_companion, ScriptItem, ScriptMacro, ScriptMode};
+use crate::utils::oxc::vue::{parse_script, ScriptItem, ScriptMacro, ScriptMode};
 
 use super::{
     apply_event_handler_param_inference, apply_template_ref_call_inference,
@@ -139,12 +139,11 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // is purely a liveness signal; it does NOT change the recovery codegen path.)
     let script_complete = parser_ret.errors.is_empty();
 
-    let parse_result = parse_script_with_companion(
+    let parse_result = parse_script(
         effective_program,
         ScriptMode::Setup,
         content_start,
         effective_content_str,
-        None, // No companion types needed for TSX — we preserve types as-is
     );
 
     // Build binding source info for JSDoc + offset comments
@@ -249,6 +248,18 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         bindings.insert(alloc_name, *bt);
     }
 
+    if let Some(bundle) = options.macro_runtime {
+        for entry in &bundle.entries {
+            if let verter_macro_dto::MacroRuntimeOutcome::Complete(shape) = &entry.outcome {
+                crate::script::visit_runtime_macro_binding_names(shape, |name| {
+                    bindings
+                        .entry(alloc.alloc_str(name))
+                        .or_insert(BindingType::Props);
+                });
+            }
+        }
+    }
+
     // Parse generic attribute if present.
     // If parsing fails (invalid TS syntax), fall back to the raw string so
     // TypeScript can surface the actual error to the user.
@@ -316,7 +327,6 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // register their bindings below). No macro spans are ever "damaged" anymore.
     let mut macro_ctx = MacroSourceCtx {
         source,
-        content_str,
         content_start,
         out,
         is_jsx: options.is_jsx,

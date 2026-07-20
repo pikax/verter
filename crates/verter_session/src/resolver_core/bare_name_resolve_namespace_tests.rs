@@ -42,6 +42,7 @@ fn file_scope_namespace_binds_type_and_value_siblings() {
         &namespace("M", LocalScopeOrigin::File),
         &state,
         "/src/nst.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "Inner",
     )
     .expect("the file-scope namespace must bind the direct TYPE sibling `Inner`");
@@ -56,6 +57,7 @@ fn file_scope_namespace_binds_type_and_value_siblings() {
         &namespace("M", LocalScopeOrigin::File),
         &state,
         "/src/nst.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "helper",
     )
     .expect("the file-scope namespace must bind the direct VALUE sibling `helper`");
@@ -70,6 +72,7 @@ fn file_scope_namespace_binds_type_and_value_siblings() {
             &namespace("M", LocalScopeOrigin::File),
             &state,
             "/src/nst.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "NotAMember",
         )
         .is_none(),
@@ -83,6 +86,7 @@ fn file_scope_namespace_binds_type_and_value_siblings() {
             &namespace("M", LocalScopeOrigin::File),
             &state,
             "/src/nst.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Sub.X",
         )
         .is_none(),
@@ -107,6 +111,7 @@ fn global_augmentation_namespace_binds_global_type_siblings_only() {
         &namespace("JSX", LocalScopeOrigin::Global),
         &state,
         "/src/jsx.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         "Element",
     )
     .expect("the global-augmentation namespace must bind the global TYPE sibling `Element`");
@@ -123,6 +128,7 @@ fn global_augmentation_namespace_binds_global_type_siblings_only() {
             &namespace("JSX", LocalScopeOrigin::File),
             &state,
             "/src/jsx.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Element",
         )
         .is_none(),
@@ -148,6 +154,7 @@ fn module_augmentation_namespace_binds_nothing() {
             &namespace("NS", LocalScopeOrigin::Module),
             &state,
             "/src/mod.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "Thing",
         )
         .is_none(),

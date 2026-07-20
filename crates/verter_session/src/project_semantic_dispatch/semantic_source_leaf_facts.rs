@@ -123,33 +123,39 @@ impl ProjectSemanticDispatch<'_> {
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
         let expr = super::lower::leaf_type_fact_expr(leaf);
-        self.lower_type_expr_in_scope_with_context(ctx.scope_canonical_id, &expr, ctx.context)
-            .map(HotTypeRef::new)
+        self.lower_type_expr_in_owner_scope_with_context(
+            ctx.scope_canonical_id,
+            ctx.scope_owner,
+            &expr,
+            ctx.context,
+        )
+        .map(HotTypeRef::new)
     }
 
     /// Lower a shallow named-symbol reference (`ResolvedLocalShape::Ref`): the
-    /// bare reference lowers IN THE SYMBOL'S OWN canonical scope so its head
-    /// resolves against the declaring file's name resolution, staying a
-    /// carrier the consuming dispatch resolves on demand. An EMPTY anchor
-    /// canonical is the analyzer's producer-local convention (same as
-    /// `absolutize_locator` in [`super::semantic_source`]) — it absolutizes
-    /// against the raise scope (`scope_canonical_id`), the file whose
-    /// analysis produced the shape.
+    /// bare reference lowers in the symbol anchor's exact canonical + lexical
+    /// owner so its head resolves against the declaring region's name
+    /// resolution, staying a carrier the consuming dispatch resolves on
+    /// demand. An EMPTY anchor canonical is the analyzer's producer-local
+    /// convention (same as `absolutize_locator` in
+    /// [`super::semantic_source`]) — both canonical and owner come from the
+    /// caller's exact raise scope.
     pub(super) fn raise_symbol_ref(
         &self,
         symbol: &SymbolBodyLocator,
-        scope_canonical_id: &str,
+        ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
         let expr = super::lower::leaf_type_fact_expr(&LeafTypeFact::Ref(
             symbol.anchor.symbol.as_ref().to_string(),
         ));
-        let canonical = if symbol.anchor.canonical_id.is_empty() {
-            scope_canonical_id
+        let (canonical, owner) = if symbol.anchor.canonical_id.is_empty() {
+            (ctx.scope_canonical_id, ctx.scope_owner)
         } else {
-            symbol.anchor.canonical_id.as_ref()
+            (symbol.anchor.canonical_id.as_ref(), symbol.anchor.owner)
         };
-        self.lower_type_expr_in_scope_with_context(
+        self.lower_type_expr_in_owner_scope_with_context(
             canonical,
+            owner,
             &expr,
             ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,

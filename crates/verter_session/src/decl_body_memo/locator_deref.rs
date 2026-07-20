@@ -36,6 +36,9 @@ pub(crate) enum LocatorBodyDerefError {
     /// Checked up front for every arm, before any body demand — the typed,
     /// release-present successor to the former branch-local `debug_assert_eq!`.
     CanonicalMismatch,
+    /// The macro ordinal exists in the producing canonical, but belongs to a
+    /// different exact top-level lexical owner than the locator anchor.
+    OwnerMismatch,
     /// The locator anchor names no inventoried declaration. This is a
     /// GENUINE, cacheable resolution result (the symbol truly does not
     /// exist) — DISTINCT from [`Self::LeaseMiss`].
@@ -197,9 +200,10 @@ impl DeclBodyMemo {
                 // non-Svelte/Vue macro ordinal yields `NoMacroCall` and keeps
                 // the hot-mirror-only error.
                 MacroPayloadPosition::TypeArgument => {
-                    let lowering = transient_outcome(
-                        self.transient_svelte_type_argument_body(payload.macro_index),
-                    )?;
+                    let lowering = transient_outcome(self.transient_svelte_type_argument_body(
+                        payload.anchor.owner,
+                        payload.macro_index,
+                    ))?;
                     match lowering.as_ref() {
                         SvelteTypeArgumentLowering::TypeArgument(expr) => Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr.clone()),
@@ -211,6 +215,9 @@ impl DeclBodyMemo {
                         }
                         SvelteTypeArgumentLowering::NoMacroCall => {
                             Err(LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer)
+                        }
+                        SvelteTypeArgumentLowering::OwnerMismatch => {
+                            Err(LocatorBodyDerefError::OwnerMismatch)
                         }
                     }
                 }
@@ -232,9 +239,11 @@ impl DeclBodyMemo {
                 // with NO authored payload is the value-annotation absence;
                 // an ordinal addressing no field at all is the path miss.
                 MacroPayloadPosition::Field { field_index } => {
-                    let lowering = transient_outcome(
-                        self.transient_macro_field_payload(payload.macro_index, field_index),
-                    )?;
+                    let lowering = transient_outcome(self.transient_macro_field_payload(
+                        payload.anchor.owner,
+                        payload.macro_index,
+                        field_index,
+                    ))?;
                     match lowering.as_ref() {
                         MacroFieldPayloadLowering::Payload(expr) => Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr.clone()),
@@ -246,6 +255,9 @@ impl DeclBodyMemo {
                         }
                         MacroFieldPayloadLowering::NoField => {
                             Err(LocatorBodyDerefError::PathUnresolved)
+                        }
+                        MacroFieldPayloadLowering::OwnerMismatch => {
+                            Err(LocatorBodyDerefError::OwnerMismatch)
                         }
                     }
                 }
@@ -260,9 +272,10 @@ impl DeclBodyMemo {
                 // value-annotation absence; an ordinal addressing no
                 // `$props()` call at all is the path miss.
                 MacroPayloadPosition::TypeAnnotation => {
-                    let lowering = transient_outcome(
-                        self.transient_props_annotation_body(payload.macro_index),
-                    )?;
+                    let lowering = transient_outcome(self.transient_props_annotation_body(
+                        payload.anchor.owner,
+                        payload.macro_index,
+                    ))?;
                     match lowering.as_ref() {
                         PropsAnnotationLowering::Annotation(expr) => Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr.clone()),
@@ -276,6 +289,9 @@ impl DeclBodyMemo {
                         }
                         PropsAnnotationLowering::NoPropsCall => {
                             Err(LocatorBodyDerefError::PathUnresolved)
+                        }
+                        PropsAnnotationLowering::OwnerMismatch => {
+                            Err(LocatorBodyDerefError::OwnerMismatch)
                         }
                     }
                 }
@@ -294,14 +310,16 @@ impl DeclBodyMemo {
                         // no-warm ReturnOnly), never collapsed into the
                         // cacheable `UnknownSymbol`.
                         let symbol = slot.anchor.symbol.as_ref();
-                        let (lowered, aug_scope) = match self.type_decl_outcome(symbol) {
+                        let owner = slot.anchor.owner;
+                        let (lowered, aug_scope) = match self.type_decl_outcome_in(owner, symbol) {
                             DemandOutcome::LeaseMiss => {
                                 return Err(LocatorBodyDerefError::LeaseMiss)
                             }
                             DemandOutcome::Ready(Some(lowered)) => (lowered, None),
                             DemandOutcome::Ready(None) => {
-                                match self.augmentation_type_decl_outcome(
+                                match self.augmentation_type_decl_outcome_in(
                                     &AugmentationScopeKind::Global,
+                                    owner,
                                     symbol,
                                 ) {
                                     DemandOutcome::LeaseMiss => {
@@ -327,7 +345,7 @@ impl DeclBodyMemo {
                         // never the placeholder.
                         if aug_scope.is_none() {
                             if let DemandOutcome::Ready(Some(value_decl)) =
-                                self.value_decl_outcome(symbol)
+                                self.value_decl_outcome_in(owner, symbol)
                             {
                                 if let Some(members) = value_decl.enum_members.as_ref() {
                                     let arms: Vec<TypeExpr> = members
@@ -354,8 +372,10 @@ impl DeclBodyMemo {
                         // graph-tier `LowerLocator` memo owns caching the
                         // lowered product).
                         let bodies = match aug_scope.as_ref() {
-                            None => self.transient_type_bodies(symbol),
-                            Some(scope) => self.transient_augmentation_type_bodies(scope, symbol),
+                            None => self.transient_type_bodies_in(owner, symbol),
+                            Some(scope) => {
+                                self.transient_augmentation_type_bodies_in(scope, owner, symbol)
+                            }
                         };
                         let bodies = transient_outcome(bodies)?;
                         let shape = transient_body_shape(&lowered, bodies)?;
@@ -379,9 +399,10 @@ impl DeclBodyMemo {
                         // The transient value-part service carries the SAME
                         // lease-miss / genuine-miss discrimination the demand
                         // cells carry (header presence is checked inside).
-                        let parts = transient_outcome(
-                            self.transient_value_parts(slot.anchor.symbol.as_ref()),
-                        )?;
+                        let parts = transient_outcome(self.transient_value_parts_in(
+                            slot.anchor.owner,
+                            slot.anchor.symbol.as_ref(),
+                        ))?;
                         let expr = navigate_value_parts(&parts, &slot.path)?;
                         Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr),
@@ -423,8 +444,11 @@ impl DeclBodyMemo {
                         // broken-lease demand surfaces the DISTINCT `LeaseMiss`
                         // no-warm signal, never a cacheable `UnknownSymbol`.
                         let symbol = aug.anchor.symbol.as_ref();
-                        let lowered = match self.augmentation_type_decl_outcome(&scope_kind, symbol)
-                        {
+                        let lowered = match self.augmentation_type_decl_outcome_in(
+                            &scope_kind,
+                            aug.anchor.owner,
+                            symbol,
+                        ) {
                             DemandOutcome::LeaseMiss => {
                                 return Err(LocatorBodyDerefError::LeaseMiss)
                             }
@@ -433,9 +457,12 @@ impl DeclBodyMemo {
                                 return Err(LocatorBodyDerefError::UnknownSymbol)
                             }
                         };
-                        let bodies = transient_outcome(
-                            self.transient_augmentation_type_bodies(&scope_kind, symbol),
-                        )?;
+                        let bodies =
+                            transient_outcome(self.transient_augmentation_type_bodies_in(
+                                &scope_kind,
+                                aug.anchor.owner,
+                                symbol,
+                            ))?;
                         let shape = transient_body_shape(&lowered, bodies)?;
                         // An augmentation-scoped `interface` / `type` decl is an
                         // authored type-decl-header decl, so its type-param
@@ -454,9 +481,10 @@ impl DeclBodyMemo {
                 // The typedef locator addresses the COMMENT-derived payload
                 // specifically (never a same-name TS declaration's statement
                 // body) — served by the dedicated lease-only re-derivation.
-                let body = transient_outcome(
-                    self.transient_jsdoc_typedef_body(typedef.anchor.symbol.as_ref()),
-                )?;
+                let body = transient_outcome(self.transient_jsdoc_typedef_body_in(
+                    typedef.anchor.owner,
+                    typedef.anchor.symbol.as_ref(),
+                ))?;
                 let expr = navigate_expr(body.as_ref().clone(), &typedef.path)?;
                 Ok(DerefedAuthoredBody {
                     shape: DerefedBodyShape::Single(expr),

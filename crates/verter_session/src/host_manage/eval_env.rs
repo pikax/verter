@@ -10,13 +10,14 @@
 use std::sync::Arc;
 
 use crate::instant::Instant;
+use crate::resolver_core::ValueDeclIdentity;
 use crate::types::*;
 use crate::VerterHost;
 
 use super::{
     component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
     is_raw_import_specifier_id, log_snapshot_debug, resolve_eval_dependency_canonical_with,
-    ComputedEvaluatedTypes, ValueDeclIdentity,
+    ComputedEvaluatedTypes,
 };
 
 impl VerterHost {
@@ -62,20 +63,23 @@ impl VerterHost {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
-        if self
-            .routed_shallow_state(canonical_source)
-            .is_some_and(|state| state.import_target(resolved_name).is_some())
-        {
-            return None;
-        }
+        // Resolve the owner from the cached declaration-header inventory
+        // before consulting the whole env. A Vue canonical can contain both
+        // module and setup owners; the legacy ordinary-owner lookup lost a
+        // setup-local declaration, while the former file-wide import guard
+        // let an import in one owner hide a real declaration in another.
+        // Exactly one declaration owner is required — multi-owner same-name
+        // declarations are ambiguous at this owner-agnostic API and fail
+        // closed. An import-only name has no declaration header and therefore
+        // also returns `None` without a permissive name rematch.
+        let state = self.routed_shallow_state(canonical_source)?;
+        let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
 
-        // Read the id through the memo-owned whole-env `Arc` — a
-        // single map lookup; never a whole-env deep clone (this is the
-        // most-hit whole-env consumer, reached on every
-        // `get_component_meta` resolution).
+        // Read the id through the memo-owned whole-env `Arc` at the proven
+        // owner — a single map lookup; never a whole-env deep clone.
         let oracle = self
             .base_eval_env_arc(canonical_source)
-            .and_then(|env| env.type_declaration_id(resolved_name));
+            .and_then(|env| env.type_declaration_id_in(owner, resolved_name));
         // Non-breaking readiness cross-check (debug/test only): the
         // bounded graph-native reader must AGREE with the oracle on
         // PRESENCE (`Some`/`None`). The oracle stays authoritative for the
@@ -91,9 +95,41 @@ impl VerterHost {
         oracle
     }
 
+    /// Return the sole authored owner declaring `resolved_name` in the
+    /// canonical's cached header inventory. The owner-agnostic declaration-id
+    /// API cannot choose between two lexical owners, so ambiguity is `None`.
+    /// Import bindings never enter this inventory and cannot mask a local
+    /// declaration owned by another SFC region.
+    ///
+    /// `pub(crate)`: the owner-agnostic named-symbol entry
+    /// (`typeinfo::resolve_named_symbol`) selects its dispatch scope owner
+    /// through this same header-inventory rule, so a `<script setup>`-local
+    /// declaration resolves under its authored Instance owner instead of
+    /// missing at the ordinary-file view.
+    pub(crate) fn unique_local_type_declaration_owner_in(
+        state: &crate::resolver_core::shallow_file_state::ShallowFileState,
+        resolved_name: &str,
+    ) -> Option<verter_type_expr::TopLevelOwnerId> {
+        let mut owner = None;
+        for key in state
+            .decl_bodies()
+            .header_index()
+            .type_headers
+            .keys()
+            .filter(|key| key.name.as_ref() == resolved_name)
+        {
+            match owner {
+                None => owner = Some(key.owner),
+                Some(existing) if existing == key.owner => {}
+                Some(_) => return None,
+            }
+        }
+        owner
+    }
+
     /// Bounded, graph-native presence reader for the C1 consumer
-    /// (`local_type_declaration_id`). Routes the import guard + the
-    /// local-type PRESENCE check through `routed_shallow_state` and the
+    /// (`local_type_declaration_id`). Routes the unique declaration-owner +
+    /// local-type PRESENCE checks through `routed_shallow_state` and the
     /// per-symbol declaration-header index — it NEVER materialises
     /// `whole_env()` / `base_eval_env_arc`.
     ///
@@ -124,15 +160,11 @@ impl VerterHost {
         resolved_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         let state = self.routed_shallow_state(canonical_source)?;
-        // Same import guard as the oracle: an imported name has no LOCAL
-        // type declaration id.
-        if state.import_target(resolved_name).is_some() {
-            return None;
-        }
+        let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
         // Presence WITHOUT body lowering — a header miss is `None`,
         // mirroring the oracle's `type_declaration_id` miss.
         let header_index = state.decl_bodies().header_index();
-        header_index.type_header(resolved_name)?;
+        header_index.type_header_in(owner, resolved_name)?;
         // Stable-unique per `(file, name)`: a deterministic ordinal over
         // the header index's sorted type-symbol names. This is NOT the
         // oracle's interleaved id (see the doc comment) but is stable
@@ -141,7 +173,8 @@ impl VerterHost {
         let mut type_names: Vec<&str> = header_index
             .type_headers
             .keys()
-            .map(String::as_str)
+            .filter(|key| key.owner == owner)
+            .map(|key| key.name.as_ref())
             .collect();
         type_names.sort_unstable();
         type_names
@@ -150,9 +183,15 @@ impl VerterHost {
             .map(|ordinal| (ordinal as u64) + 1)
     }
 
-    fn peel_value_decl_alias(&self, canonical_id: &str, name: &str) -> ValueDeclIdentity {
+    fn peel_value_decl_alias(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> ValueDeclIdentity {
         let mut current = ValueDeclIdentity {
             canonical_id: canonical_id.to_string(),
+            owner,
             name: name.to_string(),
         };
         let mut visited = rustc_hash::FxHashSet::default();
@@ -165,7 +204,7 @@ impl VerterHost {
             let Some(env) = self.base_eval_env_arc(current.canonical_id.as_str()) else {
                 break;
             };
-            let Some(group) = env.value_symbols.get(current.name.as_str()) else {
+            let Some(group) = env.value_group_in(current.owner, current.name.as_str()) else {
                 break;
             };
             let decl = group.primary();
@@ -179,11 +218,22 @@ impl VerterHost {
             let Some(target) = decl.type_annotation.typeof_alias_target.as_ref() else {
                 break;
             };
-            if !env.value_symbols.contains_key(target.symbol.as_ref()) {
+            let next = ValueDeclIdentity {
+                canonical_id: target.canonical_id.to_string(),
+                owner: target.owner,
+                name: target.symbol.to_string(),
+            };
+            let Some(target_env) = self.base_eval_env_arc(next.canonical_id.as_str()) else {
+                break;
+            };
+            if target_env
+                .value_group_in(next.owner, next.name.as_str())
+                .is_none()
+            {
                 break;
             }
 
-            current.name = target.symbol.to_string();
+            current = next;
         }
 
         // Non-breaking readiness cross-check (debug/test only): the
@@ -194,11 +244,11 @@ impl VerterHost {
         // so there is no rune-module exception.
         #[cfg(debug_assertions)]
         {
-            let graph_native = self.peel_value_decl_alias_graph_native(canonical_id, name);
+            let graph_native = self.peel_value_decl_alias_graph_native(canonical_id, owner, name);
             debug_assert_eq!(
                 current, graph_native,
                 "graph-native consumer-reader readiness: graph-native C2 peeler diverged from the oracle for \
-                 ({canonical_id}, {name})"
+                 ({canonical_id}, {owner:?}, {name})"
             );
         }
 
@@ -229,10 +279,12 @@ impl VerterHost {
     fn peel_value_decl_alias_graph_native(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> ValueDeclIdentity {
         let mut current = ValueDeclIdentity {
             canonical_id: canonical_id.to_string(),
+            owner,
             name: name.to_string(),
         };
         let mut visited = rustc_hash::FxHashSet::default();
@@ -248,7 +300,8 @@ impl VerterHost {
             // The CENTRALIZED effective lookup surfaces rune-ambient symbols in
             // a rune module too, so the peeler agrees with the oracle for rune
             // modules without this body knowing about the rune prelude.
-            let Some(lowered) = state.effective_value_decl(current.name.as_str()) else {
+            let Some(lowered) = state.effective_value_decl_in(current.owner, current.name.as_str())
+            else {
                 break;
             };
             // The `ValueTypeAnnotationFact` producer (verter_semantic
@@ -263,15 +316,22 @@ impl VerterHost {
             let Some(target) = lowered.type_annotation.typeof_alias_target.as_ref() else {
                 break;
             };
-            let next_name = target.symbol.as_ref();
+            let next = ValueDeclIdentity {
+                canonical_id: target.canonical_id.to_string(),
+                owner: target.owner,
+                name: target.symbol.to_string(),
+            };
             // Membership via header PRESENCE — no body lowering of the
             // next symbol just to learn it exists; effective presence so a
             // `typeof $rune` hop in a rune module is seen too.
-            if !state.effective_value_header_present(next_name) {
+            let Some(target_state) = self.routed_shallow_state(next.canonical_id.as_str()) else {
+                break;
+            };
+            if !target_state.effective_value_header_present_in(next.owner, next.name.as_str()) {
                 break;
             }
 
-            current.name = next_name.to_string();
+            current = next;
         }
 
         current
@@ -297,17 +357,17 @@ impl VerterHost {
     /// matching the oracle's `dep_group.primary().name`.
     pub(crate) fn dependency_value_symbol_graph_native(
         &self,
-        source_canonical_id: &str,
-        source_name: &str,
+        source: &ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        let state = self.routed_shallow_state(source_canonical_id)?;
+        let state = self.routed_shallow_state(&source.canonical_id)?;
         // The CENTRALIZED effective lookup applies user-wins → rune-ambient →
         // miss, so a Svelte rune module's ambient `$state`/`$derived`/`$effect`/
         // `$inspect` resolve here WITHOUT this reader knowing anything about the
         // rune prelude — the single authority lives on `ShallowFileState`.
-        let lowered = state.effective_value_decl(source_name)?;
+        let lowered = state.effective_value_decl_in(source.owner, &source.name)?;
         Some(verter_semantic::analysis::type_eval::ValueDeclInfo {
-            name: source_name.to_string(),
+            owner: source.owner,
+            name: source.name.clone(),
             declaration_id: 0,
             kind: lowered.kind,
             type_annotation: lowered.type_annotation.clone(),
@@ -318,26 +378,40 @@ impl VerterHost {
         })
     }
 
-    /// Test-only `(canonical, name)` view of the legacy oracle peeler.
+    /// Test-only `(canonical, name)` view of the C4 graph-native reader.
+    #[cfg(test)]
+    pub(crate) fn dependency_value_symbol_graph_native_for_test(
+        &self,
+        source_canonical_id: &str,
+        source_name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+        self.dependency_value_symbol_graph_native(&ValueDeclIdentity {
+            canonical_id: source_canonical_id.to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: source_name.to_string(),
+        })
+    }
+
+    /// Test-only exact-identity view of the legacy oracle peeler.
     #[cfg(test)]
     pub(crate) fn peel_value_decl_alias_for_test(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> (String, String) {
-        let id = self.peel_value_decl_alias(canonical_id, name);
-        (id.canonical_id, id.name)
+    ) -> ValueDeclIdentity {
+        self.peel_value_decl_alias(canonical_id, owner, name)
     }
 
-    /// Test-only `(canonical, name)` view of the graph-native peeler.
+    /// Test-only exact-identity view of the graph-native peeler.
     #[cfg(test)]
     pub(crate) fn peel_value_decl_alias_graph_native_for_test(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> (String, String) {
-        let id = self.peel_value_decl_alias_graph_native(canonical_id, name);
-        (id.canonical_id, id.name)
+    ) -> ValueDeclIdentity {
+        self.peel_value_decl_alias_graph_native(canonical_id, owner, name)
     }
 
     pub(crate) fn resolve_value_export_target(
@@ -345,11 +419,8 @@ impl VerterHost {
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
-        let export = self.resolve_named_export(dep_canonical_id, imported_name, Some(false))?;
-        let source_canonical_id = export
-            .source_canonical_id
-            .unwrap_or_else(|| dep_canonical_id.to_string());
-        Some(self.peel_value_decl_alias(source_canonical_id.as_str(), export.source_name.as_str()))
+        let target = self.resolve_value_export_route_identity(dep_canonical_id, imported_name)?;
+        Some(self.peel_value_decl_alias(&target.canonical_id, target.owner, &target.name))
     }
 
     /// Bounded, graph-native sibling of [`Self::resolve_value_export_target`].
@@ -367,102 +438,41 @@ impl VerterHost {
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
-        let export = self.resolve_named_export(dep_canonical_id, imported_name, Some(false))?;
-        let source_canonical_id = export
-            .source_canonical_id
-            .unwrap_or_else(|| dep_canonical_id.to_string());
+        let target = self.resolve_value_export_route_identity(dep_canonical_id, imported_name)?;
         Some(self.peel_value_decl_alias_graph_native(
-            source_canonical_id.as_str(),
-            export.source_name.as_str(),
+            &target.canonical_id,
+            target.owner,
+            &target.name,
         ))
     }
 
-    /// View-aware, FULL-CHAIN-fact value-export root resolver — the VALUE
-    /// counterpart of
-    /// [`Self::resolve_imported_type_root_with_facts_with_store_view`].
-    ///
-    /// Resolves a value re-export to its FINAL defining value AND returns the
-    /// version facts of EVERY file on the re-export walk (each participant's
-    /// `FileWholeHash` + route surface), then peels the terminal SAME-FILE
-    /// `typeof` value alias.
-    ///
-    /// Integration role at the sole production call site
-    /// (`build_prepared_import_canonicalization`): this rail is reached ONLY
-    /// when the symbol-space-NEUTRAL TYPE rail above it did NOT produce a
-    /// DIFFERENT final canonical — i.e. it resolved the name to the BARREL
-    /// itself, covering BOTH a same-file resolution AND a type-route
-    /// miss/fallback (both return the barrel). The type rail's
-    /// participant-accumulating walk follows EVERY cross-file re-export hop —
-    /// value-only re-exports included, because module resolution is
-    /// symbol-space-neutral — and short-circuits the moment it lands cross-file;
-    /// so by the time this rail runs, the only remaining work is the SAME-FILE
-    /// terminal value-alias peel (`export const V: typeof realImpl = realImpl`
-    /// declared on the barrel itself → `realImpl`). That same-file `typeof` peel
-    /// is this rail's distinct live contribution; the cross-file fact
-    /// completeness is delivered by the type rail's full-chain walk, not here.
-    /// The rail is whole-env-free and SYMMETRIC with the type rail, so it stays
-    /// correct if the integration ordering ever changes.
-    ///
-    /// Two graph-native sub-walks, both whole-env-free; NEVER routes through
-    /// `peel_value_decl_alias` / `base_eval_env_arc` / `whole_env()`:
-    ///
-    /// 1. The re-export CHAIN walk reuses
-    ///    [`Self::build_named_type_export_route_entry`] — the shared
-    ///    participant-accumulating walk over `ShallowFileState::export_target`
-    ///    (`Local` / `Reexport`, module resolution is symbol-space-neutral, so
-    ///    a `export { V } from './mid'` value re-export traverses identically to
-    ///    a type re-export). It returns the terminal defining `(canonical,
-    ///    name)` plus the participant `FileWholeHash` + `Route` facts; a
-    ///    fenced-serve walk returns EMPTY facts (the strict-admission
-    ///    negative-cache contract), so this resolver inherits it. The terminal
-    ///    canonical is normalized through
-    ///    [`Self::resolve_eval_dependency_canonical`] — the SAME normalization
-    ///    the type rail applies to its final `defining_canonical` — so a final
-    ///    that an eval-dependency alias collapses onto the barrel is reported
-    ///    identically by both rails (parity; no spurious cross-file divergence).
-    /// 2. The terminal value `typeof`-alias is peeled graph-native via
-    ///    [`Self::peel_value_decl_alias_graph_native`] (per-symbol value memo +
-    ///    header PRESENCE). The peeled identity is the final defining value.
-    ///
-    /// `view` carries the request boundary, symmetric with the type rail's
-    /// `_with_store_view` entry: the participant CHAIN walk (shared
-    /// `build_named_type_export_route_entry`) is the view-INDEPENDENT cold
-    /// compute — exactly as the type rail's identically-named cold closure is —
-    /// and the recorded chain facts are validated against `view` by the
-    /// consuming bundle's `ReadSetSignature` fact rail at warm-read time. The
-    /// parameter is the seam through which a future value-space route cache can
-    /// validate a cached value-export entry against the supplied view.
-    pub(crate) fn resolve_value_export_root_with_facts_with_store_view(
+    fn resolve_value_export_route_identity(
         &self,
-        _view: &dyn crate::resolver_core::StoreView,
         dep_canonical_id: &str,
         imported_name: &str,
-    ) -> (
-        Option<ValueDeclIdentity>,
-        Vec<crate::resolver_core::FactVersionRef>,
-    ) {
-        let Some((route_result, chain_facts)) =
-            self.build_named_type_export_route_entry(dep_canonical_id, imported_name)
-        else {
-            return (None, Vec::new());
-        };
-        let Some((final_canonical, final_name)) = route_result.resolved() else {
-            // A stable Miss carries the participant facts so a later-appearing
-            // export still invalidates a recorded miss; no value identity.
-            return (None, chain_facts);
-        };
-        // Normalize the terminal canonical exactly as the type rail normalizes
-        // its final `defining_canonical` (companion-declaration / bundle-entry
-        // collapse) so the two rails agree on the final identity — parity, no
-        // value-only divergence on an eval-dependency-aliased final.
-        let final_canonical = self
-            .resolve_eval_dependency_canonical(final_canonical)
-            .unwrap_or_else(|| final_canonical.to_string());
-        // Peel the terminal value alias graph-native (no whole-env). A pure
-        // `export const V` terminal peels to itself.
-        let identity =
-            self.peel_value_decl_alias_graph_native(final_canonical.as_str(), final_name);
-        (Some(identity), chain_facts)
+    ) -> Option<ValueDeclIdentity> {
+        let (route_result, chain_facts) =
+            self.build_named_type_export_route_entry(dep_canonical_id, imported_name)?;
+        // Demand-time fact observation: the chain participants' version
+        // facts (each hop's `FileWholeHash` + route surface) enter the
+        // ACTIVE fact tracer, so the CONSUMING query's read-set — the
+        // `Enum.Member` projection memo, a `build_typeof` value root, the
+        // class static-surface composer — invalidates on a retarget or a
+        // leaf edit anywhere on the chase. Prepared import
+        // canonicalization is demand-driven (the bundle records only the
+        // DIRECT hop), so this observation is the SOLE record of the
+        // chain for value-space demands. A no-op without an installed
+        // tracer.
+        crate::fact_signature_helpers::observe_fact_signature(&chain_facts);
+        let (canonical_id, owner, name) = route_result.resolved()?;
+        let canonical_id = self
+            .resolve_eval_dependency_canonical(canonical_id)
+            .unwrap_or_else(|| canonical_id.to_string());
+        Some(ValueDeclIdentity {
+            canonical_id,
+            owner,
+            name: name.to_string(),
+        })
     }
 
     pub(crate) fn build_snapshot_from_parse(parse: crate::ParseSnapshot) -> FileAnalysisSnapshot {
@@ -820,19 +830,39 @@ impl VerterHost {
     /// through the prepared surface, by name).
     fn component_meta_binding_type_entries(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical: &str,
-        requested_binding_names: &rustc_hash::FxHashSet<String>,
-    ) -> Vec<String> {
-        if requested_binding_names.is_empty() {
+        requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclBindingKey>,
+    ) -> Vec<verter_semantic::analysis::type_eval_build::BindingExpansionEntry> {
+        if requested_bindings.is_empty() {
             return Vec::new();
         }
 
-        let _ = self.shallow_file_state(canonical);
+        let Some(indexed) = ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return Vec::new();
+        };
+        let mut admitted = std::collections::BTreeSet::new();
+        for demand in requested_bindings {
+            let Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(owner)) =
+                indexed
+                    .shallow_state
+                    .visible_value_binding(demand.owner, demand.name.as_ref())
+            else {
+                continue;
+            };
+            admitted.insert(verter_type_expr::DeclBindingKey::new(
+                owner,
+                Arc::clone(&demand.name),
+            ));
+        }
 
-        requested_binding_names
+        admitted
             .iter()
-            .filter(|name| {
-                self.prepared_value_decl(canonical, name)
+            .filter(|binding| {
+                ctx.prepared_value_decl(canonical, binding.owner, binding.name.as_ref())
                     .is_some_and(|decl| {
                         !matches!(
                             decl.type_annotation.classification,
@@ -840,7 +870,12 @@ impl VerterHost {
                         )
                     })
             })
-            .cloned()
+            .map(
+                |binding| verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
+                    name: binding.name.to_string(),
+                    owner: binding.owner,
+                },
+            )
             .collect()
     }
 
@@ -863,11 +898,11 @@ impl VerterHost {
             );
             let _ = ctx.ensure_indexed_ready_serve(canonical);
         }
-        let requested_binding_names =
+        let requested_bindings =
             if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Full {
-                crate::resolver_core::collect_requested_binding_names(snapshot.macros.as_ref())
+                crate::resolver_core::collect_requested_binding_demands(snapshot.macros.as_ref())
             } else {
-                rustc_hash::FxHashSet::default()
+                std::collections::BTreeSet::new()
             };
         let binding_entries = {
             component_meta_trace_custom!(
@@ -875,11 +910,11 @@ impl VerterHost {
                 format!(
                     "owner={} requested_bindings={} store_view={}",
                     canonical,
-                    requested_binding_names.len(),
+                    requested_bindings.len(),
                     false,
                 ),
             );
-            self.component_meta_binding_type_entries(canonical, &requested_binding_names)
+            self.component_meta_binding_type_entries(ctx, canonical, &requested_bindings)
         };
         // the retired `external_engine` branch is
         // gone; there is only one `expand_macro_types` entry point left.
@@ -992,6 +1027,7 @@ impl VerterHost {
                                         verter_type_expr::locators::TypeBodySlot {
                                             anchor: verter_type_expr::locators::AuthoredAnchor {
                                                 canonical_id: std::sync::Arc::from(canonical),
+                                                owner: ctx.scope_owner,
                                                 symbol: std::sync::Arc::clone(name),
                                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                             },

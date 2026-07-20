@@ -268,7 +268,11 @@ fn semantic_subqueries_dedup_across_request_boundaries() {
         .project_type_store()
         .semantic_graph()
         .memo_entry_count();
-    let key = resolve_decl_key("/w/types.ts", "C");
+    let key = resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "C",
+    );
     let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
     let second = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key));
 
@@ -307,7 +311,11 @@ fn execute_returns_typed_type_node_with_clean_provenance() {
     upsert_ts(&host, "/w/types.ts", "export type C = { foo: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let key = resolve_decl_key("/w/types.ts", "C");
+    let key = resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "C",
+    );
     match dispatch.execute(SemanticQueryKey::ResolveDecl(key)) {
         QueryResult::Value(out) => {
             assert_eq!(
@@ -344,7 +352,11 @@ fn resolve_decl_wrapper_matches_execute_type_node_node() {
     upsert_ts(&host, "/w/types.ts", "export type C = { foo: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let key = resolve_decl_key("/w/types.ts", "C");
+    let key = resolve_decl_key(
+        "/w/types.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "C",
+    );
     let wrapper = match dispatch.resolve_decl(key.clone()) {
         QueryResult::Value(node) => node,
         other => panic!("expected wrapper Value, got {other:?}"),
@@ -866,16 +878,8 @@ fn request_view_is_absent_from_crate_sources() {
             include_str!("host_resolve/dependency_resolution.rs"),
         ),
         (
-            "host_resolve/external_macro_collector.rs",
-            include_str!("host_resolve/external_macro_collector.rs"),
-        ),
-        (
             "host_resolve/external_type_resolution.rs",
             include_str!("host_resolve/external_type_resolution.rs"),
-        ),
-        (
-            "host_resolve/frontier_adapter.rs",
-            include_str!("host_resolve/frontier_adapter.rs"),
         ),
         (
             "host_resolve/frontier_engine.rs",
@@ -889,10 +893,6 @@ fn request_view_is_absent_from_crate_sources() {
         (
             "host_resolve/route_surface.rs",
             include_str!("host_resolve/route_surface.rs"),
-        ),
-        (
-            "host_resolve/test_guards.rs",
-            include_str!("host_resolve/test_guards.rs"),
         ),
         (
             "host_resolve/virtual_file_pipeline.rs",
@@ -1250,7 +1250,11 @@ fn semantic_query_second_call_hits_warm_memo_slice11() {
     upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let key = resolve_decl_key("/w/t.ts", "T");
+    let key = resolve_decl_key(
+        "/w/t.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "T",
+    );
     let before = host
         .project_type_store()
         .semantic_graph()
@@ -1308,7 +1312,11 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
     upsert_ts(&host, "/w/b.ts", "export type B = { b: string }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let a_key = resolve_decl_key("/w/a.ts", "A");
+    let a_key = resolve_decl_key(
+        "/w/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "A",
+    );
     let first = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(a_key.clone()));
     let QueryResult::Value(SemanticQueryOutput {
         value: first_id, ..
@@ -1362,7 +1370,11 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
     upsert_ts(&host, "/w/a.ts", "export type A = { x: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let key = resolve_decl_key("/w/a.ts", "A");
+    let key = resolve_decl_key(
+        "/w/a.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "A",
+    );
     let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key.clone()));
     let warm = host
         .project_type_store()

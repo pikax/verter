@@ -83,12 +83,14 @@ fn intern_decl_ref_base(host: &VerterHost, canonical: &str, name: &str) -> Seman
             SemanticNodeData::DeclRef {
                 identity: DeclIdentity {
                     canonical_id: Arc::from(canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash,
                     decl_name: Arc::from(name),
                 },
             },
             NodeScopeId::File {
                 canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash,
                 local_scope: None,
             },
@@ -129,6 +131,7 @@ fn tracked_macro_owner(
         .expect("owner SFC IndexedReady materialises");
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
     )
 }
@@ -193,6 +196,7 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     let unrelated_key = SemanticQueryKey::ResolveMacroPayload {
         owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("<synthetic>"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("OtherOwner"),
         ),
         macro_index: 1,

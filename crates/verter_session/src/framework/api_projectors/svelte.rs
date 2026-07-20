@@ -25,6 +25,8 @@ use std::sync::Arc;
 use verter_type_expr::facts::{
     FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource,
 };
+use verter_type_expr::locators::AuthoredBodyLocator;
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 use crate::framework::api_projector::{
     ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx,
@@ -37,7 +39,10 @@ use crate::types::{PublicApiMode, TscResponse};
 pub struct SvelteComponentApiProjector;
 
 impl ComponentApiProjector for SvelteComponentApiProjector {
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection> {
+    fn render_api(
+        &self,
+        cx: ComponentApiProjectorCtx<'_>,
+    ) -> Result<Option<ComponentApiProjection>, crate::PublicApiProjectionError> {
         let ComponentApiProjectorCtx {
             host,
             resolved_canonical,
@@ -52,7 +57,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // same-adapter non-carrier row.
         let descriptor = crate::framework::descriptor::svelte_descriptor();
         if file_language.carrier_language_id() != descriptor.carrier_language.as_ref() {
-            return None;
+            return Ok(None);
         }
 
         // Mode handling is EXPLICIT (no silent fall-through for a future
@@ -66,34 +71,51 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         //   distinct from the rendered `Some`.
         match mode {
             PublicApiMode::Public | PublicApiMode::Declaration => {}
-            PublicApiMode::Testing => return None,
+            PublicApiMode::Testing => return Ok(None),
         }
 
         // Read the already-cached shallow state for the resolved canonical.
         // Source parsing happened during analysis; this render never invokes
         // OXC or scans the source text.
-        let indexed = host.ensure_indexed_ready_serve(resolved_canonical)?.indexed;
+        let Some(serve) = host.ensure_indexed_ready_serve(resolved_canonical) else {
+            return Ok(None);
+        };
+        let indexed = serve.indexed;
         let shallow = &indexed.shallow_state;
         let component_generics = svelte_component_generics(&indexed);
 
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
         // (no props, no exports) projects no public API.
-        let default_symbol = shallow.value_symbol("default")?;
+        let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
+            owner: component_owner,
+            symbol_name: component_name,
+        }) = shallow.exports.get("default")
+        else {
+            return Ok(None);
+        };
+        let component_owner = *component_owner;
+        let Some(default_symbol) = shallow.value_symbol_in(component_owner, component_name) else {
+            return Ok(None);
+        };
         if !default_symbol.is_synthesised_component_default {
-            return None;
+            return Ok(None);
         }
         // The instance shape rides the synthesized BODY's annotation-borne
         // closed SOURCE (`LoweredValueDecl.type_annotation.annotation` =
         // `Synthesized(Object(members))`); the synth's construct signature
         // deliberately carries no authored return position (`return_ty` is an
         // honest `None`), so the annotation source is the shape authority.
-        let default_body = shallow.value_decl("default")?;
-        let instance_source = default_body.type_annotation.annotation.as_ref()?;
+        let Some(default_body) = shallow.value_decl_in(component_owner, component_name) else {
+            return Ok(None);
+        };
+        let Some(instance_source) = default_body.type_annotation.annotation.as_ref() else {
+            return Ok(None);
+        };
         let SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(instance_members)) =
             instance_source
         else {
-            return None;
+            return Ok(None);
         };
 
         // Split the instance shape into props, the legacy dispatcher map, and
@@ -128,38 +150,62 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let script_facts = resolver_ctx
             .and_then(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
         let resolved_exports =
-            resolver_ctx.and_then(|ctx| resolve_public_exports_text(host, ctx, resolved_canonical));
+            resolver_ctx
+                .zip(script_facts.as_deref())
+                .and_then(|(ctx, facts)| {
+                    resolve_public_exports_text(host, ctx, resolved_canonical, facts)
+                });
+        let resolved_module_exports = resolver_ctx
+            .zip(script_facts.as_deref())
+            .map(|(ctx, facts)| resolve_public_module_exports(ctx, resolved_canonical, facts))
+            .unwrap_or_default();
 
-        // Collect the PRESERVED type-reference names (leaf refs in the props
-        // fact + the dispatcher event-map fact + export member facts) so the
-        // prelude imports ONLY the referenced types (unused imports dropped).
-        // Locator-backed facts carry no name — honestly nothing to import.
-        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        // Collect PRESERVED type references with their exact lexical owner
+        // (leaf refs in the props fact + dispatcher map + export facts) so the
+        // prelude imports ONLY the referenced owner-qualified bindings. A bare
+        // name is insufficient for split module/instance scripts.
+        let mut referenced: BTreeSet<DeclBindingKey> = BTreeSet::new();
         if let Some(props) = props_type {
-            collect_fact_refs(props, &mut referenced);
+            collect_fact_refs(props, component_owner, &mut referenced);
         }
         if let Some(events) = events_type {
-            collect_fact_refs(events, &mut referenced);
+            collect_fact_refs(events, component_owner, &mut referenced);
         }
         for (_, ty) in &export_members {
-            collect_fact_refs(ty, &mut referenced);
+            collect_fact_refs(ty, component_owner, &mut referenced);
         }
         if let Some(facts) = script_facts.as_ref() {
-            referenced.extend(facts.props_type_references.iter().cloned());
-            referenced.extend(facts.dispatcher_event_references.iter().cloned());
+            if let Some(owner) = facts
+                .props_type
+                .as_ref()
+                .map(|payload| locator_owner(&payload.locator))
+            {
+                collect_owned_refs(owner, &facts.props_type_references, &mut referenced);
+            }
+            if let Some(owner) = facts
+                .dispatcher_events
+                .as_ref()
+                .map(|payload| locator_owner(&payload.locator))
+            {
+                collect_owned_refs(owner, &facts.dispatcher_event_references, &mut referenced);
+            }
         }
         if let Some(exports) = resolved_exports.as_ref() {
             referenced.extend(exports.type_references.iter().cloned());
+        }
+        for export in &resolved_module_exports {
+            referenced.extend(export.type_references.iter().cloned());
         }
 
         let mut out = ShimBuilder::default();
 
         // 1. The type-only import / re-export prelude — minimal
-        //    `import type` lines for each PRESERVED reference whose binding the
-        //    shallow import facts resolve to an import.
-        for name in &referenced {
-            if let Some(import) = shallow.import_target(name) {
-                out.line(&render_type_only_import(name, import));
+        //    `import type` lines for each PRESERVED reference whose exact
+        //    owner-qualified shallow binding resolves to an import.
+        for reference in &referenced {
+            if let Some(import) = shallow.import_target_in(reference.owner, reference.name.as_ref())
+            {
+                out.line(&render_type_only_import(reference.name.as_ref(), import));
             }
         }
         if !referenced.is_empty() {
@@ -174,10 +220,12 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             .map(render_shim_fact)
             .unwrap_or_else(|| "{}".to_string());
         let captured_props_text = script_facts.as_ref().and_then(|facts| {
+            let owner = locator_owner(&facts.props_type.as_ref()?.locator);
             captured_display_without_local_refs(
                 facts.props_type_display.as_deref(),
                 &facts.props_type_references,
                 shallow,
+                owner,
             )
         });
         let resolved_props =
@@ -193,10 +241,12 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let dispatcher_text = script_facts
             .as_ref()
             .and_then(|facts| {
+                let owner = locator_owner(&facts.dispatcher_events.as_ref()?.locator);
                 captured_display_without_local_refs(
                     facts.dispatcher_events_display.as_deref(),
                     &facts.dispatcher_event_references,
                     shallow,
+                    owner,
                 )
             })
             .or_else(|| {
@@ -237,13 +287,21 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let component_name = public_component_name(
             resolved_canonical,
             descriptor.carrier_extension().as_deref(),
-            referenced.iter().map(String::as_str).chain(
-                shallow
-                    .exports
-                    .keys()
-                    .map(String::as_str)
-                    .chain(export_members.iter().map(|(name, _)| *name)),
-            ),
+            referenced
+                .iter()
+                .map(|reference| reference.name.as_ref())
+                .chain(
+                    shallow
+                        .exports
+                        .keys()
+                        .map(String::as_str)
+                        .chain(export_members.iter().map(|(name, _)| *name))
+                        .chain(
+                            resolved_module_exports
+                                .iter()
+                                .map(|export| export.exported_name.as_str()),
+                        ),
+                ),
         );
         let exports_text = resolved_exports
             .as_ref()
@@ -289,22 +347,15 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // 4. The component value is the module's default public API.
         out.line(&format!("export default {component_name};"));
 
-        // 5. `<script module>` exports as TOP-LEVEL named declarations. A
-        //    top-level export of the shallow state that is NOT an INSTANCE member
-        //    of the component is a module-script export — surface it as a
-        //    top-level `export declare const` so the api file exposes the
-        //    module's named exports alongside the default component.
-        let instance_member_names: std::collections::BTreeSet<&str> =
-            export_members.iter().map(|(name, _)| *name).collect();
-        let mut module_exports: Vec<&str> = shallow
-            .exports
-            .keys()
-            .map(String::as_str)
-            .filter(|name| *name != "default" && !instance_member_names.contains(name))
-            .collect();
-        module_exports.sort_unstable();
-        for name in module_exports {
-            out.line(&format!("export declare const {name}: unknown;"));
+        // 5. `<script module>` exports as TOP-LEVEL named declarations. The
+        // resolved script fact is the exact inventory: public name + captured
+        // owner-qualified local binding. No shallow-export set subtraction or
+        // name-based owner inference participates.
+        for export in resolved_module_exports {
+            out.line(&format!(
+                "export declare const {}: {};",
+                export.exported_name, export.type_annotation
+            ));
         }
 
         let (code, name_mappings) = out.finish();
@@ -315,13 +366,13 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             &name_mappings,
         );
 
-        Some(ComponentApiProjection {
+        Ok(Some(ComponentApiProjection {
             response: TscResponse {
                 code: Arc::from(code.as_str()),
                 source_map,
             },
             contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
-        })
+        }))
     }
 }
 
@@ -352,7 +403,13 @@ struct PropNameMapping {
 
 struct ResolvedPublicExports {
     text: String,
-    type_references: BTreeSet<String>,
+    type_references: BTreeSet<DeclBindingKey>,
+}
+
+struct ResolvedPublicModuleExport {
+    exported_name: String,
+    type_annotation: String,
+    type_references: BTreeSet<DeclBindingKey>,
 }
 
 /// Read the authored Svelte tooling `generics="..."` declaration from the
@@ -604,8 +661,8 @@ fn resolve_public_exports_text(
     host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
+    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
 ) -> Option<ResolvedPublicExports> {
-    use crate::typeinfo::framework_surface::results::NamedTypeMemberOutput;
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
 
     let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
@@ -620,28 +677,21 @@ fn resolve_public_exports_text(
         .members
         .iter()
         .map(|member| {
-            type_references.extend(member.type_references.iter().cloned());
+            let export = facts
+                .instance_exports
+                .iter()
+                .find(|export| export.exported_name == member.name)?;
+            collect_owned_refs(
+                export.binding_key.owner,
+                &member.type_references,
+                &mut type_references,
+            );
             let name = render_property_name(&member.name);
             let optional = if member.is_optional { "?" } else { "" };
-            let ty = member
-                .type_annotation
-                .clone()
-                .or_else(|| match member.value.as_ref() {
-                    Some(NamedTypeMemberOutput::Primitive(name)) => Some(name.as_str().to_string()),
-                    Some(NamedTypeMemberOutput::Literal(value)) => Some(match value {
-                        verter_type_expr::LiteralValue::String(value) => format!("{value:?}"),
-                        verter_type_expr::LiteralValue::Number(value) => value.to_string(),
-                        verter_type_expr::LiteralValue::BigInt(value) => value.clone(),
-                        verter_type_expr::LiteralValue::Boolean(value) => value.to_string(),
-                    }),
-                    Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
-                    Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
-                    Some(NamedTypeMemberOutput::Opaque) | None => None,
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            format!("{name}{optional}: {ty}")
+            let ty = resolved_named_member_type(member);
+            Some(format!("{name}{optional}: {ty}"))
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
     Some(ResolvedPublicExports {
         text: if fields.is_empty() {
             "{}".to_string()
@@ -650,6 +700,82 @@ fn resolve_public_exports_text(
         },
         type_references,
     })
+}
+
+fn resolve_public_module_exports(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    owner: &str,
+    facts: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+) -> Vec<ResolvedPublicModuleExport> {
+    let mut exports = facts
+        .module_exports
+        .iter()
+        .map(|export| {
+            let member =
+                crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_value_export_member(
+                    ctx,
+                    owner,
+                    &export.exported_name,
+                    &export.binding_key,
+                    None,
+                );
+            ResolvedPublicModuleExport {
+                exported_name: export.exported_name.clone(),
+                type_annotation: resolved_named_member_type(&member),
+                type_references: member
+                    .type_references
+                    .into_iter()
+                    .map(|name| DeclBindingKey::new(export.binding_key.owner, name))
+                    .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    exports.sort_by(|left, right| left.exported_name.cmp(&right.exported_name));
+    exports
+}
+
+fn resolved_named_member_type(
+    member: &crate::typeinfo::framework_surface::results::NamedTypeMember,
+) -> String {
+    use crate::typeinfo::framework_surface::results::NamedTypeMemberOutput;
+
+    member
+        .type_annotation
+        .clone()
+        .or_else(|| match member.value.as_ref() {
+            Some(NamedTypeMemberOutput::Primitive(name)) => Some(name.as_str().to_string()),
+            Some(NamedTypeMemberOutput::Literal(value)) => Some(match value {
+                verter_type_expr::LiteralValue::String(value) => format!("{value:?}"),
+                verter_type_expr::LiteralValue::Number(value) => value.to_string(),
+                verter_type_expr::LiteralValue::BigInt(value) => value.clone(),
+                verter_type_expr::LiteralValue::Boolean(value) => value.to_string(),
+            }),
+            Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
+            Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
+            Some(NamedTypeMemberOutput::Opaque) | None => None,
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn locator_owner(locator: &AuthoredBodyLocator) -> TopLevelOwnerId {
+    match locator {
+        AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
+        AuthoredBodyLocator::AugmentationBody(body) => body.anchor.owner,
+        AuthoredBodyLocator::JsdocTypedefBody(body) => body.anchor.owner,
+        AuthoredBodyLocator::MacroPayload(payload) => payload.anchor.owner,
+    }
+}
+
+fn collect_owned_refs(
+    owner: TopLevelOwnerId,
+    names: &[String],
+    out: &mut BTreeSet<DeclBindingKey>,
+) {
+    out.extend(
+        names
+            .iter()
+            .map(|name| DeclBindingKey::new(owner, name.as_str())),
+    );
 }
 
 /// Use the AST-captured type spelling only when every local reference it names
@@ -661,12 +787,13 @@ fn captured_display_without_local_refs(
     display: Option<&str>,
     references: &[String],
     shallow: &crate::resolver_core::shallow_file_state::ShallowFileState,
+    owner: TopLevelOwnerId,
 ) -> Option<String> {
     let display = display?.trim();
     if display.is_empty()
         || references
             .iter()
-            .any(|name| shallow.type_symbol_kind(name).is_some())
+            .any(|name| shallow.type_symbol_kind_in(owner, name).is_some())
     {
         return None;
     }
@@ -803,12 +930,20 @@ fn build_api_source_map(
                         ..mapping.source_start as usize + mapping.name.len(),
                 ) == Some(mapping.name.as_str())
         })
-        .map(|mapping| verter_compiler::tsc::script::GeneratedMapping {
-            generated_offset: mapping.generated_offset,
-            source_span: verter_span::Span::new(
-                mapping.source_start,
-                mapping.source_start + mapping.name.len() as u32,
-            ),
+        .flat_map(|mapping| {
+            [
+                verter_compiler::tsc::script::GeneratedMapping {
+                    generated_offset: mapping.generated_offset,
+                    source_span: Some(verter_span::Span::new(
+                        mapping.source_start,
+                        mapping.source_start + mapping.name.len() as u32,
+                    )),
+                },
+                verter_compiler::tsc::script::GeneratedMapping {
+                    generated_offset: mapping.generated_offset + mapping.name.len(),
+                    source_span: None,
+                },
+            ]
         })
         .collect();
     if admitted.is_empty() {
@@ -953,29 +1088,33 @@ fn render_type_only_import(
     }
 }
 
-/// Collect the named-reference identifiers of a member FACT — the names that
-/// may resolve to an import (so the prelude imports only them). A leaf-object
+/// Collect the owner-qualified named references of a member FACT — the exact
+/// bindings that may resolve to imports. A leaf-object
 /// props surface (`{ row: Snippet }`, the legacy export-let map) is rendered
 /// ONE level into the shim, so its member value refs are preserved references
 /// the prelude must import. A locator-backed fact carries no name — honestly
 /// nothing to import (the consumer re-resolves the authored position).
-fn collect_fact_refs(fact: &FactOrLocator, out: &mut BTreeSet<String>) {
+fn collect_fact_refs(
+    fact: &FactOrLocator,
+    owner: TopLevelOwnerId,
+    out: &mut BTreeSet<DeclBindingKey>,
+) {
     match fact {
         FactOrLocator::Leaf(LeafTypeFact::Ref(name)) => {
-            out.insert(name.clone());
+            out.insert(DeclBindingKey::new(owner, name.as_str()));
         }
         // A closed union of leaves contributes each leaf `Ref` name.
         FactOrLocator::LeafUnion(leaves) => {
             for leaf in leaves.iter() {
                 if let LeafTypeFact::Ref(name) = leaf {
-                    out.insert(name.clone());
+                    out.insert(DeclBindingKey::new(owner, name.as_str()));
                 }
             }
         }
         FactOrLocator::LeafObject(members) => {
             for member in members.iter() {
                 if let LeafTypeFact::Ref(name) = &member.ty {
-                    out.insert(name.clone());
+                    out.insert(DeclBindingKey::new(owner, name.as_str()));
                 }
             }
         }

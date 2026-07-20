@@ -173,8 +173,11 @@ fn realize_callable_member_inner(
         // Conditional reduction (which is what turns
         // `ExtendSlotWithPlan<TPlan, K>` into a Function) fires.
         SemanticNodeData::InstantiationRef { base, args } => {
-            let slot =
-                dispatch.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+            let slot = dispatch.type_slot_for(
+                Arc::clone(&base.canonical_id),
+                base.owner,
+                Arc::clone(&base.decl_name),
+            );
             let owner_canonical = Arc::clone(&base.canonical_id);
             let args = Arc::clone(args);
             drop(data);
@@ -208,6 +211,7 @@ fn realize_callable_member_inner(
             let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: crate::semantic_query::ScopeId {
                     canonical_id: Arc::clone(&identity.canonical_id),
+                    owner: identity.owner,
                     local_scope: None,
                 },
                 name: Arc::clone(&identity.decl_name),
@@ -232,10 +236,11 @@ fn realize_callable_member_inner(
         // DeclPlaceholder expansion in the dispatch walker.
         SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
             canonical_id,
+            owner,
             name,
             whole_hash: _,
         }) => {
-            let slot = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+            let slot = dispatch.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
             let owner_canonical = Arc::clone(canonical_id);
             drop(data);
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
@@ -420,6 +425,7 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
     use crate::resolver_core::{
@@ -434,11 +440,12 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
     // `type Pick`/`Omit`/chain-root shadow suppresses the registry fast-path so the
     // bare-name walk resolves the userland declaration.
     let shadowing = match engine.as_deref_mut() {
-        Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+        Some(e) => e.scope_shadowing_for_scope(scope_canonical_id, scope_owner),
         None => std::sync::Arc::new(
             crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
                 ctx,
                 scope_canonical_id,
+                scope_owner,
             ),
         ),
     };
@@ -454,6 +461,7 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
         if let Some(projected) = project_route_surface_node_via_host_threaded(
             engine_ref,
             scope_canonical_id,
+            scope_owner,
             &root_symbol,
             &route,
         ) {
@@ -462,12 +470,13 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
         if let Some(solved) = lower_and_project_to_expanded_node_via_host_threaded(
             engine_ref,
             scope_canonical_id,
+            scope_owner,
             expr,
         ) {
             return Some(solved);
         }
     }
-    crate::resolver_core::project_class_a_terminal_node(ctx, scope_canonical_id, expr)
+    crate::resolver_core::project_class_a_terminal_node(ctx, scope_canonical_id, scope_owner, expr)
 }
 
 /// decompose an IndexedAccess chain over literal-string
@@ -606,12 +615,18 @@ pub(crate) fn decompose_indexed_access_chain_node(
 pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    crate::resolver_core::lower_and_project_to_expanded_node(engine.ctx(), scope_canonical_id, expr)
+    crate::resolver_core::lower_and_project_to_expanded_node(
+        engine.ctx(),
+        scope_canonical_id,
+        scope_owner,
+        expr,
+    )
 }
 
 /// Node-domain registry-route projection: returns the admitted registry-route
@@ -619,13 +634,14 @@ pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
 pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     root_symbol: &str,
     route: &crate::resolver_core::RouteDemand,
 ) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    engine.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)
+    engine.dispatch_routed_expr_surface_node(scope_canonical_id, scope_owner, root_symbol, route)
 }
 
 // ===========================================================================
@@ -673,16 +689,19 @@ pub(crate) fn arg_preserving_member_use_site_slot(
     let observed = resolved_instantiation_head(dispatch, value_node)?;
 
     let origin = declaration_origin?;
-    let state = dispatch.ctx.shallow_file_state(origin)?;
+    let declaring_owner = observed.0.owner;
+    let bundle = dispatch.ctx.prepared_decl_bundle(origin)?;
+    let owner_scope = bundle.owner_scope(declaring_owner)?;
     // The UNIQUE file-scope type declaration whose OWN syntactic member
     // headers declare this member name (heritage contributes nothing to
     // `type_member_headers`, so a heritage-reached member resolves against
     // its true declaring contributor's file).
     let mut declaring: Option<&str> = None;
-    for name in state.type_symbol_names() {
-        let declares_member = state
-            .type_member_headers(name)
-            .is_some_and(|headers| headers.iter().any(|h| h.name == member_name));
+    for name in owner_scope.scope_type_names.iter().map(String::as_str) {
+        let declares_member = dispatch
+            .ctx
+            .prepared_type_decl_return_only(origin, declaring_owner, name)
+            .is_some_and(|prepared| prepared.member_index.contains_key(member_name));
         if !declares_member {
             continue;
         }
@@ -696,10 +715,13 @@ pub(crate) fn arg_preserving_member_use_site_slot(
     // Substitution-honesty gate: a generic declaring declaration's member
     // slot replays UNSUBSTITUTED (`MessageBase<T>`, not the instantiated
     // value) — fail closed.
-    if !state.symbol(declaring)?.type_param_names.is_empty() {
+    let prepared =
+        dispatch
+            .ctx
+            .prepared_type_decl_return_only(origin, declaring_owner, declaring)?;
+    if !prepared.type_parameters.is_empty() {
         return None;
     }
-    let prepared = dispatch.ctx.prepared_type_decl(origin, declaring)?;
     let slot = prepared.member_index.get(member_name)?.ty.clone();
 
     // Honesty verification: the candidate slot must raise to the SAME
@@ -796,16 +818,18 @@ mod pick_demand_api_signature_tests {
         fn _proof(
             engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
             scope: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
             symbol: &str,
             members: &[String],
             nested: bool,
         ) -> Option<verter_type_expr::TypeExpr> {
-            engine.materialize_pick_member_surface(scope, symbol, members, nested)
+            engine.materialize_pick_member_surface(scope, owner, symbol, members, nested)
         }
         let _ = _proof
             as fn(
                 &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
                 &str,
+                verter_type_expr::TopLevelOwnerId,
                 &str,
                 &[String],
                 bool,

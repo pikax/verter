@@ -80,16 +80,28 @@ defineProps<Helper>()
     // Verify that resolve_ref_to_root_identity discriminates the two
     // Helper identities for the App.vue scope.
     let host = project.host();
-    let local_identity =
-        super::resolve_ref_to_root_identity_for_test(host, "/src/App.vue", "Helper")
-            .expect("local Helper must resolve to a root identity");
-    let imported_identity =
-        super::resolve_ref_to_root_identity_for_test(host, "/src/b.ts", "Helper")
-            .expect("imported Helper must resolve to a root identity in b.ts scope");
+    let local_identity = super::resolve_ref_to_root_identity_for_test(
+        host,
+        "/src/App.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "Helper",
+    )
+    .expect("local Helper must resolve to a root identity");
+    let imported_identity = super::resolve_ref_to_root_identity_for_test(
+        host,
+        "/src/b.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Helper",
+    )
+    .expect("imported Helper must resolve to a root identity in b.ts scope");
 
     assert_eq!(
         local_identity,
-        ResolvedRootIdentity::new("/src/App.vue", "Helper"),
+        ResolvedRootIdentity::new_in_owner(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Helper",
+        ),
         "local Helper must key on App.vue, NOT b.ts"
     );
     assert_eq!(

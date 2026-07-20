@@ -198,6 +198,7 @@ fn neutral_error(error: LocatorBodyDerefError) -> QueryHostError {
         LocatorBodyDerefError::ValueAnnotationAbsent
         | LocatorBodyDerefError::TypeParamBoundAbsent { .. } => QueryHostError::AuthoredBodyAbsent,
         LocatorBodyDerefError::CanonicalMismatch
+        | LocatorBodyDerefError::OwnerMismatch
         | LocatorBodyDerefError::PathUnresolved
         | LocatorBodyDerefError::TypeParamOrdinalOutOfRange { .. }
         | LocatorBodyDerefError::TypeParamBoundStepMisplaced

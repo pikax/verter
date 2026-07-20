@@ -120,7 +120,11 @@ fn same_request_second_overlay_bundle_read_is_memo_hit() {
         "the overlay-bearing bundle is built from the OVERLAY content",
     );
     assert!(
-        first.prepared_type_decls.get("Foo").is_some(),
+        first
+            .prepared_type_decls
+            .get("Foo")
+            .expect("Foo preparation should succeed")
+            .is_some(),
         "the overlay bundle carries the owner's prepared type decl",
     );
 
@@ -171,11 +175,19 @@ fn fresh_request_observes_new_overlay_content() {
         "the new request's bundle reflects the NEW overlay content",
     );
     assert!(
-        bundle_b.prepared_type_decls.get("FooChanged").is_some(),
+        bundle_b
+            .prepared_type_decls
+            .get("FooChanged")
+            .expect("FooChanged preparation should succeed")
+            .is_some(),
         "the new request's bundle carries the NEW overlay's declaration",
     );
     assert!(
-        bundle_b.prepared_type_decls.get("Foo").is_none(),
+        bundle_b
+            .prepared_type_decls
+            .get("Foo")
+            .expect("Foo lookup should not fail")
+            .is_none(),
         "the new request's bundle must NOT carry the OLD overlay's declaration",
     );
 }
@@ -223,8 +235,16 @@ fn base_canonical_without_overlay_never_enters_memo() {
         .expect("base-path bundle must serve for the non-overlaid dep");
     let second = ResolverContext::prepared_decl_bundle(&ctx, DEP)
         .expect("base-path bundle must serve again");
-    assert!(first.prepared_type_decls.get("Dep").is_some());
-    assert!(second.prepared_type_decls.get("Dep").is_some());
+    assert!(first
+        .prepared_type_decls
+        .get("Dep")
+        .expect("first Dep preparation should succeed")
+        .is_some());
+    assert!(second
+        .prepared_type_decls
+        .get("Dep")
+        .expect("second Dep preparation should succeed")
+        .is_some());
 
     assert_eq!(
         overlay.overlay_bundle_memo_len_for_tests(),

@@ -66,6 +66,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
         &host,
         verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -157,6 +158,7 @@ fn family_slot_caps_concurrent_candidates_at_four_with_fifo_eviction() {
         &host,
         verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Bar"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -240,6 +242,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
         &host,
         verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical_keyed),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Owner"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -412,6 +415,7 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
         &host,
         verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical_keyed),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

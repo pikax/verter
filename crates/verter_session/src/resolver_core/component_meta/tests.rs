@@ -1,17 +1,13 @@
 use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
-use verter_parser::utils::oxc::script::type_surface::{
-    ResolvedCallPayloadForm, ResolvedElements, ResolvedMemberVisibility,
-    ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
-};
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, ImportBindingKind,
     ResolvedLocalType,
 };
 use verter_span::Span;
-use verter_type_expr::PrimitiveName;
+use verter_type_expr::{PrimitiveName, TopLevelOwnerId};
 
 /// The analyzer's synthesized closed shape for a locally-resolved type
 /// reference: a non-primitive body stays a shallow named-reference locator
@@ -23,6 +19,7 @@ fn local_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShap
         verter_type_expr::locators::SymbolBodyLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: std::sync::Arc::from(""),
+                owner: TopLevelOwnerId::instance(0),
                 symbol: std::sync::Arc::from(type_ref),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
@@ -38,7 +35,7 @@ struct TestSnapshot {
 }
 
 struct TestHost {
-    external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
+    native_prop_sources: BTreeMap<(String, String), ()>,
     eval_outputs: ComponentMetaEvalOutputs,
     projectable_owner_local_roots: BTreeSet<String>,
     // Owner-local roots that project to a NON-EMPTY prepared surface. The
@@ -55,6 +52,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: TopLevelOwnerId,
         _requested_name: &str,
     ) -> Option<ResolvedExportTarget> {
         None
@@ -71,6 +69,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
     fn type_declaration_id(
         &self,
         _canonical_source: &str,
+        _owner: TopLevelOwnerId,
         _resolved_name: &str,
     ) -> Option<DeclarationId> {
         None
@@ -129,31 +128,25 @@ impl ComponentMetaResolverHost for TestHost {
     fn owner_local_macro_root_has_surface(
         &self,
         _owner_canonical: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
         _macro_kind: AnalyzedMacroKind,
     ) -> bool {
         self.owner_local_roots_with_surface.contains(root_name)
     }
 
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         _owner_canonical: &str,
         import_source: &str,
         exported_name: &str,
         _tracked_deps: &mut BTreeSet<String>,
         _resolution_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
-        self.external_macro_elements
+        _cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>> {
+        self.native_prop_sources
             .get(&(import_source.to_string(), exported_name.to_string()))
-            .cloned()
-            .map(|elements| crate::resolver_core::ResolvedMacroElements {
-                elements,
-                // The TestHost fixtures exercise dep gating / suppression /
-                // registry seeding; none of them assert `native_props`.
-                native_props: Vec::new(),
-            })
+            .map(|_| Vec::new())
     }
 
     fn resolve_jsdoc_block(
@@ -162,8 +155,6 @@ impl ComponentMetaResolverHost for TestHost {
         _span: Span,
         _expanded: bool,
         _tracked_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         None
     }
@@ -197,6 +188,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for CombinedSurfaceTestHo
     fn resolve_export_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: TopLevelOwnerId,
         _requested_name: &str,
     ) -> Option<ResolvedExportTarget> {
         None
@@ -213,6 +205,7 @@ impl crate::resolver_core::DeclarationMetadataResolver for CombinedSurfaceTestHo
     fn type_declaration_id(
         &self,
         _canonical_source: &str,
+        _owner: TopLevelOwnerId,
         _resolved_name: &str,
     ) -> Option<DeclarationId> {
         None
@@ -234,6 +227,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
     fn resolve_type_declaration(
         &self,
         _dep_canonical: &str,
+        _owner: TopLevelOwnerId,
         _requested_name: &str,
     ) -> ResolvedTypeDeclaration {
         panic!("resolve_component_meta_parts should use the combined imported-macro surface path");
@@ -264,16 +258,15 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         self.eval_outputs.clone()
     }
 
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         _owner_canonical: &str,
         _import_source: &str,
         _exported_name: &str,
         _tracked_deps: &mut BTreeSet<String>,
         _resolution_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
+        _cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>> {
         panic!(
             "resolve_component_meta_parts should not separately ask for imported macro elements"
         );
@@ -286,8 +279,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         exported_name: &str,
         _tracked_deps: &mut BTreeSet<String>,
         _resolution_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
+        _cache: &mut NativePropProjectionCache,
     ) -> Option<ResolvedImportedMacroSurface> {
         self.imported_surface_calls
             .set(self.imported_surface_calls.get() + 1);
@@ -297,54 +289,18 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                 declaration_id: None,
                 resolved_name: "Props".to_string(),
                 canonical_source: "/dep.ts".to_string(),
+                owner: TopLevelOwnerId::ordinary_file(),
                 span: Span::new(0, 29),
                 kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
-            resolution: crate::resolver_core::ResolvedMacroElements {
-                elements: ResolvedElements {
-                    props: vec![ResolvedProp {
-                        span: Span::new(0, 29),
-                        key: Span::new(24, 29),
-                        key_name: Some("label".to_string()),
-                        optional: false,
-                        types: vec![RuntimeType::String],
-                        visibility: ResolvedMemberVisibility::Public,
-                        type_span: Some(Span::new(31, 37)),
-                        type_text: Some("string".to_string()),
-                        map_local: false,
-                        span_is_absolute: true,
-                        declared_in_macro_type_arg: false,
-                    }],
-                    call_signatures: vec![ResolvedNamedCallSignature {
-                        span: Span::new(0, 24),
-                        name: "save".to_string(),
-                        name_span: None,
-                        signature: ResolvedCallPayloadForm::Tuple {
-                            tuple_text: "[value: string]".to_string(),
-                        },
-                        map_local: false,
-                        span_is_absolute: true,
-                    }],
-                    ..ResolvedElements::default()
-                },
-                // The keep-all native rows carried alongside the elements.
-                // DELIBERATELY DIFFERENT from the `elements` carrier (which
-                // holds only the public `label` prop): the mock carries a
-                // PRIVATE `secret` row that `elements` does not contain, so
-                // the combined-surface test discriminates the SOURCING — a
-                // regression that re-derived `native_props` from the
-                // elements DTO would surface `label`/Public instead of
-                // `secret`/Private and FAIL the assertions in
-                // `resolve_component_meta_parts_prefers_combined_imported_macro_surface`.
-                native_props: vec![crate::resolver_core::ResolvedNativeProp {
-                    name: "secret".to_string(),
-                    is_optional: true,
-                    type_annotation: Some("boolean".to_string()),
-                    visibility: verter_type_expr::MemberVisibility::Private,
-                    span: Span::default(),
-                }],
-            },
+            native_props: vec![crate::resolver_core::ResolvedNativeProp {
+                name: "secret".to_string(),
+                is_optional: true,
+                type_annotation: Some("boolean".to_string()),
+                visibility: verter_type_expr::MemberVisibility::Private,
+                span: Span::default(),
+            }],
         })
     }
 
@@ -354,8 +310,6 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         _span: Span,
         _expanded: bool,
         _tracked_deps: &mut BTreeSet<String>,
-        _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        _visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock> {
         None
     }
@@ -388,6 +342,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -402,6 +357,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -446,7 +402,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
     assert_eq!(resolved.resolved_macros.len(), 1);
     // The combined imported-macro surface feeds `native_props` (the
     // class-member visibility carrier) DIRECTLY from the resolution payload
-    // (`ResolvedMacroElements.native_props`) — the cold resolver plumbs the
+    // (`ResolvedImportedMacroSurface.native_props`) — the cold resolver plumbs the
     // CARRIED rows through without re-projecting them from the elements
     // DTO. The mock's two carriers deliberately DIVERGE (`elements` holds
     // only the public `label` prop; `native_props` holds only the private
@@ -490,6 +446,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -504,6 +461,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["Emits".to_string()],
@@ -618,6 +576,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -632,6 +591,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["Emits".to_string()],
@@ -706,6 +666,7 @@ defineEmits<Emits>()
     };
     let snapshot = TestSnapshot {
         imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
             source: "./dep".to_string(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
@@ -720,6 +681,7 @@ defineEmits<Emits>()
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["Emits".to_string()],
@@ -733,6 +695,7 @@ defineEmits<Emits>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Emits".to_string(),
                 expanded: "interface Emits extends RootEmits {}".to_string(),
                 shape: local_ref_shape("Emits"),
@@ -784,7 +747,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
     // macro-surface path (covered in `typeinfo_tests::vue_adapter`); this
     // test pins the entry identity + authority the materialiser gates on.
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["AccordionEmits".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["AccordionEmits".to_string()]),
@@ -792,6 +755,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["AccordionEmits".to_string()],
@@ -805,6 +769,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "AccordionEmits".to_string(),
                 expanded:
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
@@ -848,7 +813,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
 #[test]
 fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_types() {
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["AppEmits".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["AppEmits".to_string()]),
@@ -856,6 +821,7 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
             type_references: vec!["AppEmits".to_string()],
@@ -915,7 +881,7 @@ interface CalendarSlots {
 defineSlots<CalendarSlots>()
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["CalendarSlots".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["CalendarSlots".to_string()]),
@@ -923,6 +889,7 @@ defineSlots<CalendarSlots>()
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineSlots,
             is_type_based: true,
             type_references: vec!["CalendarSlots".to_string()],
@@ -936,6 +903,7 @@ defineSlots<CalendarSlots>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "CalendarSlots".to_string(),
                 expanded: "{ day?: (props: { day: Date }) => any }".to_string(),
                 shape: local_ref_shape("CalendarSlots"),
@@ -977,47 +945,11 @@ type LocalItem = {
   label?: string
 }
 "#;
-    let mut external_macro_elements = BTreeMap::new();
-    external_macro_elements.insert(
-        ("./types".to_string(), "ImportedBase".to_string()),
-        ResolvedElements {
-            props: vec![ResolvedProp {
-                span: Span::new(0, 0),
-                key: Span::new(0, 0),
-                key_name: Some("href".to_string()),
-                optional: true,
-                types: vec![RuntimeType::String],
-                visibility: ResolvedMemberVisibility::Public,
-                type_span: None,
-                type_text: Some("string".to_string()),
-                map_local: false,
-                span_is_absolute: true,
-                declared_in_macro_type_arg: false,
-            }],
-            ..ResolvedElements::default()
-        },
-    );
-    external_macro_elements.insert(
-        ("./types".to_string(), "ImportedKeys".to_string()),
-        ResolvedElements {
-            props: vec![ResolvedProp {
-                span: Span::new(0, 0),
-                key: Span::new(0, 0),
-                key_name: Some("value".to_string()),
-                optional: true,
-                types: vec![RuntimeType::String],
-                visibility: ResolvedMemberVisibility::Public,
-                type_span: None,
-                type_text: Some("'href' | 'target'".to_string()),
-                map_local: false,
-                span_is_absolute: true,
-                declared_in_macro_type_arg: false,
-            }],
-            ..ResolvedElements::default()
-        },
-    );
+    let mut native_prop_sources = BTreeMap::new();
+    native_prop_sources.insert(("./types".to_string(), "ImportedBase".to_string()), ());
+    native_prop_sources.insert(("./types".to_string(), "ImportedKeys".to_string()), ());
     let host = TestHost {
-        external_macro_elements,
+        native_prop_sources,
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::new(),
         owner_local_roots_with_surface: BTreeSet::new(),
@@ -1025,6 +957,7 @@ type LocalItem = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1038,6 +971,7 @@ type LocalItem = {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ item?: LocalItem }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1100,24 +1034,9 @@ fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_
 type Props = Pick<ImportedBase, 'href'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("href".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs {
             evaluated_types: Some(verter_semantic::analysis::type_expand::ExpandedComponentTypes {
@@ -1161,6 +1080,7 @@ type Props = Pick<ImportedBase, 'href'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1174,6 +1094,7 @@ type Props = Pick<ImportedBase, 'href'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1228,24 +1149,9 @@ fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_
 type Props = Pick<ImportedBase, 'href'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("href".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1254,6 +1160,7 @@ type Props = Pick<ImportedBase, 'href'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1268,6 +1175,7 @@ type Props = Pick<ImportedBase, 'href'>
                 payload: Some(verter_type_expr::locators::MacroPayloadLocator {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
                         canonical_id: std::sync::Arc::from("/test.ts"),
+                        owner: TopLevelOwnerId::instance(0),
                         symbol: std::sync::Arc::from("default"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
@@ -1289,6 +1197,7 @@ type Props = Pick<ImportedBase, 'href'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1343,24 +1252,9 @@ type Props = {
 }
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("href".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1369,6 +1263,7 @@ type Props = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1382,6 +1277,7 @@ type Props = {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ href?: ImportedBase['href'] }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1440,24 +1336,9 @@ type Props = {
 }
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1466,6 +1347,7 @@ type Props = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
@@ -1479,6 +1361,7 @@ type Props = {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{ tooltip?: ImportedBase }".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1532,24 +1415,9 @@ fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_loca
 type Props = Omit<ImportedBase, 'hidden'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1558,6 +1426,7 @@ type Props = Omit<ImportedBase, 'hidden'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
@@ -1571,6 +1440,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "Omit<ImportedBase, 'hidden'>".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1620,24 +1490,9 @@ fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_owne
 type Props = Omit<ImportedBase, 'hidden'>
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "ImportedBase".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: true,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
@@ -1651,6 +1506,7 @@ type Props = Omit<ImportedBase, 'hidden'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
@@ -1664,6 +1520,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
+                owner: TopLevelOwnerId::instance(0),
                 name: "Props".to_string(),
                 expanded: "{}".to_string(),
                 shape: local_ref_shape("Props"),
@@ -1709,25 +1566,7 @@ type Props = Omit<ImportedBase, 'hidden'>
 #[test]
 fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
-            ("./types".to_string(), "Props".to_string()),
-            ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 0),
-                    key: Span::new(0, 0),
-                    key_name: Some("label".to_string()),
-                    optional: false,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: None,
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    declared_in_macro_type_arg: false,
-                }],
-                ..ResolvedElements::default()
-            },
-        )]),
+        native_prop_sources: BTreeMap::from([(("./types".to_string(), "Props".to_string()), ())]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::new(),
         owner_local_roots_with_surface: BTreeSet::new(),
@@ -1735,6 +1574,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1807,39 +1647,9 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
     // declaration, NOT by a substring scan of the underlying
     // alias body.
     let host = TestHost {
-        external_macro_elements: BTreeMap::from([(
+        native_prop_sources: BTreeMap::from([(
             ("./types".to_string(), "StringOrVNode".to_string()),
-            ResolvedElements {
-                props: vec![
-                    ResolvedProp {
-                        span: Span::new(0, 0),
-                        key: Span::new(0, 0),
-                        key_name: Some("component".to_string()),
-                        optional: true,
-                        types: vec![RuntimeType::Object],
-                        visibility: ResolvedMemberVisibility::Public,
-                        type_span: None,
-                        type_text: Some("object".to_string()),
-                        map_local: false,
-                        span_is_absolute: true,
-                        declared_in_macro_type_arg: false,
-                    },
-                    ResolvedProp {
-                        span: Span::new(0, 0),
-                        key: Span::new(0, 0),
-                        key_name: Some("children".to_string()),
-                        optional: true,
-                        types: vec![RuntimeType::String],
-                        visibility: ResolvedMemberVisibility::Public,
-                        type_span: None,
-                        type_text: Some("string".to_string()),
-                        map_local: false,
-                        span_is_absolute: true,
-                        declared_in_macro_type_arg: false,
-                    },
-                ],
-                ..ResolvedElements::default()
-            },
+            (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::new(),
@@ -1848,6 +1658,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["StringOrVNode".to_string()],
@@ -1911,7 +1722,7 @@ interface Helper {
 }
 "#;
     let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
+        native_prop_sources: BTreeMap::new(),
         eval_outputs: ComponentMetaEvalOutputs::default(),
         projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
         owner_local_roots_with_surface: BTreeSet::from(["Props".to_string()]),
@@ -1919,6 +1730,7 @@ interface Helper {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
             type_references: vec!["Props".to_string()],
@@ -1933,12 +1745,14 @@ interface Helper {
             expose_fields: Vec::new(),
             resolved_local_types: vec![
                 ResolvedLocalType {
+                    owner: TopLevelOwnerId::instance(0),
                     name: "Props".to_string(),
                     expanded: "{ label?: string }".to_string(),
                     shape: local_ref_shape("Props"),
                     span: Span::new(0, "type Props = Helper".len() as u32),
                 },
                 ResolvedLocalType {
+                    owner: TopLevelOwnerId::instance(0),
                     name: "Helper".to_string(),
                     expanded: "{ label?: string }".to_string(),
                     shape: local_ref_shape("Helper"),

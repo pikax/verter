@@ -406,19 +406,21 @@ impl VerterHost {
         }
 
         // Cold: shared cold body (publishes the analysis cache entry
-        // independently of the output result), then materialize under the
-        // SAME capture — the OUTPUT context is the session-bound wrapper
-        // (see the warm arm) while the extract keeps the established
-        // base-bound binder.
+        // independently of the output result), then materialize under ONE
+        // session-bound context derived from the SAME capture. Extraction
+        // can replay macro DTO routes, so it must retain `view` just like
+        // output materialization; a base-bound context cannot materialize an
+        // exact declaration whose canonical exists only in the overlay.
         let validated_at_generation = self.project_type_store.current_project_generation();
         let seed_fence = ColdSeedFence::new(fixed.captured_validation_token(), fixed.is_current());
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
+            view,
             fixed.cold_seed(),
-            std::sync::Arc::clone(&overlay),
+            overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         let Some((resolved, meta)) = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
@@ -434,19 +436,11 @@ impl VerterHost {
         });
         // SEPARATE tracer scope: output-materialization dependencies never
         // fold into the analysis entry's fact signature (the cold body's
-        // tracer already sealed + published above). SESSION-BOUND output
-        // context (same capture, same fence — see the warm arm).
-        let output_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-            self,
-            view,
-            fixed.cold_seed(),
-            overlay,
-        );
-        let output_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
-            &output_ctx;
+        // tracer already sealed + published above). Reuse the SAME live
+        // session context that extraction used.
         let (output, _output_read_set) = self.with_fact_tracer(|| {
             crate::meta_resolve::projectors::build_component_meta_output(
-                output_ctx_ref,
+                ctx,
                 canonical.as_str(),
                 meta,
                 seed,
@@ -616,12 +610,13 @@ impl VerterHost {
             current: fixed.is_current(),
         };
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
+            view,
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         let (_resolved, meta) = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
@@ -671,28 +666,35 @@ impl VerterHost {
         run_cold_body_pre_resolve_hook();
         // Pin the request executor to the caller's fixed view (FENCED), so
         // the resolve shares the capture's snapshot rather than re-reading.
-        let executor_fixed = {
-            let (executor_view, executor_fp) = fixed.executor_fixed_view();
-            Some((executor_view, executor_fp, fixed.is_current()))
-        };
+        let (executor_view, executor_fp) = fixed.executor_fixed_view();
+        let executor_fixed = Some((executor_view, executor_fp, fixed.is_current()));
         let results = self.project_type_store.component_meta_results();
         let (resolved_opt, meta_opt) = results.compute_and_admit(
             self,
             canonical,
             "view-aware path",
             || {
-                let resolved = match self.resolve_component_meta_with_view_and_fixed(
-                    canonical,
-                    crate::types::ProjectionMode::Expanded,
-                    view,
-                    executor_fixed,
-                ) {
-                    Some(r) => r,
+                let (mut resolved, admission) = match self
+                    .resolve_component_meta_with_view_and_fixed_admission(
+                        canonical,
+                        crate::types::ProjectionMode::Expanded,
+                        view,
+                        executor_fixed,
+                    ) {
+                    Some(pair) => pair,
                     None => return (None, None),
                 };
                 let extract = extract_component_meta_from_resolved(
                     self, canonical, &resolved, true, // include_fallthrough
                     ctx,
+                );
+                self.merge_extraction_facts_into_admitted_resolved_meta(
+                    canonical,
+                    crate::types::ProjectionMode::Expanded,
+                    view.fingerprint(),
+                    &mut resolved,
+                    extract.fallthrough_fact_versions.as_deref(),
+                    admission.as_ref(),
                 );
                 (
                     Some(resolved),

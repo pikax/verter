@@ -110,6 +110,7 @@ mod tests {
         TypeResolutionSource,
     };
     use verter_span::Span;
+    use verter_type_expr::TopLevelOwnerId;
 
     fn make_diag(span: Span) -> LintDiagnostic {
         LintDiagnostic {
@@ -163,6 +164,7 @@ mod tests {
 
     fn make_macro_struct(prop_fields: Vec<AnalyzedPropField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
+            owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: false,
             type_references: vec![],

@@ -54,7 +54,10 @@ pub mod span_origins;
 /// Closed semantic fact families — the graph-free, content-free replacement for
 /// query-time `TypeExpr` walking.
 pub mod facts;
-pub use facts::{merge_route_demands, RouteDemand, RouteKeySet};
+pub use facts::{
+    merge_route_demands, DeclBindingKey, RouteDemand, RouteKeySet, TopLevelOwnerId,
+    TopLevelOwnerKind,
+};
 
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact
 /// replacement for raw-`TypeExpr` HTML intrinsic member shapes.
@@ -899,6 +902,12 @@ pub struct MethodSignature {
     pub name: String,
     pub function: FunctionExpr,
     pub optional: bool,
+    /// Syntax-owned class method kind. Non-class object methods use `Method`.
+    #[serde(default)]
+    pub method_kind: ObjectMethodKind,
+    /// Whether this class method contributor carries an implementation body.
+    #[serde(default)]
+    pub has_implementation_body: bool,
     /// Declared accessibility of the member. `Public` for every non-class
     /// origin; class methods carry their `TSAccessibility`. Participates in
     /// node identity (Eq / Hash). Serialized with `#[serde(default)]` so a
@@ -909,6 +918,17 @@ pub struct MethodSignature {
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ObjectMethodKind {
+    #[default]
+    Method,
+    Get,
+    Set,
 }
 
 impl MethodSignature {
@@ -924,6 +944,8 @@ impl MethodSignature {
             name,
             function,
             optional,
+            method_kind: ObjectMethodKind::Method,
+            has_implementation_body: false,
             visibility: MemberVisibility::Public,
             spans: MemberSpans::default(),
         }
@@ -944,6 +966,8 @@ impl MethodSignature {
             name,
             function,
             optional,
+            method_kind: ObjectMethodKind::Method,
+            has_implementation_body: false,
             visibility,
             spans: MemberSpans::default(),
         }
@@ -965,6 +989,8 @@ impl MethodSignature {
             name,
             function,
             optional,
+            method_kind: ObjectMethodKind::Method,
+            has_implementation_body: false,
             visibility: MemberVisibility::Public,
             spans,
         }
@@ -985,6 +1011,8 @@ impl MethodSignature {
             name,
             function,
             optional,
+            method_kind: ObjectMethodKind::Method,
+            has_implementation_body: false,
             visibility,
             spans,
         }
@@ -1075,6 +1103,10 @@ pub struct FunctionParam {
     /// the type-level note on the hand-written `PartialEq`/`Eq`/`Hash`).
     #[serde(skip)]
     pub has_ts_annotation: bool,
+    /// Whether this constructor parameter also declares an instance property.
+    /// This is transient declaration geometry, parallel to source spans.
+    #[serde(skip)]
+    pub is_parameter_property: bool,
 }
 
 impl PartialEq for FunctionParam {
@@ -1118,6 +1150,7 @@ impl FunctionParam {
             rest,
             span: None,
             has_ts_annotation: false,
+            is_parameter_property: false,
         }
     }
 
@@ -1139,6 +1172,7 @@ impl FunctionParam {
             rest,
             span,
             has_ts_annotation,
+            is_parameter_property: false,
         }
     }
 }

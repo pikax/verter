@@ -135,10 +135,15 @@ defineProps<Props>()
         .host()
         .base_eval_env_arc("/Generic.vue")
         .expect("the retained eval env for /Generic.vue must build");
+    // Owner-aware inventory read: the `<script setup>` interface lands
+    // under the script's Instance owner in the owner-aware DeclMap, so
+    // the oracle searches by NAME across owners.
     let item_headers = &item_env
         .type_symbols
-        .get("Item")
+        .iter()
+        .find(|(key, _)| &*key.name == "Item")
         .expect("the `<script setup>` interface `Item` must land in the retained type_symbols")
+        .1
         .primary()
         .direct_member_headers;
     let oracle_surface: Vec<(String, bool)> = item_headers

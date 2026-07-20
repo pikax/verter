@@ -54,6 +54,8 @@ fn member_origin(ordinals: &[u32]) -> MemberSpansOrigin {
     MemberSpansOrigin::Authored {
         anchor: DeclContributorAnchor {
             contributor_index: 0,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            owner_local_ordinal: 0,
         },
         member_path: path(ordinals),
     }
@@ -169,6 +171,8 @@ fn stale_authored_origin_fails_closed_never_default() {
         &MemberSpansOrigin::Authored {
             anchor: DeclContributorAnchor {
                 contributor_index: 42,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 42,
             },
             member_path: path(&[0]),
         },
@@ -339,6 +343,8 @@ fn recovers_method_member_and_function_spans_and_exercises_optional() {
     let fn_origin = FunctionSpansOrigin::Member {
         anchor: DeclContributorAnchor {
             contributor_index: 0,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            owner_local_ordinal: 0,
         },
         member_path: path(&[0]),
     };
@@ -415,6 +421,8 @@ fn recovers_index_signature_spans_for_string_and_number_keys() {
         let origin = IndexSignatureSpansOrigin::Authored {
             anchor: DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             },
             member_path: path(&[0]),
         };
@@ -470,6 +478,8 @@ fn recovers_function_param_span_positional_and_rest() {
         function: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             },
         },
         param: FunctionParamSelector::Positional { ordinal: 0 },
@@ -478,6 +488,8 @@ fn recovers_function_param_span_positional_and_rest() {
         function: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             },
         },
         param: FunctionParamSelector::Rest,
@@ -542,6 +554,8 @@ fn recovers_function_param_span_positional_and_rest() {
             function: FunctionSpansOrigin::AliasBody {
                 anchor: DeclContributorAnchor {
                     contributor_index: 0,
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    owner_local_ordinal: 0,
                 },
             },
             param: FunctionParamSelector::Positional { ordinal: 99 },
@@ -567,6 +581,8 @@ fn recovers_standalone_function_type_spans() {
     let origin = FunctionSpansOrigin::AliasBody {
         anchor: DeclContributorAnchor {
             contributor_index: 0,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            owner_local_ordinal: 0,
         },
     };
     let recovered =

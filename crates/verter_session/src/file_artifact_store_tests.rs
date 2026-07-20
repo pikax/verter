@@ -91,6 +91,46 @@ fn empty_store_returns_none() {
 }
 
 #[test]
+fn parser_v2_artifact_is_rejected_by_v3_base_key() {
+    use super::CURRENT_PARSER_VERSION;
+
+    const PREVIOUS_PARSER_VERSION: u32 = 2;
+    assert_eq!(CURRENT_PARSER_VERSION, PREVIOUS_PARSER_VERSION + 1);
+
+    let store = FileArtifactStore::new();
+    let current = FileArtifactKey::base(Arc::from("/owner-exact.ts"), [3u8; 16]);
+    let stale = FileArtifactKey {
+        parser_version: PREVIOUS_PARSER_VERSION,
+        ..current.clone()
+    };
+    let stale_payload = synth_artifacts(3);
+    store.insert_artifacts(stale.clone(), Arc::clone(&stale_payload));
+
+    assert!(
+        Arc::ptr_eq(
+            &store
+                .get_artifacts(&stale)
+                .expect("the planted v2 row exists by exact stale key"),
+            &stale_payload
+        ),
+        "test precondition: exact stale-key reads remain content-addressable"
+    );
+    assert!(
+        store.get_any("/owner-exact.ts").is_none(),
+        "the base read rejects a v2 artifact under the owner-exact v3 parser schema"
+    );
+
+    let current_payload = synth_artifacts(3);
+    store.insert_artifacts(current.clone(), Arc::clone(&current_payload));
+    assert!(Arc::ptr_eq(
+        &store
+            .get_any("/owner-exact.ts")
+            .expect("a v3 artifact roundtrips through the current base key"),
+        &current_payload.indexed
+    ));
+}
+
+#[test]
 fn insert_then_get_returns_payload() {
     let store = FileArtifactStore::new();
     let key = synth_key("/a.ts", [1u8; 16], [2u8; 16]);
@@ -896,6 +936,7 @@ fn synth_augmenter_artifacts_for_specifier(
         parse_stable_hash,
         augmentations: Arc::new(vec![ModuleAugmentationFact {
             specifier: InternedSpecifier::from(specifier),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             augmented_name: InternedName::from("Augmented"),
             space: SymbolSpace::Type,
             augmented_member_shape_fingerprint: [0u8; 16],
@@ -1043,6 +1084,7 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
 
     let fact = ModuleAugmentationFact {
         specifier: InternedSpecifier::from(".."),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         augmented_name: InternedName::from("Augmented"),
         space: SymbolSpace::Type,
         augmented_member_shape_fingerprint: [0u8; 16],
@@ -1271,6 +1313,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
             parse_stable_hash: [0x11u8; 16],
             augmentations: Arc::new(vec![ModuleAugmentationFact {
                 specifier: InternedSpecifier::from("./dep"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 augmented_name: InternedName::from("Augmented"),
                 space: SymbolSpace::Type,
                 // CHANGED member-shape fingerprint → genuine contribution change.
@@ -1425,6 +1468,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
             parse_stable_hash: [0x11u8; 16],
             augmentations: Arc::new(vec![ModuleAugmentationFact {
                 specifier: InternedSpecifier::from("./dep"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 augmented_name: InternedName::from("Augmented"),
                 space: SymbolSpace::Type,
                 augmented_member_shape_fingerprint: [0x77u8; 16],
@@ -1435,6 +1479,28 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
         !augmentation_contribution_equivalent(&base, &diff_facts),
         "a fact-set change MUST NOT be equivalent — it can change which index rows the augmenter \
          contributes to"
+    );
+
+    let diff_owner = {
+        use super::{FileFacts, ModuleAugmentationFact};
+        use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+        Arc::new(FileArtifacts {
+            indexed: synth_indexed(0xA9),
+            facts: Arc::new(FileFacts::empty()),
+            parse_stable_hash: [0x11u8; 16],
+            augmentations: Arc::new(vec![ModuleAugmentationFact {
+                specifier: InternedSpecifier::from("./dep"),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                augmented_name: InternedName::from("Augmented"),
+                space: SymbolSpace::Type,
+                augmented_member_shape_fingerprint: [0u8; 16],
+            }]),
+        })
+    };
+    assert!(
+        !augmentation_contribution_equivalent(&base, &diff_owner),
+        "moving an otherwise identical augmentation between lexical owners changes its exact \
+         contribution"
     );
 }
 

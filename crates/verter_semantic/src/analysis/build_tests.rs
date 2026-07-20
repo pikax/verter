@@ -167,6 +167,52 @@ const props = defineProps<{ foo: Chain }>();
 }
 
 #[test]
+fn macro_value_query_usage_preserves_import_root_and_surface_strength() {
+    let result = analyze(
+        r#"
+import { importedValue } from './values';
+const ownerValue = { local: true };
+defineProps<typeof importedValue & {
+  imported: typeof importedValue,
+  owner: typeof ownerValue,
+}>();
+"#,
+    );
+
+    let imported = result
+        .macro_type_deps
+        .iter()
+        .find(|dependency| dependency.type_name == "importedValue")
+        .expect("imported value query dependency");
+    assert_eq!(imported.usage, MacroTypeDepUsage::ValueQuerySurface);
+    assert!(result.macros[0]
+        .type_references
+        .iter()
+        .any(|reference| reference == "ownerValue"));
+    assert!(!result
+        .macro_type_deps
+        .iter()
+        .any(|dependency| dependency.type_name == "ownerValue"));
+}
+
+#[test]
+fn macro_value_query_usage_preserves_qualified_namespace_root() {
+    let result = analyze(
+        r#"
+import * as Values from './values';
+defineProps<{ value: typeof Values.current }>();
+"#,
+    );
+
+    assert_eq!(result.macro_type_deps.len(), 1);
+    assert_eq!(result.macro_type_deps[0].type_name, "Values");
+    assert_eq!(
+        result.macro_type_deps[0].usage,
+        MacroTypeDepUsage::ValueQueryMember
+    );
+}
+
+#[test]
 fn literal_binding() {
     let result = analyze("const x = 42;");
     assert_eq!(result.bindings.len(), 1);
@@ -2406,6 +2452,214 @@ fn define_model_default_modelvalue() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn owner_aware_analysis_stamps_imports_macros_and_declarations_at_production() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let source = r#"
+import type { ModuleProps } from './module';
+import type { SetupProps } from './setup';
+interface Shared { module: string }
+interface Shared { setup: number }
+const props = defineProps<SetupProps>();
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance, module, instance, instance],
+    )
+    .expect("validated owner table");
+    let snapshot = build_script_analysis_with_scope_from_program_with_owners(
+        source,
+        SourceType::ts(),
+        &parsed.program,
+        AnalysisScope::all(),
+        &owners,
+    );
+
+    assert_eq!(snapshot.imports[0].owner, module);
+    assert_eq!(snapshot.imports[1].owner, instance);
+    assert_eq!(snapshot.macros[0].owner, instance);
+    let shared = snapshot
+        .declaration_entries
+        .iter()
+        .filter(|entry| entry.name == "Shared")
+        .collect::<Vec<_>>();
+    assert_eq!(shared.len(), 2);
+    assert_eq!(shared[0].owner, module);
+    assert_eq!(shared[1].owner, instance);
+    assert_ne!(shared[0].content_hash, shared[1].content_hash);
+}
+
+#[test]
+fn declaration_content_hash_discriminates_owner_only_role_changes() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let source = "interface Shared { value: string }";
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module_owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [TopLevelOwnerId::module(0)],
+    )
+    .expect("module owner table");
+    let instance_owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [TopLevelOwnerId::instance(0)],
+    )
+    .expect("instance owner table");
+    let module = build_script_analysis_with_scope_from_program_with_owners(
+        source,
+        SourceType::ts(),
+        &parsed.program,
+        AnalysisScope::all(),
+        &module_owners,
+    );
+    let instance = build_script_analysis_with_scope_from_program_with_owners(
+        source,
+        SourceType::ts(),
+        &parsed.program,
+        AnalysisScope::all(),
+        &instance_owners,
+    );
+
+    assert_ne!(
+        module.declaration_entries[0].content_hash, instance.declaration_entries[0].content_hash,
+        "a role-only owner change must invalidate parse-stable declaration identity"
+    );
+}
+
+#[test]
+fn macro_local_type_resolution_is_scoped_by_owner() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let source = r#"
+interface Props { moduleOnly: string }
+const moduleProps = defineProps<Props>();
+interface Props { instanceOnly: number }
+const instanceProps = defineProps<Props>();
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, module, instance, instance],
+    )
+    .expect("validated owner table");
+    let snapshot = build_script_analysis_with_scope_from_program_with_owners(
+        source,
+        SourceType::ts(),
+        &parsed.program,
+        AnalysisScope::all(),
+        &owners,
+    );
+
+    assert_eq!(snapshot.macros.len(), 2);
+    assert_eq!(snapshot.macros[0].owner, module);
+    assert_eq!(snapshot.macros[0].prop_fields[0].name, "moduleOnly");
+    assert_eq!(snapshot.macros[1].owner, instance);
+    assert_eq!(snapshot.macros[1].prop_fields[0].name, "instanceOnly");
+}
+
+#[test]
+fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let analyze = |source: &str, statement_owners: &[TopLevelOwnerId]| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(!parsed.panicked, "fixture must parse");
+        let owners = TopLevelOwnerTable::try_from_statement_owners(
+            parsed.program.body.len(),
+            statement_owners.iter().copied(),
+        )
+        .expect("validated owner table");
+        build_script_analysis_with_scope_from_program_with_owners(
+            source,
+            SourceType::ts(),
+            &parsed.program,
+            AnalysisScope::all(),
+            &owners,
+        )
+    };
+
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let inherited = analyze(
+        "interface Shared { moduleNested: string }\ninterface Props extends Shared { moduleOnly: string }\ninterface Shared { instanceNested: number }\nconst props = defineProps<Props>();",
+        &[module, module, instance, instance],
+    );
+    assert_eq!(
+        inherited.macros[0]
+            .prop_fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["moduleNested", "moduleOnly"],
+        "an instance macro sees its sole validated module parent, while the module declaration's own dependencies stay in module scope"
+    );
+    assert_eq!(inherited.macros[0].resolved_local_types[0].owner, module);
+
+    let reverse = analyze(
+        "const props = defineProps<Props>();\ninterface Props { instanceOnly: number }",
+        &[module, instance],
+    );
+    assert!(
+        reverse.macros[0].prop_fields.is_empty(),
+        "module scope must never see an instance declaration"
+    );
+
+    let ambiguous = analyze(
+        "interface Props { first: string }\ntype Other = number;\nconst props = defineProps<Props>();",
+        &[module, TopLevelOwnerId::module(1), instance],
+    );
+    assert!(
+        ambiguous.macros[0].prop_fields.is_empty(),
+        "an instance with multiple module owners has no inferred parent"
+    );
+}
+
+#[test]
+fn stable_declaration_id_discriminates_top_level_owner() {
+    use verter_type_expr::TopLevelOwnerId;
+
+    let module =
+        StableDeclarationId::new_in_owner("/src/App.vue", TopLevelOwnerId::module(0), "Shared");
+    let instance =
+        StableDeclarationId::new_in_owner("/src/App.vue", TopLevelOwnerId::instance(0), "Shared");
+
+    assert_ne!(module, instance);
+    assert_ne!(module.to_symbol_id(), instance.to_symbol_id());
+    assert_eq!(
+        StableDeclarationId::from_symbol_id(&instance.to_symbol_id()),
+        Some(instance)
+    );
+}
+
+#[test]
 fn stable_declaration_id_new_and_accessors() {
     let id = StableDeclarationId::new("/src/types.ts", "Props");
     assert_eq!(id.canonical_id(), "/src/types.ts");
@@ -2615,6 +2869,78 @@ fn declaration_entries_preserve_interface_merges() {
             .iter()
             .any(|e| e.name == "Missing"),
         "declaration entry collection must not fabricate unrelated names"
+    );
+}
+
+#[test]
+fn declaration_entries_slice_full_export_and_owned_jsdoc() {
+    let source = "/** Public props. */\nexport interface Props<T> extends Base<T> { value: T }";
+    let result = analyze(source);
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|entry| entry.name == "Props")
+        .expect("Props declaration");
+
+    assert_eq!(
+        &source[entry.span.start as usize..entry.span.end as usize],
+        source
+    );
+}
+
+#[test]
+fn declaration_entries_keep_merged_contributors_ordered_and_non_overlapping() {
+    let source = "/** First. */\ninterface Props { first: string }\n\n/** Second. */\nexport interface Props { second: number }";
+    let result = analyze(source);
+    let entries = result
+        .declaration_entries
+        .iter()
+        .filter(|entry| entry.name == "Props")
+        .collect::<Vec<_>>();
+
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].span.end < entries[1].span.start);
+    assert_eq!(
+        &source[entries[0].span.start as usize..entries[0].span.end as usize],
+        "/** First. */\ninterface Props { first: string }"
+    );
+    assert_eq!(
+        &source[entries[1].span.start as usize..entries[1].span.end as usize],
+        "/** Second. */\nexport interface Props { second: number }"
+    );
+}
+
+#[test]
+fn declaration_entries_include_default_exported_interface() {
+    let source = "export default interface Props { value: string }";
+    let result = analyze(source);
+    let entry = result
+        .declaration_entries
+        .iter()
+        .find(|entry| entry.name == "Props")
+        .expect("default interface declaration");
+
+    assert_eq!(
+        &source[entry.span.start as usize..entry.span.end as usize],
+        source
+    );
+}
+
+#[test]
+fn declaration_entries_share_one_full_statement_span_for_multi_declarators() {
+    let source = "export const first = 1, second = 2;";
+    let result = analyze(source);
+    let entries = result
+        .declaration_entries
+        .iter()
+        .filter(|entry| entry.name == "first" || entry.name == "second")
+        .collect::<Vec<_>>();
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].span, entries[1].span);
+    assert_eq!(
+        &source[entries[0].span.start as usize..entries[0].span.end as usize],
+        source
     );
 }
 

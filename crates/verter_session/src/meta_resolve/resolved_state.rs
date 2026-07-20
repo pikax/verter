@@ -117,6 +117,26 @@ pub struct ResolvedComponentMetaState {
     pub synthesis_should_suppress: bool,
 }
 
+impl ResolvedComponentMetaState {
+    /// Merge facts observed by the extraction/fallthrough phase into this
+    /// call-owned state. Existing resolve facts retain their order; new facts
+    /// append in producer order with deterministic equality-based dedup.
+    pub(crate) fn merge_extraction_fact_versions(
+        &mut self,
+        extraction_facts: Option<&[crate::resolver_core::FactVersionRef]>,
+    ) -> bool {
+        let Some(extraction_facts) = extraction_facts else {
+            return false;
+        };
+        let previous_len = self.fact_versions.len();
+        crate::resolver_core::extend_unique_fact_versions(
+            &mut self.fact_versions,
+            extraction_facts.iter().cloned(),
+        );
+        self.fact_versions.len() != previous_len
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegistryMaterialization {
     Full,

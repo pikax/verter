@@ -665,8 +665,13 @@ impl DocumentRegistry {
     }
 
     /// Get all virtual files for a document, including TSX output.
-    pub fn get_virtual_files(&self, uri: &Uri) -> Option<VirtualFilesResponse> {
-        let canonical_id = self.get_canonical_id(uri)?;
+    pub fn get_virtual_files(
+        &self,
+        uri: &Uri,
+    ) -> Result<Option<VirtualFilesResponse>, verter_session::PublicApiProjectionError> {
+        let Some(canonical_id) = self.get_canonical_id(uri) else {
+            return Ok(None);
+        };
 
         // Get IDE output (TSX/JSX for template type checking)
         let ide = self
@@ -680,7 +685,7 @@ impl DocumentRegistry {
 
         // Get API output (declaration for cross-file type resolution)
         let is_js = ide.as_ref().is_some_and(|b| b.is_js);
-        let api = self.host.get_public_api(&canonical_id).map(|t| CodeBlock {
+        let api = self.host.get_public_api(&canonical_id)?.map(|t| CodeBlock {
             code: t.code.to_string(),
             source_map: t.source_map.map(|m| m.to_string()),
             is_js,
@@ -730,11 +735,11 @@ impl DocumentRegistry {
             }
         }
 
-        Some(VirtualFilesResponse {
+        Ok(Some(VirtualFilesResponse {
             ide,
             api,
             virtual_files,
-        })
+        }))
     }
 
     /// Get the analysis snapshot as a JSON value.

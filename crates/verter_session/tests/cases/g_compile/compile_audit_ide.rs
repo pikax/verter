@@ -19,6 +19,11 @@ const SFC: &str = "<script setup lang=\"ts\">\n\
                    </script>\n\
                    <template><button @click=\"count++\">{{ count }}</button></template>\n";
 
+const TYPED_PROPS_SFC: &str = "<script setup lang=\"ts\">\n\
+                               defineProps<{ title: string }>();\n\
+                               </script>\n\
+                               <template><h1>{{ title }}</h1></template>\n";
+
 fn build_host() -> Arc<VerterHost> {
     let workspace: Arc<dyn WorkspaceAccess> =
         Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -37,6 +42,29 @@ fn build_host() -> Arc<VerterHost> {
         file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
+    host
+}
+
+fn build_typed_props_host() -> Arc<VerterHost> {
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: false,
+            ..HostConfig::default()
+        },
+        workspace,
+    ));
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/typed.vue".into()),
+            input_id: "/typed.vue".into(),
+            source: Arc::from(TYPED_PROPS_SFC),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("typed-props fixture must index");
     host
 }
 
@@ -85,5 +113,28 @@ fn compile_with_audit_ide_publishes_record_with_ide_tag_and_tsx_block() {
     assert!(
         payload.output_bytes > 0,
         "IDE compile must report non-zero output_bytes; payload = {payload:?}",
+    );
+}
+
+#[test]
+fn compile_with_audit_ide_routes_authoritative_runtime_props_to_tsx_bindings() {
+    let host = build_typed_props_host();
+    let (result, _record) = host
+        .compile_with_audit("/typed.vue", CompileTarget::IDE)
+        .into_parts();
+    let result = match result {
+        Ok(result) => result,
+        Err(never) => match never {},
+    };
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = result.tsx.expect("IDE target must emit TSX").code;
+    assert!(
+        code.contains("__props.title"),
+        "the session's authoritative runtime DTO must reach IDE binding ownership: {code}"
+    );
+    assert!(
+        !code.contains("_ctx.title"),
+        "typed props must not degrade to context bindings: {code}"
     );
 }

@@ -691,7 +691,6 @@ fn extract_component_meta_from_resolved_with_evaluated(
         ctx,
         canonical_id,
         resolved.snapshot.macros.as_ref(),
-        &resolved.resolved_macros,
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);

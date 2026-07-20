@@ -2306,118 +2306,45 @@ fn extract_slots_from_macro(
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<SlotAnalysis>,
 ) {
-    let expanded_slots = expanded_define_slot_entries(evaluated, macro_index);
-    if !expanded_slots.is_empty() {
-        let mut remaining = expanded_slots;
-
-        for field in slot_fields {
-            let Some(slot_index) = remaining.iter().position(|slot| slot.name == field.name) else {
-                continue;
-            };
-            let mut slot = remaining.remove(slot_index);
-            slot.bindings = merge_slot_bindings_with_source(field, slot.bindings);
-            let return_source = authored_payload_source(field.payload.as_ref());
-            let return_source_scope = field.return_expr_scope.clone();
-            out.push(SlotAnalysis {
-                name: slot.name,
-                is_scoped: !slot.bindings.is_empty(),
-                bindings: slot.bindings,
-                is_required: slot.is_required,
-                return_type: field.return_type.clone(),
-                return_source,
-                return_source_scope,
-                description: field.description.clone(),
-                tags: field.tags.clone(),
-                // Matched an authored `AnalyzedSlotField` — the author's
-                // own defineSlots surface declares this name.
-                declared_in_macro_type_arg: true,
-            });
-        }
-
-        for slot in remaining {
-            let source_field = slot_fields.iter().find(|field| field.name == slot.name);
-            let return_source =
-                source_field.and_then(|field| authored_payload_source(field.payload.as_ref()));
-            let return_source_scope =
-                source_field.and_then(|field| field.return_expr_scope.clone());
-            out.push(SlotAnalysis {
-                name: slot.name,
-                is_scoped: !slot.bindings.is_empty(),
-                bindings: slot.bindings,
-                is_required: slot.is_required,
-                return_type: source_field.and_then(|field| field.return_type.clone()),
-                return_source,
-                return_source_scope,
-                description: source_field.and_then(|field| field.description.clone()),
-                tags: source_field
-                    .map(|field| field.tags.clone())
-                    .unwrap_or_default(),
-                // A row arriving PURELY through the evaluated
-                // type-expansion channel has no authored counterpart —
-                // the one channel a VNode-transport key can leak
-                // through, and the only rows the compat slot blocklist
-                // may still suppress.
-                declared_in_macro_type_arg: source_field.is_some(),
-            });
-        }
-        return;
-    }
+    // The three lanes are independent partial observations:
+    //
+    // - `slot_fields` owns authored/resolved membership, order, docs, return
+    //   source, and source optionality;
+    // - `define_slots` contributes additional resolved membership plus
+    //   authoritative optionality for names it actually observed;
+    // - `slot_bindings` contributes resolved binding rows even when the
+    //   `define_slots` shape was partial or empty.
+    //
+    // Never use non-emptiness of one lane as proof that it is complete. An open
+    // intersection arm can leave `define_slots` as a strict subset while the
+    // graph-native binding walk still resolves every callable explicit arm.
+    let mut expanded_remaining = expanded_define_slot_entries(evaluated, macro_index);
+    let mut seen_slots = rustc_hash::FxHashSet::default();
 
     for field in slot_fields {
-        let bindings: Vec<SlotBindingAnalysis> = field
-            .bindings
+        if !seen_slots.insert(field.name.clone()) {
+            continue;
+        }
+        let expanded = expanded_remaining
             .iter()
-            .map(|b| {
-                let (type_source, type_expansion) = if let Some(eval) = evaluated {
-                    // Slot bindings are keyed as "slotName.bindingName" in ExpandedComponentTypes
-                    let key = format!("{}.{}", field.name, b.name);
-                    eval.slot_bindings
-                        .iter()
-                        .find(|f| f.name == key)
-                        .map(|f| {
-                            let type_expansion = field_expansion_metadata(f);
-                            let source = prefer_authored_on_incomplete(
-                                &f.r#type,
-                                b.payload.as_ref(),
-                                Some(&type_expansion),
-                            );
-                            (source, Some(type_expansion))
-                        })
-                        .unwrap_or_else(|| (authored_payload_position(b.payload.as_ref()), None))
-                } else {
-                    (authored_payload_position(b.payload.as_ref()), None)
-                };
-                let raw_type = evaluated
-                    .and_then(|eval| {
-                        let key = format!("{}.{}", field.name, b.name);
-                        eval.slot_bindings
-                            .iter()
-                            .find(|candidate| candidate.name == key)
-                            .and_then(|candidate| candidate.raw_type.clone())
-                    })
-                    .or_else(|| b.type_annotation.clone());
-                let raw_type_source = raw_type_source_from_source_annotation(
-                    raw_type.as_deref(),
-                    b.type_annotation.as_deref(),
-                    b.payload.as_ref(),
-                );
-                SlotBindingAnalysis {
-                    name: b.name.clone(),
-                    type_source,
-                    type_expansion,
-                    raw_type,
-                    raw_type_source,
-                }
-            })
-            .collect();
+            .position(|slot| slot.name == field.name)
+            .map(|index| expanded_remaining.remove(index));
+        let (expanded_bindings, is_required) = match expanded {
+            Some(slot) => (slot.bindings, slot.is_required),
+            None => (
+                expanded_slot_bindings(evaluated, &field.name),
+                field.is_required,
+            ),
+        };
+        let bindings = merge_slot_bindings_with_source(field, expanded_bindings);
 
         let return_source = authored_payload_source(field.payload.as_ref());
         let return_source_scope = field.return_expr_scope.clone();
         out.push(SlotAnalysis {
             name: field.name.clone(),
-            is_scoped: !field.bindings.is_empty(),
+            is_scoped: !bindings.is_empty(),
             bindings,
-            is_required: field.is_required,
+            is_required,
             return_type: field.return_type.clone(),
             return_source,
             return_source_scope,
@@ -2426,6 +2353,28 @@ fn extract_slots_from_macro(
             // Straight off the authored / resolver-projected
             // defineSlots surface.
             declared_in_macro_type_arg: true,
+        });
+    }
+
+    // Expanded-only names append after the authored/resolved lane, preserving
+    // the evaluator's deterministic property order. Exact name dedup prevents
+    // duplicate shape rows from publishing the same slot twice.
+    for slot in expanded_remaining {
+        if !seen_slots.insert(slot.name.clone()) {
+            continue;
+        }
+        out.push(SlotAnalysis {
+            name: slot.name,
+            is_scoped: !slot.bindings.is_empty(),
+            bindings: slot.bindings,
+            is_required: slot.is_required,
+            return_type: None,
+            return_source: None,
+            return_source_scope: None,
+            description: None,
+            tags: Vec::new(),
+            // No authored/resolved field declared this evaluated-only name.
+            declared_in_macro_type_arg: false,
         });
     }
 }
@@ -2551,23 +2500,37 @@ fn expanded_slot_bindings(
     let Some(evaluated) = evaluated else {
         return Vec::new();
     };
+    let prefix = format!("{slot_name}.");
+    let mut seen_bindings = rustc_hash::FxHashSet::default();
     evaluated
         .slot_bindings
         .iter()
-        .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
-        .map(|field| {
+        .filter_map(|field| {
+            // Graph-native no-parser rows carry the exact typed pair. Other
+            // rows use the established flat `slot.binding` transport key.
+            let binding_name = match &field.r#type {
+                SourcePosition::Present(SemanticTypeSource::SyntheticSlotBinding(key))
+                    if key.surface_kind
+                        == verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding =>
+                {
+                    if key.slot_name.as_deref() != Some(slot_name) {
+                        return None;
+                    }
+                    key.binding_name.as_ref()
+                }
+                _ => field.name.strip_prefix(&prefix)?,
+            };
+            if binding_name.is_empty() || !seen_bindings.insert(binding_name.to_string()) {
+                return None;
+            }
             let type_expansion = field_expansion_metadata(field);
-            SlotBindingAnalysis {
-                name: field
-                    .name
-                    .split_once('.')
-                    .map(|(_, binding)| binding.to_string())
-                    .unwrap_or_else(|| field.name.clone()),
+            Some(SlotBindingAnalysis {
+                name: binding_name.to_string(),
                 type_source: field.r#type.clone(),
                 type_expansion: Some(type_expansion),
                 raw_type: field.raw_type.clone(),
                 raw_type_source: None,
-            }
+            })
         })
         .collect()
 }
@@ -2576,38 +2539,38 @@ fn merge_slot_bindings_with_source(
     source_field: &crate::analysis::types::AnalyzedSlotField,
     expanded_bindings: Vec<SlotBindingAnalysis>,
 ) -> Vec<SlotBindingAnalysis> {
-    if source_field.bindings.is_empty() {
-        return expanded_bindings;
-    }
-    if expanded_bindings.is_empty() {
-        return source_field
-            .bindings
-            .iter()
-            .map(|binding| SlotBindingAnalysis {
-                name: binding.name.clone(),
-                type_source: authored_payload_position(binding.payload.as_ref()),
-                type_expansion: None,
-                raw_type: binding.type_annotation.clone(),
-                raw_type_source: authored_payload_source(binding.payload.as_ref()),
-            })
-            .collect();
-    }
-
     // Order discipline: source-captured bindings (parser-side
     // `AnalyzedSlotField::bindings`) come first in parser order;
     // expansion-only remainder appends in the evaluator's emission order.
-    // No hash structure participates.
-    let mut expanded_remaining: Vec<SlotBindingAnalysis> = expanded_bindings;
-    let mut merged: Vec<SlotBindingAnalysis> = Vec::with_capacity(expanded_remaining.len());
+    // Membership sets only suppress duplicate identities; no hash iteration
+    // participates in output order.
+    let mut expanded_seen = rustc_hash::FxHashSet::default();
+    let mut expanded_remaining: Vec<SlotBindingAnalysis> = expanded_bindings
+        .into_iter()
+        .filter(|binding| expanded_seen.insert(binding.name.clone()))
+        .collect();
+    let mut merged: Vec<SlotBindingAnalysis> =
+        Vec::with_capacity(source_field.bindings.len() + expanded_remaining.len());
+    let mut merged_seen = rustc_hash::FxHashSet::default();
 
     for source_binding in &source_field.bindings {
-        let Some(pos) = expanded_remaining
+        if !merged_seen.insert(source_binding.name.clone()) {
+            continue;
+        }
+        let Some(position) = expanded_remaining
             .iter()
             .position(|candidate| candidate.name == source_binding.name)
         else {
+            merged.push(SlotBindingAnalysis {
+                name: source_binding.name.clone(),
+                type_source: authored_payload_position(source_binding.payload.as_ref()),
+                type_expansion: None,
+                raw_type: source_binding.type_annotation.clone(),
+                raw_type_source: authored_payload_source(source_binding.payload.as_ref()),
+            });
             continue;
         };
-        let mut binding = expanded_remaining.remove(pos);
+        let mut binding = expanded_remaining.remove(position);
         let raw_type = symbolic_type_from_evaluated_and_source(
             binding.raw_type.as_deref(),
             source_binding.type_annotation.as_deref(),
@@ -2632,10 +2595,19 @@ fn merge_slot_bindings_with_source(
                 .unwrap_or_else(|| binding.type_source.clone())
         };
         binding.raw_type = raw_type;
+        binding.raw_type_source = raw_type_source_from_source_annotation(
+            binding.raw_type.as_deref(),
+            source_binding.type_annotation.as_deref(),
+            source_binding.payload.as_ref(),
+        );
         merged.push(binding);
     }
 
-    merged.extend(expanded_remaining);
+    merged.extend(
+        expanded_remaining
+            .into_iter()
+            .filter(|binding| merged_seen.insert(binding.name.clone())),
+    );
     merged
 }
 

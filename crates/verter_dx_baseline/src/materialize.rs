@@ -28,8 +28,8 @@ use std::sync::Arc;
 use oxc_sourcemap::{SourceMap, Token};
 
 use verter_session::{
-    CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
-    VERTER_TYPES_STANDALONE_DTS,
+    CompileProfile, CompileTarget, FileLanguage, HostConfig, PublicApiProjectionError,
+    UpsertRequest, VerterHost, VERTER_TYPES_STANDALONE_DTS,
 };
 use verter_span::path::canonicalize_path;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, WorkspaceAccess};
@@ -158,6 +158,12 @@ pub enum MaterializeError {
     },
     #[error("host upsert failed for {canonical}: {message}")]
     Upsert { canonical: String, message: String },
+    #[error("public API projection failed for {canonical}: {source}")]
+    PublicApiProjection {
+        canonical: String,
+        #[source]
+        source: PublicApiProjectionError,
+    },
     #[error(
         "vendored Vue declaration version mismatch for {package}: expected {expected}, found {found}"
     )]
@@ -969,7 +975,12 @@ pub fn materialize(req: &MaterializeRequest) -> Result<MaterializeReport, Materi
         }
 
         // Public-API twin (.vue.ts).
-        if let Some(api) = host.get_public_api(&canonical) {
+        if let Some(api) = host.get_public_api(&canonical).map_err(|source| {
+            MaterializeError::PublicApiProjection {
+                canonical: canonical.clone(),
+                source,
+            }
+        })? {
             let gen_path = artifact_path(vue, ".ts");
             let rewrite = rewrite_vue_imports_tracked(&api.code);
             fs::write(&gen_path, &rewrite.output).map_err(|e| io_err(&gen_path, e))?;

@@ -3,6 +3,11 @@ use crate::provider::ActionContext;
 use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
 use verter_semantic::analysis::template::*;
 use verter_semantic::analysis::types::*;
+use verter_type_expr::TopLevelOwnerId;
+
+fn setup_owner() -> TopLevelOwnerId {
+    TopLevelOwnerId::instance(0)
+}
 
 fn make_diag(start: u32, end: u32) -> LintDiagnostic {
     LintDiagnostic {
@@ -101,6 +106,7 @@ fn simple_text_and_interpolation_extracts_to_computed() {
     let script = make_script_with_bindings(vec![make_binding("count", ReactivityKind::Ref)]);
 
     let vue_import = AnalyzedImport {
+        owner: setup_owner(),
         source: "vue".to_string(),
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
@@ -345,6 +351,7 @@ fn reactive_binding_no_dot_value() {
     };
 
     let vue_import = AnalyzedImport {
+        owner: setup_owner(),
         source: "vue".to_string(),
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
@@ -433,6 +440,7 @@ fn maybe_ref_binding_uses_unref() {
     };
 
     let vue_import = AnalyzedImport {
+        owner: setup_owner(),
         source: "vue".to_string(),
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
@@ -690,6 +698,7 @@ fn no_duplicate_computed_import() {
     };
 
     let vue_import = AnalyzedImport {
+        owner: setup_owner(),
         source: "vue".to_string(),
         is_type_only: false,
         bindings: vec![
@@ -781,6 +790,7 @@ fn complex_expression_preserved() {
     };
 
     let vue_import = AnalyzedImport {
+        owner: setup_owner(),
         source: "vue".to_string(),
         is_type_only: false,
         bindings: vec![AnalyzedImportBinding {
@@ -976,6 +986,7 @@ fn make_macro(
     span: Span,
 ) -> AnalyzedMacro {
     AnalyzedMacro {
+        owner: setup_owner(),
         kind,
         is_type_based: true,
         type_references: vec![],
@@ -1295,6 +1306,7 @@ fn bare_define_props_mixed_with_ref() {
             Span::new(24, 55),
         )],
         vec![AnalyzedImport {
+            owner: setup_owner(),
             source: "vue".to_string(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
@@ -1629,6 +1641,7 @@ fn script_binding_shadows_prop() {
             Span::new(24, 55),
         )],
         vec![AnalyzedImport {
+            owner: setup_owner(),
             source: "vue".to_string(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
@@ -1676,6 +1689,7 @@ fn computed_overrides_prop() {
             Span::new(24, 50),
         )],
         vec![AnalyzedImport {
+            owner: setup_owner(),
             source: "vue".to_string(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {

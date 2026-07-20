@@ -21,3 +21,4 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+verter_type_expr = { path = "../verter_type_expr" }

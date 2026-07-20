@@ -544,6 +544,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 source_type,
                 module_region,
                 framework_mode_hint,
+                framework_parse.as_deref(),
             )
             .map(|c| {
                 // Producer-side locator absolutization: fill the capture's
@@ -735,6 +736,7 @@ fn capture_candidates_for(
     framework_mode_hint: Option<
         verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
     >,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
 ) -> Option<FrameworkScriptCandidates> {
     let alloc = Allocator::new();
     let parser = Parser::new(&alloc, source, source_type).with_options(ParseOptions {
@@ -745,12 +747,14 @@ fn capture_candidates_for(
     if result.panicked {
         return None;
     }
+    let owner_table = crate::parse::top_level_owner_table(&result.program, framework_parse).ok()?;
     let set = verter_semantic::analysis::framework_facts::capture_script_candidates_with_context(
         std::slice::from_ref(provider),
         source,
         &result.program,
         module_script_region,
         framework_mode_hint,
+        &owner_table,
     );
     set.per_provider.into_iter().next()
 }

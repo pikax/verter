@@ -60,6 +60,36 @@ pub enum IntrinsicImpl {
     PromiseGlobal,
 }
 
+/// Closed identity of global nominal constructors relevant to runtime shape.
+/// A name becomes this identity only after the carrier resolver's normal
+/// name-resolution and lib-shadowing gates have proved it is global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeNominal {
+    Date,
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+    Promise,
+    Error,
+}
+
+impl RuntimeNominal {
+    #[must_use]
+    pub fn from_global_name(name: &str) -> Option<Self> {
+        match name {
+            "Date" => Some(Self::Date),
+            "Map" => Some(Self::Map),
+            "Set" => Some(Self::Set),
+            "WeakMap" => Some(Self::WeakMap),
+            "WeakSet" => Some(Self::WeakSet),
+            "Promise" => Some(Self::Promise),
+            "Error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 impl IntrinsicImpl {
     /// Map this intrinsic identity onto the shared dispatch's
     /// [`BuiltinUtility`](verter_semantic::analysis::type_solver::builtin::BuiltinUtility)

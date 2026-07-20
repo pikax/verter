@@ -66,6 +66,7 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     let pick_identity =
         verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/pathological.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Pick"),
         );
     let key = verter_session::for_tests::instantiate_key_for_tests(

@@ -92,8 +92,6 @@ mod materializations_lane_wired;
 mod mcp_audit_e2e;
 #[path = "g_misc0/mcp_audit_tls_propagation.rs"]
 mod mcp_audit_tls_propagation;
-#[path = "g_misc0/neutral_script_analysis_not_under_vue_path.rs"]
-mod neutral_script_analysis_not_under_vue_path;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
 mod no_default_env_hashes_in_production;
 #[path = "g_misc0/no_legacy_compile_many_upsert_fanout.rs"]

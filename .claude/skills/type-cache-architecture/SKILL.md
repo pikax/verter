@@ -527,6 +527,29 @@ insertion-order (FIFO) on write only.** No LRU bookkeeping on read; warm reads
 are `&self` shared borrows with zero atomic write or lock contention.
 Concurrent sessions never overwrite each other's results.
 
+Vue runtime props/emits heritage filtering stays inside this same
+`SemanticGraphStore` family memo. `VueRuntimeSurfaceShallow` is an internal
+slot selected by `ReductionDemand::VueRuntimeObjectSurface`, isolated from the
+unfiltered `MacroSurfaceShallow` slot with no cross-backfill. The runtime
+constructor additionally sets the orthogonal content-free
+`VueHeritagePolicy::SuppressIgnored`; default contexts retain all heritage.
+Every `ProjectionReductionContext`-bearing family and mapped-member identity
+encoding carries this policy because a declaration-carrier unwrap demotes the
+demand to `StructuralTransit` while retaining runtime filtering. Thus filtered
+and unfiltered transit computations remain distinct even though they select the
+same transit mode slot. Fresh-context transitions inherit the policy only via
+the exhaustive `ProjectionReductionContext::with_orthogonal_axes_from`
+adapter; adding a context field fails its no-`..` witness until ownership is
+classified. This is not a new durable cache or a new
+`ProjectionMode`; version state remains exclusively on each candidate's
+prepared-declaration/LowerLocator read set and file self-roots per R6/R20.
+The associated `ClassifyBroadRuntime` family is likewise keyed by a
+content-free canonical macro payload/member locator plus split env dimensions,
+never by its transient `SemanticNodeId`. Each cold build rehydrates the live
+carrier from the indexed owner and publishes its exact value-side read set;
+anonymous graph-instance classifications are ReturnOnly and have no family
+entry.
+
 **Bounded query-identity retention substrate.** Every durable query-identity
 cache accumulates concurrent content-version CANDIDATES in its content-free
 slots — the version state lives on each candidate's value-side carrier (per R6),
@@ -1064,7 +1087,12 @@ Literal-key projections like `Pick<Foo, "a">` observe **`MemberPresence(Foo, "a"
 
 **R29 (Module augmentation).** Module augmentation is a fact-graph completeness
 requirement. Parse-domain emits a syntactic fact `ModuleAugmentation {
-specifier, augmented_name, space }` per `declare module 'x' { ... }` block.
+specifier, owner, augmented_name, space }` per augmented binding. `owner` is
+the exact neutral lexical [`TopLevelOwnerId`](../../crates/verter_type_expr/src/facts.rs)
+of the authored `declare module 'x' { ... }` / `declare global { ... }`
+statement. Same-name declarations in module and instance script regions are
+distinct facts and distinct prepared contributors; the augmentation target
+scope itself remains unpartitioned by lexical owner.
 Resolution of the augmentation target happens at the resolver stage, producing a
 typed `AugmentationTargetKey`:
 
@@ -1120,7 +1148,7 @@ re-population). Each `AugmenterSet` entry is an `AugmenterEntry` carrying the
 via `FileArtifactStore::get_artifacts(&key)` keyed by that exact key, never a
 content-agnostic canonical-only scan, so the stitch reads precisely the
 augmenter version the fingerprint was computed over. The stitcher then folds
-each augmenter's `(augmented_name, space)` contributions into an
+each augmenter's `(owner, augmented_name, space)` contributions into an
 `EffectiveExportSetEntry { entries, augmenter_count, augmenter_set_fingerprint,
 fact_dep_signature }`. The `fact_dep_signature` records the
 `RouteSurface(ModuleAugmentationIndexShape)` fact plus per-contributor
@@ -1223,6 +1251,58 @@ bridge-truncated, and cancelled results may be returned to a caller, but they
 must be marked non-cacheable or cached only in a typed degraded-result cache
 whose callers cannot mistake them for exact answers.
 
+**Vue macro compiler DTOs are request-local projections, not cache entries.**
+`produce_vue_macro_codegen` may fulfill runtime and TSC demand together in one
+SFC inventory pass, but it must not admit the aggregate
+`MacroRuntimeBundle`/`MacroTscBundle` under a graph-instance id, raw source
+slice, or whole-file semantic hash. The producer reuses the canonical
+`SemanticGraphStore` query memos underneath it, returns the request's typed
+completeness and fact footprint, and hands the DTOs directly to the compiler.
+Only a future cache family with a complete typed policy identity and normal
+read-side fact validation could retain such an aggregate.
+
+### Exact-owner version audit (2026-07-19)
+
+The neutral lexical-owner cutover changes cached parse facts, declaration
+preparation, route results, semantic-query identity, and carrier script facts.
+The coordinated invalidation boundaries are:
+
+- `CACHE_CLUSTER_SCHEMA_VERSION = 4` rejects the former schema-3 cache cohort.
+- `CURRENT_PARSER_VERSION = 3` rejects ordinary/base artifacts whose parse
+  facts and declaration inventories predate exact owners.
+- `LEGACY_PARSER_VERSION = 4` rejects carrier-script candidates that predate
+  exact owners.
+- `ROUTE_DB_RESOLVER_VERSION = 2` rejects route values that do not carry the
+  defining declaration owner.
+- `SvelteScriptProvider::VERSION = 9` independently rejects Svelte candidate
+  payloads without the persisted exact module-export inventory, export owners,
+  and owner-qualified binding keys.
+
+Exact-owner shallow facts also govern qualified namespace roots. For
+`import * as Ns from './dep'`, the cached binding for `(owner, Ns)` is a MODULE
+handle (`is_namespace`), not a request to find an export literally named
+`Ns`. Resolution first proves that exact-owner namespace fact (ambiguous
+bindings fail closed), then sends only the qualified MEMBER through the shared
+type/value export resolver. Re-export aliases therefore publish the terminal
+declaration canonical/name rather than the namespace module or barrel
+identity; there is no prepared-declaration or file-wide name-rematch fallback.
+
+The other named versions are intentionally unchanged:
+
+- `RESOLVED_IMPORT_FACTS_RESOLVER_VERSION = 1`: this cache serializes
+  per-specifier resolution and resolved binding names/canonicals; its key and
+  value schema do not embed `DeclKey`, prepared scopes, augmentation
+  contributors, or route results.
+- `TYPEINFO_GRAPH_SCHEMA_VERSION = 4`: the TypeInfo wire schema does not carry
+  `VueMacroCodegenOutput`, `MacroRuntimeBundle`, or `MacroTscBundle`.
+  `produce_vue_macro_codegen_with_ctx` constructs and returns those aggregates
+  request-locally and performs no aggregate cache admission; only its
+  underlying canonical semantic queries are memoized.
+- `ORACLE_SCHEMA_VERSION = 3`: oracle snapshots serialize hover/probe capture
+  shapes and migration fingerprints, not parser facts, lexical-owner
+  declaration identities, prepared scopes, route results, or Vue macro
+  compiler DTOs.
+
 ## Cache layer key composition
 
 See `docs/arch/fact-based-cache.md` for the canonical per-cache-layer key
@@ -1293,8 +1373,9 @@ Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain
   canonical (R12).
 - `SyntacticReexportRef(specifier, source_name, target_name, space)`
 - `ExportAlias(exported_as, space)` — per `export {X as Y}`.
-- `ModuleAugmentation(specifier, augmented_name, space)` — per augmented binding
-  inside each `declare module "X" {…}` / `declare global {…}` block.
+- `ModuleAugmentation(specifier, owner, augmented_name, space)` — per augmented binding
+  inside each `declare module "X" {…}` / `declare global {…}` block; `owner`
+  is the exact lexical authoring region.
 
 Lazy emission (member body, on first member-access query) lives in TWO separate
 stores keyed differently to physically separate semantic vs display:
@@ -1374,8 +1455,7 @@ The discrimination matrix:
   `ModuleAugmentationFact`, `ProjectIdentity`.
 - `crates/verter_session/src/fact_emission.rs` —
   `emit_parse_facts(&IndexedReady) -> ParseFactsEmission`,
-  `GLOBAL_AUGMENTATION_TAG`, single-pass
-  `extract_module_augmentations_from_source` byte scanner.
+  `GLOBAL_AUGMENTATION_TAG`, and typed augmentation-header fact emission.
 - `crates/verter_session/src/member_semantic_fact_store.rs` —
   `MemberSemanticFactStore`, `MemberSemanticFactKey`, `make_member_fact`,
   `member_fact_key`.
@@ -1417,7 +1497,8 @@ The discrimination matrix:
   alpha-normalisation under object member reorder (R16), stack-safety on
   200-deep nesting (R27), `MemberPresence`/`MemberShape` discrimination (R28).
 - `crates/verter_session/src/fact_emission.rs` (inline `tests` module) —
-  `declare module …` source-byte scanner per R29 archetype.
+  typed augmentation-inventory emission per R29 archetype and exact lexical
+  owner.
 - `crates/verter_session/src/member_semantic_fact_store.rs` /
   `member_display_fact_store.rs` (inline `tests` modules) — store admission,
   parse_stable_hash vs content_hash keying contract (R13).

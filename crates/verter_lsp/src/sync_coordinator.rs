@@ -345,8 +345,19 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 }
             }
 
-            let api =
-                tokio::task::block_in_place(|| deps.documents.host.get_public_api(canonical_id));
+            let api = match tokio::task::block_in_place(|| {
+                deps.documents.host.get_public_api(canonical_id)
+            }) {
+                Ok(api) => api,
+                Err(error) => {
+                    crate::report_public_api_projection_error(
+                        "sync_coordinator",
+                        canonical_id,
+                        &error,
+                    );
+                    return;
+                }
+            };
             if let Some(api) = api {
                 if let Some(dts_path) = committed_state.api_path.clone() {
                     let result = if committed_state.api_background_loaded {

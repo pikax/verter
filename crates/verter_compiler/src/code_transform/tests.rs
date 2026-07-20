@@ -1,5 +1,310 @@
 use super::*;
+use crate::code_transform::chunk::Chunk;
 use oxc_allocator::Allocator;
+
+#[test]
+fn source_ranges_split_original_chunks_at_sorted_unique_internal_locations() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abcdef", &allocator);
+    transform.prepend(">>");
+    for location in [4, 2, 2, 0, 6] {
+        transform
+            .try_add_sourcemap_location(location)
+            .expect("fixture location is a UTF-8 boundary");
+    }
+
+    let (output, ranges) = transform.build_string_with_source_ranges();
+
+    assert_eq!(output, ">>abcdef");
+    assert_eq!(
+        ranges,
+        vec![
+            GeneratedSourceRange {
+                generated_start: 2,
+                generated_end: 4,
+                source_start: 0,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 4,
+                generated_end: 6,
+                source_start: 2,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 6,
+                generated_end: 8,
+                source_start: 4,
+                replacement: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn source_ranges_split_moved_chunks_and_preserve_original_provenance() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("ABCDEF", &allocator);
+    for location in [5, 3, 1] {
+        transform
+            .try_add_sourcemap_location(location)
+            .expect("fixture location is a UTF-8 boundary");
+    }
+    transform.move_slice(2, 4, 0);
+
+    let (output, ranges) = transform.build_string_with_source_ranges();
+
+    assert_eq!(output, "CDABEF");
+    assert_eq!(
+        ranges,
+        vec![
+            GeneratedSourceRange {
+                generated_start: 0,
+                generated_end: 1,
+                source_start: 2,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 1,
+                generated_end: 2,
+                source_start: 3,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 2,
+                generated_end: 3,
+                source_start: 0,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 3,
+                generated_end: 4,
+                source_start: 1,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 4,
+                generated_end: 5,
+                source_start: 4,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 5,
+                generated_end: 6,
+                source_start: 5,
+                replacement: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn source_ranges_mark_overwrites_as_non_linear_replacements() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abcd", &allocator);
+    transform.overwrite(1, 3, "XYZ");
+
+    let (output, ranges) = transform.build_string_with_source_ranges();
+
+    assert_eq!(output, "aXYZd");
+    assert_eq!(
+        ranges,
+        vec![
+            GeneratedSourceRange {
+                generated_start: 0,
+                generated_end: 1,
+                source_start: 0,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 1,
+                generated_end: 4,
+                source_start: 1,
+                replacement: true,
+            },
+            GeneratedSourceRange {
+                generated_start: 4,
+                generated_end: 5,
+                source_start: 3,
+                replacement: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn source_range_projection_retains_live_generated_unmapped_boundaries() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abcd", &allocator);
+    transform.overwrite_with_unmapped_boundaries(1, 3, "XYZ", &[1]);
+    transform.prepend_left_with_unmapped_boundaries(4, "PQ", &[1]);
+
+    let (output, _, boundaries) =
+        transform.build_string_with_source_ranges_and_unmapped_boundaries();
+
+    assert_eq!(output, "aXYZdPQ");
+    assert_eq!(boundaries, vec![2, 6]);
+
+    transform.overwrite(1, 3, "Z");
+    let (_, _, boundaries) = transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    assert_eq!(boundaries, vec![4]);
+}
+
+#[test]
+fn source_ranges_omit_removed_and_empty_overwrite_bytes() {
+    let allocator = Allocator::default();
+    let mut middle = CodeTransform::new("abcd", &allocator);
+    middle.remove(1, 3);
+    let (output, ranges) = middle.build_string_with_source_ranges();
+    assert_eq!(output, "ad");
+    assert_eq!(
+        ranges,
+        vec![
+            GeneratedSourceRange {
+                generated_start: 0,
+                generated_end: 1,
+                source_start: 0,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 1,
+                generated_end: 2,
+                source_start: 3,
+                replacement: false,
+            },
+        ]
+    );
+
+    let mut empty = CodeTransform::new("abcd", &allocator);
+    empty.overwrite(0, 4, "");
+    assert_eq!(
+        empty.build_string_with_source_ranges(),
+        (String::new(), Vec::new())
+    );
+}
+
+#[test]
+fn source_ranges_leave_intro_outro_and_plain_insertions_unmapped() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abc", &allocator);
+    transform.prepend("<").append(">").prepend_left(1, "X");
+    let (output, ranges) = transform.build_string_with_source_ranges();
+    assert_eq!(output, "<aXbc>");
+    assert_eq!(
+        ranges,
+        vec![
+            GeneratedSourceRange {
+                generated_start: 1,
+                generated_end: 2,
+                source_start: 0,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 3,
+                generated_end: 5,
+                source_start: 1,
+                replacement: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn source_ranges_include_only_the_mapped_suffix_of_inserted_mapped_chunks() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("ab", &allocator);
+    transform.chunks.push(Chunk::inserted_mapped_with_offset(
+        allocator.alloc_str("__id"),
+        1,
+        2,
+    ));
+    let (output, ranges) = transform.build_string_with_source_ranges();
+    assert_eq!(output, "ab__id");
+    assert_eq!(
+        ranges.last(),
+        Some(&GeneratedSourceRange {
+            generated_start: 4,
+            generated_end: 6,
+            source_start: 1,
+            replacement: true,
+        })
+    );
+}
+
+#[test]
+fn source_ranges_split_only_at_valid_utf8_byte_boundaries() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("aéz", &allocator);
+    assert!(transform.try_add_sourcemap_location(2).is_err());
+    for location in [0, 1, 3, 4] {
+        transform.try_add_sourcemap_location(location).unwrap();
+    }
+    let (output, ranges) = transform.build_string_with_source_ranges();
+    assert_eq!(output, "aéz");
+    assert_eq!(
+        ranges
+            .iter()
+            .map(|range| (
+                range.generated_start,
+                range.generated_end,
+                range.source_start
+            ))
+            .collect::<Vec<_>>(),
+        [(0, 1, 0), (1, 3, 1), (3, 4, 3)]
+    );
+}
+
+#[test]
+fn source_ranges_keep_moved_and_edited_geometry_non_overlapping() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abcdef", &allocator);
+    transform.move_slice(1, 3, 5).overwrite(3, 5, "XY");
+    let (output, ranges) = transform.build_string_with_source_ranges();
+    assert_eq!(output, "aXYbcf");
+    assert!(ranges
+        .windows(2)
+        .all(|pair| pair[0].generated_end <= pair[1].generated_start));
+    assert_eq!(
+        ranges.last().map(|range| range.generated_end),
+        Some(output.len() as u32)
+    );
+    assert!(ranges.iter().any(|range| range.replacement));
+    assert!(ranges
+        .iter()
+        .any(|range| !range.replacement && range.source_start == 1));
+}
+
+#[test]
+fn source_ranges_preserve_replacement_identity_when_overwritten_content_moves() {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new("abcd", &allocator);
+    transform.overwrite(1, 3, "XY").move_slice(1, 3, 4);
+    let (output, ranges) = transform.build_string_with_source_ranges();
+    assert_eq!(output, "adXY");
+    assert_eq!(
+        ranges,
+        vec![
+            GeneratedSourceRange {
+                generated_start: 0,
+                generated_end: 1,
+                source_start: 0,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 1,
+                generated_end: 2,
+                source_start: 3,
+                replacement: false,
+            },
+            GeneratedSourceRange {
+                generated_start: 2,
+                generated_end: 4,
+                source_start: 1,
+                replacement: true,
+            },
+        ]
+    );
+}
 
 #[test]
 fn test_new() {

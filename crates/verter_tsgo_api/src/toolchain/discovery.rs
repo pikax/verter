@@ -1084,7 +1084,7 @@ mod tests {
         );
     }
 
-    // ── DISCRIMINATING (B4a): a bundled sidecar that EXISTS but is
+    // ── DISCRIMINATING: a bundled sidecar that EXISTS but is
     //    structurally invalid (a symlink/reparse component) is a
     //    PRODUCT-INTEGRITY failure — never a soft skip that falls through to
     //    "no provider". RED: today it degrades to a note + NoUsableCandidate. ──
@@ -1120,7 +1120,7 @@ mod tests {
         assert!(rendered.contains("Reinstall"), "{rendered}");
     }
 
-    // ── DISCRIMINATING (B4b): canonical-path dedup must not DISCARD Bundled
+    // ── DISCRIMINATING: canonical-path dedup must not DISCARD Bundled
     //    provenance — PATH/VERTER_TSGO_BIN pointing AT the bundled binary still
     //    classifies as Bundled, so an invalid one escalates to ProductIntegrity
     //    instead of degrading to an ordinary no-provider result. RED: dedup

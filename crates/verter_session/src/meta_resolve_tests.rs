@@ -154,6 +154,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         declaration_id: None,
         resolved_name: "Props".to_string(),
         canonical_source: "/src/types.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
         text: Some("export interface Props { label?: string }".to_string()),
@@ -191,6 +192,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
         declaration_id: None,
         resolved_name: "Button".to_string(),
         canonical_source: "/src/types.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
         text: Some("export type Button = VariantProps<typeof config>".to_string()),
@@ -201,6 +203,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
                 object: verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
                         canonical_id: Arc::from("/src/types.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         symbol: Arc::from("Button"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
@@ -1804,24 +1807,17 @@ defineProps<C>()
 
 /// The EMPTY-member projection through the REAL rail: a call-signature-only
 /// imported interface projects a one-level surface with ZERO members (and a
-/// non-empty call-signature set), so the combined macro-elements projection
-/// (`macro_elements_from_surface`) runs its member loop over an empty set —
-/// `native_props` must come out EMPTY (no synthetic floor rows) while the
-/// resolution itself SUCCEEDS.
+/// non-empty call-signature set). The component-meta-owned native projector
+/// must return resolved-empty (no synthetic floor rows), not a miss.
 ///
 /// The state-level facts alone (macro entry present + `native_props` empty +
 /// emit published) CANNOT discriminate a genuine empty projection from a
 /// projection MISS: the cold resolver's fallback arm synthesizes the same
-/// macro entry with `native_props: Vec::new()` when the macro-elements
+/// macro entry with `native_props: Vec::new()` when the native projection
 /// resolution returns `None`, and the emit surfaces through the independent
 /// `vue_macro_dtos` path. The discriminator is the direct drive of the SAME
-/// macro-elements rail the cold resolver consumes
-/// (`resolve_component_meta_macro_elements` →
-/// `named_type_elements_outcome(NativeProjection::Include)`): it must return
-/// `Some` (a miss returns `None` and FAILS), with `has_call_signature` set
-/// (stamped only by the surface projection `macro_elements_from_surface`;
-/// the memberless root-classified fallback stamps `false`) — proving the
-/// projection genuinely RAN before its `native_props` emptiness is asserted.
+/// native rail the cold resolver consumes: it must return `Some([])`; a miss
+/// returns `None` and fails the test.
 #[test]
 fn native_props_empty_for_call_signature_only_imported_type() {
     let project = make_project();
@@ -1878,18 +1874,15 @@ defineEmits<Events>()
     // `native_props`, and the emit rides the independent `vue_macro_dtos`
     // path). Drive the SAME macro-elements rail the cold resolver consumes
     // and require the projection to have RESOLVED: a miss returns `None`
-    // and fails the expect; a memberless ROOT-CLASSIFIED (non-surface)
-    // resolution stamps `has_call_signature = false` and fails the
-    // call-signature assert. Only the genuine one-level surface projection
-    // (`macro_elements_from_surface` under `NativeProjection::Include`)
-    // produces `Some` + `has_call_signature = true` — whose member loop
-    // over the empty member set is what must yield zero native rows.
+    // and fails the expect. The object surface is authoritative even though
+    // its member loop is empty because it contains only a call signature.
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut elements_cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut elements_cache =
+        crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let resolution = project
         .host()
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/App.vue",
             "./events",
             "Events",
@@ -1903,17 +1896,10 @@ defineEmits<Events>()
              cold resolver's empty fallback arm",
         );
     assert!(
-        resolution.elements.has_call_signature,
-        "the resolved elements must carry the call signature, proving the \
-         one-level surface projection ran (the memberless root-classified \
-         fallback stamps has_call_signature = false)"
-    );
-    assert!(
-        resolution.native_props.is_empty(),
+        resolution.is_empty(),
         "the RESOLVED projection's member loop over the empty member set \
          must produce ZERO native_props rows, got: {:?}",
         resolution
-            .native_props
             .iter()
             .map(|prop| prop.name.as_str())
             .collect::<Vec<_>>()
@@ -4325,8 +4311,8 @@ defineProps<Slots>()
         )
         .unwrap();
 
-    let meta = project
-        .host()
+    let host = project.host();
+    let meta = host
         .get_component_meta("/App.vue")
         .expect("should return component meta");
 
@@ -4336,6 +4322,25 @@ defineProps<Slots>()
         "re-exported imported typeof member paths should resolve through final component meta: {:?}",
         prop_names
     );
+
+    // Namespace aliases identify modules, while the qualified member
+    // identifies the exported declaration. Treating `ThemeNs` as an ordinary
+    // named import misses, and stopping at the barrel loses the terminal
+    // source/name. Pin both halves alongside the final-meta assertion.
+    let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        host,
+        "/App.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        None,
+        "ThemeNs.sharedTheme",
+    )
+    .expect("the exact-owner namespace member must resolve through the barrel");
+    assert_eq!(resolved.canonical_id.as_ref(), "/inner.ts");
+    assert_eq!(
+        resolved.owner,
+        verter_type_expr::TopLevelOwnerId::ordinary_file()
+    );
+    assert_eq!(resolved.symbol_name.as_ref(), "theme");
 }
 
 #[test]
@@ -5224,10 +5229,18 @@ defineProps<Props>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let result1 = query_engine
-        .resolve_imported_registry_symbol("/src/types.ts", "Props")
+        .resolve_imported_registry_symbol(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        )
         .expect("Props should resolve from DB-backed prepared declarations");
     let result2 = query_engine
-        .resolve_imported_registry_symbol("/src/types.ts", "Props")
+        .resolve_imported_registry_symbol(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        )
         .expect("repeated resolution should stay stable");
 
     assert_eq!(
@@ -5278,7 +5291,11 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let resolved = query_engine
-        .resolve_imported_registry_symbol("/src/index.ts", "ButtonProps")
+        .resolve_imported_registry_symbol(
+            "/src/index.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ButtonProps",
+        )
         .expect("barrel export should resolve through DB-backed route facts");
 
     assert_eq!(
@@ -5786,7 +5803,6 @@ defineEmits<Emits>()
         host,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
-        &fallthrough.resolved_macros,
     );
     let resolved_type_registry =
         crate::resolver_core::component_meta_type_registry(&fallthrough.resolved_type_registry);
@@ -5892,7 +5908,6 @@ defineEmits<Emits>()
         host,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
-        &fallthrough.resolved_macros,
     );
     let resolved_type_registry =
         crate::resolver_core::component_meta_type_registry(&fallthrough.resolved_type_registry);
@@ -5921,6 +5936,154 @@ defineEmits<Emits>()
     );
 }
 
+// @ai-generated - Pins normalized macro DTO publication when declaration metadata is absent.
+#[test]
+fn component_meta_resolved_macros_reads_local_wrapper_dto_without_declaration_metadata() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"
+export interface BaseProps {
+  /** Inherited description. */
+  inherited?: string
+  undecorated?: number
+  /** Feature switch.
+   * @defaultValue true
+   */
+  enabled?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { BaseProps } from './base'
+
+export interface Props extends BaseProps {
+  /** Local description. */
+  local?: string
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let whole_hash = host
+        .current_or_read_whole_hash("/src/App.vue")
+        .expect("owner whole hash");
+    let state = host
+        .compute_component_meta_state("/src/App.vue", ProjectionMode::Expanded, whole_hash)
+        .expect("component-meta state");
+    assert!(
+        state.resolved_macros.is_empty(),
+        "the regression requires the optional declaration metadata sidecar to be absent"
+    );
+
+    // Declaration metadata is optional enrichment. Exact lexical ownership can
+    // legitimately leave this sidecar empty for a module-script declaration
+    // consumed by a setup-script macro; the snapshot macro index still owns one
+    // normalized typeinfo DTO.
+    let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        crate::resolver_core::component_meta_resolved_macros(
+            ctx,
+            "/src/App.vue",
+            state.snapshot.macros.as_ref(),
+        )
+    });
+
+    assert_eq!(inputs.len(), 1, "one snapshot macro owns one DTO input");
+    assert_eq!(inputs[0].macro_index, 0);
+    let prop = |name: &str| {
+        inputs[0]
+            .props
+            .iter()
+            .find(|prop| prop.field.name == name)
+            .unwrap_or_else(|| panic!("missing prop {name}"))
+    };
+    assert_eq!(
+        prop("inherited").field.description.as_deref(),
+        Some("Inherited description.")
+    );
+    assert_eq!(
+        prop("local").field.description.as_deref(),
+        Some("Local description.")
+    );
+    assert_eq!(prop("undecorated").field.description, None);
+    assert!(prop("undecorated").field.tags.is_empty());
+    assert_eq!(prop("enabled").field.tags.len(), 1);
+    assert_eq!(prop("enabled").field.tags[0].name, "defaultValue");
+    assert_eq!(prop("enabled").field.tags[0].text.as_deref(), Some("true"));
+}
+
+// @ai-generated - Pins deterministic one-row-per-index publication across multiple macros.
+#[test]
+fn component_meta_resolved_macros_preserves_snapshot_order_and_one_input_per_index() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface Props {
+  /** Prop description. */
+  label?: string
+}
+
+export interface Slots {
+  /** Slot description. */
+  default?: (props: { value: string }) => any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props, Slots } from './types'
+
+defineProps<Props>()
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let whole_hash = host
+        .current_or_read_whole_hash("/src/App.vue")
+        .expect("owner whole hash");
+    let state = host
+        .compute_component_meta_state("/src/App.vue", ProjectionMode::Expanded, whole_hash)
+        .expect("component-meta state");
+    let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        crate::resolver_core::component_meta_resolved_macros(
+            ctx,
+            "/src/App.vue",
+            state.snapshot.macros.as_ref(),
+        )
+    });
+
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|input| input.macro_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "snapshot order and one DTO input per macro index must be stable"
+    );
+    assert_eq!(inputs[0].props.len(), 1);
+    assert!(inputs[0].slots.is_empty());
+    assert_eq!(inputs[1].slots.len(), 1);
+    assert!(inputs[1].props.is_empty());
+}
+
 #[test]
 fn component_meta_query_engine_can_resolve_registry_symbols_filters_builtins() {
     let project = make_project();
@@ -5944,23 +6107,48 @@ defineProps<{ x: string }>()
 
     // Built-in names should NOT be resolvable
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Partial", None),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Partial",
+            None,
+        ),
         "Partial is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Array", None),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Array",
+            None,
+        ),
         "Array is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Record", None),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Record",
+            None,
+        ),
         "Record is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        query_engine.can_resolve_registry_symbol("/src/App.vue", "Props", Some("/src/types.ts")),
+        query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+            Some("/src/types.ts"),
+        ),
         "imported registry refs should resolve from DB-backed prepared declarations"
     );
     assert!(
-        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Missing", Some("/src/types.ts")),
+        !query_engine.can_resolve_registry_symbol(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Missing",
+            Some("/src/types.ts"),
+        ),
         "missing imported registry refs should still report unresolved"
     );
 }
@@ -5969,14 +6157,22 @@ defineProps<{ x: string }>()
 fn local_type_declaration_id_ignores_import_bindings_from_indexed_ready() {
     let project = make_project();
     project
-        .upsert_base("/src/types.ts", "export interface Props { msg: string }")
+        .upsert_base(
+            "/src/types.ts",
+            "export interface Props { msg: string }\nexport interface Shared { remote: string }",
+        )
         .unwrap();
     project
         .upsert_base(
             "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { Props } from './types'
+            r#"<script lang="ts">
+type Shared = { local: string }
+type Duplicate = { module: string }
+</script>
+<script setup lang="ts">
+import type { Props, Shared } from './types'
 type Local = { count: number }
+type Duplicate = { setup: string }
 defineProps<Props>()
 </script>
 <template><div /></template>"#,
@@ -5995,6 +6191,16 @@ defineProps<Props>()
         host.local_type_declaration_id("/src/App.vue", "Local")
             .is_some(),
         "owner-local declarations should still resolve through the cached eval env",
+    );
+    assert!(
+        host.local_type_declaration_id("/src/App.vue", "Shared")
+            .is_some(),
+        "an import in the setup owner must not hide the same-named declaration in the module owner",
+    );
+    assert!(
+        host.local_type_declaration_id("/src/App.vue", "Duplicate")
+            .is_none(),
+        "owner-agnostic declaration-id lookup must fail closed when multiple lexical owners declare the same type name",
     );
 }
 
@@ -6151,7 +6357,7 @@ defineProps<TreeNode>()
 // Dispatch substitution spike (#1).
 //
 // A black-box dispatch test (it uses NO instrumentation hooks): it
-// validates that `dispatch.lower_type_expr_in_scope` + `ProjectPath`
+// validates that owner-exact dispatch lowering + `ProjectPath`
 // projection + `raise_node_to_type_expr` substitute the
 // script-setup-generic `T` when given the parent macro shell `Props<T>`
 // directly.
@@ -6170,7 +6376,7 @@ defineProps<TreeNode>()
 // the spike's non-discriminating `pre_lower_count > 0`.
 // ===========================================================================
 
-/// Spike #1: validates that `dispatch.lower_type_expr_in_scope` +
+/// Spike #1: validates that owner-exact dispatch lowering +
 /// `ProjectPath` projection + `raise_node_to_type_expr` correctly
 /// substitute the script-setup-generic `T` when given the parent
 /// macro shell `Props<T>` directly.
@@ -6232,7 +6438,12 @@ defineProps<Props<T>>()
         }]),
     };
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/Generic.vue", &props_t, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/Generic.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &props_t,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower the Props<T> shell rooted at /Generic.vue");
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -6399,9 +6610,11 @@ defineProps<Wrapper<Inner>>()
 // These tests bypass `materialize_component_meta_type_expr_until_stable_full`
 // (which currently runs both the legacy walker and dispatch and falls back
 // to the legacy result for the three fixtures below). Each test calls
-// dispatch's `lower_type_expr_in_scope_with_mode` + `raise_and_reduce` (or
-// `execute(ProjectPath)` + `raise_node_to_type_expr`) directly so the
-// failure isolates the dispatch substitution gap.
+// dispatch's lowering + `raise_and_reduce` (or `execute(ProjectPath)` +
+// `raise_node_to_type_expr`) directly so the failure isolates the dispatch
+// substitution gap. SFC script-setup fixtures lower through the owner-exact
+// entry with `Instance(0)`; the owner-agnostic entry intentionally selects
+// the ordinary-file `Module(0)` scope and cannot see setup-local imports.
 //
 // Pre-Step-1.5: each of these three tests fails — dispatch's reduction
 // surface returns `IndexedAccess { object: Opaque(Miss), … }` for Pick
@@ -6484,7 +6697,12 @@ defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
     };
 
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/src/App.vue", &expr, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &expr,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower IndexedAccess<ButtonHTMLAttributes, 'type'> at /src/App.vue");
 
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
@@ -6631,7 +6849,12 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     };
 
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &macro_shell,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
@@ -6834,7 +7057,12 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     };
 
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &macro_shell,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
 
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
@@ -7592,7 +7820,8 @@ defineProps<FixedProps | BubbleProps>()
 #[test]
 fn dispatch_aliased_conditional_emits_branch_merge() {
     use crate::meta_resolve::projectors::{
-        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+        resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope,
+        PayloadSurfaceScope,
     };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
@@ -7628,7 +7857,12 @@ defineEmits<ConditionalEmits>()
         type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
     };
     let payload_node = dispatch
-        .lower_type_expr_in_scope_with_mode(scope, &conditional_ref, ProjectionMode::Navigate)
+        .lower_type_expr_in_owner_scope_with_mode(
+            scope,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &conditional_ref,
+            ProjectionMode::Navigate,
+        )
         .expect("ConditionalEmits must lower to a Navigate carrier node");
 
     // Pre-condition: the payload is a carrier (NOT a bare Conditional),
@@ -7642,6 +7876,15 @@ defineEmits<ConditionalEmits>()
          be a CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional — that is \
          the shape the carrier walk must follow"
     );
+
+    let mut carrier_visited = rustc_hash::FxHashSet::default();
+    let conditional_root =
+        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
+            .expect("the named emit alias carrier must reach its conditional root");
+    assert!(matches!(
+        crate::project_semantic_dispatch::node_data_for(host, conditional_root).as_deref(),
+        Some(SemanticNodeData::Conditional { .. })
+    ));
 
     let mut diag_sink = Vec::new();
     let surface = resolve_payload_surface_with_scope(
@@ -7694,7 +7937,8 @@ defineEmits<ConditionalEmits>()
 #[test]
 fn dispatch_long_alias_chain_to_conditional_emits_branch_merge() {
     use crate::meta_resolve::projectors::{
-        resolve_payload_surface_with_scope, PayloadSurfaceScope,
+        resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope,
+        PayloadSurfaceScope,
     };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, SemanticNodeData};
@@ -7740,7 +7984,12 @@ defineEmits<EmitChain0>()
         type_arguments: std::sync::Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
     };
     let payload_node = dispatch
-        .lower_type_expr_in_scope_with_mode(scope, &chain_head_ref, ProjectionMode::Navigate)
+        .lower_type_expr_in_owner_scope_with_mode(
+            scope,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &chain_head_ref,
+            ProjectionMode::Navigate,
+        )
         .expect("EmitChain0 must lower to a Navigate carrier node");
 
     // Precondition: the chain head is a carrier (NOT a bare Conditional),
@@ -7754,6 +8003,15 @@ defineEmits<EmitChain0>()
         "fixture precondition: the Navigate-lowered chain head must be a \
          CARRIER (DeclRef/DeclPlaceholder), not a bare Conditional"
     );
+
+    let mut carrier_visited = rustc_hash::FxHashSet::default();
+    let conditional_root =
+        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
+            .expect("the >8-hop named emit alias carrier must reach its conditional root");
+    assert!(matches!(
+        crate::project_semantic_dispatch::node_data_for(host, conditional_root).as_deref(),
+        Some(SemanticNodeData::Conditional { .. })
+    ));
 
     let mut diag_sink = Vec::new();
     let surface = resolve_payload_surface_with_scope(
@@ -7917,6 +8175,7 @@ mod node_predicates_tests {
     fn synthetic_decl_identity(decl_name: &str) -> DeclIdentity {
         DeclIdentity {
             canonical_id: StdArc::from("/test/local.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(decl_name),
         }
@@ -7925,6 +8184,7 @@ mod node_predicates_tests {
     fn package_decl_identity(decl_name: &str) -> DeclIdentity {
         DeclIdentity {
             canonical_id: StdArc::from("/repo/node_modules/some-pkg/index.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(decl_name),
         }
@@ -7937,6 +8197,7 @@ mod node_predicates_tests {
         // route branch so userland shadowing is preserved.
         DeclIdentity {
             canonical_id: StdArc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(name),
         }
@@ -7971,6 +8232,7 @@ mod node_predicates_tests {
         // the registry-route branch to fire.
         let pick_builtin = DeclIdentity {
             canonical_id: StdArc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from("Pick"),
         };
@@ -8288,6 +8550,7 @@ defineProps<{ value: A }>()
             .expect("cycle.ts must be indexed");
         let a_identity = DeclIdentity {
             canonical_id: StdArc::from(cycle_canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             decl_name: StdArc::from("A"),
         };
@@ -9179,7 +9442,7 @@ const model = defineModel<string>()
         "fixture precondition: `defineModel<string>()` is a type-based model macro"
     );
 
-    let owner = build_owner_decl_identity(host, "/src/App.vue");
+    let owner = build_owner_decl_identity(host, "/src/App.vue", mac.owner);
 
     // A non-`Model` cursor (here `Props`) MUST be rejected by the kind check —
     // `project_model` returns `None` without publishing the model surface under

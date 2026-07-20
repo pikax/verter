@@ -2,15 +2,32 @@
 
 use super::*;
 
+fn props_runtime(
+    props: Vec<crate::test_helpers::RuntimePropSpec>,
+) -> std::sync::Arc<verter_macro_dto::MacroRuntimeBundle> {
+    crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        props,
+    )])
+}
+
 // ── Conditional root narrowing tests ─────────────────────────
 
 #[test]
 fn narrowing_bare_prop() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "foo",
+        true,
+        [verter_macro_dto::RuntimeConstructor::Boolean],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts">
 defineProps<{foo?: boolean}>()
 </script>
 <template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+        &runtime,
     );
     // Positive: getRootComponent should have T_foo generic
     assert!(
@@ -38,11 +55,24 @@ defineProps<{foo?: boolean}>()
 
 #[test]
 fn narrowing_multi_prop_chain() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![
+        crate::test_helpers::runtime_prop(
+            "foo",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Boolean],
+        ),
+        crate::test_helpers::runtime_prop(
+            "s",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        ),
+    ]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts">
 defineProps<{foo?: boolean, s?: 'foo' | 'bar'}>()
 </script>
 <template><div v-if="foo">A</div><span v-else-if="s === 'foo'">B</span><canvas v-else-if="s === 'bar'">C</canvas><input v-else /></template>"#,
+        &runtime,
     );
     // Positive: two generics
     assert!(code.contains("T_foo extends"), "should have T_foo: {code}");
@@ -64,11 +94,17 @@ defineProps<{foo?: boolean, s?: 'foo' | 'bar'}>()
 
 #[test]
 fn narrowing_negated() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "disabled",
+        true,
+        [verter_macro_dto::RuntimeConstructor::Boolean],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts">
 defineProps<{disabled?: boolean}>()
 </script>
 <template><div v-if="!disabled">A</div><span v-else>B</span></template>"#,
+        &runtime,
     );
     // Negated: T_disabled extends false means "!disabled is true"
     assert!(
@@ -118,11 +154,17 @@ defineProps<{show?: boolean, count?: number}>()
 
 #[test]
 fn narrowing_appends_to_existing_generics() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "show",
+        false,
+        [verter_macro_dto::RuntimeConstructor::Boolean],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts" generic="T extends string">
 defineProps<{show: boolean}>()
 </script>
 <template><div v-if="show">A</div><span v-else>B</span></template>"#,
+        &runtime,
     );
     // Should have both T (existing) and T_show (narrowing)
     assert!(
@@ -138,11 +180,17 @@ defineProps<{show: boolean}>()
 
 #[test]
 fn narrowing_triple_same_prop() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "m",
+        true,
+        [verter_macro_dto::RuntimeConstructor::String],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts">
 defineProps<{m?: 'a' | 'b' | 'c'}>()
 </script>
 <template><div v-if="m === 'a'">A</div><span v-else-if="m === 'b'">B</span><p v-else>C</p></template>"#,
+        &runtime,
     );
     // Single generic T_m for same prop across branches
     assert!(
@@ -155,13 +203,19 @@ defineProps<{m?: 'a' | 'b' | 'c'}>()
 
 #[test]
 fn narrowing_component_roots() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "variant",
+        true,
+        [verter_macro_dto::RuntimeConstructor::String],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts">
 import MyComp from './MyComp.vue'
 import OtherComp from './OtherComp.vue'
 defineProps<{variant?: 'primary' | 'secondary'}>()
 </script>
 <template><MyComp v-if="variant === 'primary'" /><OtherComp v-else /></template>"#,
+        &runtime,
     );
     assert!(
         code.contains("T_variant extends"),
@@ -175,12 +229,18 @@ defineProps<{variant?: 'primary' | 'secondary'}>()
 
 #[test]
 fn narrowing_mixed_native_component() {
-    let code = gen_tsx_script_narrowing(
+    let runtime = props_runtime(vec![crate::test_helpers::runtime_prop(
+        "simple",
+        true,
+        [verter_macro_dto::RuntimeConstructor::Boolean],
+    )]);
+    let code = gen_tsx_script_narrowing_with_runtime(
         r#"<script setup lang="ts">
 import MyComp from './MyComp.vue'
 defineProps<{simple?: boolean}>()
 </script>
 <template><div v-if="simple">A</div><MyComp v-else /></template>"#,
+        &runtime,
     );
     assert!(
         code.contains("T_simple extends"),
@@ -307,6 +367,7 @@ function handleClick(event) {}
         scope_id: "data-v-abc123",
         has_scoped_style: false,
         runtime_module_name: "vue",
+        macro_runtime: None,
         types_module_name: "@verter/types",
         is_vapor: false,
         embed_ambient_types: true,

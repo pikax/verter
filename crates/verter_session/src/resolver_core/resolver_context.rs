@@ -11,15 +11,10 @@
 //!
 //! ## Why a separate trait (not super-trait composition)
 //!
-//! Several existing domain traits — `ComponentMetaResolverHost`,
-//! `ComponentMetaRequestHost`, `FallthroughResolverHost`,
-//! `FallthroughComputeHost`, `FallthroughRequestHost`,
-//! `ExternalMacroTypeCollectorHost`, `FrontierHost`,
-//! `DeclarationMetadataResolver` — use **associated types** in method
-//! positions (`Snapshot`, `EvalContext`, `View`, `Mode`, `ChildResolution`,
-//! `Resolution`, `Error`). A trait with non-dyn-compatible super-traits
-//! inherits non-dyn-compatibility, so `&dyn ResolverContext` would not
-//! compile if any of these were super-traits. The cascade concern that
+//! Several domain traits use **associated types** in method positions. A
+//! trait with non-dyn-compatible super-traits inherits non-dyn-compatibility,
+//! so `&dyn ResolverContext` would not compile if any of them were
+//! super-traits. The cascade concern that
 //! motivated super-trait composition was a phantom: every `engine.host` /
 //! `query_engine.host` callsite in the seal scope passes concrete
 //! `&VerterHost` to **concrete-parameter functions** (e.g.,
@@ -52,8 +47,8 @@
 //!   analysis or prepared-decl state delivers a cache-owned `Arc<T>`. No
 //!   raw source is exposed.
 //! - **Macro Type Traversal Rule:** symbol-graph walks happen through
-//!   `resolve_named_type_export_target` / `resolve_imported_type_root`,
-//!   never through ad-hoc parsing.
+//!   `resolve_named_type_export_target_shallow` /
+//!   `resolve_imported_type_root`, never through ad-hoc parsing.
 //! - **Authority Chain:** workspace mutators are NOT exposed; the trait
 //!   exposes only the narrow ambient capabilities required by
 //!   `ambient_resolve.rs` (`lookup_ambient_symbol`,
@@ -66,16 +61,15 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 
-use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::{IndexedReady, ProjectTypeStore};
 use crate::resolver_core::fact_tracer_tls;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::ValueDeclIdentity;
 use crate::resolver_core::{FactVersionRef, ShallowFileState};
 use crate::resolver_store::HostStoreView;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
@@ -161,10 +155,8 @@ impl MaterializeScopeObservation {
 /// state at runtime. It is a **flat trait** with no super-traits — see
 /// the module-level rationale.
 ///
-/// Visibility is `pub(crate)` because the trait references
-/// `ValueDeclIdentity` which is itself `pub(crate)`; a `pub` trait would
-/// trip clippy's `private_interfaces` lint. is purely an
-/// internal seal — no external integrators construct
+/// Visibility is `pub(crate)` because this is purely an internal seal — no
+/// external integrators construct
 /// `&dyn ResolverContext`.
 pub(crate) trait ResolverContext: sealed::Sealed {
     // -------- Identity --------------------------------------------
@@ -188,6 +180,28 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         false
     }
 
+    /// Cancellation authority for the current semantic execution. A
+    /// scheduler-owned aggregate token with registered owners takes precedence
+    /// over the request token so cancelling one singleflight waiter never
+    /// poisons a live sibling's shared compute. Ordinary ownerless DAG stages
+    /// fall back to their installed request token.
+    fn cancellation_token(&self) -> Option<verter_scheduler::cancellation::CancellationToken> {
+        let job = verter_scheduler::cancellation::current_job_cancellation_token();
+        if job
+            .as_ref()
+            .is_some_and(|token| token.has_registered_owners())
+        {
+            return job;
+        }
+        crate::request_context::current_request_cancellation_token().or(job)
+    }
+
+    /// Cheap cancellation checkpoint used at semantic dispatch/work charges.
+    fn is_cancelled(&self) -> bool {
+        self.cancellation_token()
+            .is_some_and(|token| token.is_cancelled())
+    }
+
     // -------- Cache accessors --------------------------------------
 
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>>;
@@ -195,12 +209,43 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn prepared_type_decl(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedTypeDecl>>;
+    ) -> Result<
+        Option<Arc<PreparedTypeDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    >;
+
+    /// Consume a typed preparation failure as a ReturnOnly absence at an
+    /// Option-shaped semantic boundary. The failure stays explicit through
+    /// [`Self::prepared_type_decl`]; this adapter is the sole lossy boundary
+    /// and taints every enclosing cacheability scope before returning `None`.
+    fn prepared_type_decl_return_only(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Option<Arc<PreparedTypeDecl>> {
+        match self.prepared_type_decl(canonical_id, owner, symbol_name) {
+            Ok(decl) => decl,
+            Err(failure) => {
+                note_non_cacheable_read_fan_out(NonCacheableReadReason::PreparationFailure);
+                tracing::error!(
+                    canonical_id,
+                    ?owner,
+                    symbol_name,
+                    ?failure,
+                    "prepared type declaration failed; serving ReturnOnly absence"
+                );
+                None
+            }
+        }
+    }
 
     fn prepared_value_decl(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>>;
 
@@ -219,9 +264,6 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe>;
 
     fn ensure_loaded(&self, canonical_id: &str) -> bool;
-
-    fn external_type_analysis(&self, canonical_id: &str)
-        -> Option<Arc<AnalyzedExternalTypeSource>>;
 
     fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
 
@@ -397,7 +439,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String);
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>;
 
     /// Like [`Self::resolve_imported_type_root`] but ALSO returns the full
     /// route-chain fact list the resolution observed (every barrel /
@@ -413,15 +455,9 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     );
-
-    fn resolve_named_type_export_target(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<(String, String)>;
 
     fn resolve_named_type_export_target_shallow(
         &self,
@@ -456,6 +492,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     fn resolve_type_declaration_for_dep(
         &self,
         dep_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration;
 
@@ -783,21 +820,26 @@ impl ResolverContext for crate::VerterHost {
     fn prepared_type_decl(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> Result<
+        Option<Arc<PreparedTypeDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
         #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::prepared_type_decl_with_store_view(
+            crate::VerterHost::prepared_type_decl_in_with_store_view(
                 self,
                 &view,
                 canonical_id,
+                owner,
                 symbol_name,
             )
         }
         #[cfg(not(any(test, feature = "test-support")))]
         {
-            let _ = (canonical_id, symbol_name);
+            let _ = (canonical_id, owner, symbol_name);
             panic!(
                 "Architectural violation: bare-host prepared_type_decl called from \
                  production; construct HostResolverContext at the request entry"
@@ -809,21 +851,23 @@ impl ResolverContext for crate::VerterHost {
     fn prepared_value_decl(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
         #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::prepared_value_decl_with_store_view(
+            crate::VerterHost::prepared_value_decl_in_with_store_view(
                 self,
                 &view,
                 canonical_id,
+                owner,
                 symbol_name,
             )
         }
         #[cfg(not(any(test, feature = "test-support")))]
         {
-            let _ = (canonical_id, symbol_name);
+            let _ = (canonical_id, owner, symbol_name);
             panic!(
                 "Architectural violation: bare-host prepared_value_decl called from \
                  production; construct HostResolverContext at the request entry"
@@ -842,14 +886,6 @@ impl ResolverContext for crate::VerterHost {
     #[inline]
     fn ensure_loaded(&self, canonical_id: &str) -> bool {
         crate::VerterHost::ensure_loaded(self, canonical_id)
-    }
-
-    #[inline]
-    fn external_type_analysis(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<AnalyzedExternalTypeSource>> {
-        crate::VerterHost::external_type_analysis(self, canonical_id)
     }
 
     #[inline]
@@ -950,7 +986,7 @@ impl ResolverContext for crate::VerterHost {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String) {
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         // Bare-host arm: in production, reaching this means a
         // request-bound caller missed plumbing. Tests still route
         // through the `#[cfg(test)]` arm via the one-shot owned-view
@@ -983,7 +1019,7 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         // Bare-host arm: mirrors `resolve_imported_type_root` above — a
@@ -1006,32 +1042,6 @@ impl ResolverContext for crate::VerterHost {
                 "Architectural violation: bare-host resolve_imported_type_root_with_facts called \
                  from production; construct HostResolverContext::new(host, &view, overlay) at the \
                  request entry and route through `ctx.resolve_imported_type_root_with_facts`"
-            );
-        }
-    }
-
-    #[inline]
-    fn resolve_named_type_export_target(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<(String, String)> {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::resolve_named_type_export_target_with_store_view(
-                self,
-                &view,
-                dep_canonical,
-                requested_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (dep_canonical, requested_name);
-            panic!(
-                "Architectural violation: bare-host resolve_named_type_export_target called \
-                 from production; construct HostResolverContext at the request entry"
             );
         }
     }
@@ -1109,12 +1119,13 @@ impl ResolverContext for crate::VerterHost {
     fn resolve_type_declaration_for_dep(
         &self,
         dep_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
         // Bare-host arm. The internal walker constructs a
         // `HostComponentMetaResolver` over a `ctx` reference; passing
-        // `self` (bare host) would route the walker's
-        // `ctx.resolve_named_type_export_target(...)` etc. through the
+        // `self` (bare host) would route the walker's request-bound methods
+        // through the
         // panic-shimmed bare-host trait impl. Tests perform the
         // one-shot owned-view rebuild via `_with_context(host, self)`;
         // production callers go through
@@ -1127,12 +1138,13 @@ impl ResolverContext for crate::VerterHost {
                 self,
                 self,
                 dep_canonical,
+                owner,
                 requested_name,
             )
         }
         #[cfg(not(any(test, feature = "test-support")))]
         {
-            let _ = (dep_canonical, requested_name);
+            let _ = (dep_canonical, owner, requested_name);
             panic!(
                 "Architectural violation: bare-host resolve_type_declaration_for_dep called \
                  from production; construct HostResolverContext at the request entry"
@@ -1239,6 +1251,17 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionR
     fact_tracer_tls::observe_fan_out_borrowed(sig);
 }
 
+/// Whether any fact tracer is installed on the current thread's stack.
+///
+/// A cheap early-out for observation producers whose FACT DERIVATION has a
+/// non-trivial cost (a predicate check, a hash derivation, an owned
+/// canonical clone): with no active tracer the observation would be a
+/// no-op, so the producer skips the derivation entirely.
+#[inline]
+pub(crate) fn fact_tracer_installed() -> bool {
+    fact_tracer_tls::current_tracer().is_some()
+}
+
 /// A typed reason a read was NON-CACHEABLE — the discriminant a marking
 /// site passes to [`note_non_cacheable_read_fan_out`].
 ///
@@ -1266,6 +1289,13 @@ pub(crate) enum NonCacheableReadReason {
     /// key the read served from is unavailable, so the result cannot be
     /// fact-rooted.
     UnobservableSource,
+    /// A local semantic-inference safety budget stopped before producing an
+    /// authoritative declaration result.
+    InferenceBudgetExceeded,
+    /// Declaration preparation failed with a typed structural failure. The
+    /// failed slot remains vacant and any Option-shaped caller may serve the
+    /// failure only as ReturnOnly; it must never publish it as real absence.
+    PreparationFailure,
 }
 
 impl NonCacheableReadReason {
@@ -1278,7 +1308,9 @@ impl NonCacheableReadReason {
             Self::FencedServe
             | Self::LeaseMiss
             | Self::UnrootableRoute
-            | Self::UnobservableSource => super::fact_read_set::NonCacheablePropagation::Transitive,
+            | Self::UnobservableSource
+            | Self::InferenceBudgetExceeded
+            | Self::PreparationFailure => super::fact_read_set::NonCacheablePropagation::Transitive,
         }
     }
 }

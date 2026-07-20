@@ -31,8 +31,11 @@ fn production_relation_admission_is_semantic_store_owned() {
         "the production relation write must be private"
     );
 }
-use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId};
+use crate::semantic_query::{
+    DeclIdentity, DepVersion, PrimitiveKind, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId,
+};
 use crate::{HostConfig, VerterHost};
+use verter_type_expr::TopLevelOwnerId;
 
 /// A standalone host used purely as a
 /// [`crate::resolver_core::ResolverContext`] for the strict warm-read
@@ -53,6 +56,7 @@ fn ctx_host() -> VerterHost {
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
         canonical_id: Arc::from(canonical),
+        owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
     }
 }
@@ -142,6 +146,7 @@ fn intern_dedups_structural_values_across_contexts() {
         SemanticNodeData::Primitive(PrimitiveKind::Number),
         NodeScopeId::File {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             local_scope: None,
         },
@@ -151,6 +156,122 @@ fn intern_dedups_structural_values_across_contexts() {
         "cross-scope same-payload interns must stay distinct — C7 \
          preserves the scope disambiguation axis",
     );
+}
+
+/// Owner is a semantic identity axis, not presentation metadata. The same
+/// payload at the same canonical/hash/local scope must intern separately when
+/// its authored module/instance owner differs; an ordinary-file control still
+/// deduplicates.
+#[test]
+fn intern_identity_discriminates_top_level_owner() {
+    let store = SemanticGraphStore::new();
+    let scope = |owner| NodeScopeId::File {
+        canonical_id: Arc::from("/w/Component.vue"),
+        owner,
+        whole_hash: [7u8; 16],
+        local_scope: None,
+    };
+    let payload = SemanticNodeData::Primitive(PrimitiveKind::Number);
+
+    let module = store.intern_node_with_scope(payload.clone(), scope(TopLevelOwnerId::module(0)));
+    let instance =
+        store.intern_node_with_scope(payload.clone(), scope(TopLevelOwnerId::instance(0)));
+    let ordinary_first =
+        store.intern_node_with_scope(payload.clone(), scope(TopLevelOwnerId::ordinary_file()));
+    let ordinary_second =
+        store.intern_node_with_scope(payload, scope(TopLevelOwnerId::ordinary_file()));
+
+    assert_ne!(
+        module, instance,
+        "module and instance scopes must not alias"
+    );
+    assert_eq!(
+        module, ordinary_first,
+        "ordinary files are explicitly Module(0)"
+    );
+    assert_eq!(ordinary_first, ordinary_second);
+    assert_eq!(store.node_count(), 2);
+}
+
+/// Declaration payload identity and content-free slot identity both retain
+/// owner. Removing either owner field makes module/instance declarations with
+/// the same canonical/name/space collide before they reach the memo.
+#[test]
+fn declaration_and_slot_identity_discriminate_top_level_owner() {
+    let decl = |owner| DeclIdentity {
+        canonical_id: Arc::from("/w/Component.vue"),
+        owner,
+        whole_hash: [9u8; 16],
+        decl_name: Arc::from("Shared"),
+    };
+    let module_decl = decl(TopLevelOwnerId::module(0));
+    let instance_decl = decl(TopLevelOwnerId::instance(0));
+    assert_ne!(module_decl, instance_decl);
+
+    let slot = |owner| {
+        ResolvedDeclSlotIdentity::type_slot(
+            Arc::from("/w/Component.vue"),
+            owner,
+            Arc::from("Shared"),
+            3,
+            [4u8; 16],
+            [5u8; 16],
+        )
+    };
+    let module_slot = slot(TopLevelOwnerId::module(0));
+    let instance_slot = slot(TopLevelOwnerId::instance(0));
+    assert_ne!(module_slot, instance_slot);
+
+    let mut declarations = std::collections::HashMap::new();
+    declarations.insert(module_decl, "module");
+    declarations.insert(instance_decl, "instance");
+    assert_eq!(declarations.len(), 2);
+
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(module_slot, "module");
+    slots.insert(instance_slot, "instance");
+    assert_eq!(slots.len(), 2);
+}
+
+/// The file-scope owner survives family-key projection. Flipping only the
+/// authored owner must allocate a second warm memo entry and execute a second
+/// cold build; repeating the exact owner is a warm hit.
+#[test]
+fn resolve_decl_memo_key_discriminates_top_level_owner() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let key = |owner| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/w/Component.vue"),
+                owner,
+                local_scope: None,
+            },
+            name: Arc::from("Shared"),
+        })
+    };
+    let module = key(TopLevelOwnerId::module(0));
+    let instance = key(TopLevelOwnerId::instance(0));
+    let mut builds = 0usize;
+
+    for query in [module.clone(), instance, module] {
+        let _ = store.execute_cooperative(
+            &host,
+            query,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                builds += 1;
+                let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(node), empty_signature())
+            },
+        );
+    }
+
+    assert_eq!(
+        builds, 2,
+        "owner flip must miss; exact-owner repeat must hit"
+    );
+    assert_eq!(store.memo_entry_count(), 2);
 }
 
 #[test]
@@ -236,6 +357,7 @@ fn intern_typeparam_display_name_excluded_from_identity() {
     let mk = |display: &str| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [3u8; 16],
             decl_name: Arc::from("T"),
         },
@@ -266,6 +388,7 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
     let scope_global = NodeScopeId::Global;
     let scope_file = NodeScopeId::File {
         canonical_id: Arc::from("/w/x.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
     };
@@ -762,7 +885,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     store.warm_publish_one(
         &host,
         &super::prepared::PreparedKeyHandle::prepare(key.clone()),
-        &QueryResult::Value(value),
+        &QueryResult::Value(SemanticQueryValue::TypeNode(value)),
         &walker_diagnostics,
         &carrier,
         &dep_sig,
@@ -971,11 +1094,13 @@ fn node_arena_invalidation_preserves_global_scope() {
     let whole_b: Hash16 = [2u8; 16];
     let scope_a = NodeScopeId::File {
         canonical_id: Arc::clone(&canonical_a),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_a,
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::clone(&canonical_b),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_b,
         local_scope: None,
     };
@@ -986,6 +1111,7 @@ fn node_arena_invalidation_preserves_global_scope() {
     let file_a_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: Arc::clone(&canonical_a),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_a,
             decl_name: Arc::from("Param_A"),
         },
@@ -997,6 +1123,7 @@ fn node_arena_invalidation_preserves_global_scope() {
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: Arc::clone(&canonical_b),
+            owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_b,
             decl_name: Arc::from("Param_B"),
         },
@@ -1443,7 +1570,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     store.warm_publish_one(
         &host,
         &super::prepared::PreparedKeyHandle::prepare(key_expanded),
-        &QueryResult::Value(value),
+        &QueryResult::Value(SemanticQueryValue::TypeNode(value)),
         &walker_diagnostics,
         &carrier,
         &empty_signature(),
@@ -4673,6 +4800,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     // `build_instantiate` result).
     let scope = NodeScopeId::File {
         canonical_id: Arc::from("/w/decl.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
     };
@@ -4697,6 +4825,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     // Multiple non-exempt nodes get independent sidecar slots.
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::from("/w/other.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [8u8; 16],
         local_scope: Some(3),
     };
@@ -4718,11 +4847,13 @@ fn node_scope_returns_origin_not_reader_scope() {
     let store = SemanticGraphStore::new();
     let scope_a = NodeScopeId::File {
         canonical_id: Arc::from("/w/a.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::from("/w/b.ts"),
+        owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: None,
     };
@@ -7814,6 +7945,7 @@ mod env_scoped_key_identity_guards {
         SurfaceProvenanceContext,
     };
     use std::sync::Arc;
+    use verter_type_expr::TopLevelOwnerId;
 
     fn empty_args() -> Arc<[SemanticNodeId]> {
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
@@ -7878,6 +8010,7 @@ mod env_scoped_key_identity_guards {
         let name: Arc<str> = Arc::from("Foo");
         let base_t = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -7888,6 +8021,7 @@ mod env_scoped_key_identity_guards {
         // type_env differs on the slot.
         let t2 = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [2u8; 16],
@@ -7902,6 +8036,7 @@ mod env_scoped_key_identity_guards {
         // lib_env differs on the slot.
         let l = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -7916,6 +8051,7 @@ mod env_scoped_key_identity_guards {
         // project_identity differs on the slot.
         let j = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             7,
             [1u8; 16],
@@ -7949,6 +8085,7 @@ mod env_scoped_key_identity_guards {
             inst_key(
                 ResolvedDeclSlotIdentity::type_slot(
                     Arc::clone(&canonical),
+                    TopLevelOwnerId::ordinary_file(),
                     Arc::clone(&name),
                     0,
                     t,
@@ -7987,6 +8124,7 @@ mod env_scoped_key_identity_guards {
         };
         let owner_t = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -7996,6 +8134,7 @@ mod env_scoped_key_identity_guards {
 
         let t2 = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [2u8; 16],
@@ -8009,6 +8148,7 @@ mod env_scoped_key_identity_guards {
 
         let l = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             0,
             [1u8; 16],
@@ -8027,6 +8167,7 @@ mod env_scoped_key_identity_guards {
         // the baseline slot and this assertion would fail.
         let j = ResolvedDeclSlotIdentity::type_slot(
             Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
             Arc::clone(&name),
             7,
             [1u8; 16],
@@ -8261,13 +8402,137 @@ mod env_scoped_key_identity_guards {
     ) -> crate::semantic_query::ValueRootSlotIdentity {
         crate::semantic_query::ValueRootSlotIdentity::new(
             crate::semantic_query::ValueRootKey {
-                scope: crate::semantic_query::ScopeId::file(Arc::clone(canonical)),
+                scope: crate::semantic_query::ScopeId::file(
+                    Arc::clone(canonical),
+                    TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::clone(name),
             },
             project_identity,
             type_env,
             lib_env,
         )
+    }
+
+    /// `VueHeritagePolicy` remains value-affecting after the runtime
+    /// publication demand demotes to `StructuralTransit`: both contexts use
+    /// the same transit mode slot, so every PRC-bearing family must carry the
+    /// policy in its family identity. The final ProjectPath exercise proves
+    /// this is real warm-read isolation, not only derived-key inequality.
+    #[test]
+    fn vue_heritage_policy_is_family_identity_for_every_projection_reduction_family() {
+        let host = super::ctx_host();
+        let store = super::SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let mapper = mapper_key(base);
+        let retained =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let suppressed = ProjectionReductionContext::vue_runtime_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        )
+        .into_structural_transit_with_mode(ProjectionMode::Navigate);
+
+        assert_eq!(retained.mode, suppressed.mode);
+        assert_eq!(retained.demand, suppressed.demand);
+        assert_eq!(retained.provenance, suppressed.provenance);
+        assert_eq!(retained.merge_role, suppressed.merge_role);
+        assert_ne!(
+            retained.vue_heritage_policy, suppressed.vue_heritage_policy,
+            "the demotion must preserve runtime heritage suppression as an orthogonal axis"
+        );
+
+        let canonical: Arc<str> = Arc::from("/vue-policy/source.ts");
+        let symbol: Arc<str> = Arc::from("Source");
+        let decl_slot = ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::clone(&canonical),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::clone(&symbol),
+        );
+        let instantiate = |context| {
+            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                decl_slot.clone(),
+                empty_args(),
+                InstantiateContext::non_file(
+                    context,
+                    [0; 16],
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
+            ))
+        };
+
+        let keyof = |context| SemanticQueryKey::KeyOf { base, context };
+        let mapped = |context| SemanticQueryKey::MappedType {
+            source: base,
+            mapper: mapper.clone(),
+            context,
+        };
+        let value_slot = value_root_slot(&canonical, &symbol, 0, [0; 16], [0; 16]);
+        let type_of = |context| typeof_key(value_slot.clone(), [0; 16], context);
+        let project_path = |context| SemanticQueryKey::ProjectPath {
+            base,
+            path: super::family_test_path(),
+            context,
+        };
+
+        let pairs = [
+            (instantiate(retained), instantiate(suppressed)),
+            (keyof(retained), keyof(suppressed)),
+            (mapped(retained), mapped(suppressed)),
+            (type_of(retained), type_of(suppressed)),
+            (project_path(retained), project_path(suppressed)),
+        ];
+        for (unfiltered, filtered) in &pairs {
+            let (unfiltered_family, unfiltered_slot) = family_and_slot(unfiltered);
+            let (filtered_family, filtered_slot) = family_and_slot(filtered);
+            assert_eq!(
+                unfiltered_slot, filtered_slot,
+                "policy must not invent another reduction-demand slot"
+            );
+            assert_ne!(
+                unfiltered_family, filtered_family,
+                "every PRC-bearing family must retain VueHeritagePolicy identity"
+            );
+        }
+
+        let unfiltered_key = project_path(retained);
+        let filtered_key = project_path(suppressed);
+        let unfiltered_value =
+            store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let filtered_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let first = store.execute_cooperative(
+            &host,
+            unfiltered_key,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(unfiltered_value),
+                    super::empty_signature(),
+                )
+            },
+        );
+        assert_value_node(first.value, unfiltered_value);
+
+        let mut filtered_build_ran = false;
+        let second = store.execute_cooperative(
+            &host,
+            filtered_key,
+            || store.intern_node(SemanticNodeData::Opaque(super::QueryError::Miss)),
+            || {
+                filtered_build_ran = true;
+                (QueryResult::Value(filtered_value), super::empty_signature())
+            },
+        );
+        assert!(
+            filtered_build_ran,
+            "filtered StructuralTransit must not warm-hit the unfiltered family"
+        );
+        assert_value_node(second.value, filtered_value);
+
+        // Mutation recipe: remove `vue_heritage_policy` from any FamilyKey
+        // variant or rebuild a demoted context from the default transit
+        // constructor; the corresponding equality/preservation assertion
+        // fails, and ProjectPath cross-serves the first warm value.
     }
 
     /// Two `TypeOf` queries over the SAME value root `(canonical, name)`
@@ -8462,13 +8727,18 @@ mod instantiate_body_source_family_identity {
         ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
     };
     use std::sync::Arc;
+    use verter_type_expr::TopLevelOwnerId;
 
     fn empty_args() -> Arc<[SemanticNodeId]> {
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
     }
 
     fn slot() -> ResolvedDeclSlotIdentity {
-        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/w/a.ts"), Arc::from("Foo"))
+        ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/w/a.ts"),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::from("Foo"),
+        )
     }
 
     fn inst_key(context: InstantiateContext) -> SemanticQueryKey {
@@ -8630,10 +8900,12 @@ mod lower_locator_family_identity {
     use verter_type_expr::locators::{
         AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
     };
+    use verter_type_expr::TopLevelOwnerId;
 
     fn slot() -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/w/a.ts"),
+            TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
             7,
             [3u8; 16],
@@ -8645,6 +8917,7 @@ mod lower_locator_family_identity {
         AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -8863,6 +9136,99 @@ fn transit_skeleton_warm_does_not_serve_published_skeleton_request() {
     );
 }
 
+/// Runtime-filtered Vue macro surfaces and ordinary macro/TSC surfaces are
+/// distinct evaluations. Publication demand selects dedicated non-backfilling
+/// slots, while the orthogonal policy also distinguishes their family identity
+/// so a later StructuralTransit demotion remains isolated.
+#[test]
+fn vue_runtime_surface_warm_never_serves_unfiltered_macro_surface() {
+    use super::family::{context_to_slot, slot_domain_siblings};
+    use crate::semantic_query::{ProjectionReductionContext, SurfaceProvenanceContext};
+
+    let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    let unfiltered_context = ProjectionReductionContext::macro_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    let runtime_slot = context_to_slot(runtime_context);
+    let unfiltered_slot = context_to_slot(unfiltered_context);
+    assert_ne!(
+        runtime_slot, unfiltered_slot,
+        "runtime-filtered and unfiltered macro demands must use distinct memo slots"
+    );
+    assert!(
+        slot_domain_siblings(runtime_slot).is_empty()
+            && slot_domain_siblings(unfiltered_slot).is_empty(),
+        "neither policy slot may backfill the other"
+    );
+
+    let key_for =
+        |base: SemanticNodeId, context: ProjectionReductionContext| SemanticQueryKey::ProjectPath {
+            base,
+            path: family_test_path(),
+            context,
+        };
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+
+    let runtime_base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let runtime_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let runtime_key = key_for(runtime_base, runtime_context);
+    let unfiltered_peer = key_for(runtime_base, unfiltered_context);
+    let runtime_read = store.execute_cooperative(
+        &host,
+        runtime_key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(runtime_value),
+                family_test_dep_signature(),
+            )
+        },
+    );
+    assert!(matches!(
+        runtime_read.value,
+        QueryResult::Value(id) if id == runtime_value
+    ));
+    assert!(store.get_unvalidated(&runtime_key).is_some());
+    assert!(
+        store.get_unvalidated(&unfiltered_peer).is_none(),
+        "a filtered runtime value must not warm-serve TSC/component-meta"
+    );
+
+    let unfiltered_base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let unfiltered_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let unfiltered_key = key_for(unfiltered_base, unfiltered_context);
+    let runtime_peer = key_for(unfiltered_base, runtime_context);
+    let unfiltered_read = store.execute_cooperative(
+        &host,
+        unfiltered_key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(unfiltered_value),
+                family_test_dep_signature(),
+            )
+        },
+    );
+    assert!(matches!(
+        unfiltered_read.value,
+        QueryResult::Value(id) if id == unfiltered_value
+    ));
+    assert!(store.get_unvalidated(&unfiltered_key).is_some());
+    assert!(
+        store.get_unvalidated(&runtime_peer).is_none(),
+        "an unfiltered macro value must not warm-serve runtime props/emits"
+    );
+
+    // Mutation recipe: route `VueRuntimeObjectSurface` to
+    // `MacroSurfaceShallow` (or add either slot as the other's sibling); the
+    // slot or warm-isolation assertion must fail.
+}
+
 /// Prepared-identity bijection guards (HARD CONDITION for the prepared
 /// dispatch token).
 ///
@@ -8888,19 +9254,20 @@ mod prepared_identity_bijection {
     use crate::locator_identity::{LocatorLoweringKey, ParseEnvHash, ResolveEnvHash};
     use crate::project_semantic_dispatch::BodySourceWitness;
     use crate::semantic_query::{
-        ApparentTypeContext, ClassSurfaceContext, ClassSurfaceSide, ContextualTypingKey,
-        EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey, InstantiateContext,
-        InstantiateKey, MacroPayloadContext, MapperKey, MapperKind, OptionalityMod,
-        OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId, ProjectionMode,
-        ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind, RelationPolicy,
-        ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId, SemanticQueryKey,
-        SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
+        ApparentTypeContext, BroadRuntimeContext, ClassSurfaceContext, ClassSurfaceSide,
+        ContextualTypingKey, EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey,
+        InstantiateContext, InstantiateKey, MacroPayloadContext, MapperKey, MapperKind,
+        OptionalityMod, OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId,
+        ProjectionMode, ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind,
+        RelationPolicy, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId,
+        SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
         SurfaceProvenanceContext, TemplateLiteralReduceContext, TypeOfContext, ValueRootKey,
         ValueRootSlotIdentity,
     };
     use verter_type_expr::locators::{
         AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
     };
+    use verter_type_expr::TopLevelOwnerId;
 
     fn h16(byte: u8) -> HashValue {
         [byte; 16]
@@ -8923,6 +9290,7 @@ mod prepared_identity_bijection {
     fn type_slot(name: &str) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/w/a.ts"),
+            TopLevelOwnerId::ordinary_file(),
             Arc::from(name),
             0,
             h16(0),
@@ -8957,7 +9325,7 @@ mod prepared_identity_bijection {
     fn value_root(name: &str) -> ValueRootSlotIdentity {
         ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: ScopeId::file(Arc::from("/w/a.ts")),
+                scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
                 name: Arc::from(name),
             },
             0,
@@ -8989,6 +9357,7 @@ mod prepared_identity_bijection {
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -9013,11 +9382,11 @@ mod prepared_identity_bijection {
         match tag {
             SemanticQueryKeyTag::ResolveDecl => (
                 SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                    scope: ScopeId::file(Arc::from("/w/a.ts")),
+                    scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
                     name: Arc::from("Foo"),
                 }),
                 SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                    scope: ScopeId::file(Arc::from("/w/a.ts")),
+                    scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
                     name: Arc::from("Bar"),
                 }),
             ),
@@ -9235,6 +9604,32 @@ mod prepared_identity_bijection {
                     type_args: nodes(&[]),
                     context: OverloadSetContext {
                         resolve_env_hash: h16(0),
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::ClassifyBroadRuntime => (
+                SemanticQueryKey::ClassifyBroadRuntime {
+                    subject: crate::locator_identity::BroadRuntimeSubjectLocator::payload(
+                        type_slot("__sfc"),
+                        0,
+                    ),
+                    context: BroadRuntimeContext {
+                        resolve_env_hash: h16(0),
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
+                },
+                SemanticQueryKey::ClassifyBroadRuntime {
+                    subject: crate::locator_identity::BroadRuntimeSubjectLocator::payload(
+                        type_slot("__sfc"),
+                        1,
+                    ),
+                    context: BroadRuntimeContext {
+                        resolve_env_hash: h16(0),
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
                     },
                 },
             ),

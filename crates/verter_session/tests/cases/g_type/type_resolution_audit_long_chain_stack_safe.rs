@@ -54,6 +54,7 @@ fn type_resolution_audit_long_chain_terminates_without_stack_overflow() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/chain.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("T0"),

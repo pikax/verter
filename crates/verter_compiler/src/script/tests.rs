@@ -65,30 +65,34 @@ fn gen_script<'a>(
     alloc: &'a Allocator,
     options: &ScriptCodeGenOptions<'_>,
 ) -> ScriptCodeGenResult<'a> {
-    gen_script_with_external(script, script_setup, source, ct, alloc, options, None)
-}
+    let prepared =
+        crate::script::prepared::PreparedScript::build(source, script, script_setup, alloc);
+    let result = generate_script(script, script_setup, &prepared, source, ct, alloc, options);
 
-/// Same as [`gen_script`] but with pre-resolved external types, as the host
-/// supplies them.
-fn gen_script_with_external<'a>(
-    script: Option<&RootNodeScript>,
-    script_setup: Option<&RootNodeScript>,
-    source: &'a str,
-    ct: &mut CodeTransform<'a>,
-    alloc: &'a Allocator,
-    options: &ScriptCodeGenOptions<'_>,
-    external_types: Option<
-        &rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements>,
-    >,
-) -> ScriptCodeGenResult<'a> {
-    let prepared = crate::script::prepared::PreparedScript::build(
-        source,
-        script,
-        script_setup,
-        alloc,
-        external_types,
-    );
-    generate_script(script, script_setup, &prepared, source, ct, alloc, options)
+    // Mirror the production compile pipeline: under force_js the whole-program
+    // body strip runs AFTER generate_script (compile/mod.rs), owning all TS
+    // removal (annotations, casts, generics, type-only imports, type decls).
+    // Running it here keeps these unit tests faithful to real output.
+    if !options.keep_ts_types {
+        if let Some(setup) = prepared.setup() {
+            crate::strip_types::typescript::strip_typescript_body_types(
+                setup.program(),
+                ct,
+                setup.content_start(),
+                setup.content_str(),
+            );
+        }
+        if let Some(companion) = prepared.companion() {
+            crate::strip_types::typescript::strip_typescript_types(
+                companion.program(),
+                ct,
+                companion.content_start(),
+                companion.content_str(),
+            );
+        }
+    }
+
+    result
 }
 
 // ── Test 1: No script blocks ──────────────────────────────────
@@ -974,7 +978,7 @@ fn define_model_replaces_with_use_model() {
 
     let output = ct.build_string();
     assert!(
-        output.contains("_useModel(__props, 'modelValue')"),
+        output.contains("_useModel(__props, \"modelValue\")"),
         "should replace defineModel with _useModel. output: {}",
         output
     );
@@ -1013,8 +1017,8 @@ fn define_model_named_replaces_with_use_model() {
 
     let output = ct.build_string();
     assert!(
-        output.contains("_useModel(__props, 'show')"),
-        "should replace defineModel('show') with _useModel(__props, 'show'). output: {}",
+        output.contains("_useModel(__props, \"show\")"),
+        "should replace defineModel('show') with a safely quoted _useModel call. output: {}",
         output
     );
     assert!(
@@ -1584,17 +1588,17 @@ fn multiple_define_model_deduplicates_imports() {
 
     // All three models should be replaced
     assert!(
-        output.contains("_useModel(__props, 'modelValue')"),
+        output.contains("_useModel(__props, \"modelValue\")"),
         "default model. output: {}",
         output
     );
     assert!(
-        output.contains("_useModel(__props, 'title')"),
+        output.contains("_useModel(__props, \"title\")"),
         "title model. output: {}",
         output
     );
     assert!(
-        output.contains("_useModel(__props, 'count')"),
+        output.contains("_useModel(__props, \"count\")"),
         "count model. output: {}",
         output
     );
@@ -1629,10 +1633,10 @@ fn async_setup_produces_async_wrapper() {
     );
 }
 
-// ── Test 34: withDefaults method shorthand produces valid arrow function ──
+// ── Test 34: withDefaults method shorthand remains valid method syntax ──
 
 #[test]
-fn with_defaults_method_shorthand_produces_arrow_function() {
+fn with_defaults_method_shorthand_produces_valid_default_method() {
     let alloc = Allocator::default();
     let content = r#"
 withDefaults(defineProps<{
@@ -1643,6 +1647,26 @@ withDefaults(defineProps<{
   color: 'primary'
 })
 "#;
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "validateOn",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Array],
+            ),
+            crate::test_helpers::runtime_prop(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -1654,21 +1678,23 @@ withDefaults(defineProps<{
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "FormTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
 
-    // Method shorthand should be converted to arrow function
+    // The authored method body remains method syntax under the synthesized
+    // `default` key. `default: () {}` would be invalid JavaScript.
     assert!(
         !output.contains("default: () {"),
         "should NOT contain invalid method shorthand 'default: () {{'. output: {}",
         output
     );
     assert!(
-        output.contains("default: () => {"),
-        "method shorthand should be converted to arrow function. output: {}",
+        output.contains("\"default\"() {"),
+        "method shorthand should remain a valid default method. output: {}",
         output
     );
 
@@ -1686,590 +1712,6 @@ withDefaults(defineProps<{
     assert!(
         parser_result.errors.is_empty(),
         "withDefaults with method shorthand should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
-        output,
-        parser_result.errors
-    );
-}
-
-// ── External type resolution tests ──────────────────────────────
-
-/// Helper to build pre-resolved external types from a fake external file source.
-fn make_external_types(
-    type_name: &str,
-    dep_source: &str,
-) -> rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements> {
-    let alloc = oxc_allocator::Allocator::default();
-    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
-        type_name, dep_source, &alloc,
-    )
-    .expect("failed to resolve external type");
-    let mut map = rustc_hash::FxHashMap::default();
-    map.insert(type_name.to_string(), resolved);
-    map
-}
-
-/// `withDefaults(defineProps<T>(), { as: 'td' })` must declare `as` even when
-/// `T` only partially expands (heritage props missing). Otherwise `_ctx.as`
-/// is undefined and table cells render as `div` (reka-ui Calendar).
-#[test]
-fn with_defaults_emits_keys_missing_from_partial_type_surface() {
-    let alloc = Allocator::default();
-    // Simulate partial type resolution: only `date` on the interface, but
-    // withDefaults still supplies `as: 'td'`.
-    let content = r#"
-interface CellProps {
-  date: string
-}
-const props = withDefaults(defineProps<CellProps>(), { as: 'td' })
-"#;
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let _result = gen_script(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-    );
-
-    let output = ct.build_string();
-    assert!(
-        output.contains("date:"),
-        "resolved type prop `date` must be present. output:\n{output}"
-    );
-    assert!(
-        output.contains("as:") && output.contains("'td'"),
-        "withDefaults key `as: 'td'` must be a runtime prop even if absent from type surface. output:\n{output}"
-    );
-}
-
-/// Local interface members whose type is an indexed access (`Foo['bar']`)
-/// must still appear in the runtime props object (type may degrade to
-/// `null`). Dropping them breaks `toRefs(props).missingProp.value` at
-/// setup (reka-ui MenuContentImpl trapFocus / disableOutsidePointerEvents).
-#[test]
-fn local_indexed_access_props_still_emitted_in_runtime_props() {
-    let alloc = Allocator::default();
-    let content = r#"
-interface Cap { foo: boolean }
-interface PrivateProps {
-  disableOutsidePointerEvents?: Cap['foo']
-  disableOutsideScroll?: boolean
-  trapFocus?: Cap['foo']
-}
-interface ImplProps extends PrivateProps {
-  loop?: boolean
-}
-const props = withDefaults(defineProps<ImplProps>(), {})
-const { trapFocus, disableOutsidePointerEvents, loop } = toRefs(props)
-"#;
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-    );
-
-    let output = ct.build_string();
-    for name in [
-        "disableOutsidePointerEvents",
-        "disableOutsideScroll",
-        "trapFocus",
-        "loop",
-    ] {
-        assert!(
-            result.bindings.contains_key(name) || output.contains(&format!("{name}:")),
-            "runtime props must include {name:?}. bindings={:?}\noutput:\n{output}",
-            result.bindings.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            output.contains(&format!("{name}:")),
-            "runtime props object must declare {name:?}. output:\n{output}"
-        );
-    }
-}
-
-#[test]
-fn external_type_defineprops_generates_runtime_props() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "MyProps",
-        "export interface MyProps { title: string; count: number }",
-    );
-    let content = "\nimport type { MyProps } from './types'\ndefineProps<MyProps>()\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    // External props should be in bindings
-    assert!(
-        result.bindings.contains_key("title"),
-        "bindings should contain 'title'. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        result.bindings.contains_key("count"),
-        "bindings should contain 'count'. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-
-    let output = ct.build_string();
-
-    // Runtime props should be generated
-    assert!(
-        output.contains("title:"),
-        "should generate runtime props for 'title'. output: {}",
-        output
-    );
-    assert!(
-        output.contains("count:"),
-        "should generate runtime props for 'count'. output: {}",
-        output
-    );
-
-    // Validate JS syntax
-    let js_alloc = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
-    assert!(
-        parser_result.errors.is_empty(),
-        "External type defineProps should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
-        output,
-        parser_result.errors
-    );
-}
-
-#[test]
-fn external_type_defineprops_optional_prop() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "MyProps",
-        "export interface MyProps { label?: string; required: boolean }",
-    );
-    let content = "\nimport type { MyProps } from './types'\ndefineProps<MyProps>()\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let _result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    let output = ct.build_string();
-
-    // Optional prop should NOT have "required: true"
-    // The label prop line should not contain "required: true"
-    let lines: Vec<&str> = output.lines().collect();
-    let label_line = lines.iter().find(|l| l.contains("label:"));
-    if let Some(line) = label_line {
-        assert!(
-            !line.contains("required: true"),
-            "optional prop 'label' should not be required. line: {}",
-            line
-        );
-    }
-
-    // Required prop SHOULD have "required: true"
-    // (field name is "required" which is also a keyword, but the runtime output
-    // should include "required: true" for the prop named "required")
-    assert!(
-        output.contains("required: true"),
-        "non-optional prop should have 'required: true'. output: {}",
-        output
-    );
-}
-
-#[test]
-fn external_type_defineemits_generates_emits_section() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "MyEmits",
-        "export interface MyEmits { (e: 'change', value: string): void; (e: 'update'): void }",
-    );
-    let content = "\nimport type { MyEmits } from './events'\ndefineEmits<MyEmits>()\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let _result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    let output = ct.build_string();
-
-    // Emits should be in the component definition
-    assert!(
-        output.contains("\"change\""),
-        "should generate emit for 'change'. output: {}",
-        output
-    );
-    assert!(
-        output.contains("\"update\""),
-        "should generate emit for 'update'. output: {}",
-        output
-    );
-
-    // Validate JS syntax
-    let js_alloc = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
-    assert!(
-        parser_result.errors.is_empty(),
-        "External type defineEmits should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
-        output,
-        parser_result.errors
-    );
-}
-
-#[test]
-fn external_type_with_no_matching_type_falls_back() {
-    let alloc = Allocator::default();
-    // Provide external types but for a different name
-    let external_types =
-        make_external_types("OtherProps", "export interface OtherProps { x: string }");
-    let content = "\nimport type { UnknownType } from './types'\ndefineProps<UnknownType>()\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    // No props should be resolved — unknown type is not in external_types
-    let has_props = result
-        .bindings
-        .iter()
-        .any(|(_, bt)| bt == &crate::template::code_gen::binding::BindingType::Props);
-    assert!(
-        !has_props,
-        "should have no prop bindings for unresolved type. Got: {:?}",
-        result.bindings
-    );
-}
-
-#[test]
-fn external_type_props_dont_conflict_with_companion_types() {
-    let alloc = Allocator::default();
-    // External file has a prop "shared" and "external"
-    let external_types = make_external_types(
-        "ExtProps",
-        "export interface ExtProps { shared: string; external: number }",
-    );
-    // Companion <script> block declares a type "ExtProps" with only "shared"
-    // External types should NOT override companion types (companion wins)
-    let companion_content = "\nexport interface ExtProps { shared: boolean }\nexport default {}\n";
-    let (_companion, _) = make_script(companion_content, "<script>", false);
-
-    let setup_content = "\nimport type { ExtProps } from './types'\ndefineProps<ExtProps>()\n";
-    let (_setup, _) = make_script(setup_content, "<script setup lang=\"ts\">", true);
-
-    // Build full SFC with both blocks
-    let full = format!(
-        "<script>{}</script><script setup lang=\"ts\">{}</script>",
-        companion_content, setup_content
-    );
-    // Rebuild script nodes with correct offsets in the full SFC
-    let companion_tag_end = "<script>".len() as u32;
-    let companion_content_start = companion_tag_end;
-    let companion_content_end = companion_content_start + companion_content.len() as u32;
-    let companion_close_start = companion_content_end;
-    let companion_close_end = companion_close_start + "</script>".len() as u32;
-
-    let setup_tag_start = companion_close_end;
-    let setup_tag_end = setup_tag_start + "<script setup lang=\"ts\">".len() as u32;
-    let setup_content_start = setup_tag_end;
-    let setup_content_end = setup_content_start + setup_content.len() as u32;
-    let setup_close_start = setup_content_end;
-    let setup_close_end = setup_close_start + "</script>".len() as u32;
-
-    let companion_node = RootNodeScript {
-        tag_open: NodeTag {
-            start: 0,
-            end: companion_tag_end,
-            name_end: 7,
-        },
-        tag_close: Some(NodeTag {
-            start: companion_close_start,
-            end: companion_close_end,
-            name_end: companion_close_end - 1,
-        }),
-        is_setup: false,
-        lang: None,
-        src: None,
-        generic: None,
-        attrs: None,
-        attributes: Vec::new(),
-        content: Some(crate::common::Span::new(
-            companion_content_start,
-            companion_content_end,
-        )),
-    };
-
-    let setup_node = RootNodeScript {
-        tag_open: NodeTag {
-            start: setup_tag_start,
-            end: setup_tag_end,
-            name_end: setup_tag_start + 8,
-        },
-        tag_close: Some(NodeTag {
-            start: setup_close_start,
-            end: setup_close_end,
-            name_end: setup_close_end - 1,
-        }),
-        is_setup: true,
-        lang: None,
-        src: None,
-        generic: None,
-        attrs: None,
-        attributes: Vec::new(),
-        content: Some(crate::common::Span::new(
-            setup_content_start,
-            setup_content_end,
-        )),
-    };
-
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script_with_external(
-        Some(&companion_node),
-        Some(&setup_node),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    // "shared" should be in bindings (from companion, takes precedence)
-    assert!(
-        result.bindings.contains_key("shared"),
-        "should have 'shared' from companion. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-}
-
-/// @ai-generated — withDefaults + external type: prop names must use pre-resolved key_name,
-/// not span extraction (which indexes into the wrong source for external types).
-#[test]
-fn external_type_withdefaults_uses_key_name() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "ExternalProps",
-        "export interface ExternalProps { title?: string; description?: string; color?: string }",
-    );
-    let content =
-        "\nimport type { ExternalProps } from './types'\nconst props = withDefaults(defineProps<ExternalProps>(), {\n  color: 'primary'\n})\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    let output = ct.build_string();
-
-    // All three props should appear with correct names
-    assert!(
-        output.contains("title:"),
-        "should have 'title' prop from external type. output:\n{}",
-        output
-    );
-    assert!(
-        output.contains("description:"),
-        "should have 'description' prop from external type. output:\n{}",
-        output
-    );
-    assert!(
-        output.contains("color:") && output.contains("default: 'primary'"),
-        "should have 'color' prop with default from withDefaults. output:\n{}",
-        output
-    );
-
-    // External props should be in bindings
-    assert!(
-        result.bindings.contains_key("title"),
-        "bindings should contain 'title'. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-
-    // Validate JS syntax
-    let js_alloc = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
-    assert!(
-        parser_result.errors.is_empty(),
-        "External type withDefaults should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
-        output,
-        parser_result.errors
-    );
-}
-
-/// @ai-generated — typeof external value: `defineProps<typeof MyType>()` with exported const
-#[test]
-fn typeof_external_value_generates_runtime_props() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "MyType",
-        "export const MyType: { foo: string; bar: number } = { foo: '', bar: 0 }",
-    );
-    let content = "\nimport { MyType } from './types'\ndefineProps<typeof MyType>()\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    // External props should be in bindings
-    assert!(
-        result.bindings.contains_key("foo"),
-        "bindings should contain 'foo'. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        result.bindings.contains_key("bar"),
-        "bindings should contain 'bar'. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-
-    let output = ct.build_string();
-
-    // Runtime props should be generated
-    assert!(
-        output.contains("foo:"),
-        "should generate runtime props for 'foo'. output: {}",
-        output
-    );
-    assert!(
-        output.contains("bar:"),
-        "should generate runtime props for 'bar'. output: {}",
-        output
-    );
-
-    // Validate JS syntax
-    let js_alloc = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
-    assert!(
-        parser_result.errors.is_empty(),
-        "typeof external value defineProps should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
-        output,
-        parser_result.errors
-    );
-}
-
-/// @ai-generated — typeof external value without type annotation (infer from object literal)
-#[test]
-fn typeof_external_value_infers_from_object_literal() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "defaults",
-        "export const defaults = { name: 'test', count: 42, active: true }",
-    );
-    let content = "\nimport { defaults } from './config'\ndefineProps<typeof defaults>()\n";
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    // External props should be in bindings
-    assert!(
-        result.bindings.contains_key("name"),
-        "bindings should contain 'name'. Got: {:?}",
-        result.bindings.keys().collect::<Vec<_>>()
-    );
-
-    let output = ct.build_string();
-
-    // Validate JS syntax
-    let js_alloc = oxc_allocator::Allocator::default();
-    let source_type = oxc_span::SourceType::mjs();
-    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
-    assert!(
-        parser_result.errors.is_empty(),
-        "typeof object literal defineProps should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
         output,
         parser_result.errors
     );
@@ -2302,6 +1744,26 @@ fn with_defaults_force_js_strips_ts_from_object_defaults() {
     // section; a `[] as string[]` default must lose its TS cast in force-js.
     let alloc = Allocator::default();
     let content = "\ninterface Props { items?: string[]; color?: string }\nconst props = withDefaults(defineProps<Props>(), { items: [] as string[], color: 'primary' })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "items",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Array],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2313,6 +1775,7 @@ fn with_defaults_force_js_strips_ts_from_object_defaults() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "WD",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2337,6 +1800,26 @@ fn with_defaults_force_js_strips_satisfies_and_non_null() {
     // output invalid JS, so the mjs parse is the strongest guard here.
     let alloc = Allocator::default();
     let content = "\ninterface Props { count?: number; label?: string }\nconst defaultLabel = 'fallback'\nconst props = withDefaults(defineProps<Props>(), { count: 0 satisfies number, label: defaultLabel! })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "count",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "label",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2348,6 +1831,7 @@ fn with_defaults_force_js_strips_satisfies_and_non_null() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "WD",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2372,11 +1856,25 @@ fn with_defaults_force_js_strips_satisfies_and_non_null() {
 }
 
 #[test]
-fn with_defaults_force_js_strips_ts_from_unresolved_variable_ref_defaults() {
-    // Unresolvable props type + non-object defaults → runtime IIFE that wraps the
-    // defaults expression verbatim. A `defaults as T` cast must be stripped.
+fn with_defaults_force_js_strips_ts_from_variable_ref_defaults() {
+    // This fixture isolates rewriting a non-object defaults expression. The
+    // locally declared prop type makes the runtime projection authoritative;
+    // unresolved macro semantics are covered by the fail-closed boundary tests.
     let alloc = Allocator::default();
-    let content = "\nconst baseDefaults = { color: 'primary' }\nconst props = withDefaults(defineProps<ImportedProps>(), baseDefaults as ImportedProps)\n";
+    let content = "\ninterface Props { color?: string }\nconst baseDefaults = { color: 'primary' }\nconst props = withDefaults(defineProps<Props>(), baseDefaults as Props)\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "color",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2388,19 +1886,20 @@ fn with_defaults_force_js_strips_ts_from_unresolved_variable_ref_defaults() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "WD",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
     assert!(
-        output.contains("((d)=>"),
-        "unresolved variable-ref defaults should build the runtime IIFE. output:\n{}",
+        output.contains("_mergeDefaults("),
+        "variable-ref defaults should merge with authoritative runtime props. output:\n{}",
         output
     );
     assert!(
-        !output.contains("as ImportedProps"),
-        "force-js must strip the `as ImportedProps` cast from the IIFE argument. output:\n{}",
+        !output.contains("as Props"),
+        "force-js must strip the `as Props` cast from the defaults argument. output:\n{}",
         output
     );
     assert_valid_js(&output);
@@ -2548,63 +2047,33 @@ fn define_props_array_dynamic_element_names_nothing() {
     );
 }
 
-/// External property-form emits (`{ 'update:open': [boolean] }`) must produce
-/// a runtime `emits: [...]` array. AlertDialogRoot re-exports DialogRootEmits
-/// and useEmitAsProps reads `vm.type.emits` — empty array → silent open toggle.
-#[test]
-fn external_type_defineemits_property_form_generates_emits_array() {
-    let alloc = Allocator::default();
-    let external_types = make_external_types(
-        "DialogRootEmits",
-        "export type DialogRootEmits = { 'update:open': [value: boolean] }",
-    );
-    // Sanity: external resolution itself yields call signatures
-    let resolved = external_types.get("DialogRootEmits").unwrap();
-    assert!(
-        !resolved.call_signatures.is_empty(),
-        "resolve_external_type must classify property-form emits as call_signatures, got props={:?} calls={:?}",
-        resolved.props.iter().map(|p| p.key_name.as_deref()).collect::<Vec<_>>(),
-        resolved.call_signatures.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-    );
-
-    let content = r#"
-import type { DialogRootEmits } from './dialog'
-type AlertDialogEmits = DialogRootEmits
-const emit = defineEmits<AlertDialogEmits>()
-"#;
-    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
-    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
-
-    let _result = gen_script_with_external(
-        None,
-        Some(&setup),
-        &full,
-        &mut ct,
-        &alloc,
-        &ScriptCodeGenOptions {
-            component_name: "Test",
-            ..Default::default()
-        },
-        Some(&external_types),
-    );
-
-    let output = ct.build_string();
-    assert!(
-        output.contains("emits:") && output.contains("update:open"),
-        "defineEmits of external property-form emits must emit runtime emits array, got:\n{output}"
-    );
-}
-
 // ── Optional Boolean props: official parity (no `default: undefined`) ──
 
-/// Official plugin-vue emits `{ type: Boolean }` for an optional Boolean
-/// prop with NO default; the runtime resolves an absent optional Boolean
-/// to `false` (boolean cast). An explicit `default: undefined` diverges
-/// observably (`props.x === false` fails for unset props).
+/// In development, official plugin-vue emits
+/// `{ type: Boolean, required: false }` for an optional Boolean prop with no
+/// default. The runtime resolves an absent optional Boolean to `false`; an
+/// explicit `default: undefined` diverges observably.
 #[test]
 fn optional_boolean_prop_emits_no_default_type_based() {
     let alloc = Allocator::default();
     let content = "\nconst props = defineProps<{ disabled?: boolean, label?: string }>()\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop(
+                "disabled",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop(
+                "label",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2616,22 +2085,23 @@ fn optional_boolean_prop_emits_no_default_type_based() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "BoolTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
     assert!(
-        output.contains("disabled: { type: Boolean }"),
-        "optional Boolean prop must emit the bare official shape, got:\n{output}"
+        output.contains("disabled: { type: Boolean, required: false }"),
+        "optional Boolean prop must emit the official dev shape, got:\n{output}"
     );
     assert!(
         !output.contains("default: undefined"),
         "no prop may carry `default: undefined` (official emits no default), got:\n{output}"
     );
     assert!(
-        output.contains("label: { type: String }"),
-        "optional non-Boolean prop keeps its bare shape, got:\n{output}"
+        output.contains("label: { type: String, required: false }"),
+        "optional non-Boolean prop keeps the official dev shape, got:\n{output}"
     );
 }
 
@@ -2642,6 +2112,26 @@ fn optional_boolean_prop_emits_no_default_type_based() {
 fn optional_boolean_prop_emits_no_default_with_defaults_path() {
     let alloc = Allocator::default();
     let content = "\nconst props = withDefaults(defineProps<{ disabled?: boolean, color?: string }>(), { color: 'red' })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop(
+                "disabled",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2653,14 +2143,15 @@ fn optional_boolean_prop_emits_no_default_with_defaults_path() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "BoolTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
 
     let output = ct.build_string();
     assert!(
-        output.contains("disabled: { type: Boolean }"),
-        "optional Boolean without a declared default must stay bare, got:\n{output}"
+        output.contains("disabled: { type: Boolean, required: false }"),
+        "optional Boolean without a declared default keeps the official dev shape, got:\n{output}"
     );
     assert!(
         !output.contains("default: undefined"),
@@ -2682,6 +2173,19 @@ fn merge_defaults_spread_pushes_runtime_import() {
     let alloc = Allocator::default();
     let content =
         "\nconst props = withDefaults(defineProps<{ a?: string }>(), { ...SHARED_DEFAULTS })\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "a",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2693,6 +2197,7 @@ fn merge_defaults_spread_pushes_runtime_import() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "MergeTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2715,6 +2220,19 @@ fn merge_defaults_spread_pushes_runtime_import() {
 fn merge_defaults_variable_pushes_runtime_import() {
     let alloc = Allocator::default();
     let content = "\nconst props = withDefaults(defineProps<{ a?: string }>(), DEFAULTS)\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "a",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2726,6 +2244,7 @@ fn merge_defaults_variable_pushes_runtime_import() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "MergeTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2811,6 +2330,11 @@ fn define_emits_props_only_surface_does_not_invent_emits() {
 fn define_emits_named_tuple_property_form_still_produces_emits() {
     let alloc = Allocator::default();
     let content = "\nconst emit = defineEmits<{ change: [id: number], close: [] }>()\n";
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_emits_entry(
+        0,
+        0,
+        ["change", "close"],
+    )]);
     let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
@@ -2822,6 +2346,7 @@ fn define_emits_named_tuple_property_form_still_produces_emits() {
         &alloc,
         &ScriptCodeGenOptions {
             component_name: "EmitsTest",
+            macro_runtime: Some(&runtime),
             ..Default::default()
         },
     );
@@ -2830,5 +2355,284 @@ fn define_emits_named_tuple_property_form_still_produces_emits() {
     assert!(
         output.contains("emits: [\"change\", \"close\"]"),
         "named-tuple emits must produce the emits array, got:\n{output}"
+    );
+}
+
+/// force_js import reconstruction must preserve renamed named imports
+/// (`import { FixedSizeList as ElFixedSizeList }`). Dropping the export name
+/// makes rollup look for a non-existent `ElFixedSizeList` export (element-plus).
+#[test]
+fn force_js_preserves_named_import_alias() {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use oxc_allocator::Allocator;
+
+    let input = r#"
+<script setup lang="ts">
+import { FixedSizeList as ElFixedSizeList } from './virtual-list'
+const List = ElFixedSizeList
+</script>
+<template><component :is="List" /></template>
+"#;
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("Transfer.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
+    let code = result
+        .script
+        .as_ref()
+        .map(|s| s.code.as_str())
+        .unwrap_or("");
+    assert!(
+        code.contains("FixedSizeList as ElFixedSizeList"),
+        "must preserve export alias FixedSizeList as ElFixedSizeList, got:\n{code}"
+    );
+    assert!(
+        !code.contains("{ ElFixedSizeList }") && !code.contains("{ElFixedSizeList}"),
+        "must not rewrite to bare ElFixedSizeList import, got:\n{code}"
+    );
+}
+
+/// Options-API `<script lang="ts">` (no setup) is not rewritten by
+/// process_script_only — force_js must still strip `import type` (element-plus
+/// focus-trap.vue under rollup).
+#[test]
+fn force_js_options_api_strips_import_type() {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use oxc_allocator::Allocator;
+
+    let input = r#"
+<script lang="ts">
+import { defineComponent, ref } from 'vue'
+import type { PropType } from 'vue'
+export default defineComponent({
+  props: { el: Object as PropType<HTMLElement> },
+  setup() { return { x: ref(1) } },
+})
+</script>
+<template><div /></template>
+"#;
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("Focus.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
+    let code = result
+        .script
+        .as_ref()
+        .map(|s| s.code.as_str())
+        .unwrap_or("");
+    assert!(
+        !code.contains("import type"),
+        "import type must be stripped under force_js options API, got:\n{code}"
+    );
+    assert!(
+        code.contains("defineComponent") && code.contains("from 'vue'"),
+        "value imports must remain, got:\n{code}"
+    );
+}
+
+/// force_js must not leave ghost import fragments inside setup after
+/// reconstructing value-only imports (element-plus radio.vue:
+/// `import { type RadioProps, radioEmits, … }` → leftover
+/// `radioEmits, … } from './radio'` mid-setup).
+#[test]
+fn force_js_mixed_type_value_import_has_no_ghost_body_fragment() {
+    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+    use oxc_allocator::Allocator;
+
+    let input = r#"
+<script setup lang="ts">
+import { type RadioProps, radioEmits, radioPropsDefaults } from './radio'
+// Runtime-syntax macros isolate mixed-import rewriting from typed macro handoff.
+const props = defineProps(radioPropsDefaults)
+const emit = defineEmits(radioEmits)
+</script>
+<template><div /></template>
+"#;
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("Radio.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
+    let code = result
+        .script
+        .as_ref()
+        .map(|s| s.code.as_str())
+        .unwrap_or("");
+    assert!(
+        result.errors.is_empty(),
+        "compile should succeed, errors={:?}\n{code}",
+        result.errors
+    );
+    assert!(
+        code.contains("import { radioEmits, radioPropsDefaults } from './radio'")
+            || code.contains("import { radioEmits, radioPropsDefaults } from \"./radio\""),
+        "value-only import must be kept, got:\n{code}"
+    );
+    // Ghost fragment from double strip: specifier list without `import {`
+    // appearing mid-setup after the real import was already hoisted.
+    assert!(
+        !code.contains("\nradioEmits, radioPropsDefaults } from"),
+        "must not leave ghost import remnant inside setup, got:\n{code}"
+    );
+    let from_count =
+        code.matches("from './radio'").count() + code.matches("from \"./radio\"").count();
+    assert_eq!(
+        from_count, 1,
+        "exactly one import from './radio', got {from_count} in:\n{code}"
+    );
+}
+
+/// Prop keys that are not bare JS identifiers (e.g. `onUpdate:visible`) must
+/// be quoted in the runtime props object. element-plus tooltip emits this
+/// shape from `UseTooltipProps`; unquoted keys are a PARSE_ERROR under
+/// rolldown/esbuild.
+#[test]
+fn runtime_props_quote_colon_keys_like_on_update_visible() {
+    let alloc = Allocator::default();
+    let content = r#"
+interface Props {
+  visible?: boolean
+  'onUpdate:visible'?: (value: boolean) => void
+}
+const props = withDefaults(defineProps<Props>(), {
+  visible: false,
+})
+"#;
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "visible",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "onUpdate:visible",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Function],
+            ),
+        ],
+    )]);
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+    let _ = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            macro_runtime: Some(&runtime),
+            ..Default::default()
+        },
+    );
+    let output = ct.build_string();
+    assert!(
+        output.contains(r#""onUpdate:visible""#) || output.contains(r#"'onUpdate:visible'"#),
+        "colon prop keys must be quoted in runtime props, got:\n{output}"
+    );
+    // Bare unquoted form is a syntax error in the generated module.
+    assert!(
+        !output.contains("onUpdate:visible: {"),
+        "must not emit unquoted onUpdate:visible: key, got:\n{output}"
+    );
+}
+
+/// `withDefaults(defineProps<T>(), { ...Defaults })` must pass the full
+/// defaults expression to `_mergeDefaults` (reka-ui PopperContent).
+#[test]
+fn with_defaults_object_spread_uses_merge_defaults_full_expr() {
+    let alloc = Allocator::default();
+    let content = r#"
+export const Defaults = { as: 'button', disabled: false }
+interface Props { as?: string; disabled?: boolean; value?: string }
+const props = withDefaults(defineProps<Props>(), {
+  ...Defaults,
+  value: 'on',
+})
+"#;
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "as",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "disabled",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "value",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+    let _ = gen_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            macro_runtime: Some(&runtime),
+            ..Default::default()
+        },
+    );
+    let output = ct.build_string();
+    assert!(
+        output.contains("_mergeDefaults"),
+        "spread defaults must use _mergeDefaults, got:\n{output}"
+    );
+    assert!(
+        output.contains("...Defaults") || output.contains("Defaults"),
+        "full defaults expression must retain Defaults, got:\n{output}"
+    );
+    assert!(
+        output.contains("value:") && output.contains("'on'"),
+        "inline default keys must remain in the typed props or defaults expr, got:\n{output}"
     );
 }

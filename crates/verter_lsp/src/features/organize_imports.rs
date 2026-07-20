@@ -278,6 +278,7 @@ mod tests {
         let analysis = make_analysis(
             vec![AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "ref".into(),
@@ -321,6 +322,7 @@ mod tests {
         let analysis = make_analysis(
             vec![AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![
                     AnalyzedImportBinding {
@@ -374,6 +376,7 @@ mod tests {
         let analysis = make_analysis(
             vec![AnalyzedImport {
                 source: "./types".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: true,
                 bindings: vec![AnalyzedImportBinding {
                     name: "Props".into(),
@@ -428,6 +431,7 @@ mod tests {
         let analysis = make_analysis(
             vec![AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![
                     AnalyzedImportBinding {
@@ -515,6 +519,7 @@ mod tests {
         let analysis = make_analysis(
             vec![AnalyzedImport {
                 source: "vue".into(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "computed".into(),

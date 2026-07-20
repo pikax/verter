@@ -295,7 +295,7 @@ enum FactKey {
     TemplateRoot,
     ImportRef { specifier, binding, space },
     SyntacticReexportRef { specifier, source_name, target_name, space },
-    ModuleAugmentation { specifier, augmented_name, space },
+    ModuleAugmentation { specifier, owner, augmented_name, space },
 
     // Resolve-imports domain (R12; populated downstream by the resolver)
     ResolvedImportClause { specifier, binding, space, resolved_canonical, resolved_source_name },
@@ -315,6 +315,11 @@ impl FactKey {
     fn domain(&self) -> FactDomain;  // routes per-domain validator dispatch
 }
 ```
+
+`ModuleAugmentation.owner` is the exact neutral lexical owner of the authored
+augmentation statement. It distinguishes same-name contributors from module
+and instance script regions; the resolved augmentation target scope remains
+unpartitioned by lexical owner.
 
 `FactKey::domain()` routes validator lookups through the `StoreView`
 trait surface:

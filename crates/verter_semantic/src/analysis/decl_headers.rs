@@ -19,18 +19,72 @@
 //! [`crate::analysis::type_eval_build::lower_top_level_statement`] arms.
 
 use oxc_ast::ast::{
-    Class, ClassElement, Declaration, ExportDefaultDeclarationKind, Expression,
+    Class, ClassElement, Comment, Declaration, ExportDefaultDeclarationKind, Expression,
     MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
     TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration,
     TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature, TSType, TSTypeAliasDeclaration,
     TSTypeParameterDeclaration, VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_span::GetSpan;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
+use verter_type_expr::facts::VueIgnoredHeritageFact;
+use verter_type_expr::span_origins::DeclContributorAnchor;
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 use verter_type_expr_oxc::property_key_name;
 
+use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelStatementOwner};
 use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
+
+#[path = "decl_headers_augmentation.rs"]
+mod augmentation;
+use augmentation::index_augmentation_block;
+
+#[derive(Debug, Clone, Copy)]
+struct HeaderStatementContext<'a> {
+    anchor: DeclContributorAnchor,
+    vue_ignore_attachment_starts: &'a FxHashSet<u32>,
+}
+
+impl<'a> HeaderStatementContext<'a> {
+    fn new(
+        statement_index: usize,
+        owner: TopLevelStatementOwner,
+        vue_ignore_attachment_starts: &'a FxHashSet<u32>,
+    ) -> Option<Self> {
+        Some(Self {
+            anchor: DeclContributorAnchor {
+                contributor_index: u32::try_from(statement_index).ok()?,
+                owner: owner.owner,
+                owner_local_ordinal: owner.owner_local_ordinal,
+            },
+            vue_ignore_attachment_starts,
+        })
+    }
+
+    fn key(self, name: &str) -> DeclBindingKey {
+        DeclBindingKey::new(self.anchor.owner, name)
+    }
+}
+
+/// Exact authored contributor record retained by the shallow header index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclHeaderContributor {
+    pub anchor: DeclContributorAnchor,
+    pub declaration_span: Span,
+    pub name_span: Span,
+}
+
+/// Exact parser-authored locator for a JSDoc typedef declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsdocTypedefHeader {
+    pub owner: TopLevelOwnerId,
+    pub attached_to: u32,
+    pub comment_span: Span,
+    pub name_span: Span,
+    pub statement_index: Option<u32>,
+    pub owner_local_ordinal: Option<u32>,
+}
 
 /// Direct syntactic member-header kind (a shallow shape fact, not a body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +135,17 @@ pub struct TypeDeclHeader {
     /// Source-order top-level statement indices of every contributing
     /// statement (deduplicated; one statement can contribute several
     /// same-name declarations).
-    pub contributors: Vec<u32>,
+    pub contributors: Vec<DeclHeaderContributor>,
+    /// Vue runtime-only heritage suppression, addressed against the exact
+    /// lowered contributor/heritage-arm shape. This is parser-authored
+    /// comment meaning captured once at indexing; consumers never rescan
+    /// source text or comments.
+    pub vue_ignored_heritage: Vec<VueIgnoredHeritageFact>,
     /// `true` when the name exists ONLY as a JSDoc `@typedef` (no TS
     /// declaration claimed it — TS-decl precedence applied at build).
     pub from_jsdoc_typedef: bool,
+    /// Exact comment identity for a JSDoc-only typedef header.
+    pub jsdoc_typedef: Option<JsdocTypedefHeader>,
 }
 
 /// Header record for one declared VALUE symbol.
@@ -101,7 +162,7 @@ pub struct ValueDeclHeader {
     pub object_member_headers: Vec<MemberHeader>,
     /// Source-order top-level statement indices of every contributing
     /// statement (deduplicated).
-    pub contributors: Vec<u32>,
+    pub contributors: Vec<DeclHeaderContributor>,
 }
 
 /// Header record for one `enum` declaration. The dedicated table carries
@@ -115,7 +176,7 @@ pub struct EnumDeclHeader {
     pub span: Span,
     pub name_span: Span,
     pub member_names: Vec<String>,
-    pub contributors: Vec<u32>,
+    pub contributors: Vec<DeclHeaderContributor>,
 }
 
 /// The shallow declaration-header index for one parsed program.
@@ -124,24 +185,30 @@ pub struct EnumDeclHeader {
 /// scoped lookup needs no allocated tuple key.
 #[derive(Debug, Clone, Default)]
 pub struct DeclHeaderIndex {
-    pub type_headers: FxHashMap<String, TypeDeclHeader>,
-    pub value_headers: FxHashMap<String, ValueDeclHeader>,
-    pub enum_headers: FxHashMap<String, EnumDeclHeader>,
-    pub augmentation_type_headers:
-        FxHashMap<AugmentationScopeKind, FxHashMap<String, TypeDeclHeader>>,
-    pub augmentation_value_headers:
-        FxHashMap<AugmentationScopeKind, FxHashMap<String, ValueDeclHeader>>,
+    pub type_headers: DeclMap<TypeDeclHeader>,
+    pub value_headers: DeclMap<ValueDeclHeader>,
+    pub enum_headers: DeclMap<EnumDeclHeader>,
+    pub augmentation_type_headers: FxHashMap<AugmentationScopeKind, DeclMap<TypeDeclHeader>>,
+    pub augmentation_value_headers: FxHashMap<AugmentationScopeKind, DeclMap<ValueDeclHeader>>,
 }
 
 impl DeclHeaderIndex {
     /// Look up a file-scope type header.
     pub fn type_header(&self, name: &str) -> Option<&TypeDeclHeader> {
-        self.type_headers.get(name)
+        self.type_header_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn type_header_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&TypeDeclHeader> {
+        self.type_headers.get(&DeclBindingKey::new(owner, name))
     }
 
     /// Look up a file-scope value header.
     pub fn value_header(&self, name: &str) -> Option<&ValueDeclHeader> {
-        self.value_headers.get(name)
+        self.value_header_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn value_header_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&ValueDeclHeader> {
+        self.value_headers.get(&DeclBindingKey::new(owner, name))
     }
 
     /// Look up an augmentation-scoped type header (borrowed-key two-level
@@ -151,7 +218,18 @@ impl DeclHeaderIndex {
         scope: &AugmentationScopeKind,
         name: &str,
     ) -> Option<&TypeDeclHeader> {
-        self.augmentation_type_headers.get(scope)?.get(name)
+        self.augmentation_type_header_in(scope, TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn augmentation_type_header_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&TypeDeclHeader> {
+        self.augmentation_type_headers
+            .get(scope)?
+            .get(&DeclBindingKey::new(owner, name))
     }
 
     /// Look up an augmentation-scoped value header (borrowed-key two-level
@@ -161,7 +239,18 @@ impl DeclHeaderIndex {
         scope: &AugmentationScopeKind,
         name: &str,
     ) -> Option<&ValueDeclHeader> {
-        self.augmentation_value_headers.get(scope)?.get(name)
+        self.augmentation_value_header_in(scope, TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn augmentation_value_header_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&ValueDeclHeader> {
+        self.augmentation_value_headers
+            .get(scope)?
+            .get(&DeclBindingKey::new(owner, name))
     }
 }
 
@@ -210,7 +299,9 @@ impl DeclHeaderIndex {
                 type_params,
                 member_headers,
                 contributors: Vec::new(),
+                vue_ignored_heritage: Vec::new(),
                 from_jsdoc_typedef: false,
+                jsdoc_typedef: None,
             }
         }
 
@@ -315,31 +406,74 @@ impl DeclHeaderIndex {
 /// Build the shallow declaration-header index for `program`. Walks every
 /// top-level statement once; lowers NO declaration body.
 pub fn build_decl_header_index(program: &Program<'_>, source: &str) -> DeclHeaderIndex {
+    let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
+    build_decl_header_index_with_owners(program, source, &owners)
+}
+
+/// Build the shallow declaration index under an explicit validated lexical
+/// owner mapping.
+pub fn build_decl_header_index_with_owners(
+    program: &Program<'_>,
+    source: &str,
+    owners: &TopLevelOwnerTable,
+) -> DeclHeaderIndex {
+    assert_eq!(
+        owners.len(),
+        program.body.len(),
+        "validated owner table must cover the indexed program exactly"
+    );
     let mut index = DeclHeaderIndex::default();
+    let vue_ignore_attachment_starts =
+        collect_vue_ignore_attachment_starts(&program.comments, source);
 
     for (stmt_index, stmt) in program.body.iter().enumerate() {
-        let stmt_index = u32::try_from(stmt_index).unwrap_or(u32::MAX);
-        index_top_level_statement(stmt, stmt_index, &mut index);
+        let Some(ctx) = HeaderStatementContext::new(
+            stmt_index,
+            owners.statement(stmt_index),
+            &vue_ignore_attachment_starts,
+        ) else {
+            break;
+        };
+        index_top_level_statement(stmt, ctx, &mut index);
     }
 
-    // JSDoc `@typedef {T} Name` names — TS-decl precedence: a name a TS
-    // declaration already claimed is skipped (mirrors
-    // `register_jsdoc_typedefs`). A typedef has no statement locator; its
-    // body lowers from the program's comments on demand.
-    for name in crate::analysis::jsdoc::collect_jsdoc_typedef_names(&program.comments, source) {
-        if index.type_headers.contains_key(&name) {
+    // JSDoc typedefs are keyed by their parser-authored attachment owner. An
+    // unattached carrier comment must fall inside an explicit owner region;
+    // ambiguous/unowned comments are skipped rather than guessed.
+    for typedef in
+        crate::analysis::jsdoc::collect_jsdoc_typedef_name_records(&program.comments, source)
+    {
+        let Some(attached_owner) = owners.resolve_comment_owner(
+            typedef.attached_to,
+            typedef.comment_span,
+            program.body.iter().map(|statement| statement.span().start),
+        ) else {
+            continue;
+        };
+        let key = DeclBindingKey::new(attached_owner.owner, typedef.name.as_str());
+        if index.type_headers.contains_key(&key) {
             continue;
         }
+        let jsdoc_typedef = JsdocTypedefHeader {
+            owner: attached_owner.owner,
+            attached_to: typedef.attached_to,
+            comment_span: typedef.comment_span,
+            name_span: typedef.name_span,
+            statement_index: attached_owner.statement_index,
+            owner_local_ordinal: attached_owner.owner_local_ordinal,
+        };
         index.type_headers.insert(
-            name,
+            key,
             TypeDeclHeader {
                 kind: TypeDeclKind::Alias,
-                span: Span::default(),
-                name_span: Span::default(),
+                span: typedef.comment_span,
+                name_span: typedef.name_span,
                 type_params: Vec::new(),
                 member_headers: Vec::new(),
                 contributors: Vec::new(),
+                vue_ignored_heritage: Vec::new(),
                 from_jsdoc_typedef: true,
+                jsdoc_typedef: Some(jsdoc_typedef),
             },
         );
     }
@@ -347,81 +481,94 @@ pub fn build_decl_header_index(program: &Program<'_>, source: &str) -> DeclHeade
     index
 }
 
+fn collect_vue_ignore_attachment_starts(comments: &[Comment], source: &str) -> FxHashSet<u32> {
+    comments
+        .iter()
+        .filter(|comment| comment.is_block())
+        .filter_map(|comment| {
+            let content = comment.content_span();
+            let content = source.get(content.start as usize..content.end as usize)?;
+            contains_exact_vue_ignore_directive(content).then_some(comment.attached_to)
+        })
+        .collect()
+}
+
+fn contains_exact_vue_ignore_directive(content: &str) -> bool {
+    const DIRECTIVE: &[u8] = b"@vue-ignore";
+
+    content
+        .as_bytes()
+        .windows(DIRECTIVE.len())
+        .enumerate()
+        .any(|(start, candidate)| {
+            if candidate != DIRECTIVE {
+                return false;
+            }
+            let bytes = content.as_bytes();
+            let before = start.checked_sub(1).and_then(|index| bytes.get(index));
+            let after = bytes.get(start + DIRECTIVE.len());
+            !before.is_some_and(|byte| is_vue_directive_token_byte(*byte))
+                && !after.is_some_and(|byte| is_vue_directive_token_byte(*byte))
+        })
+}
+
+const fn is_vue_directive_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'$' | b'@')
+}
+
 /// Mirror of `lower_top_level_statement`'s name registration, headers only.
-fn index_top_level_statement(stmt: &Statement<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
+fn index_top_level_statement(
+    stmt: &Statement<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
     match stmt {
         Statement::TSTypeAliasDeclaration(decl) => {
-            index_type_alias(
-                decl,
-                decl.id.name.as_str(),
-                stmt_index,
-                &mut index.type_headers,
-            );
+            index_type_alias(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Statement::TSInterfaceDeclaration(decl) => {
-            index_interface(
-                decl,
-                decl.id.name.as_str(),
-                stmt_index,
-                &mut index.type_headers,
-            );
+            index_interface(decl, decl.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, stmt_index, index, None);
+            index_module_declaration(module, ctx, index, None);
         }
         Statement::TSGlobalDeclaration(global) => {
-            index_augmentation_block(
-                &global.body,
-                stmt_index,
-                index,
-                &AugmentationScopeKind::Global,
-            );
+            index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
         }
         Statement::ClassDeclaration(decl) => {
-            index_class(decl, stmt_index, index);
+            index_class(decl, ctx, index);
         }
         Statement::FunctionDeclaration(func) => {
-            index_function(func, stmt_index, &mut index.value_headers);
+            index_function(func, ctx, &mut index.value_headers);
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                index_variable(
-                    decl,
-                    var_decl.kind,
-                    stmt_index,
-                    &mut index.value_headers,
-                    None,
-                );
+                index_variable(decl, var_decl.kind, ctx, &mut index.value_headers, None);
             }
         }
         Statement::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, stmt_index, index);
+            index_enum(enum_decl, ctx, index);
         }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                index_declaration(decl, stmt_index, index);
+                index_declaration(decl, ctx, index);
             }
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                index_function(func, stmt_index, &mut index.value_headers);
+                index_function(func, ctx, &mut index.value_headers);
             }
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                index_class(cls, stmt_index, index);
+                index_class(cls, ctx, index);
                 // Mirror `alias_default_export_type_symbol`: the declared
                 // class type also answers under the `default` export name.
                 if let Some(id) = &cls.id {
-                    alias_default_type_header(index, id.name.as_str(), stmt_index);
+                    alias_default_type_header(index, id.name.as_str(), ctx);
                 }
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
-                index_interface(
-                    iface,
-                    iface.id.name.as_str(),
-                    stmt_index,
-                    &mut index.type_headers,
-                );
-                alias_default_type_header(index, iface.id.name.as_str(), stmt_index);
+                index_interface(iface, iface.id.name.as_str(), ctx, &mut index.type_headers);
+                alias_default_type_header(index, iface.id.name.as_str(), ctx);
             }
             other => {
                 if let Some(expr) = other.as_expression() {
@@ -430,7 +577,7 @@ fn index_top_level_statement(stmt: &Statement<'_>, stmt_index: u32, index: &mut 
                     // member headers when the expression is one.
                     let entry = index
                         .value_headers
-                        .entry("default".to_string())
+                        .entry(ctx.key("default"))
                         .or_insert_with(|| ValueDeclHeader {
                             kind: ValueDeclKind::Const,
                             span: export.span.into(),
@@ -438,7 +585,12 @@ fn index_top_level_statement(stmt: &Statement<'_>, stmt_index: u32, index: &mut 
                             object_member_headers: object_literal_member_headers(expr),
                             contributors: Vec::new(),
                         });
-                    push_contributor(&mut entry.contributors, stmt_index);
+                    push_contributor(
+                        &mut entry.contributors,
+                        ctx,
+                        export.span.into(),
+                        export.span.into(),
+                    );
                 }
             }
         },
@@ -447,48 +599,37 @@ fn index_top_level_statement(stmt: &Statement<'_>, stmt_index: u32, index: &mut 
 }
 
 /// Mirror of `extract_from_declaration` (the `export <decl>` wrapper arms).
-fn index_declaration(decl: &Declaration<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
+fn index_declaration(
+    decl: &Declaration<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
-            index_type_alias(
-                alias,
-                alias.id.name.as_str(),
-                stmt_index,
-                &mut index.type_headers,
-            );
+            index_type_alias(alias, alias.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Declaration::TSInterfaceDeclaration(iface) => {
-            index_interface(
-                iface,
-                iface.id.name.as_str(),
-                stmt_index,
-                &mut index.type_headers,
-            );
+            index_interface(iface, iface.id.name.as_str(), ctx, &mut index.type_headers);
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, stmt_index, index, None);
+            index_module_declaration(module, ctx, index, None);
         }
         Declaration::TSGlobalDeclaration(global) => {
-            index_augmentation_block(
-                &global.body,
-                stmt_index,
-                index,
-                &AugmentationScopeKind::Global,
-            );
+            index_augmentation_block(&global.body, ctx, index, &AugmentationScopeKind::Global);
         }
         Declaration::ClassDeclaration(cls) => {
-            index_class(cls, stmt_index, index);
+            index_class(cls, ctx, index);
         }
         Declaration::FunctionDeclaration(func) => {
-            index_function(func, stmt_index, &mut index.value_headers);
+            index_function(func, ctx, &mut index.value_headers);
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                index_variable(d, var_decl.kind, stmt_index, &mut index.value_headers, None);
+                index_variable(d, var_decl.kind, ctx, &mut index.value_headers, None);
             }
         }
         Declaration::TSEnumDeclaration(enum_decl) => {
-            index_enum(enum_decl, stmt_index, index);
+            index_enum(enum_decl, ctx, index);
         }
         _ => {}
     }
@@ -510,11 +651,15 @@ fn index_declaration(decl: &Declaration<'_>, stmt_index: u32, index: &mut DeclHe
 /// double-counted. The representative spans are the FIRST contributor's
 /// (enum spans are not consumed downstream; only the member-name union and
 /// the contributor locators feed the parse-stable skeleton and facts).
-fn index_enum(enum_decl: &TSEnumDeclaration<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
+fn index_enum(
+    enum_decl: &TSEnumDeclaration<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
     let name = enum_decl.id.name.as_str();
     let entry = index
         .enum_headers
-        .entry(name.to_string())
+        .entry(ctx.key(name))
         .or_insert_with(|| EnumDeclHeader {
             span: enum_decl.span.into(),
             name_span: enum_decl.id.span.into(),
@@ -531,7 +676,12 @@ fn index_enum(enum_decl: &TSEnumDeclaration<'_>, stmt_index: u32, index: &mut De
             entry.member_names.push(member_name);
         }
     }
-    push_contributor(&mut entry.contributors, stmt_index);
+    push_contributor(
+        &mut entry.contributors,
+        ctx,
+        enum_decl.span.into(),
+        enum_decl.id.span.into(),
+    );
 
     // Dual-space RESOLUTION headers (mirrors `index_class`): an `enum` is
     // BOTH a type (its projected-type union) and a value (its `typeof`
@@ -553,11 +703,12 @@ fn index_enum(enum_decl: &TSEnumDeclaration<'_>, stmt_index: u32, index: &mut De
         enum_decl.id.span.into(),
         Vec::new(),
         Vec::new(),
-        stmt_index,
+        &[],
+        ctx,
     );
     let value_entry = index
         .value_headers
-        .entry(name.to_string())
+        .entry(ctx.key(name))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Enum,
             span: enum_decl.span.into(),
@@ -566,7 +717,12 @@ fn index_enum(enum_decl: &TSEnumDeclaration<'_>, stmt_index: u32, index: &mut De
             contributors: Vec::new(),
         });
     value_entry.kind = ValueDeclKind::Enum;
-    push_contributor(&mut value_entry.contributors, stmt_index);
+    push_contributor(
+        &mut value_entry.contributors,
+        ctx,
+        enum_decl.span.into(),
+        enum_decl.id.span.into(),
+    );
 }
 
 /// Mirror of `extract_module_declaration`: a string-literal module name is
@@ -574,14 +730,14 @@ fn index_enum(enum_decl: &TSEnumDeclaration<'_>, stmt_index: u32, index: &mut De
 /// inner type declarations register under qualified `Ns.Name` names.
 fn index_module_declaration(
     decl: &TSModuleDeclaration<'_>,
-    stmt_index: u32,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     prefix: Option<&str>,
 ) {
     if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
         if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
             let scope = AugmentationScopeKind::Module(spec.value.to_string());
-            index_augmentation_block(block, stmt_index, index, &scope);
+            index_augmentation_block(block, ctx, index, &scope);
         }
         return;
     }
@@ -599,11 +755,11 @@ fn index_module_declaration(
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            index_module_declaration(inner, stmt_index, index, Some(module_name.as_str()));
+            index_module_declaration(inner, ctx, index, Some(module_name.as_str()));
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                index_namespaced_statement(stmt, stmt_index, index, module_name.as_str());
+                index_namespaced_statement(stmt, ctx, index, module_name.as_str());
             }
         }
     }
@@ -617,21 +773,27 @@ fn index_module_declaration(
 /// is private to the namespace body and is intentionally NOT indexed.
 fn index_namespaced_statement(
     stmt: &Statement<'_>,
-    stmt_index: u32,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
             let name = format!("{namespace}.{}", alias.id.name);
-            index_type_alias(alias, name.as_str(), stmt_index, &mut index.type_headers);
+            index_type_alias(alias, name.as_str(), ctx, &mut index.type_headers);
         }
         Statement::TSInterfaceDeclaration(iface) => {
             let name = format!("{namespace}.{}", iface.id.name);
-            index_interface(iface, name.as_str(), stmt_index, &mut index.type_headers);
+            index_interface(iface, name.as_str(), ctx, &mut index.type_headers);
+        }
+        Statement::ClassDeclaration(class) => {
+            if let Some(identifier) = &class.id {
+                let name = format!("{namespace}.{}", identifier.name);
+                index_named_class(class, &name, ctx, index);
+            }
         }
         Statement::TSModuleDeclaration(module) => {
-            index_module_declaration(module, stmt_index, index, Some(namespace));
+            index_module_declaration(module, ctx, index, Some(namespace));
         }
         // Export-only: a DIRECT (non-exported) `VariableDeclaration` is private
         // to the namespace body and is intentionally NOT indexed. Only the
@@ -639,7 +801,7 @@ fn index_namespaced_statement(
         // `index_namespaced_declaration`) registers a qualified value member.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                index_namespaced_declaration(decl, stmt_index, index, namespace);
+                index_namespaced_declaration(decl, ctx, index, namespace);
             }
         }
         _ => {}
@@ -648,28 +810,34 @@ fn index_namespaced_statement(
 
 fn index_namespaced_declaration(
     decl: &Declaration<'_>,
-    stmt_index: u32,
+    ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     namespace: &str,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
             let name = format!("{namespace}.{}", alias.id.name);
-            index_type_alias(alias, name.as_str(), stmt_index, &mut index.type_headers);
+            index_type_alias(alias, name.as_str(), ctx, &mut index.type_headers);
         }
         Declaration::TSInterfaceDeclaration(iface) => {
             let name = format!("{namespace}.{}", iface.id.name);
-            index_interface(iface, name.as_str(), stmt_index, &mut index.type_headers);
+            index_interface(iface, name.as_str(), ctx, &mut index.type_headers);
+        }
+        Declaration::ClassDeclaration(class) => {
+            if let Some(identifier) = &class.id {
+                let name = format!("{namespace}.{}", identifier.name);
+                index_named_class(class, &name, ctx, index);
+            }
         }
         Declaration::TSModuleDeclaration(module) => {
-            index_module_declaration(module, stmt_index, index, Some(namespace));
+            index_module_declaration(module, ctx, index, Some(namespace));
         }
         Declaration::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
                 index_variable(
                     decl,
                     var_decl.kind,
-                    stmt_index,
+                    ctx,
                     &mut index.value_headers,
                     Some(namespace),
                 );
@@ -679,279 +847,6 @@ fn index_namespaced_declaration(
     }
 }
 
-/// Mirror of `extract_augmentation_block` + `extract_augmentation_declaration`
-/// + `retain_value_statement_into_augmentation`.
-///
-/// Inner interfaces / type-aliases register under the TYPE augmentation
-/// scope; inner value statements (`const`/`let`/`var`, `function`,
-/// `class`) register under the VALUE augmentation scope. An inner class
-/// registers ONLY its value side (the env walk drops the throwaway type
-/// side).
-fn index_augmentation_block(
-    block: &TSModuleBlock<'_>,
-    stmt_index: u32,
-    index: &mut DeclHeaderIndex,
-    scope: &AugmentationScopeKind,
-) {
-    for stmt in &block.body {
-        match stmt {
-            Statement::TSInterfaceDeclaration(iface) => {
-                let scoped = index
-                    .augmentation_type_headers
-                    .entry(scope.clone())
-                    .or_default();
-                index_interface(iface, iface.id.name.as_str(), stmt_index, scoped);
-            }
-            Statement::TSTypeAliasDeclaration(alias) => {
-                let scoped = index
-                    .augmentation_type_headers
-                    .entry(scope.clone())
-                    .or_default();
-                index_type_alias(alias, alias.id.name.as_str(), stmt_index, scoped);
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(decl) = export.declaration.as_ref() {
-                    match decl {
-                        Declaration::TSInterfaceDeclaration(iface) => {
-                            let scoped = index
-                                .augmentation_type_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            index_interface(iface, iface.id.name.as_str(), stmt_index, scoped);
-                        }
-                        Declaration::TSTypeAliasDeclaration(alias) => {
-                            let scoped = index
-                                .augmentation_type_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            index_type_alias(alias, alias.id.name.as_str(), stmt_index, scoped);
-                        }
-                        Declaration::VariableDeclaration(var_decl) => {
-                            let scoped = index
-                                .augmentation_value_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            for d in &var_decl.declarations {
-                                index_variable(d, var_decl.kind, stmt_index, scoped, None);
-                            }
-                        }
-                        Declaration::FunctionDeclaration(func) => {
-                            let scoped = index
-                                .augmentation_value_headers
-                                .entry(scope.clone())
-                                .or_default();
-                            index_function(func, stmt_index, scoped);
-                        }
-                        Declaration::ClassDeclaration(cls) => {
-                            index_augmentation_class_value(cls, stmt_index, index, scope);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Statement::VariableDeclaration(var_decl) => {
-                let scoped = index
-                    .augmentation_value_headers
-                    .entry(scope.clone())
-                    .or_default();
-                for d in &var_decl.declarations {
-                    index_variable(d, var_decl.kind, stmt_index, scoped, None);
-                }
-            }
-            Statement::FunctionDeclaration(func) => {
-                let scoped = index
-                    .augmentation_value_headers
-                    .entry(scope.clone())
-                    .or_default();
-                index_function(func, stmt_index, scoped);
-            }
-            Statement::ClassDeclaration(cls) => {
-                index_augmentation_class_value(cls, stmt_index, index, scope);
-            }
-            // A namespace nested inside an ambient augmentation block
-            // (`declare global { namespace JSX { ... } }`) registers its inner
-            // members under their qualified `Ns.Member` names into the SAME
-            // augmentation scope. Mirror of
-            // `extract_augmentation_module_declaration` (the body builder); the
-            // two MUST agree on the qualified key so `has_global_augmentation`
-            // and the lazy body memo resolve the same `(scope, name)` identity.
-            Statement::TSModuleDeclaration(module) => {
-                index_augmentation_module_declaration(module, stmt_index, index, scope, None);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Mirror of `extract_augmentation_module_declaration`: a `namespace N { ... }`
-/// nested inside an ambient augmentation block registers its inner type/value
-/// members under their qualified `Ns.Member` names in the augmentation
-/// inventory. A string-literal module name nested here contributes nothing.
-fn index_augmentation_module_declaration(
-    decl: &TSModuleDeclaration<'_>,
-    stmt_index: u32,
-    index: &mut DeclHeaderIndex,
-    scope: &AugmentationScopeKind,
-    prefix: Option<&str>,
-) {
-    let namespace = match &decl.id {
-        TSModuleDeclarationName::Identifier(id) => match prefix {
-            Some(prefix) => format!("{prefix}.{}", id.name),
-            None => id.name.to_string(),
-        },
-        TSModuleDeclarationName::StringLiteral(_) => return,
-    };
-    let Some(body) = decl.body.as_ref() else {
-        return;
-    };
-    match body {
-        TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            index_augmentation_module_declaration(
-                inner,
-                stmt_index,
-                index,
-                scope,
-                Some(namespace.as_str()),
-            );
-        }
-        TSModuleDeclarationBody::TSModuleBlock(block) => {
-            for stmt in &block.body {
-                index_namespaced_statement_into_augmentation(
-                    stmt,
-                    stmt_index,
-                    index,
-                    namespace.as_str(),
-                    scope,
-                );
-            }
-        }
-    }
-}
-
-/// Augmentation-scope mirror of `index_namespaced_statement`.
-fn index_namespaced_statement_into_augmentation(
-    stmt: &Statement<'_>,
-    stmt_index: u32,
-    index: &mut DeclHeaderIndex,
-    namespace: &str,
-    scope: &AugmentationScopeKind,
-) {
-    match stmt {
-        Statement::TSTypeAliasDeclaration(alias) => {
-            let name = format!("{namespace}.{}", alias.id.name);
-            let scoped = index
-                .augmentation_type_headers
-                .entry(scope.clone())
-                .or_default();
-            index_type_alias(alias, name.as_str(), stmt_index, scoped);
-        }
-        Statement::TSInterfaceDeclaration(iface) => {
-            let name = format!("{namespace}.{}", iface.id.name);
-            let scoped = index
-                .augmentation_type_headers
-                .entry(scope.clone())
-                .or_default();
-            index_interface(iface, name.as_str(), stmt_index, scoped);
-        }
-        Statement::TSModuleDeclaration(module) => {
-            index_augmentation_module_declaration(
-                module,
-                stmt_index,
-                index,
-                scope,
-                Some(namespace),
-            );
-        }
-        // Export-only namespace value indexing (mirror of
-        // `index_namespaced_statement`).
-        Statement::ExportNamedDeclaration(export) => {
-            if let Some(ref decl) = export.declaration {
-                index_namespaced_declaration_into_augmentation(
-                    decl, stmt_index, index, namespace, scope,
-                );
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Augmentation-scope mirror of `index_namespaced_declaration`.
-fn index_namespaced_declaration_into_augmentation(
-    decl: &Declaration<'_>,
-    stmt_index: u32,
-    index: &mut DeclHeaderIndex,
-    namespace: &str,
-    scope: &AugmentationScopeKind,
-) {
-    match decl {
-        Declaration::TSTypeAliasDeclaration(alias) => {
-            let name = format!("{namespace}.{}", alias.id.name);
-            let scoped = index
-                .augmentation_type_headers
-                .entry(scope.clone())
-                .or_default();
-            index_type_alias(alias, name.as_str(), stmt_index, scoped);
-        }
-        Declaration::TSInterfaceDeclaration(iface) => {
-            let name = format!("{namespace}.{}", iface.id.name);
-            let scoped = index
-                .augmentation_type_headers
-                .entry(scope.clone())
-                .or_default();
-            index_interface(iface, name.as_str(), stmt_index, scoped);
-        }
-        Declaration::TSModuleDeclaration(module) => {
-            index_augmentation_module_declaration(
-                module,
-                stmt_index,
-                index,
-                scope,
-                Some(namespace),
-            );
-        }
-        Declaration::VariableDeclaration(var_decl) => {
-            let scoped = index
-                .augmentation_value_headers
-                .entry(scope.clone())
-                .or_default();
-            for d in &var_decl.declarations {
-                index_variable(d, var_decl.kind, stmt_index, scoped, Some(namespace));
-            }
-        }
-        _ => {}
-    }
-}
-
-/// An ambient-augmentation class contributes its VALUE side only (mirrors
-/// `move_value_symbols_into_augmentation`, which drops the type side).
-fn index_augmentation_class_value(
-    cls: &Class<'_>,
-    stmt_index: u32,
-    index: &mut DeclHeaderIndex,
-    scope: &AugmentationScopeKind,
-) {
-    let Some(id) = &cls.id else {
-        return;
-    };
-    let scoped = index
-        .augmentation_value_headers
-        .entry(scope.clone())
-        .or_default();
-    let entry = scoped
-        .entry(id.name.to_string())
-        .or_insert_with(|| ValueDeclHeader {
-            kind: ValueDeclKind::Class,
-            span: cls.span.into(),
-            name_span: id.span.into(),
-            object_member_headers: Vec::new(),
-            contributors: Vec::new(),
-        });
-    entry.kind = ValueDeclKind::Class;
-    entry.span = cls.span.into();
-    entry.name_span = id.span.into();
-    push_contributor(&mut entry.contributors, stmt_index);
-}
-
 // ───────────────────────────────────────────────────────────────────────
 // Per-declaration header builders
 // ───────────────────────────────────────────────────────────────────────
@@ -959,8 +854,8 @@ fn index_augmentation_class_value(
 fn index_type_alias(
     decl: &TSTypeAliasDeclaration<'_>,
     name: &str,
-    stmt_index: u32,
-    table: &mut FxHashMap<String, TypeDeclHeader>,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<TypeDeclHeader>,
 ) {
     let params = type_param_headers(decl.type_parameters.as_deref());
     let members = alias_body_member_headers(&decl.type_annotation);
@@ -972,15 +867,16 @@ fn index_type_alias(
         decl.id.span.into(),
         params,
         members,
-        stmt_index,
+        &[],
+        ctx,
     );
 }
 
 fn index_interface(
     decl: &TSInterfaceDeclaration<'_>,
     name: &str,
-    stmt_index: u32,
-    table: &mut FxHashMap<String, TypeDeclHeader>,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<TypeDeclHeader>,
 ) {
     let params = type_param_headers(decl.type_parameters.as_deref());
     let mut members = Vec::new();
@@ -989,6 +885,7 @@ fn index_interface(
             members.push(header);
         }
     }
+    let ignored_heritage_arms = vue_ignored_heritage_arms(decl, ctx);
     upsert_type_header(
         table,
         name,
@@ -997,18 +894,73 @@ fn index_interface(
         decl.id.span.into(),
         params,
         members,
-        stmt_index,
+        &ignored_heritage_arms,
+        ctx,
     );
+}
+
+fn vue_ignored_heritage_arms(
+    decl: &TSInterfaceDeclaration<'_>,
+    ctx: HeaderStatementContext<'_>,
+) -> Vec<u32> {
+    let mut lowered_arm_ordinal = 0u32;
+    let mut ignored = Vec::new();
+
+    for heritage in &decl.extends {
+        if !is_lowerable_heritage_expression(&heritage.expression) {
+            continue;
+        }
+        if matches!(heritage.expression, Expression::Identifier(_))
+            && ctx
+                .vue_ignore_attachment_starts
+                .contains(&heritage.expression.span().start)
+        {
+            ignored.push(lowered_arm_ordinal);
+        }
+        let Some(next) = lowered_arm_ordinal.checked_add(1) else {
+            break;
+        };
+        lowered_arm_ordinal = next;
+    }
+    ignored
+}
+
+fn is_lowerable_heritage_expression(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Identifier(_) => true,
+        Expression::StaticMemberExpression(member) => {
+            let mut object = &member.object;
+            loop {
+                match object {
+                    Expression::Identifier(_) => return true,
+                    Expression::StaticMemberExpression(parent) => object = &parent.object,
+                    _ => return false,
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Mirror of `extract_class`'s NAME registration: a named class declares a
 /// type symbol (instance members) AND a value symbol (constructor shape +
 /// static members). An anonymous class declares nothing.
-fn index_class(decl: &Class<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
+fn index_class(decl: &Class<'_>, ctx: HeaderStatementContext<'_>, index: &mut DeclHeaderIndex) {
     let Some(id) = &decl.id else {
         return;
     };
-    let name = id.name.as_str();
+    index_named_class(decl, id.name.as_str(), ctx, index);
+}
+
+fn index_named_class(
+    decl: &Class<'_>,
+    name: &str,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
+    let Some(id) = &decl.id else {
+        return;
+    };
 
     let params = type_param_headers(decl.type_parameters.as_deref());
     let mut instance_members = Vec::new();
@@ -1060,12 +1012,13 @@ fn index_class(decl: &Class<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
         id.span.into(),
         params,
         instance_members,
-        stmt_index,
+        &[],
+        ctx,
     );
 
     let entry = index
         .value_headers
-        .entry(name.to_string())
+        .entry(ctx.key(name))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Class,
             span: decl.span.into(),
@@ -1085,13 +1038,18 @@ fn index_class(decl: &Class<'_>, stmt_index: u32, index: &mut DeclHeaderIndex) {
             entry.object_member_headers.push(header);
         }
     }
-    push_contributor(&mut entry.contributors, stmt_index);
+    push_contributor(
+        &mut entry.contributors,
+        ctx,
+        decl.span.into(),
+        id.span.into(),
+    );
 }
 
 fn index_function(
     func: &oxc_ast::ast::Function<'_>,
-    stmt_index: u32,
-    table: &mut FxHashMap<String, ValueDeclHeader>,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<ValueDeclHeader>,
 ) {
     let Some(id) = &func.id else {
         return;
@@ -1102,7 +1060,7 @@ fn index_function(
         ValueDeclKind::Function
     };
     let entry = table
-        .entry(id.name.to_string())
+        .entry(ctx.key(id.name.as_str()))
         .or_insert_with(|| ValueDeclHeader {
             kind,
             span: func.span.into(),
@@ -1115,14 +1073,19 @@ fn index_function(
     entry.kind = kind;
     entry.span = func.span.into();
     entry.name_span = id.span.into();
-    push_contributor(&mut entry.contributors, stmt_index);
+    push_contributor(
+        &mut entry.contributors,
+        ctx,
+        func.span.into(),
+        id.span.into(),
+    );
 }
 
 fn index_variable(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
-    stmt_index: u32,
-    table: &mut FxHashMap<String, ValueDeclHeader>,
+    ctx: HeaderStatementContext<'_>,
+    table: &mut DeclMap<ValueDeclHeader>,
     namespace: Option<&str>,
 ) {
     let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &decl.id else {
@@ -1147,13 +1110,15 @@ fn index_variable(
         Some(ns) => format!("{ns}.{}", id.name),
         None => id.name.to_string(),
     };
-    let entry = table.entry(key).or_insert_with(|| ValueDeclHeader {
-        kind: var_kind,
-        span: decl.span.into(),
-        name_span: id.span.into(),
-        object_member_headers: Vec::new(),
-        contributors: Vec::new(),
-    });
+    let entry = table
+        .entry(ctx.key(&key))
+        .or_insert_with(|| ValueDeclHeader {
+            kind: var_kind,
+            span: decl.span.into(),
+            name_span: id.span.into(),
+            object_member_headers: Vec::new(),
+            contributors: Vec::new(),
+        });
     entry.kind = var_kind;
     entry.span = decl.span.into();
     entry.name_span = id.span.into();
@@ -1166,37 +1131,50 @@ fn index_variable(
             entry.object_member_headers.push(header);
         }
     }
-    push_contributor(&mut entry.contributors, stmt_index);
+    push_contributor(
+        &mut entry.contributors,
+        ctx,
+        decl.span.into(),
+        id.span.into(),
+    );
 }
 
 /// Mirror of `alias_default_export_type_symbol`: clone the declared-name
 /// header under `default` (no-op when `default` already exists or the
 /// declared name produced no type header).
-fn alias_default_type_header(index: &mut DeclHeaderIndex, declared_name: &str, stmt_index: u32) {
-    if index.type_headers.contains_key("default") {
+fn alias_default_type_header(
+    index: &mut DeclHeaderIndex,
+    declared_name: &str,
+    ctx: HeaderStatementContext<'_>,
+) {
+    let default_key = ctx.key("default");
+    if index.type_headers.contains_key(&default_key) {
         return;
     }
-    let Some(declared) = index.type_headers.get(declared_name) else {
+    let Some(declared) = index.type_headers.get(&ctx.key(declared_name)) else {
         return;
     };
     let mut aliased = declared.clone();
-    aliased.contributors = vec![stmt_index];
-    index.type_headers.insert("default".to_string(), aliased);
+    aliased
+        .contributors
+        .retain(|entry| entry.anchor == ctx.anchor);
+    index.type_headers.insert(default_key, aliased);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn upsert_type_header(
-    table: &mut FxHashMap<String, TypeDeclHeader>,
+    table: &mut DeclMap<TypeDeclHeader>,
     name: &str,
     kind: TypeDeclKind,
     span: Span,
     name_span: Span,
     params: Vec<TypeParamHeader>,
     members: Vec<MemberHeader>,
-    stmt_index: u32,
+    ignored_heritage_arm_ordinals: &[u32],
+    ctx: HeaderStatementContext<'_>,
 ) {
     let entry = table
-        .entry(name.to_string())
+        .entry(ctx.key(name))
         .or_insert_with(|| TypeDeclHeader {
             kind,
             span,
@@ -1204,7 +1182,9 @@ fn upsert_type_header(
             type_params: Vec::new(),
             member_headers: Vec::new(),
             contributors: Vec::new(),
+            vue_ignored_heritage: Vec::new(),
             from_jsdoc_typedef: false,
+            jsdoc_typedef: None,
         });
     // Last contributor wins for the representative kind/spans (matching
     // `TypeDeclGroup::primary`); params and members UNION across
@@ -1215,6 +1195,7 @@ fn upsert_type_header(
     entry.span = span;
     entry.name_span = name_span;
     entry.from_jsdoc_typedef = false;
+    entry.jsdoc_typedef = None;
     for param in params {
         if !entry.type_params.iter().any(|p| p.name == param.name) {
             entry.type_params.push(param);
@@ -1229,13 +1210,42 @@ fn upsert_type_header(
             entry.member_headers.push(member);
         }
     }
-    push_contributor(&mut entry.contributors, stmt_index);
+    let contributor_ordinal = entry
+        .contributors
+        .iter()
+        .position(|contributor| contributor.anchor == ctx.anchor)
+        .unwrap_or(entry.contributors.len());
+    if let Ok(contributor_ordinal) = u32::try_from(contributor_ordinal) {
+        for &intersection_arm_ordinal in ignored_heritage_arm_ordinals {
+            let fact = VueIgnoredHeritageFact {
+                contributor_ordinal,
+                intersection_arm_ordinal,
+            };
+            if !entry.vue_ignored_heritage.contains(&fact) {
+                entry.vue_ignored_heritage.push(fact);
+            }
+        }
+    }
+    push_contributor(&mut entry.contributors, ctx, span, name_span);
 }
 
-fn push_contributor(contributors: &mut Vec<u32>, stmt_index: u32) {
-    if contributors.last() != Some(&stmt_index) {
-        contributors.push(stmt_index);
+fn push_contributor(
+    contributors: &mut Vec<DeclHeaderContributor>,
+    ctx: HeaderStatementContext<'_>,
+    declaration_span: Span,
+    name_span: Span,
+) {
+    if contributors
+        .last()
+        .is_some_and(|entry| entry.anchor == ctx.anchor)
+    {
+        return;
     }
+    contributors.push(DeclHeaderContributor {
+        anchor: ctx.anchor,
+        declaration_span,
+        name_span,
+    });
 }
 
 fn type_param_headers(decl: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<TypeParamHeader> {

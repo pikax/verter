@@ -34,6 +34,7 @@ fn projected_member_path_fact_discriminates_base_and_path() {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: std::sync::Arc::from(canonical),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
                 symbol: std::sync::Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -92,6 +93,7 @@ fn projected_callable_params_fact_discriminates_base_ordinal_and_first_param() {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: std::sync::Arc::from(canonical),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
                 symbol: std::sync::Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -157,6 +159,7 @@ fn projected_index_position_fact_discriminates_base_ordinal_and_position() {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: std::sync::Arc::from(canonical),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
                 symbol: std::sync::Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },

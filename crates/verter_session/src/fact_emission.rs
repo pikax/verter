@@ -106,6 +106,7 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
         registry.insert(Fact {
             key: FactKey::ModuleAugmentation {
                 specifier: InternedSpecifier(aug.specifier.0.clone()),
+                owner: aug.owner,
                 augmented_name: InternedName(aug.augmented_name.0.clone()),
                 space: aug.space,
             },
@@ -119,7 +120,7 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
         lens,
         synthesised_value_bodies: shallow
             .synthesised_value_bodies()
-            .map(|(name, body)| (name.to_string(), Arc::clone(body)))
+            .map(|(key, body)| (key.clone(), Arc::clone(body)))
             .collect(),
         computed: Arc::new(DashMap::default()),
     };
@@ -145,7 +146,7 @@ pub(crate) struct LazyBodyFactSource {
     /// Eager synthesised value BODIES (the `.vue` implicit `default`)
     /// — their facts compute from the eager `LoweredValueDecl`, never
     /// the lazy memo.
-    synthesised_value_bodies: FxHashMap<String, Arc<LoweredValueDecl>>,
+    synthesised_value_bodies: FxHashMap<verter_type_expr::DeclBindingKey, Arc<LoweredValueDecl>>,
     computed: Arc<DashMap<FactKey, Fact>>,
 }
 
@@ -157,23 +158,37 @@ impl LazyBodyFactSource {
         // `name` is the backing LOCAL declaration name probed against the
         // body memo; the emitted `Fact.key` stays the original requested
         // key (e.g. `Export(Bar, Type)`), never the backing local key.
-        let (name, space): (&str, SymbolSpace) = match key {
+        let (decl_key, space): (verter_type_expr::DeclBindingKey, SymbolSpace) = match key {
             // The `Export` key answers only for names that resolve to a
             // LOCAL declaration — `export { Foo as Bar }` maps the public
             // `Bar` to the backing local `Foo`; reexports are absent from
             // the map and so never compute body facts here.
             FactKey::Export { name, space } => {
-                let backing = self.lens.local_export_targets.get(name.as_ref())?;
-                (backing.as_str(), *space)
+                let key = verter_type_expr::DeclBindingKey::new(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    name.as_ref(),
+                );
+                let backing = self.lens.local_export_targets.get(&key)?;
+                (backing.clone(), *space)
             }
             // `LocalDecl` answers only for non-exported names — mirroring
             // the historical emission's exported-name split, so consistent
             // absence stays consistent.
             FactKey::LocalDecl { name, space } => {
-                if self.lens.exported.contains(name.as_ref()) {
+                let key = verter_type_expr::DeclBindingKey::new(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    name.as_ref(),
+                );
+                if self.lens.exported.contains(&key) {
                     return None;
                 }
-                (name.as_ref(), *space)
+                (
+                    verter_type_expr::DeclBindingKey::new(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        name.as_ref(),
+                    ),
+                    *space,
+                )
             }
             _ => return None,
         };
@@ -183,7 +198,15 @@ impl LazyBodyFactSource {
             // lowered bodies through the same shared lens (the fenced
             // output-side body-fact site), never a direct typed-body access
             // and never a re-lowering.
-            SymbolSpace::Type => self.memo.compat_type_body_hash_input(name)?,
+            SymbolSpace::Type => {
+                if decl_key.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+                    self.memo
+                        .compat_type_body_hash_input(decl_key.name.as_ref())?
+                } else {
+                    self.memo
+                        .compat_type_body_hash_input_in(decl_key.owner, decl_key.name.as_ref())?
+                }
+            }
             // No namespace-space declarations are inventoried by the
             // shallow walk — consistent absence.
             SymbolSpace::Namespace => return None,
@@ -191,9 +214,16 @@ impl LazyBodyFactSource {
                 // Keep the synthesised-value-body vs lazy-memo selection HERE,
                 // then read the stored fingerprint through the named compat
                 // producer (the fenced output-side value-body-fact site).
-                let lowered = match self.synthesised_value_bodies.get(name) {
+                let lowered = match self.synthesised_value_bodies.get(&decl_key) {
                     Some(body) => Arc::clone(body),
-                    None => self.memo.value_decl(name)?,
+                    None if decl_key.owner
+                        == verter_type_expr::TopLevelOwnerId::ordinary_file() =>
+                    {
+                        self.memo.value_decl(decl_key.name.as_ref())?
+                    }
+                    None => self
+                        .memo
+                        .value_decl_in(decl_key.owner, decl_key.name.as_ref())?,
                 };
                 compat_value_body_hash_input(&lowered)
             }
@@ -236,18 +266,19 @@ pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> HashOu
 /// free references.
 #[derive(Debug)]
 pub(crate) struct ShallowLens {
-    locals: FxHashSet<String>,
-    value_locals: FxHashSet<String>,
-    exported: FxHashSet<String>,
+    locals: FxHashSet<verter_type_expr::DeclBindingKey>,
+    value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
+    exported: FxHashSet<verter_type_expr::DeclBindingKey>,
     /// Maps a public exported name to its backing LOCAL declaration name
     /// for `export { Foo as Bar }` / `export { Foo }` (the latter maps a
     /// name to itself). Built ONLY from `ExportTarget::Local` entries —
     /// reexports are excluded, so they never compute body facts through
     /// the lazy path. The lazy `Export(Bar, …)` fact preserves the public
     /// key `Bar` while lowering/hashing the backing local `Foo`.
-    local_export_targets: FxHashMap<String, String>,
+    local_export_targets:
+        FxHashMap<verter_type_expr::DeclBindingKey, verter_type_expr::DeclBindingKey>,
     /// Maps `local_binding_name → source_specifier`.
-    import_targets: FxHashMap<String, Arc<str>>,
+    import_targets: FxHashMap<verter_type_expr::DeclBindingKey, Arc<str>>,
 }
 
 impl ShallowLens {
@@ -257,21 +288,46 @@ impl ShallowLens {
     /// body fingerprint, the lazy body-fact source) shares that one instance.
     pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
         Self {
-            locals: shallow.type_symbol_names().map(str::to_string).collect(),
-            value_locals: shallow.value_symbol_names().map(str::to_string).collect(),
-            exported: shallow.exports.keys().cloned().collect(),
+            locals: shallow
+                .decl_bodies()
+                .header_index()
+                .type_headers
+                .keys()
+                .cloned()
+                .collect(),
+            value_locals: shallow
+                .decl_bodies()
+                .header_index()
+                .value_headers
+                .keys()
+                .cloned()
+                .collect(),
+            exported: shallow
+                .exports
+                .keys()
+                .map(|name| {
+                    verter_type_expr::DeclBindingKey::new(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        name.as_str(),
+                    )
+                })
+                .collect(),
             local_export_targets: shallow
                 .exports
                 .iter()
                 .filter_map(|(public_name, target)| match target {
-                    ExportTarget::Local { symbol_name } => {
-                        Some((public_name.clone(), symbol_name.clone()))
-                    }
+                    ExportTarget::Local { owner, symbol_name } => Some((
+                        verter_type_expr::DeclBindingKey::new(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            public_name.as_str(),
+                        ),
+                        verter_type_expr::DeclBindingKey::new(*owner, symbol_name.as_str()),
+                    )),
                     ExportTarget::Reexport { .. } => None,
                 })
                 .collect(),
             import_targets: shallow
-                .import_targets
+                .owner_import_targets
                 .iter()
                 .map(|(local, target)| {
                     (
@@ -282,20 +338,29 @@ impl ShallowLens {
                 .collect(),
         }
     }
-}
 
-impl CrossDeclLens for ShallowLens {
-    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {
-        if let Some(specifier) = self.import_targets.get(name) {
+    pub(crate) fn for_owner(
+        &self,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> OwnedShallowLens<'_> {
+        OwnedShallowLens { base: self, owner }
+    }
+
+    fn resolve_in(
+        &self,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        space: SymbolSpace,
+    ) -> Option<CrossDeclRef> {
+        let key = verter_type_expr::DeclBindingKey::new(owner, name);
+        if let Some(specifier) = self.import_targets.get(&key) {
             return Some(CrossDeclRef::ImportRef {
                 specifier: Arc::clone(specifier),
                 binding: Arc::from(name),
                 space,
             });
         }
-        let is_local_type = self.locals.contains(name);
-        let is_local_value = self.value_locals.contains(name);
-        if is_local_type || is_local_value {
+        if self.locals.contains(&key) || self.value_locals.contains(&key) {
             return Some(CrossDeclRef::LocalDecl {
                 name: Arc::from(name),
                 space,
@@ -305,6 +370,27 @@ impl CrossDeclLens for ShallowLens {
             name: Arc::from(name),
             space,
         })
+    }
+}
+
+impl CrossDeclLens for ShallowLens {
+    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {
+        self.resolve_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name,
+            space,
+        )
+    }
+}
+
+pub(crate) struct OwnedShallowLens<'a> {
+    base: &'a ShallowLens,
+    owner: verter_type_expr::TopLevelOwnerId,
+}
+
+impl CrossDeclLens for OwnedShallowLens<'_> {
+    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {
+        self.base.resolve_in(self.owner, name, space)
     }
 }
 
@@ -318,8 +404,9 @@ impl CrossDeclLens for ShallowLens {
 #[derive(Debug)]
 pub(crate) struct RouteLens {
     canonical_id: Arc<str>,
-    type_symbols: FxHashSet<String>,
-    import_targets: FxHashMap<String, verter_semantic::facts::ImportRouteTarget>,
+    type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
+    import_targets:
+        FxHashMap<verter_type_expr::DeclBindingKey, verter_semantic::facts::ImportRouteTarget>,
 }
 
 impl RouteLens {
@@ -328,14 +415,20 @@ impl RouteLens {
     pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
         Self {
             canonical_id: shallow.decl_bodies().canonical_id(),
-            type_symbols: shallow.type_symbol_names().map(str::to_string).collect(),
+            type_symbols: shallow
+                .decl_bodies()
+                .header_index()
+                .type_headers
+                .keys()
+                .cloned()
+                .collect(),
             import_targets:
                 shallow
-                    .import_targets
+                    .owner_import_targets
                     .iter()
                     .map(|(local, target)| {
                         (
-                            local.to_string(),
+                            local.clone(),
                             verter_semantic::facts::ImportRouteTarget {
                                 source_specifier: Arc::from(target.source_specifier.as_str()),
                                 imported_name: Arc::from(target.imported_name.as_str()),
@@ -349,21 +442,38 @@ impl RouteLens {
                     .collect(),
         }
     }
+
+    pub(crate) fn for_owner(&self, owner: verter_type_expr::TopLevelOwnerId) -> OwnedRouteLens<'_> {
+        OwnedRouteLens { base: self, owner }
+    }
 }
 
-impl verter_semantic::facts::RouteFactLens for RouteLens {
+pub(crate) struct OwnedRouteLens<'a> {
+    base: &'a RouteLens,
+    owner: verter_type_expr::TopLevelOwnerId,
+}
+
+impl verter_semantic::facts::RouteFactLens for OwnedRouteLens<'_> {
     fn resolve_import_route(
         &self,
         local: &str,
         _space: SymbolSpace,
     ) -> Option<verter_semantic::facts::ImportRouteTarget> {
-        self.import_targets.get(local).cloned()
+        self.base
+            .import_targets
+            .get(&verter_type_expr::DeclBindingKey::new(self.owner, local))
+            .cloned()
     }
     fn has_type_symbol(&self, name: &str) -> bool {
-        self.type_symbols.contains(name)
+        self.base
+            .type_symbols
+            .contains(&verter_type_expr::DeclBindingKey::new(self.owner, name))
     }
     fn own_canonical_id(&self) -> Arc<str> {
-        Arc::clone(&self.canonical_id)
+        Arc::clone(&self.base.canonical_id)
+    }
+    fn own_top_level_owner(&self) -> verter_type_expr::TopLevelOwnerId {
+        self.owner
     }
 }
 
@@ -634,6 +744,8 @@ fn emit_import_refs(registry: &mut FactRegistry, shallow: &ShallowFileState) {
         buf.extend_from_slice(local.as_bytes());
         buf.push(0xFE);
         buf.extend_from_slice(target.imported_name.as_bytes());
+        buf.push(0xFE);
+        buf.push(u8::from(target.is_namespace));
         // R12: NO position, NO resolved_canonical.
         let h = hash_16(&buf);
         registry.insert(Fact {
@@ -699,13 +811,16 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
 
     // Type-space augmentations (interfaces, type aliases).
     for (scope, names) in &header_index.augmentation_type_headers {
-        for (name, header) in names {
+        for (key, header) in names {
+            let name = key.name.as_ref();
             out.push(ModuleAugmentationFact {
                 specifier: specifier_for(scope),
-                augmented_name: InternedName::from(name.as_str()),
+                owner: key.owner,
+                augmented_name: InternedName::from(name),
                 space: SymbolSpace::Type,
                 augmented_member_shape_fingerprint: augmentation_header_fingerprint(
                     scope,
+                    key.owner,
                     name,
                     format!("{:?}", header.kind).as_str(),
                     header.member_headers.as_slice(),
@@ -717,13 +832,16 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
 
     // Value-space augmentations (`const`/`let`/`var`, `function`, `class`).
     for (scope, names) in &header_index.augmentation_value_headers {
-        for (name, header) in names {
+        for (key, header) in names {
+            let name = key.name.as_ref();
             out.push(ModuleAugmentationFact {
                 specifier: specifier_for(scope),
-                augmented_name: InternedName::from(name.as_str()),
+                owner: key.owner,
+                augmented_name: InternedName::from(name),
                 space: SymbolSpace::Value,
                 augmented_member_shape_fingerprint: augmentation_header_fingerprint(
                     scope,
+                    key.owner,
                     name,
                     format!("{:?}", header.kind).as_str(),
                     header.object_member_headers.as_slice(),
@@ -740,6 +858,7 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
         a.specifier
             .as_ref()
             .cmp(b.specifier.as_ref())
+            .then_with(|| a.owner.cmp(&b.owner))
             .then_with(|| a.space.tag().cmp(&b.space.tag()))
             .then_with(|| a.augmented_name.as_ref().cmp(b.augmented_name.as_ref()))
     });
@@ -761,6 +880,7 @@ fn hash16_from_pair(lo: u64, hi: u64) -> Hash16 {
 /// body-VALUE sensitivity is the per-contributor `FileWholeHash` rail.
 fn augmentation_header_fingerprint(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
     kind: &str,
     members: &[MemberHeader],
@@ -773,6 +893,7 @@ fn augmentation_header_fingerprint(
         let mut h = rustc_hash::FxHasher::default();
         salt.hash(&mut h);
         scope.hash(&mut h);
+        owner.hash(&mut h);
         name.hash(&mut h);
         kind.hash(&mut h);
         contributor_count.hash(&mut h);
@@ -819,6 +940,38 @@ mod tests {
         assert_eq!(facts[0].specifier.as_ref(), "vue");
         assert_eq!(facts[0].augmented_name.as_ref(), "ComponentOptions");
         assert_eq!(facts[0].space, SymbolSpace::Type);
+        assert_eq!(
+            facts[0].owner,
+            verter_type_expr::TopLevelOwnerId::ordinary_file()
+        );
+    }
+
+    #[test]
+    fn same_augmentation_header_is_emitted_for_each_exact_lexical_owner() {
+        let source = r#"
+declare module "vue" { interface Shared { value: string } }
+declare module "vue" { interface Shared { value: string } }
+"#;
+        let module = verter_type_expr::TopLevelOwnerId::module(0);
+        let instance = verter_type_expr::TopLevelOwnerId::instance(0);
+        let state =
+            crate::resolver_core::ShallowFileState::service_backed_for_test_with_statement_owners(
+                "/ws/fixture.vue",
+                source,
+                &[module, instance],
+            );
+
+        let facts = collect_augmentations(&state);
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].owner, module);
+        assert_eq!(facts[1].owner, instance);
+        assert_eq!(facts[0].specifier, facts[1].specifier);
+        assert_eq!(facts[0].augmented_name, facts[1].augmented_name);
+        assert_ne!(
+            facts[0].augmented_member_shape_fingerprint,
+            facts[1].augmented_member_shape_fingerprint,
+            "lexical owner is part of the authored augmentation fingerprint"
+        );
     }
 
     #[test]

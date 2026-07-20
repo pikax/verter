@@ -46,6 +46,7 @@ walkdir = "2.5"
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "io-util", "process", "net", "time", "sync"] }
 
 [dev-dependencies]
+verter_macro_dto = { path = "../verter_macro_dto" }
 # Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
 # only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)
 # while default/release builds never produce it. Cargo prints a cosmetic

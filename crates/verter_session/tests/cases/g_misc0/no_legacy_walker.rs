@@ -221,8 +221,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Framework parse-artifact carrier substrate: every production
     // `cached_parse` carrier field — `IndexedReady`,
     // `RouteOwnedShallowEntry`, `HostSourceData`, `CompileInput`,
-    // `EffectiveFileState`, `ContentOverrideWithParse`,
-    // `ExternalTypeResolutionInputs` — plus the producer/threading
+    // `EffectiveFileState`, `ContentOverrideWithParse` — plus the producer/threading
     // locals and the `route_owned_snapshot_cached_parse_hits`
     // provenance-counter family are renamed/replaced by the
     // framework-neutral `framework_parse:
@@ -452,12 +451,8 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Re-introducing it would resurrect a consumer-local
     // second-resolution path beside the shared resolver.
     "select_imported_materialization_scope",
-    // "Emit" is Vue semantics, not a neutral script-surface concept.
-    // The neutral type-surface element types carry the neutral names
-    // `ResolvedNamedCallSignature` / `ResolvedCallPayloadForm`
-    // (`verter_parser::utils::oxc::script::type_surface`); the retired
-    // Vue-flavoured names must not reappear on the neutral surface or
-    // as aliases beside it.
+    // "Emit" is Vue semantics, not a neutral script-inventory concept. Vue
+    // projection names must not enter the framework-neutral parser inventory.
     "ResolvedEmit",
     "ResolvedEmitSignature",
     // The Vue adapter's host-owned shallow-metadata store + its key/value

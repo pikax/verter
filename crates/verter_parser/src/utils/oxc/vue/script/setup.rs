@@ -12,7 +12,8 @@ use oxc_span::GetSpan;
 
 use super::macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
-    MacroObjectArg, MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
+    MacroObjectArg, MacroObjectStaticEligibility, MacroProperty, MacroTypeParams,
+    MacroTypePropMember, RuntimeConstructorSyntax, ScriptMacro, VueMacroKind,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -25,10 +26,8 @@ use super::usage::{
     SyncContextUsage, TemplateUtilUsage, UsageCollector, VueApiCategory, VueApiKind, WatcherUsage,
 };
 use crate::common::Span;
-use crate::utils::oxc::script::type_surface::{
-    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, RuntimeType,
-    TypeResolutionContext,
-};
+use verter_type_expr::facts::TypeDependencyPathFact;
+use verter_type_expr_oxc::collect_type_dependency_paths;
 
 /// Context for setup script parsing
 pub struct SetupContext {
@@ -85,13 +84,12 @@ impl SetupContext {
 pub fn process_setup_statements<'a>(
     statements: &'a [Statement<'a>],
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
 ) {
     for stmt in statements {
-        process_setup_statement(stmt, ctx, type_ctx, setup_ctx, items, errors);
+        process_setup_statement(stmt, ctx, setup_ctx, items, errors);
     }
 }
 
@@ -99,7 +97,6 @@ pub fn process_setup_statements<'a>(
 pub fn process_setup_statement<'a>(
     stmt: &'a Statement<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -122,7 +119,7 @@ pub fn process_setup_statement<'a>(
                     kind: TypeDeclarationKind::TypeAlias,
                 }));
             } else {
-                process_variable_declaration(var_decl, ctx, type_ctx, setup_ctx, items);
+                process_variable_declaration(var_decl, ctx, setup_ctx, items);
             }
         }
 
@@ -166,13 +163,13 @@ pub fn process_setup_statement<'a>(
 
         // Expression statements (may contain macro calls, await, etc.)
         Statement::ExpressionStatement(expr_stmt) => {
-            process_expression_statement(expr_stmt, ctx, type_ctx, setup_ctx, items);
+            process_expression_statement(expr_stmt, ctx, setup_ctx, items);
         }
 
         // Block statements that prevent declaration tracking
         Statement::BlockStatement(block) => {
             setup_ctx.enter_block();
-            process_setup_statements(&block.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statements(&block.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -181,25 +178,25 @@ pub fn process_setup_statement<'a>(
             check_expression_for_async(&if_stmt.test, setup_ctx, items);
 
             setup_ctx.enter_block();
-            process_setup_statement(&if_stmt.consequent, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&if_stmt.consequent, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
 
             if let Some(alt) = &if_stmt.alternate {
                 setup_ctx.enter_block();
-                process_setup_statement(alt, ctx, type_ctx, setup_ctx, items, errors);
+                process_setup_statement(alt, ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
         }
 
         Statement::ForStatement(for_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statement(&for_stmt.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_stmt.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::ForInStatement(for_in) => {
             setup_ctx.enter_block();
-            process_setup_statement(&for_in.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_in.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -214,19 +211,19 @@ pub fn process_setup_statement<'a>(
                 }));
             }
             setup_ctx.enter_block();
-            process_setup_statement(&for_of.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_of.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::WhileStatement(while_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statement(&while_stmt.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&while_stmt.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::DoWhileStatement(do_while) => {
             setup_ctx.enter_block();
-            process_setup_statement(&do_while.body, ctx, type_ctx, setup_ctx, items, errors);
+            process_setup_statement(&do_while.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -234,7 +231,7 @@ pub fn process_setup_statement<'a>(
             setup_ctx.enter_block();
             for case in &switch_stmt.cases {
                 for stmt in &case.consequent {
-                    process_setup_statement(stmt, ctx, type_ctx, setup_ctx, items, errors);
+                    process_setup_statement(stmt, ctx, setup_ctx, items, errors);
                 }
             }
             setup_ctx.leave_block();
@@ -242,32 +239,18 @@ pub fn process_setup_statement<'a>(
 
         Statement::TryStatement(try_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statements(
-                &try_stmt.block.body,
-                ctx,
-                type_ctx,
-                setup_ctx,
-                items,
-                errors,
-            );
+            process_setup_statements(&try_stmt.block.body, ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
 
             if let Some(handler) = &try_stmt.handler {
                 setup_ctx.enter_block();
-                process_setup_statements(
-                    &handler.body.body,
-                    ctx,
-                    type_ctx,
-                    setup_ctx,
-                    items,
-                    errors,
-                );
+                process_setup_statements(&handler.body.body, ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
 
             if let Some(finalizer) = &try_stmt.finalizer {
                 setup_ctx.enter_block();
-                process_setup_statements(&finalizer.body, ctx, type_ctx, setup_ctx, items, errors);
+                process_setup_statements(&finalizer.body, ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
         }
@@ -381,7 +364,6 @@ fn is_ref_creating_call(init: &Expression<'_>) -> bool {
 fn process_variable_declaration<'a>(
     var_decl: &'a VariableDeclaration<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -422,9 +404,7 @@ fn process_variable_declaration<'a>(
             });
 
             // Check if init is a macro call
-            if let Some(macro_item) =
-                try_parse_macro_from_expression(init, ctx, type_ctx, macro_declarator)
-            {
+            if let Some(macro_item) = try_parse_macro_from_expression(init, ctx, macro_declarator) {
                 items.push(ScriptItem::Macro(macro_item));
             }
         }
@@ -478,7 +458,6 @@ fn process_function_declaration<'a>(
 fn process_expression_statement<'a>(
     expr_stmt: &'a ExpressionStatement<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -486,9 +465,7 @@ fn process_expression_statement<'a>(
     check_expression_for_async(&expr_stmt.expression, setup_ctx, items);
 
     // Check for macro calls at expression level (no declarator for standalone expressions)
-    if let Some(macro_item) =
-        try_parse_macro_from_expression(&expr_stmt.expression, ctx, type_ctx, None)
-    {
+    if let Some(macro_item) = try_parse_macro_from_expression(&expr_stmt.expression, ctx, None) {
         items.push(ScriptItem::Macro(macro_item));
     }
 }
@@ -627,11 +604,10 @@ fn check_expression_for_async<'a>(
 fn try_parse_macro_from_expression<'a>(
     expr: &'a Expression<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     match expr {
-        Expression::CallExpression(call) => parse_macro_call(call, ctx, type_ctx, declarator),
+        Expression::CallExpression(call) => parse_macro_call(call, ctx, declarator),
         _ => None,
     }
 }
@@ -640,7 +616,6 @@ fn try_parse_macro_from_expression<'a>(
 pub fn parse_macro_call<'a>(
     call: &'a CallExpression<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     // Get callee name as bytes
@@ -656,7 +631,7 @@ pub fn parse_macro_call<'a>(
     let type_params = call
         .type_arguments
         .as_ref()
-        .map(|tp| extract_type_params(tp, ctx, type_ctx));
+        .map(|tp| extract_type_params(tp, ctx));
 
     match kind {
         VueMacroKind::DefineProps => {
@@ -700,16 +675,19 @@ pub fn parse_macro_call<'a>(
         }
         VueMacroKind::DefineModel => {
             // defineModel(name?, options?)
-            let name_span = call.arguments.first().and_then(|arg| {
-                if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
-                    Some(Span::from(s.span))
-                } else {
-                    None
-                }
-            });
+            let (name, name_span) = call
+                .arguments
+                .first()
+                .and_then(|arg| {
+                    let Expression::StringLiteral(literal) = arg.as_expression()? else {
+                        return None;
+                    };
+                    Some((literal.value.as_str(), Span::from(literal.span)))
+                })
+                .map_or((None, None), |(name, span)| (Some(name), Some(span)));
 
             // Options is second arg if first is string, or first arg if no string
-            let options_idx = if name_span.is_some() { 1 } else { 0 };
+            let options_idx = if name.is_some() { 1 } else { 0 };
             let options_span = call.arguments.get(options_idx).and_then(|arg| {
                 if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
                     Some(Span::from(obj.span))
@@ -722,6 +700,7 @@ pub fn parse_macro_call<'a>(
                 span,
                 declarator,
                 type_params,
+                name,
                 name_span,
                 options_span,
             })
@@ -744,7 +723,7 @@ pub fn parse_macro_call<'a>(
                                 let inner_type_params = inner
                                     .type_arguments
                                     .as_ref()
-                                    .map(|tp| extract_type_params(tp, ctx, type_ctx));
+                                    .map(|tp| extract_type_params(tp, ctx));
                                 return Some((Some(Span::from(inner.span)), inner_type_params));
                             }
                         }
@@ -776,13 +755,9 @@ pub fn parse_macro_call<'a>(
 }
 
 /// Extract type parameters from a TSTypeParameterInstantiation.
-///
-/// Uses the `TypeResolutionContext` to resolve type references (interfaces, type aliases)
-/// declared in the same SFC. Unresolvable external types produce empty results.
 fn extract_type_params<'a>(
     tp: &'a TSTypeParameterInstantiation<'a>,
     ctx: &ScriptParseContext<'a>,
-    type_ctx: &TypeResolutionContext<'a, 'a>,
 ) -> MacroTypeParams {
     let full_span = tp.span;
     let offset = ctx.content_offset;
@@ -799,55 +774,109 @@ fn extract_type_params<'a>(
     // The type content is between < and >
     let type_span = Span::new(full_span.start + 1 + offset, full_span.end - 1 + offset);
 
-    // Resolve the type from the first type parameter using the type context
-    // This enables resolution of SFC-local interfaces and type aliases.
-    //
-    // Vue setup-script macros that flow through this helper
-    // (`defineProps<T>()`, `defineEmits<T>()`, `defineSlots<T>()`,
-    // `withDefaults`, etc.) are top-level macro entries: `T` IS the
-    // macro T's own body, so members reached through it get
-    // `declared_in_macro_type_arg = true` (subject to the heritage
-    // flip semantics inside the resolver).
-    let resolved = tp
+    let mut prop_members = Vec::new();
+    let mut emit_member_spans = Vec::new();
+    let type_dependency_paths = tp
         .params
         .first()
-        .map(|ts_type| {
-            resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx, true)
-        })
-        .unwrap_or_default();
-
-    // Detect unresolvable type references: the first type param is a TSTypeReference
-    // (e.g., `Props` in `defineProps<Props>()`) but resolution produced empty results.
-    // This distinguishes `defineProps<{}>()` (empty type literal, no error) from
-    // `defineProps<ExternalProps>()` (unresolvable reference, should warn).
-    let is_type_reference = tp
-        .params
-        .first()
-        .is_some_and(|ts_type| matches!(ts_type, TSType::TSTypeReference(_)));
-    let has_resolved_root_runtime = resolved
-        .root_runtime_types
-        .iter()
-        .any(|ty| !matches!(ty, RuntimeType::Unknown));
-    let unresolved_type_ref = is_type_reference
-        && resolved.props.is_empty()
-        && resolved.call_signatures.is_empty()
-        && !resolved.has_call_signature
-        && !has_resolved_root_runtime;
-
-    // Infer runtime types from the root type (for simple types like `string`, `number`)
-    let runtime_types = tp
-        .params
-        .first()
-        .map(|ts_type| infer_runtime_type(ts_type))
-        .unwrap_or_default();
+        .map(collect_type_dependency_paths)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    if let Some(first) = tp.params.first() {
+        collect_macro_type_member_spans(first, offset, &mut prop_members, &mut emit_member_spans);
+    }
 
     MacroTypeParams {
         lt_span,
         type_span,
         gt_span,
-        resolved,
-        runtime_types,
-        unresolved_type_ref,
+        prop_members,
+        emit_member_spans,
+        type_dependency_paths,
+    }
+}
+
+fn collect_macro_type_member_spans(
+    ty: &TSType<'_>,
+    offset: u32,
+    prop_members: &mut Vec<MacroTypePropMember>,
+    emit_spans: &mut Vec<Span>,
+) {
+    match ty {
+        TSType::TSTypeLiteral(literal) => {
+            for member in &literal.members {
+                match member {
+                    TSSignature::TSPropertySignature(property) => {
+                        let Some((name, span)) = authored_property_key(&property.key) else {
+                            continue;
+                        };
+                        let span = Span::new(
+                            span.start.saturating_add(offset),
+                            span.end.saturating_add(offset),
+                        );
+                        prop_members.push(MacroTypePropMember {
+                            name,
+                            key_span: span,
+                            type_span: property.type_annotation.as_ref().map(|annotation| {
+                                let span = annotation.type_annotation.span();
+                                Span::new(
+                                    span.start.saturating_add(offset),
+                                    span.end.saturating_add(offset),
+                                )
+                            }),
+                            optional: property.optional,
+                        });
+                        emit_spans.push(span);
+                    }
+                    TSSignature::TSCallSignatureDeclaration(call) => {
+                        let Some(TSType::TSLiteralType(literal)) = call
+                            .params
+                            .items
+                            .first()
+                            .and_then(|parameter| parameter.type_annotation.as_ref())
+                            .map(|annotation| &annotation.type_annotation)
+                        else {
+                            continue;
+                        };
+                        let TSLiteral::StringLiteral(event_name) = &literal.literal else {
+                            continue;
+                        };
+                        emit_spans.push(Span::new(
+                            event_name.span.start.saturating_add(offset),
+                            event_name.span.end.saturating_add(offset),
+                        ));
+                    }
+                    TSSignature::TSMethodSignature(_)
+                    | TSSignature::TSIndexSignature(_)
+                    | TSSignature::TSConstructSignatureDeclaration(_) => {}
+                }
+            }
+        }
+        TSType::TSIntersectionType(intersection) => {
+            for arm in &intersection.types {
+                collect_macro_type_member_spans(arm, offset, prop_members, emit_spans);
+            }
+        }
+        TSType::TSParenthesizedType(parenthesized) => {
+            collect_macro_type_member_spans(
+                &parenthesized.type_annotation,
+                offset,
+                prop_members,
+                emit_spans,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn authored_property_key(key: &PropertyKey<'_>) -> Option<(String, oxc_span::Span)> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => {
+            Some((identifier.name.to_string(), identifier.span))
+        }
+        PropertyKey::StringLiteral(literal) => Some((literal.value.to_string(), literal.span)),
+        _ => None,
     }
 }
 
@@ -916,16 +945,16 @@ fn extract_array_arg_from_call<'a>(
     })
 }
 
-/// Map a JS constructor identifier name to a `RuntimeType`.
-fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeType> {
+/// Map a JS constructor identifier name to syntax inventory.
+fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeConstructorSyntax> {
     match name {
-        "String" => Some(RuntimeType::String),
-        "Number" => Some(RuntimeType::Number),
-        "Boolean" => Some(RuntimeType::Boolean),
-        "Object" => Some(RuntimeType::Object),
-        "Array" => Some(RuntimeType::Array),
-        "Function" => Some(RuntimeType::Function),
-        "Symbol" => Some(RuntimeType::Symbol),
+        "String" => Some(RuntimeConstructorSyntax::String),
+        "Number" => Some(RuntimeConstructorSyntax::Number),
+        "Boolean" => Some(RuntimeConstructorSyntax::Boolean),
+        "Object" => Some(RuntimeConstructorSyntax::Object),
+        "Array" => Some(RuntimeConstructorSyntax::Array),
+        "Function" => Some(RuntimeConstructorSyntax::Function),
+        "Symbol" => Some(RuntimeConstructorSyntax::Symbol),
         _ => None,
     }
 }
@@ -933,10 +962,7 @@ fn constructor_ident_to_runtime_type(name: &str) -> Option<RuntimeType> {
 /// Extract runtime types from an AST expression.
 ///
 /// Handles:
-/// - `String` → `[RuntimeType::String]`
-/// - `[String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
-/// - `Number as PropType<number[]>` → `[RuntimeType::Number]` (uses the constructor before `as`)
-fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeType> {
+fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeConstructorSyntax> {
     match expr {
         Expression::Identifier(id) => {
             if let Some(rt) = constructor_ident_to_runtime_type(id.name.as_str()) {
@@ -964,7 +990,9 @@ fn extract_runtime_types_from_expr(expr: &Expression<'_>) -> Vec<RuntimeType> {
 /// Extract the `PropType<T>` type annotation span from a `TSAsExpression`.
 ///
 /// For `X as PropType<T>`, returns the span of `T`.
-fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
+fn extract_prop_type_annotation<'ast, 'expr>(
+    expr: &'expr Expression<'ast>,
+) -> Option<(&'expr TSType<'ast>, Span)> {
     let Expression::TSAsExpression(ts_as) = expr else {
         return None;
     };
@@ -983,7 +1011,55 @@ fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
     type_args
         .params
         .first()
-        .map(|p: &TSType<'_>| Span::from(p.span()))
+        .map(|ty: &TSType<'_>| (ty, Span::from(ty.span())))
+}
+
+fn extend_parameter_type_dependencies(
+    parameters: &FormalParameters<'_>,
+    dependencies: &mut std::collections::BTreeSet<TypeDependencyPathFact>,
+) {
+    for parameter in &parameters.items {
+        if let Some(annotation) = &parameter.type_annotation {
+            dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+        }
+    }
+    if let Some(rest) = &parameters.rest {
+        if let Some(annotation) = &rest.type_annotation {
+            dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+        }
+    }
+}
+
+fn callable_type_dependencies(expr: &Expression<'_>) -> Vec<TypeDependencyPathFact> {
+    let mut dependencies = std::collections::BTreeSet::new();
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            extend_parameter_type_dependencies(&arrow.params, &mut dependencies);
+            if let Some(annotation) = &arrow.return_type {
+                dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+            }
+        }
+        Expression::FunctionExpression(function) => {
+            extend_parameter_type_dependencies(&function.params, &mut dependencies);
+            if let Some(annotation) = &function.return_type {
+                dependencies.extend(collect_type_dependency_paths(&annotation.type_annotation));
+            }
+        }
+        Expression::TSAsExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        Expression::TSNonNullExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        Expression::ParenthesizedExpression(expression) => {
+            dependencies.extend(callable_type_dependencies(&expression.expression));
+        }
+        _ => {}
+    }
+    dependencies.into_iter().collect()
 }
 
 /// Extract prop metadata from an object-form prop value:
@@ -992,11 +1068,18 @@ fn extract_prop_type_annotation(expr: &Expression<'_>) -> Option<Span> {
 /// Returns `(required, has_default, runtime_types, prop_type_annotation)`.
 fn extract_prop_object_metadata(
     obj: &ObjectExpression<'_>,
-) -> (bool, bool, Vec<RuntimeType>, Option<Span>) {
+) -> (
+    bool,
+    bool,
+    Vec<RuntimeConstructorSyntax>,
+    Option<Span>,
+    Vec<TypeDependencyPathFact>,
+) {
     let mut required = false;
     let mut has_default = false;
     let mut runtime_types = Vec::new();
     let mut prop_type_annotation = None;
+    let mut type_dependency_paths = std::collections::BTreeSet::new();
 
     for prop in &obj.properties {
         if let ObjectPropertyKind::ObjectProperty(p) = prop {
@@ -1007,7 +1090,10 @@ fn extract_prop_object_metadata(
             match key_name {
                 Some("type") => {
                     runtime_types = extract_runtime_types_from_expr(&p.value);
-                    prop_type_annotation = extract_prop_type_annotation(&p.value);
+                    if let Some((ty, span)) = extract_prop_type_annotation(&p.value) {
+                        prop_type_annotation = Some(span);
+                        type_dependency_paths.extend(collect_type_dependency_paths(ty));
+                    }
                 }
                 Some("required") => {
                     if let Expression::BooleanLiteral(b) = &p.value {
@@ -1022,7 +1108,13 @@ fn extract_prop_object_metadata(
         }
     }
 
-    (required, has_default, runtime_types, prop_type_annotation)
+    (
+        required,
+        has_default,
+        runtime_types,
+        prop_type_annotation,
+        type_dependency_paths.into_iter().collect(),
+    )
 }
 
 /// Extract object argument details.
@@ -1040,6 +1132,7 @@ fn extract_object_arg<'a>(
     // object non-static: codegen routes the whole object expression
     // through `_mergeDefaults` at runtime.
     let mut has_spread = false;
+    let mut has_unsupported_key = false;
 
     for prop in &obj.properties {
         match prop {
@@ -1051,36 +1144,57 @@ fn extract_object_arg<'a>(
                         Some(Span::from(p.value.span()))
                     };
 
-                    let (required, has_default, runtime_types, prop_type_annotation) = if p
-                        .shorthand
-                    {
-                        (false, false, vec![], None)
+                    let (
+                        required,
+                        has_default,
+                        runtime_types,
+                        prop_type_annotation,
+                        mut type_dependency_paths,
+                    ) = if p.shorthand {
+                        (false, false, vec![], None, Vec::new())
                     } else {
                         match &p.value {
                             Expression::Identifier(_) | Expression::ArrayExpression(_) => {
                                 let types = extract_runtime_types_from_expr(&p.value);
-                                (false, false, types, None)
+                                (false, false, types, None, Vec::new())
                             }
                             Expression::TSAsExpression(_) => {
                                 let types = extract_runtime_types_from_expr(&p.value);
-                                let annotation = extract_prop_type_annotation(&p.value);
-                                (false, false, types, annotation)
+                                let (annotation, dependencies) =
+                                    extract_prop_type_annotation(&p.value)
+                                        .map(|(ty, span)| {
+                                            (
+                                                Some(span),
+                                                collect_type_dependency_paths(ty)
+                                                    .into_iter()
+                                                    .collect(),
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                (false, false, types, annotation, dependencies)
                             }
                             Expression::ObjectExpression(obj) => extract_prop_object_metadata(obj),
-                            _ => (false, false, vec![], None),
+                            _ => (false, false, vec![], None, Vec::new()),
                         }
                     };
+                    type_dependency_paths.extend(callable_type_dependencies(&p.value));
+                    type_dependency_paths.sort();
+                    type_dependency_paths.dedup();
 
                     properties.push(MacroProperty {
                         name,
                         name_span,
+                        property_span: Span::from(p.span),
                         value_span,
                         is_method: p.method,
                         required,
                         has_default,
                         runtime_types,
                         prop_type_annotation,
+                        type_dependency_paths,
                     });
+                } else {
+                    has_unsupported_key = true;
                 }
             }
             ObjectPropertyKind::SpreadProperty(_) => {
@@ -1093,6 +1207,10 @@ fn extract_object_arg<'a>(
         span: Span::from(obj.span),
         properties,
         has_spread,
+        static_eligibility: MacroObjectStaticEligibility::from_shape(
+            has_spread,
+            has_unsupported_key,
+        ),
     }
 }
 

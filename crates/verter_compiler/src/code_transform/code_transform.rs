@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::chunk::Chunk;
@@ -74,6 +75,10 @@ pub struct CodeTransform<'a> {
     /// Explicit original-source offsets that must receive source-map segments
     /// in addition to ordinary chunk and line starts.
     pub(super) sourcemap_locations: Vec<u32>,
+    /// Exact unmapped transitions inside bump-allocated generated chunks.
+    /// Pointer identity makes markers disappear naturally when a later edit
+    /// removes their owning chunk.
+    generated_unmapped_boundaries: FxHashMap<(usize, usize), SmallVec<[u32; 2]>>,
     /// Test-only: the token-buffer capacity reserved by the most recent
     /// `generate_map`, captured at the reservation point. Lets tests assert the
     /// reservation covers every emitted token (no reallocation during
@@ -112,6 +117,41 @@ pub(crate) struct GeneratedSourceRange {
     pub(crate) replacement: bool,
 }
 
+fn push_preserved_source_ranges(
+    ranges: &mut Vec<GeneratedSourceRange>,
+    locations: &[u32],
+    generated_start: u32,
+    source_start: u32,
+    len: u32,
+) {
+    let source_end = source_start.saturating_add(len);
+    let mut segment_source = source_start;
+    let mut segment_generated = generated_start;
+    for location in locations
+        .iter()
+        .copied()
+        .filter(|location| *location > source_start && *location < source_end)
+    {
+        let segment_len = location - segment_source;
+        ranges.push(GeneratedSourceRange {
+            generated_start: segment_generated,
+            generated_end: segment_generated + segment_len,
+            source_start: segment_source,
+            replacement: false,
+        });
+        segment_source = location;
+        segment_generated += segment_len;
+    }
+    if segment_source < source_end {
+        ranges.push(GeneratedSourceRange {
+            generated_start: segment_generated,
+            generated_end: generated_start + len,
+            source_start: segment_source,
+            replacement: false,
+        });
+    }
+}
+
 #[allow(dead_code)] // Many API methods only exercised by tests currently
 impl<'a> CodeTransform<'a> {
     /// Create a new CodeTransform from source text and an allocator
@@ -142,6 +182,7 @@ impl<'a> CodeTransform<'a> {
             output_delta: 0,
             resolver: OnceCell::new(),
             sourcemap_locations: Vec::new(),
+            generated_unmapped_boundaries: FxHashMap::default(),
             #[cfg(test)]
             last_reserved_token_capacity: std::cell::Cell::new(0),
             helper_preamble_content: None,
@@ -596,6 +637,69 @@ impl<'a> CodeTransform<'a> {
         self
     }
 
+    /// Overwrite a range while retaining exact unmapped source-map
+    /// transitions inside the replacement text. Offsets are UTF-8 byte
+    /// boundaries relative to `content`; malformed offsets are ignored.
+    pub(crate) fn overwrite_with_unmapped_boundaries(
+        &mut self,
+        start: u32,
+        end: u32,
+        content: &str,
+        boundaries: &[u32],
+    ) -> &mut Self {
+        self.record_audit_op();
+        if start >= end {
+            return self;
+        }
+        let content_ref = if content.is_empty() {
+            ""
+        } else {
+            self.allocator.alloc_str(content)
+        };
+        self.record_generated_unmapped_boundaries(content_ref, boundaries);
+        self.replace_range_impl(start, end, content_ref, false);
+        self
+    }
+
+    /// Insert generated text before `index` and retain exact unmapped
+    /// source-map transitions inside that insertion.
+    pub(crate) fn prepend_left_with_unmapped_boundaries(
+        &mut self,
+        index: u32,
+        content: &str,
+        boundaries: &[u32],
+    ) -> &mut Self {
+        self.record_audit_op();
+        if content.is_empty() {
+            return self;
+        }
+        let content_ref = self.allocator.alloc_str(content);
+        self.record_generated_unmapped_boundaries(content_ref, boundaries);
+        let insert_idx = self.find_insert_position_for_prepend(index, false);
+        self.chunks.insert(insert_idx, Chunk::inserted(content_ref));
+        if insert_idx <= self.cursor_hint {
+            self.cursor_hint += 1;
+        }
+        self.output_delta += content.len() as i64;
+        self
+    }
+
+    fn record_generated_unmapped_boundaries(&mut self, content: &'a str, boundaries: &[u32]) {
+        let offsets = boundaries
+            .iter()
+            .copied()
+            .filter(|offset| {
+                (*offset as usize) < content.len() && content.is_char_boundary(*offset as usize)
+            })
+            .collect::<SmallVec<[u32; 2]>>();
+        if !offsets.is_empty() {
+            self.generated_unmapped_boundaries
+                .entry((content.as_ptr() as usize, content.len()))
+                .or_default()
+                .extend(offsets);
+        }
+    }
+
     /// Content-only replacement: overwrite the range's content while
     /// PRESERVING the boundary insertions the checked insertion operations
     /// attached to the range (RIGHT-affinity content at `start`, and the
@@ -998,15 +1102,20 @@ impl<'a> CodeTransform<'a> {
                     content,
                     ..
                 } => {
-                    chunks_to_move.push(Chunk::moved(start, end, content));
+                    chunks_to_move.push(Chunk::moved_replacement(start, end, content));
                 }
                 Chunk::Moved {
                     start,
                     end,
                     content,
+                    replacement,
                     ..
                 } => {
-                    chunks_to_move.push(Chunk::moved(start, end, content));
+                    chunks_to_move.push(if replacement {
+                        Chunk::moved_replacement(start, end, content)
+                    } else {
+                        Chunk::moved(start, end, content)
+                    });
                 }
                 Chunk::Inserted { content } => {
                     chunks_to_move.push(Chunk::inserted(content));
@@ -1138,32 +1247,77 @@ impl<'a> CodeTransform<'a> {
     /// represented; callers therefore cannot accidentally assign them authored
     /// provenance.
     pub(crate) fn build_string_with_source_ranges(&self) -> (String, Vec<GeneratedSourceRange>) {
+        let (output, ranges, _) = self.build_string_with_source_ranges_and_unmapped_boundaries();
+        (output, ranges)
+    }
+
+    /// Build the output, authored range geometry, and explicit ownership
+    /// transitions inside generated chunks.
+    pub(crate) fn build_string_with_source_ranges_and_unmapped_boundaries(
+        &self,
+    ) -> (String, Vec<GeneratedSourceRange>, Vec<u32>) {
         let output = self.build_string();
         let mut generated = self.intro.len() as u32;
         let mut ranges = Vec::with_capacity(self.chunks.len());
+        let mut unmapped_boundaries = Vec::new();
+        let mut locations = self.sourcemap_locations.clone();
+        locations.sort_unstable();
+        locations.dedup();
         for chunk in &self.chunks {
+            let content = match chunk {
+                Chunk::Original { .. } => None,
+                Chunk::Inserted { content }
+                | Chunk::Overwritten { content, .. }
+                | Chunk::Moved { content, .. }
+                | Chunk::InsertedMapped { content, .. }
+                | Chunk::InsertedAnchored { content, .. } => Some(*content),
+            };
+            if let Some(content) = content {
+                if let Some(boundaries) = self
+                    .generated_unmapped_boundaries
+                    .get(&(content.as_ptr() as usize, content.len()))
+                {
+                    unmapped_boundaries.extend(boundaries.iter().map(|offset| generated + offset));
+                }
+            }
             match chunk {
                 Chunk::Original { start, end } => {
                     let len = end - start;
                     if len > 0 {
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated,
-                            generated_end: generated + len,
-                            source_start: *start,
-                            replacement: false,
-                        });
+                        push_preserved_source_ranges(
+                            &mut ranges,
+                            &locations,
+                            generated,
+                            *start,
+                            len,
+                        );
                     }
                     generated += len;
                 }
-                Chunk::Moved { start, content, .. } => {
+                Chunk::Moved {
+                    start,
+                    content,
+                    replacement,
+                    ..
+                } => {
                     let len = content.len() as u32;
                     if len > 0 {
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated,
-                            generated_end: generated + len,
-                            source_start: *start,
-                            replacement: false,
-                        });
+                        if *replacement {
+                            ranges.push(GeneratedSourceRange {
+                                generated_start: generated,
+                                generated_end: generated + len,
+                                source_start: *start,
+                                replacement: true,
+                            });
+                        } else {
+                            push_preserved_source_ranges(
+                                &mut ranges,
+                                &locations,
+                                generated,
+                                *start,
+                                len,
+                            );
+                        }
                     }
                     generated += len;
                 }
@@ -1206,7 +1360,9 @@ impl<'a> CodeTransform<'a> {
             output.len(),
             "source-range geometry must cover the built output bytes"
         );
-        (output, ranges)
+        unmapped_boundaries.sort_unstable();
+        unmapped_boundaries.dedup();
+        (output, ranges, unmapped_boundaries)
     }
 }
 

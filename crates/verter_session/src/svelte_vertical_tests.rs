@@ -566,12 +566,20 @@ fn svelte_framework_surface_warm_hit_is_value_stable() {
 #[test]
 fn svelte_get_public_api_renders_the_declaration_shim() {
     let host = host();
-    let src = r#"<script lang="ts">
+    let src = r#"<script module lang="ts">
+  import type { WidgetProps } from './module-props';
+</script>
+<script lang="ts">
   import type { WidgetProps } from './props';
   let { props }: { props: WidgetProps } = $props();
   export function focus() {}
 </script>
 "#;
+    upsert_ts(
+        &host,
+        "/module-props.ts",
+        "export interface WidgetProps { wrongOwner: true }\n",
+    );
     upsert_ts(
         &host,
         "/props.ts",
@@ -581,6 +589,7 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
 
     let api = host
         .get_public_api("/Shim.svelte")
+        .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
     let code = api.code.as_ref();
 
@@ -623,6 +632,10 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
         code.contains("import type") && code.contains("WidgetProps") && code.contains("./props"),
         "the type-only import prelude imports the preserved WidgetProps reference:\n{code}"
     );
+    assert!(
+        !code.contains("./module-props") && !code.contains("wrongOwner"),
+        "the instance props reference must never resolve through the same-name module owner:\n{code}"
+    );
 }
 
 #[test]
@@ -646,13 +659,30 @@ fn svelte_runes_state_export_projects_the_native_component_exports_generic() {
     let indexed = host
         .ensure_indexed_ready("/ExposePublic.svelte")
         .expect("the runes component indexes");
+    let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
     assert!(
-        indexed.shallow_state.value_symbol("publicCount").is_some(),
-        "the exported local binding must remain addressable by the shared typeof resolver"
+        indexed
+            .shallow_state
+            .has_value_symbol_in(instance_owner, "publicCount"),
+        "the exported local binding must remain addressable in its exact instance owner"
+    );
+    assert!(
+        !indexed
+            .shallow_state
+            .has_value_symbol_in(module_owner, "publicCount"),
+        "the instance export must not alias the module owner"
+    );
+    assert!(
+        !indexed
+            .shallow_state
+            .has_type_symbol_in(instance_owner, "publicCount"),
+        "the runtime state binding must not alias type space"
     );
 
     let declaration = host
         .get_public_api_with_mode("/ExposePublic.svelte", PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("the runes component projects a public declaration")
         .code
         .to_string();
@@ -703,6 +733,7 @@ fn svelte_public_api_resolves_local_props_interface_from_macro_locator() {
 
         let declaration = host
             .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+            .expect("Svelte declaration projection")
             .expect("a local Props interface projects a public declaration")
             .code
             .to_string();
@@ -736,6 +767,7 @@ let { contractProp, optionalCount = 0 }: Props = $props();
 
     let projection = host
         .get_public_api_projection("/EditorContract.svelte")
+        .expect("Svelte projection request")
         .expect("Svelte public API projects");
     let contract = projection
         .contract
@@ -778,6 +810,7 @@ let { title, count = 0 } = $props();
 
     let declaration = host
         .get_public_api_with_mode("/JsCard.svelte", PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("a JavaScript Svelte component projects a declaration import surface")
         .code
         .to_string();
@@ -843,6 +876,7 @@ fn svelte_get_public_api_renders_native_event_and_snippet_props() {
 
     let api = host
         .get_public_api("/EventsSlots.svelte")
+        .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
     let code = api.code.as_ref();
 
@@ -902,6 +936,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
     );
     let decl = host
         .get_public_api_with_mode("/Card.svelte", PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("svelte declaration output")
         .code
         .to_string();
@@ -934,6 +969,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
     // that stubbed to `None` (or diverged) would break this byte-identity.
     let public = host
         .get_public_api_with_mode("/Card.svelte", PublicApiMode::Public, None)
+        .expect("Svelte public projection")
         .expect("svelte public output")
         .code
         .to_string();
@@ -966,6 +1002,43 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
 }
 
 #[test]
+fn svelte_public_api_keeps_same_name_module_and_instance_exports_typed() {
+    let host = host();
+    upsert_svelte(
+        &host,
+        "/OwnerExact.svelte",
+        "<script module lang=\"ts\">\n\
+         const moduleShared: string = 'module';\n\
+         export { moduleShared as shared };\n\
+         </script>\n\
+         <script lang=\"ts\">\n\
+         export const shared: number = 1;\n\
+         </script>\n\
+         <div />\n",
+    );
+
+    let code = host
+        .get_public_api_with_mode("/OwnerExact.svelte", PublicApiMode::Public, None)
+        .expect("Svelte public projection")
+        .expect("Svelte public output")
+        .code
+        .to_string();
+
+    assert!(
+        code.contains("export declare const shared: string;"),
+        "the exact module-owner binding publishes as a typed top-level export:\n{code}"
+    );
+    assert!(
+        code.contains("shared: number"),
+        "the same-name instance-owner binding remains the component export member:\n{code}"
+    );
+    assert!(
+        !code.contains("export declare const shared: unknown;"),
+        "module export typing must not degrade to the retired inferred-unknown row:\n{code}"
+    );
+}
+
+#[test]
 fn svelte_get_public_api_testing_mode_returns_none() {
     // DISCRIMINATING: the testing surface is Vue-only — Svelte returns None for
     // Testing, distinct from Public mode's Some.
@@ -977,11 +1050,13 @@ fn svelte_get_public_api_testing_mode_returns_none() {
     );
     assert!(
         host.get_public_api_with_mode("/T.svelte", PublicApiMode::Public, None)
+            .expect("Svelte public projection")
             .is_some(),
         "Public mode projects a surface"
     );
     assert!(
         host.get_public_api_with_mode("/T.svelte", PublicApiMode::Testing, None)
+            .expect("Svelte testing projection")
             .is_none(),
         "Testing mode is Vue-only — Svelte returns None"
     );
@@ -1172,6 +1247,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
 
     let api = host
         .get_public_api("/DirectChild.svelte")
+        .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
     let code = api.code.as_ref();
     let map_json = api
@@ -1244,6 +1320,7 @@ fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
 
     let api = host
         .get_public_api("/EditorContract.svelte")
+        .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
     let code = api.code.as_ref();
     let map_json = api

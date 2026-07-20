@@ -126,7 +126,11 @@ impl VerterHost {
         // the engine inherit the overlay-aware view. Member values stay shallow
         // sources; consumers raise them on demand through the dispatch bridge.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-        engine.project_intrinsic_root_shape(canonical_id, type_name)
+        engine.project_intrinsic_root_shape(
+            canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            type_name,
+        )
     }
 
     fn expand_project_intrinsic_tag_members_for_canonical(
@@ -162,7 +166,11 @@ impl VerterHost {
         // last-arm-override), the TS-correct merge for `A & B`. The engine binds
         // to the supplied request-bound `ctx`.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-        let tag_shape = engine.project_intrinsic_tag_member_shape(scope, &tag_source)?;
+        let tag_shape = engine.project_intrinsic_tag_member_shape(
+            scope,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            &tag_source,
+        )?;
         Some(Self::intrinsic_members_from_shape(tag_shape))
     }
 

@@ -45,6 +45,7 @@ use crate::semantic_query::{
 /// projection-reduction context.
 pub(crate) struct SourceRaiseContext<'a> {
     pub scope_canonical_id: &'a str,
+    pub scope_owner: verter_type_expr::TopLevelOwnerId,
     pub context: ProjectionReductionContext,
     /// STRICT-mode interior-failure sink: when armed, every failed
     /// dereference of a PRESENT interior position of a composed fact shell
@@ -303,6 +304,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         source: &SemanticTypeSource,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         context: ProjectionReductionContext,
     ) -> Result<Option<HotTypeRef>, StrictSourceRaiseFailure> {
         let sink = InteriorFailureSink::default();
@@ -310,6 +312,7 @@ impl ProjectSemanticDispatch<'_> {
             source,
             SourceRaiseContext {
                 scope_canonical_id,
+                scope_owner,
                 context,
                 interior_failures: Some(&sink),
             },
@@ -1070,6 +1073,7 @@ pub(in crate::project_semantic_dispatch) fn absolutize_locator(
         if anchor.canonical_id.is_empty() {
             AuthoredAnchor {
                 canonical_id: Arc::from(scope_canonical_id),
+                owner: anchor.owner,
                 symbol: Arc::clone(&anchor.symbol),
                 space: anchor.space,
             }
@@ -1191,6 +1195,7 @@ pub(crate) fn demand_semantic_source_type_expr_with_ctx(
         source,
         SourceRaiseContext {
             scope_canonical_id: owner_canonical,
+            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             context: raise_context,
             interior_failures: None,
         },
@@ -1237,6 +1242,7 @@ pub fn shallow_semantic_source_type_expr(
         source,
         SourceRaiseContext {
             scope_canonical_id: owner_canonical,
+            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             context,
             interior_failures: None,
         },

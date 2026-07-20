@@ -55,7 +55,8 @@ fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx
         return false;
     };
     let Some(DeclLookup {
-        canonical_source: _,
+        canonical_source,
+        owner,
         body,
     }) = ctx.locate_declaration(name.as_str())
     else {
@@ -64,7 +65,7 @@ fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx
     // The root's declaration body must raise to an Object whose `member`
     // property value contains an imported reference (or itself resolves to
     // an imported declaration). The root's own location is not the trigger.
-    let Some(body_hot) = ctx.raise_source(&body) else {
+    let Some(body_hot) = ctx.raise_source_in_scope(&body, &canonical_source, owner) else {
         return false;
     };
     let property_value = match ctx.node_data(body_hot.node()).as_deref() {
@@ -95,10 +96,12 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
         }
         if let Some((name, args)) = ctx.node_ref_head(node) {
             if let Some(DeclLookup {
-                canonical_source, ..
+                canonical_source,
+                owner,
+                ..
             }) = ctx.locate_declaration(name.as_str())
             {
-                if canonical_source != ctx.owner_canonical {
+                if canonical_source != ctx.owner_canonical || owner != ctx.owner {
                     return true;
                 }
             }

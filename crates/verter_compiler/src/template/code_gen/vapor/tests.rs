@@ -102,7 +102,6 @@ fn run_full_pipeline_mode(source: &str, mode: super::super::CodeGenMode) -> Stri
         syntax.script(),
         syntax.script_setup(),
         &alloc,
-        None,
     );
     let script_result = generate_script(
         syntax.script(),

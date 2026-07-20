@@ -3,7 +3,9 @@ use oxc_allocator::Allocator;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{
+    compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput,
+};
 
 /// A loaded Vue file ready for benchmarking.
 struct VueFile {
@@ -87,7 +89,13 @@ fn compile_bench(files: &[VueFile], source_map: bool) -> usize {
             source_map,
             ..Default::default()
         };
-        let result = compile(&file.content, &options, &compiler_options, &allocator);
+        let result = compile(
+            &file.content,
+            &options,
+            &compiler_options,
+            &VueMacroSemanticInput::Unavailable,
+            &allocator,
+        );
         error_count += result.errors.len();
         black_box(&result.script);
         black_box(&result.template);
@@ -178,7 +186,13 @@ fn aggregate_no_sourcemap(c: &mut Criterion) {
                     source_map: false,
                     ..Default::default()
                 };
-                let result = compile(&file.content, &options, &compiler_options, &allocator);
+                let result = compile(
+                    &file.content,
+                    &options,
+                    &compiler_options,
+                    &VueMacroSemanticInput::Unavailable,
+                    &allocator,
+                );
                 errors += result.errors.len();
                 black_box(&result.script);
             }
@@ -251,7 +265,13 @@ fn aggregate_with_sourcemap(c: &mut Criterion) {
                     source_map: true,
                     ..Default::default()
                 };
-                let result = compile(&file.content, &options, &compiler_options, &allocator);
+                let result = compile(
+                    &file.content,
+                    &options,
+                    &compiler_options,
+                    &VueMacroSemanticInput::Unavailable,
+                    &allocator,
+                );
                 errors += result.errors.len();
                 black_box(&result.script);
                 black_box(&result.template);

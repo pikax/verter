@@ -53,6 +53,24 @@ pub(crate) struct FallthroughComputeOutcome {
     pub(crate) completeness: crate::semantic_query::ResultCompleteness,
 }
 
+/// Call-owned inputs for one fallthrough evaluation. The dependency lane is
+/// populated by the same runtime-value materializer that built `env`, so it
+/// names only values that were successfully hydrated. `BTreeSet` preserves
+/// exact canonical/lexical-owner/name identity with deterministic dedup.
+pub(super) struct FallthroughEvalInputs {
+    pub(super) env: std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+    pub(super) materialized_runtime_values:
+        std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>,
+}
+
+impl std::ops::Deref for FallthroughEvalInputs {
+    type Target = verter_semantic::analysis::type_eval::EvalEnv;
+
+    fn deref(&self) -> &Self::Target {
+        self.env.as_ref()
+    }
+}
+
 impl VerterHost {
     pub fn resolve_fallthrough_surface(
         &self,
@@ -330,7 +348,7 @@ impl VerterHost {
             canonical_id,
             false,
         );
-        let fallthrough_fact_versions = resolved.fact_versions.clone();
+        let mut fallthrough_fact_versions = resolved.fact_versions.clone();
 
         // Macro-DTO surface read runs under the request-bound `ctx` (not
         // `self`, the bare host) — `vue_macro_dtos_with_ctx` ->
@@ -340,7 +358,6 @@ impl VerterHost {
             ctx,
             canonical_id,
             resolved.snapshot.macros.as_ref(),
-            &resolved.resolved_macros,
         );
         let resolved_type_registry =
             resolver_component_meta_type_registry(&resolved.resolved_type_registry);
@@ -382,11 +399,24 @@ impl VerterHost {
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime
         // values + prop overrides.
-        let eval_env = self.build_fallthrough_eval_env_lightweight(
+        let eval_inputs = self.build_fallthrough_eval_env_lightweight(
             canonical_id,
             &resolved.snapshot,
             Some(&base_meta.root_reachability),
         );
+        if let Some(inputs) = eval_inputs.as_ref() {
+            let no_transitive_dependencies = std::collections::BTreeSet::new();
+            for dependency in &inputs.materialized_runtime_values {
+                crate::resolver_core::extend_unique_fact_versions(
+                    &mut fallthrough_fact_versions,
+                    ctx.current_dependency_fact_versions(
+                        dependency.canonical_id.as_str(),
+                        &no_transitive_dependencies,
+                    ),
+                );
+            }
+        }
+        let eval_env = eval_inputs.map(|inputs| inputs.env);
 
         let resolved_surface = resolver_resolve_fallthrough_surface(
             &fallthrough_resolver,
@@ -458,7 +488,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-    ) -> Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<FallthroughEvalInputs> {
         component_meta_trace_custom!(
             "build_fallthrough_eval_env_lightweight",
             format!(
@@ -481,40 +511,43 @@ impl VerterHost {
             // Nothing to hydrate: the memo-owned whole-env Arc IS the
             // fallthrough env — zero whole-env clones on this path
             // (every downstream consumer reads it immutably).
-            return Some(base_env);
+            return Some(FallthroughEvalInputs {
+                env: base_env,
+                materialized_runtime_values: std::collections::BTreeSet::new(),
+            });
         }
-        let local_value_names: rustc_hash::FxHashSet<String> =
+        let local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey> =
             base_env.value_symbols.keys().cloned().collect();
         // Hydration mutates: clone the base env once, hydrate, and
         // hand out a fresh Arc.
         let mut env = (*base_env).clone();
-        {
-            // The graph-native dep extractor
-            // (`fallthrough_runtime_value_deps_graph_native`) enumerates the
-            // cross-file runtime-value sources the materializer hydrates,
-            // WITHOUT a whole-env clone of any dependency, so a future
-            // whole-env-free builder can drive hydration off the per-name
-            // value readers. Its equivalence with the materializer is proved
-            // OFFLINE on full `(source_canonical, source_name)` pairs by
-            // `c3_fallthrough_runtime_value_deps_graph_native_equals_\
-            // materializer_touched_full_pairs`. No in-production cross-check
-            // runs here: the only faithful in-production touched-pair recompute
-            // would route through the legacy `resolve_value_export_target`
-            // whole-env peel (materialising every dependency's whole env) —
-            // the exact cost the readiness work removes — and a name-count
-            // proxy is unsound (legal double-alias-onto-one-source hydrates two
-            // bindings from one dep pair). The offline pair-equality test is
-            // the authoritative equivalence rail.
+        // The graph-native dep extractor
+        // (`fallthrough_runtime_value_deps_graph_native`) enumerates the
+        // cross-file runtime-value sources the materializer hydrates,
+        // WITHOUT a whole-env clone of any dependency, so a future
+        // whole-env-free builder can drive hydration off the per-name
+        // value readers. Its equivalence with the materializer is proved
+        // OFFLINE on full `(source_canonical, source_name)` pairs by
+        // `c3_fallthrough_runtime_value_deps_graph_native_equals_\
+        // materializer_touched_full_pairs`. No in-production cross-check
+        // runs here: the only faithful in-production touched-pair recompute
+        // would route through the legacy `resolve_value_export_target`
+        // whole-env peel (materialising every dependency's whole env) —
+        // the exact cost the readiness work removes — and a name-count
+        // proxy is unsound (legal double-alias-onto-one-source hydrates two
+        // bindings from one dep pair). The offline pair-equality test is
+        // the authoritative equivalence rail.
 
-            self.materialize_imported_runtime_values_into_env(
-                snapshot,
-                &local_value_names,
-                Some(&required_runtime_value_names),
-                &mut env,
-            );
-        }
-
-        Some(std::sync::Arc::new(env))
+        let materialized_runtime_values = self.materialize_imported_runtime_values_into_env(
+            snapshot,
+            &local_value_names,
+            Some(&required_runtime_value_names),
+            &mut env,
+        );
+        Some(FallthroughEvalInputs {
+            env: std::sync::Arc::new(env),
+            materialized_runtime_values,
+        })
     }
 
     /// Graph-native dep-extraction reader for the lightweight fallthrough
@@ -536,7 +569,7 @@ impl VerterHost {
     /// file-scope value symbols.
     ///
     /// Its equivalence with the materializer is proved on full
-    /// `(source_canonical, source_name)` pairs by the C3 dep-equivalence
+    /// `(source_canonical, source_owner, source_name)` identities by the C3 dep-equivalence
     /// tests; its presence is pinned by
     /// `whole_env_consumer_graph_native_inventory.rs`.
     #[allow(dead_code)]
@@ -545,7 +578,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-    ) -> std::collections::BTreeSet<(String, String)> {
+    ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
         use verter_semantic::analysis::types::ImportBindingKind;
 
         let required_runtime_value_names = match root_reachability {
@@ -564,16 +597,20 @@ impl VerterHost {
         // index — NO whole-env clone. A binding whose name is an owner
         // file-scope value symbol is shadowed and never hydrated, exactly
         // as the materializer's `local_value_names` filter requires.
-        let owner_local_value_names: rustc_hash::FxHashSet<String> = self
+        let owner_local_value_names: rustc_hash::FxHashMap<
+            verter_type_expr::TopLevelOwnerId,
+            rustc_hash::FxHashSet<String>,
+        > = self
             .routed_shallow_state(canonical_id)
             .map(|state| {
-                state
-                    .decl_bodies()
-                    .header_index()
-                    .value_headers
-                    .keys()
-                    .cloned()
-                    .collect()
+                let mut names_by_owner = rustc_hash::FxHashMap::default();
+                for key in state.decl_bodies().header_index().value_headers.keys() {
+                    names_by_owner
+                        .entry(key.owner)
+                        .or_insert_with(rustc_hash::FxHashSet::default)
+                        .insert(key.name.to_string());
+                }
+                names_by_owner
             })
             .unwrap_or_default();
 
@@ -587,7 +624,9 @@ impl VerterHost {
             for binding in &import.bindings {
                 if binding.is_type_only
                     || matches!(binding.kind, ImportBindingKind::Namespace)
-                    || owner_local_value_names.contains(&binding.name)
+                    || owner_local_value_names
+                        .get(&import.owner)
+                        .is_some_and(|names| names.contains(binding.name.as_str()))
                     || !required_runtime_value_names.contains(&binding.name)
                 {
                     continue;
@@ -602,11 +641,11 @@ impl VerterHost {
                 // env. The materializer's selection identity is preserved
                 // — same `resolve_named_export` walk, same single-segment
                 // alias chain, peeled per-symbol instead of via the env.
-                let (source_canonical_id, source_name) = self
-                    .resolve_value_export_target_graph_native(dep_canonical_id, imported_name)
-                    .map(|target| (target.canonical_id, target.name))
-                    .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()));
-                deps.insert((source_canonical_id, source_name));
+                if let Some(target) =
+                    self.resolve_value_export_target_graph_native(dep_canonical_id, imported_name)
+                {
+                    deps.insert(target);
+                }
             }
         }
 
@@ -617,10 +656,10 @@ impl VerterHost {
     pub(super) fn materialize_imported_runtime_values_into_env(
         &self,
         snapshot: &FileAnalysisSnapshot,
-        owner_local_value_names: &rustc_hash::FxHashSet<String>,
+        owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    ) {
+    ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
         component_meta_trace_custom!(
             "materialize_runtime_values",
             format!(
@@ -633,7 +672,7 @@ impl VerterHost {
         );
         let started = component_meta_debug_enabled().then(Instant::now);
         let resolver = HostRuntimeValueResolver { host: self };
-        materialize_imported_runtime_values_into_env(
+        let materialized = materialize_imported_runtime_values_into_env(
             snapshot.imports.as_slice(),
             owner_local_value_names,
             required_runtime_value_names,
@@ -657,6 +696,7 @@ impl VerterHost {
                 env.value_symbols.len(),
             ),
         );
+        materialized
     }
 
     pub(super) fn build_generic_child_prop_overrides(
@@ -692,9 +732,13 @@ impl VerterHost {
                 continue;
             }
 
-            let Some(node) =
-                engine.value_expression_override_node(canonical_id, prop, env_ref, overrides_in)
-            else {
+            let Some(node) = engine.value_expression_override_node(
+                canonical_id,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                prop,
+                env_ref,
+                overrides_in,
+            ) else {
                 continue;
             };
             entries.push(crate::resolver_core::FallthroughPropOverride {
@@ -792,6 +836,7 @@ impl VerterHost {
 
                 let Some(summary) = engine.known_spread_keys_for_value_expression(
                     canonical_id,
+                    verter_type_expr::TopLevelOwnerId::instance(0),
                     expression,
                     env_ref,
                     overrides,
@@ -867,6 +912,7 @@ impl VerterHost {
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
         candidates.extend(engine.dynamic_root_candidates_for_value_expression(
             canonical_id,
+            verter_type_expr::TopLevelOwnerId::instance(0),
             &expression,
             eval_env.as_deref(),
             overrides,
@@ -1328,7 +1374,20 @@ impl VerterHost {
         }
         // ALWAYS fires — even when cc.dependencies union is unchanged, the
         // semantic-class slice may have changed (closes F15).
+        //
+        // A file is never its own transitive dependency. The macro
+        // fact-footprint that feeds this axis records the OWNER's own
+        // canonical (its own decl / whole-hash facts are read during macro
+        // resolution), but a self-edge is not a cross-file semantic
+        // transitive dependency. Excluding it keeps the empty-cross-file
+        // case genuinely empty, so removing the last macro type dep fully
+        // clears the axis instead of leaving a spurious self-edge (F15).
+        let transitive_without_self: std::collections::BTreeSet<String> = transitive_deps
+            .iter()
+            .filter(|dep| dep.as_str() != canonical_id)
+            .cloned()
+            .collect();
         self.ws()
-            .replace_semantic_transitive(canonical_id, transitive_deps.clone());
+            .replace_semantic_transitive(canonical_id, transitive_without_self);
     }
 }

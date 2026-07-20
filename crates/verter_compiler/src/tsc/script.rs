@@ -32,26 +32,35 @@
 
 use base64::prelude::*;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, Statement};
-use oxc_ast::{Comment, CommentContent};
-use oxc_parser::Parser;
+use oxc_ast::ast::*;
+use oxc_parser::{config::TokensParserConfig, Kind, Parser, Token};
+use oxc_semantic::SemanticBuilder;
 use oxc_sourcemap::SourceMapBuilder;
 use oxc_span::{GetSpan, SourceType};
+use oxc_syntax::constant_value::ConstantValue;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_macro_dto::{
+    MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason, MacroTscBundle,
+    MacroTscOutcome, MacroTscProjection, SynthesizedRowKind, TscBindingUsage,
+    TscDeclarationFailureReason, TscInferredClassMember, TscInferredClassTypePosition,
+    TscOwnerValueDependency, TscPublicPropsProjection, TscRetainedValueCarrier,
+    TscScopeRequirements, TscScriptOwner, TscSemanticInferenceUnavailableReason, UnresolvedReason,
+    UnsupportedReason,
+};
+use verter_type_expr::facts::TypeDependencyPathFact;
 
+use crate::code_transform::{CodeTransform, GeneratedSourceRange};
 use crate::common::Span;
 use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
+use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::tokenizer::byte::tokenize_sfc;
-use crate::utils::oxc::script::type_surface::{
-    extract_companion_types, ResolvedCallPayloadForm, ResolvedElements, ResolvedProp, RuntimeType,
-};
 use crate::utils::oxc::vue::{
-    extract_options_component_macro_args, parse_script, parse_script_with_companion,
-    DefaultExportType, ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams,
-    OptionsComponentMacroArgs, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
+    extract_options_component_macro_args, parse_script, DefaultExportType, ImportSpecifierKind,
+    MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
+    RuntimeConstructorSyntax, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
 };
 
 /// Macro stub declarations shared between `generate_code` (when expose entries
@@ -69,13 +78,421 @@ declare function defineSlots<Slots extends Record<string, any>>(): Slots\n\
 declare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\n\
 declare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n";
 
+const TERMINAL_EMITS_TO_PROPS_TYPE: &str = "type __Verter_EmitsToProps<T> = T extends (...args: infer A) => any ? A extends [infer E extends string, ...infer P] ? { [K in E as `on${Capitalize<K>}`]?: (...args: P) => void } : {} : T extends Record<string, any> ? { [K in keyof T as K extends string ? `on${Capitalize<K>}` : never]?: (...args: T[K] extends any[] ? T[K] : T[K] extends (...args: infer P) => any ? P : unknown[]) => void } : {}\n";
+
 /// Output from the tsc codegen.
+#[derive(Debug)]
 pub struct TscOutput {
     /// The generated `.tsc.tsx` source with inline source map.
     pub code: String,
     /// The JSON source map string (without base64 encoding).
     pub source_map: String,
 }
+
+/// Explicit semantic input contract for TSC generation.
+#[derive(Debug, Clone, Copy)]
+pub enum MacroTscInput<'a> {
+    /// The caller asserts that the source contains no type-based codegen macro.
+    NotRequired,
+    /// Authoritative TypeInfo projections for every type-based codegen macro.
+    Authoritative(&'a MacroTscBundle),
+}
+
+/// Closed failures from joining compiler syntax to authoritative TypeInfo facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TscGenerationError {
+    /// A typed macro exists but the caller supplied [`MacroTscInput::NotRequired`].
+    MissingAuthoritativeSemantics { subject: TscFailureSubject },
+    /// The authoritative bundle has no entry for a typed macro syntax identity.
+    MissingEntry { subject: TscFailureSubject },
+    /// More than one entry claims the same typed macro syntax identity.
+    DuplicateEntry { subject: TscFailureSubject },
+    /// The entry exists but is partial, unresolved, unsupported, or invalid.
+    UnavailableOutcome {
+        subject: TscFailureSubject,
+        outcome: TscUnavailableOutcome,
+    },
+    /// The entry's projection role does not match the compiler syntax role.
+    RoleMismatch { subject: TscFailureSubject },
+    /// The entry claims a semantic macro identity other than the parser-owned
+    /// effective call for this syntax slot.
+    MacroIdentityMismatch { subject: TscFailureSubject },
+    /// The bundle contains an entry with no compiler-owned typed macro slot.
+    UnexpectedEntry { subject: TscFailureSubject },
+    /// A DTO scope requirement does not name a compiler-owned import binding.
+    MissingScopeBinding { subject: TscFailureSubject },
+    /// A DTO value-position requirement names an authored type-only import.
+    ValueScopeBindingUnavailable { subject: TscFailureSubject },
+    /// A retained local identity is absent or cannot be projected safely.
+    MissingScopeDeclaration { subject: TscFailureSubject },
+    /// The selected mode omits a declaration owner's body and cannot prove a
+    /// safe ambient carrier for one of its retained local declarations.
+    UnsupportedDeclarationShape {
+        subject: TscFailureSubject,
+        reason: TscDeclarationShapeReason,
+    },
+    /// An authored row ordinal is outside the role-specific syntax inventory.
+    InvalidAuthoredMemberOrdinal {
+        subject: TscFailureSubject,
+        member_ordinal: u32,
+    },
+    /// The row anchor kind or macro identity is not valid for this syntax role.
+    InvalidMacroAnchor { subject: TscFailureSubject },
+    /// The DTO authorized parser-owned type syntax but the extracted slot has
+    /// no complete, source-stable argument geometry.
+    MissingAuthoredArgumentGeometry { subject: TscFailureSubject },
+}
+
+/// Authored compiler syntax carrier associated with a TSC generation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TscFailureSubject {
+    /// Parser-owned source-order identity among compiler macro syntax items.
+    Macro { syntax_index: u32 },
+    /// The raw type syntax authored in `<script setup attrs="…">`.
+    ScriptSetupAttrs { source_range: Span },
+}
+
+impl TscFailureSubject {
+    #[must_use]
+    pub const fn macro_syntax(syntax_index: u32) -> Self {
+        Self::Macro { syntax_index }
+    }
+
+    #[must_use]
+    pub const fn macro_syntax_index(self) -> Option<u32> {
+        match self {
+            Self::Macro { syntax_index } => Some(syntax_index),
+            Self::ScriptSetupAttrs { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TscFailureSubject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Macro { syntax_index } => {
+                write!(formatter, "macro syntax index {syntax_index}")
+            }
+            Self::ScriptSetupAttrs { source_range } => write!(
+                formatter,
+                "script setup attrs source range {}..{}",
+                source_range.start, source_range.end
+            ),
+        }
+    }
+}
+
+/// Exact non-complete TypeInfo outcome retained across compiler and host error
+/// boundaries. Display diagnostics are carried but never interpreted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TscUnavailableOutcome {
+    Partial(MacroFailure<MacroPartialReason>),
+    Unresolved(MacroFailure<UnresolvedReason>),
+    Unsupported(MacroFailure<UnsupportedReason>),
+    Invalid(TscInvalidOutcome),
+}
+
+/// Closed invalid-outcome vocabulary across macro semantics and compiler-owned
+/// authored type syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TscInvalidOutcome {
+    /// Lossless TypeInfo macro invalidity.
+    Macro(MacroFailure<MacroInvalidReason>),
+    /// Compiler-owned authored type syntax that did not parse completely.
+    AuthoredTypeSyntax(TscInvalidAuthoredTypeReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TscInvalidAuthoredTypeReason {
+    /// The type parser rejected the source or recovered a non-authoritative AST.
+    MalformedOrRecoveredTypeSyntax,
+}
+
+impl TscUnavailableOutcome {
+    #[must_use]
+    pub fn from_macro_outcome(outcome: &MacroTscOutcome) -> Option<Self> {
+        match outcome {
+            MacroTscOutcome::Complete(_) => None,
+            MacroTscOutcome::Partial(failure) => Some(Self::Partial(failure.clone())),
+            MacroTscOutcome::Unresolved(failure) => Some(Self::Unresolved(failure.clone())),
+            MacroTscOutcome::Unsupported(failure) => Some(Self::Unsupported(failure.clone())),
+            MacroTscOutcome::Invalid(failure) => {
+                Some(Self::Invalid(TscInvalidOutcome::Macro(failure.clone())))
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn kind_code(&self) -> &'static str {
+        match self {
+            Self::Partial(_) => "partial",
+            Self::Unresolved(_) => "unresolved",
+            Self::Unsupported(_) => "unsupported",
+            Self::Invalid(_) => "invalid",
+        }
+    }
+
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Partial(failure) => match failure.reason {
+                MacroPartialReason::BudgetExceeded => "budget-exceeded",
+                MacroPartialReason::Cancelled => "cancelled",
+                MacroPartialReason::SupersededGeneration => "superseded-generation",
+                MacroPartialReason::UnstableState => "unstable-state",
+                MacroPartialReason::Recursion => "recursion",
+                MacroPartialReason::IncompleteTraversal => "incomplete-traversal",
+            },
+            Self::Unresolved(failure) => match failure.reason {
+                UnresolvedReason::MissingTypeArgument => "missing-type-argument",
+                UnresolvedReason::MissingDeclaration => "missing-declaration",
+                UnresolvedReason::AmbiguousReference => "ambiguous-reference",
+                UnresolvedReason::MissingDependency => "missing-dependency",
+            },
+            Self::Unsupported(failure) => match failure.reason {
+                UnsupportedReason::MacroKind => "macro-kind",
+                UnsupportedReason::SemanticConstruct => "semantic-construct",
+            },
+            Self::Invalid(invalid) => match invalid {
+                TscInvalidOutcome::Macro(failure) => match failure.reason {
+                    MacroInvalidReason::NonObjectRoot => "non-object-root",
+                    MacroInvalidReason::InvalidEmitsShape => "invalid-emits-shape",
+                },
+                TscInvalidOutcome::AuthoredTypeSyntax(
+                    TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+                ) => "malformed-or-recovered-type-syntax",
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&str> {
+        match self {
+            Self::Partial(failure) => failure.diagnostic.as_deref(),
+            Self::Unresolved(failure) => failure.diagnostic.as_deref(),
+            Self::Unsupported(failure) => failure.diagnostic.as_deref(),
+            Self::Invalid(TscInvalidOutcome::Macro(failure)) => failure.diagnostic.as_deref(),
+            Self::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(_)) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TscDeclarationShapeReason {
+    TypeInfoDeclarationFailure(TscDeclarationFailureReason),
+    OwnerValueDependencyUnavailable,
+    ClassDecorator,
+    ComplexClassHeritage,
+    DecoratedClassMember,
+    ComputedClassMember,
+    PrivateClassMember,
+    RestClassParameter,
+    DestructuredClassParameter,
+    DecoratedClassParameter,
+    ConstructorOverload,
+    UnsupportedClassShape,
+    UnsupportedEnumShape,
+    InconsistentClassInference,
+}
+
+impl TscDeclarationShapeReason {
+    /// Stable machine-readable identity for host and language binding errors.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TypeInfoDeclarationFailure(failure) => match failure {
+                TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                    TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+                ) => "semantic-inference-depth-budget-exceeded",
+                TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                    TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+                ) => "semantic-inference-work-budget-exceeded",
+                TscDeclarationFailureReason::Unsupported(UnsupportedReason::MacroKind) => {
+                    "semantic-inference-unsupported-macro-kind"
+                }
+                TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct) => {
+                    "semantic-inference-unsupported-construct"
+                }
+                TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingTypeArgument) => {
+                    "semantic-inference-missing-type-argument"
+                }
+                TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDeclaration) => {
+                    "semantic-inference-missing-declaration"
+                }
+                TscDeclarationFailureReason::Unresolved(UnresolvedReason::AmbiguousReference) => {
+                    "semantic-inference-ambiguous-reference"
+                }
+                TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDependency) => {
+                    "semantic-inference-missing-dependency"
+                }
+            },
+            Self::OwnerValueDependencyUnavailable => "owner-value-dependency-unavailable",
+            Self::ClassDecorator => "class-decorator",
+            Self::ComplexClassHeritage => "complex-class-heritage",
+            Self::DecoratedClassMember => "decorated-class-member",
+            Self::ComputedClassMember => "computed-class-member",
+            Self::PrivateClassMember => "private-class-member",
+            Self::RestClassParameter => "rest-class-parameter",
+            Self::DestructuredClassParameter => "destructured-class-parameter",
+            Self::DecoratedClassParameter => "decorated-class-parameter",
+            Self::ConstructorOverload => "constructor-overload",
+            Self::UnsupportedClassShape => "unsupported-class-shape",
+            Self::UnsupportedEnumShape => "unsupported-enum-shape",
+            Self::InconsistentClassInference => "inconsistent-class-inference",
+        }
+    }
+}
+
+impl TscGenerationError {
+    /// Stable machine-readable identity for this failure class.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::MissingAuthoritativeSemantics { .. } => "missing-authoritative-semantics",
+            Self::MissingEntry { .. } => "missing-entry",
+            Self::DuplicateEntry { .. } => "duplicate-entry",
+            Self::UnavailableOutcome { .. } => "unavailable-outcome",
+            Self::RoleMismatch { .. } => "role-mismatch",
+            Self::MacroIdentityMismatch { .. } => "macro-identity-mismatch",
+            Self::UnexpectedEntry { .. } => "unexpected-entry",
+            Self::MissingScopeBinding { .. } => "missing-scope-binding",
+            Self::ValueScopeBindingUnavailable { .. } => "value-scope-binding-unavailable",
+            Self::MissingScopeDeclaration { .. } => "missing-scope-declaration",
+            Self::UnsupportedDeclarationShape { .. } => "unsupported-declaration-shape",
+            Self::InvalidAuthoredMemberOrdinal { .. } => "invalid-authored-member-ordinal",
+            Self::InvalidMacroAnchor { .. } => "invalid-macro-anchor",
+            Self::MissingAuthoredArgumentGeometry { .. } => "missing-authored-argument-geometry",
+        }
+    }
+
+    /// Compiler-owned syntax carrier that failed.
+    #[must_use]
+    pub const fn subject(&self) -> TscFailureSubject {
+        match self {
+            Self::MissingAuthoritativeSemantics { subject }
+            | Self::MissingEntry { subject }
+            | Self::DuplicateEntry { subject }
+            | Self::UnavailableOutcome { subject, .. }
+            | Self::RoleMismatch { subject }
+            | Self::MacroIdentityMismatch { subject }
+            | Self::UnexpectedEntry { subject }
+            | Self::MissingScopeBinding { subject }
+            | Self::ValueScopeBindingUnavailable { subject }
+            | Self::MissingScopeDeclaration { subject }
+            | Self::UnsupportedDeclarationShape { subject, .. }
+            | Self::InvalidAuthoredMemberOrdinal { subject, .. }
+            | Self::InvalidMacroAnchor { subject }
+            | Self::MissingAuthoredArgumentGeometry { subject } => *subject,
+        }
+    }
+
+    /// Parser-owned macro syntax slot, when the subject is a macro.
+    #[must_use]
+    pub const fn macro_syntax_index(&self) -> Option<u32> {
+        self.subject().macro_syntax_index()
+    }
+
+    /// Exact unavailable TypeInfo outcome, when this is that failure class.
+    #[must_use]
+    pub const fn unavailable_outcome(&self) -> Option<&TscUnavailableOutcome> {
+        match self {
+            Self::UnavailableOutcome { outcome, .. } => Some(outcome),
+            _ => None,
+        }
+    }
+
+    /// Declaration-shape refusal detail, when this is that failure class.
+    #[must_use]
+    pub const fn declaration_shape_reason(&self) -> Option<TscDeclarationShapeReason> {
+        match self {
+            Self::UnsupportedDeclarationShape { reason, .. } => Some(*reason),
+            _ => None,
+        }
+    }
+
+    /// Authored member ordinal, when this failure identifies one.
+    #[must_use]
+    pub const fn member_ordinal(&self) -> Option<u32> {
+        match self {
+            Self::InvalidAuthoredMemberOrdinal { member_ordinal, .. } => Some(*member_ordinal),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TscGenerationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (message, subject) = match self {
+            Self::MissingAuthoritativeSemantics { subject } => {
+                ("missing authoritative TSC semantics", subject)
+            }
+            Self::MissingEntry { subject } => {
+                ("authoritative TSC bundle is missing an entry", subject)
+            }
+            Self::DuplicateEntry { subject } => (
+                "authoritative TSC bundle contains duplicate entries",
+                subject,
+            ),
+            Self::UnavailableOutcome { subject, outcome } => {
+                write!(
+                    formatter,
+                    "authoritative TSC outcome is {} ({}) for {}",
+                    outcome.kind_code(),
+                    outcome.reason_code(),
+                    subject
+                )?;
+                if let Some(diagnostic) = outcome.diagnostic() {
+                    write!(formatter, ": {diagnostic}")?;
+                }
+                return Ok(());
+            }
+            Self::RoleMismatch { subject } => {
+                ("authoritative TSC projection has the wrong role", subject)
+            }
+            Self::MacroIdentityMismatch { subject } => (
+                "authoritative TSC entry has the wrong macro identity",
+                subject,
+            ),
+            Self::UnexpectedEntry { subject } => (
+                "authoritative TSC bundle contains an unexpected entry",
+                subject,
+            ),
+            Self::MissingScopeBinding { subject } => (
+                "authoritative TSC scope references an unavailable import binding",
+                subject,
+            ),
+            Self::ValueScopeBindingUnavailable { subject } => (
+                "authoritative TSC scope requires a value-capable import binding",
+                subject,
+            ),
+            Self::MissingScopeDeclaration { subject } => (
+                "authoritative TSC scope references an unavailable local declaration",
+                subject,
+            ),
+            Self::UnsupportedDeclarationShape { subject, reason } => {
+                return write!(
+                    formatter,
+                    "retained local declaration has no proven ambient projection ({reason:?}) for {subject}"
+                );
+            }
+            Self::InvalidAuthoredMemberOrdinal { subject, .. } => (
+                "authoritative TSC row anchor references an unavailable authored member",
+                subject,
+            ),
+            Self::InvalidMacroAnchor { subject } => (
+                "authoritative TSC row has an invalid role-specific anchor",
+                subject,
+            ),
+            Self::MissingAuthoredArgumentGeometry { subject } => (
+                "authoritative TSC props projection requires missing authored argument geometry",
+                subject,
+            ),
+        };
+        write!(formatter, "{message} for {subject}")
+    }
+}
+
+impl std::error::Error for TscGenerationError {}
 
 /// Output mode for generated TypeScript declaration files.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -101,8 +518,6 @@ pub struct TscGenOptions {
     pub conditional_root_narrowing: bool,
     /// Source filename used in source maps and cross-file type resolution.
     pub filename: Option<String>,
-    /// Pre-resolved external macro types, keyed by imported type name.
-    pub external_types: Option<rustc_hash::FxHashMap<String, ResolvedElements>>,
     /// Public or testing/debug output mode.
     pub mode: TscMode,
 }
@@ -112,13 +527,26 @@ pub struct TscGenOptions {
 /// TypeScript type representation for props (from `defineProps`).
 #[derive(Clone)]
 enum PropsTs {
-    /// Type reference (name only) — from `defineProps<ImportedType>()`.
-    /// The corresponding `import type { ... }` is in `TscMacroState::type_import_stmts`.
-    TypeRef(String),
-    /// Raw TypeScript type text — for unresolved or inline complex types
-    TypeText(String),
-    /// Resolved property list — from object-syntax or inline type literal
+    /// Parser-owned first type argument, authorized by the semantic DTO.
+    AuthoredArgument(AuthoredPropsArgument),
+    /// Syntax-derived property list for runtime object/array forms.
     Inline(Vec<InlinePropEntry>),
+}
+
+#[derive(Clone)]
+struct AuthoredPropsArgument {
+    text: String,
+    source_start: u32,
+    members: Vec<AuthoredPropMember>,
+}
+
+#[derive(Clone)]
+struct AuthoredPropMember {
+    name: String,
+    key_start: u32,
+    key_end: u32,
+    type_range: Option<(u32, u32)>,
+    optional: bool,
 }
 
 #[derive(Clone)]
@@ -140,13 +568,16 @@ struct EmitEntry {
 #[derive(Clone)]
 enum EmitPayload {
     Unknown,
-    Call { params_text: String },
-    Tuple { tuple_text: String },
+    Call {
+        params_text: String,
+        handler_params_text: Option<String>,
+    },
 }
 
 #[derive(Clone)]
 struct ModelEntry {
     name: String,
+    optional: bool,
     ts_type: String,
     map_span: Option<Span>,
 }
@@ -176,12 +607,116 @@ struct ExposeEntry {
     typeof_target: Option<String>,
 }
 
-struct LocalTypeDecl<'a> {
-    name: &'a str,
-    text: &'a str,
+#[derive(Clone)]
+struct LocalTypeDecl {
+    name: String,
+    contributor_ordinal: u32,
+    source_start: u32,
+    owner: TscScriptOwner,
+    declaration: DeclarationProjection,
+    dependency_names: Vec<String>,
+    value_capable: bool,
 }
 
-/// One generated-code byte offset mapped to its authored source byte span.
+fn parser_top_level_owner(owner: TscScriptOwner) -> verter_type_expr::TopLevelOwnerId {
+    match owner {
+        TscScriptOwner::Setup => verter_type_expr::TopLevelOwnerId::instance(0),
+        TscScriptOwner::Companion => verter_type_expr::TopLevelOwnerId::module(0),
+    }
+}
+
+#[derive(Clone)]
+enum DeclarationProjection {
+    Ready(RenderedText),
+    Class(ClassDeclarationPlan),
+    Unavailable(TscDeclarationShapeReason),
+}
+
+#[derive(Clone)]
+struct ClassDeclarationPlan {
+    authored: AuthoredFragment,
+    edits: Vec<DeclarationEdit>,
+    inferred_sites: Vec<ClassInferenceSite>,
+}
+
+#[derive(Clone)]
+struct AuthoredFragment {
+    text: String,
+    source_start: u32,
+    /// Parser-token starts relative to `text`. Splitting original transform
+    /// chunks at these positions gives every preserved authored token its own
+    /// exact V3 source-map anchor without mapping synthetic replacements.
+    token_starts: Vec<u32>,
+}
+
+#[derive(Clone)]
+enum DeclarationEdit {
+    Insert {
+        offset: u32,
+        text: String,
+    },
+    Remove {
+        start: u32,
+        end: u32,
+    },
+    Overwrite {
+        start: u32,
+        end: u32,
+        text: String,
+    },
+    SyntheticType {
+        start: u32,
+        end: u32,
+        text: String,
+        type_offset: u32,
+    },
+}
+
+#[derive(Clone)]
+struct ClassInferenceSite {
+    name: String,
+    occurrence: u32,
+    is_static: bool,
+    position: TscInferredClassTypePosition,
+    targets: Vec<ClassInferenceTarget>,
+}
+
+#[derive(Clone)]
+struct ClassInferenceTarget {
+    start: u32,
+    end: u32,
+    prefix: String,
+    suffix: String,
+}
+
+#[derive(Clone)]
+struct LocalTypeCarrier {
+    name: String,
+    contributor_ordinal: u32,
+    owner: TscScriptOwner,
+    declaration: DeclarationProjection,
+    inferred_class_members: Vec<TscInferredClassMember>,
+    declaration_failure: Option<verter_macro_dto::TscDeclarationFailureReason>,
+    owner_value_dependencies: Vec<TscOwnerValueDependency>,
+    compiler_failure: Option<TscDeclarationShapeReason>,
+    syntax_index: u32,
+    authoritative: bool,
+}
+
+#[derive(Clone)]
+struct RetainedTypeImport {
+    statement: String,
+    owner: TscScriptOwner,
+}
+
+#[derive(Clone)]
+struct RetainedValueImport {
+    statement: String,
+    promoted_type_statement: String,
+    owner: TscScriptOwner,
+}
+
+/// One generated-code byte offset where source ownership changes.
 ///
 /// Shared with framework declaration carriers rendered outside this module
 /// (the Svelte public-API projector maps its generated prop-name tokens back
@@ -189,13 +724,15 @@ struct LocalTypeDecl<'a> {
 /// [`build_tsc_source_map`] V3 JSON the store/plugin consume for `.vue`).
 #[derive(Clone, Copy)]
 pub struct GeneratedMapping {
-    /// Byte offset of the mapped token's start in the generated code.
+    /// Byte offset of the ownership transition in the generated code.
     pub generated_offset: usize,
-    /// The authored byte span the token maps to (only `start` is encoded).
-    pub source_span: Span,
+    /// The authored byte span when entering authored text, or `None` when
+    /// entering compiler-generated text. Generated transitions are required:
+    /// without them a V3 lookup inherits the preceding authored segment.
+    pub source_span: Option<Span>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct RenderedText {
     text: String,
     mappings: Vec<GeneratedMapping>,
@@ -203,15 +740,32 @@ struct RenderedText {
 
 impl RenderedText {
     fn push_str(&mut self, text: &str) {
+        self.push_mapping_transition(None, text);
         self.text.push_str(text);
     }
 
     fn push_mapped(&mut self, text: &str, source_span: Span) {
-        self.mappings.push(GeneratedMapping {
-            generated_offset: self.text.len(),
-            source_span,
-        });
+        self.push_mapping_transition(Some(source_span), text);
         self.text.push_str(text);
+    }
+
+    fn push_mapping_transition(&mut self, source_span: Option<Span>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let generated_offset = self.text.len();
+        if let Some(existing) = self
+            .mappings
+            .last_mut()
+            .filter(|mapping| mapping.generated_offset == generated_offset)
+        {
+            existing.source_span = source_span;
+        } else {
+            self.mappings.push(GeneratedMapping {
+                generated_offset,
+                source_span,
+            });
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -247,19 +801,37 @@ impl TscWriter {
     }
 
     fn push_str(&mut self, text: &str) {
+        self.push_mapping_transition(None, text.len());
         self.text.push_str(text);
     }
 
     fn push(&mut self, ch: char) {
+        self.push_mapping_transition(None, ch.len_utf8());
         self.text.push(ch);
     }
 
     fn push_mapped(&mut self, text: &str, source_span: Span) {
-        self.mappings.push(GeneratedMapping {
-            generated_offset: self.text.len(),
-            source_span,
-        });
+        self.push_mapping_transition(Some(source_span), text.len());
         self.text.push_str(text);
+    }
+
+    fn push_mapping_transition(&mut self, source_span: Option<Span>, text_len: usize) {
+        if text_len == 0 {
+            return;
+        }
+        let generated_offset = self.text.len();
+        if let Some(existing) = self
+            .mappings
+            .last_mut()
+            .filter(|mapping| mapping.generated_offset == generated_offset)
+        {
+            existing.source_span = source_span;
+        } else {
+            self.mappings.push(GeneratedMapping {
+                generated_offset,
+                source_span,
+            });
+        }
     }
 
     fn append_rendered(&mut self, rendered: RenderedText) {
@@ -301,6 +873,8 @@ struct TscMacroState {
     emits_names: Vec<String>,
     // defineEmits — TypeScript emit entries
     emits_ts: Vec<EmitEntry>,
+    /// Authoritative terminal emit projection from TypeInfo.
+    terminal_emits_ts: Option<String>,
     // defineModel — each model binding
     models: Vec<ModelEntry>,
 
@@ -313,10 +887,10 @@ struct TscMacroState {
     expose_type_text: Option<String>,
 
     // Local type declarations (interfaces, type aliases)
-    local_types: Vec<String>,
+    local_types: Vec<LocalTypeCarrier>,
 
     // Type import statements to emit (e.g. `import type { Props } from './types'`)
-    type_import_stmts: Vec<String>,
+    type_import_stmts: Vec<RetainedTypeImport>,
 
     // Declaration-only type import statements: VALUE imports (no `type`
     // modifier) that are USED IN A TYPE POSITION (e.g. `import { Props }` used by
@@ -326,7 +900,130 @@ struct TscMacroState {
     // statements instead. Kept SEPARATE from `type_import_stmts` so emitting
     // them does NOT duplicate the value import the setup body already carries in
     // the non-declaration paths.
-    declaration_promoted_type_imports: Vec<String>,
+    declaration_promoted_type_imports: Vec<RetainedTypeImport>,
+    /// Value-capable imports required when a declaration carrier omits its
+    /// authored owner body (`typeof importedValue`, `extends ImportedBase`).
+    declaration_value_imports: Vec<RetainedValueImport>,
+
+    /// Full typed import inventory available for DTO scope joins.
+    available_scope_imports: Vec<AvailableScopeImport>,
+
+    /// Compiler-owned authored local declaration inventory, joined by DTO
+    /// contributor identity. Source text never crosses the DTO boundary.
+    available_scope_declarations: Vec<LocalTypeDecl>,
+
+    /// Content-free compiler syntax slots awaiting authoritative TSC splices.
+    semantic_slots: Vec<TscSemanticSlot>,
+    /// Owner-qualified values referenced directly by macro type arguments.
+    direct_owner_value_dependencies: Vec<(u32, TscOwnerValueDependency)>,
+}
+
+impl TscMacroState {
+    fn retain_type_import(&mut self, statement: String, owner: TscScriptOwner) {
+        if !self
+            .type_import_stmts
+            .iter()
+            .any(|existing| existing.statement == statement && existing.owner == owner)
+        {
+            self.type_import_stmts
+                .push(RetainedTypeImport { statement, owner });
+        }
+    }
+
+    fn retain_promoted_type_import(&mut self, statement: String, owner: TscScriptOwner) {
+        if self.declaration_value_imports.iter().any(|existing| {
+            existing.promoted_type_statement == statement && existing.owner == owner
+        }) {
+            return;
+        }
+        if !self
+            .declaration_promoted_type_imports
+            .iter()
+            .any(|existing| existing.statement == statement && existing.owner == owner)
+        {
+            self.declaration_promoted_type_imports
+                .push(RetainedTypeImport { statement, owner });
+        }
+    }
+
+    fn retain_value_import(
+        &mut self,
+        statement: String,
+        promoted_type_statement: String,
+        owner: TscScriptOwner,
+    ) {
+        self.declaration_promoted_type_imports.retain(|existing| {
+            existing.statement != promoted_type_statement || existing.owner != owner
+        });
+        if !self
+            .declaration_value_imports
+            .iter()
+            .any(|existing| existing.statement == statement && existing.owner == owner)
+        {
+            self.declaration_value_imports.push(RetainedValueImport {
+                statement,
+                promoted_type_statement,
+                owner,
+            });
+        }
+    }
+
+    fn retain_local_type(&mut self, mut incoming: LocalTypeCarrier) {
+        if let Some(existing) = self.local_types.iter_mut().find(|existing| {
+            existing.name == incoming.name
+                && existing.contributor_ordinal == incoming.contributor_ordinal
+                && existing.owner == incoming.owner
+        }) {
+            if incoming.authoritative {
+                if existing.authoritative
+                    && (existing.inferred_class_members != incoming.inferred_class_members
+                        || existing.declaration_failure != incoming.declaration_failure
+                        || existing.owner_value_dependencies != incoming.owner_value_dependencies)
+                {
+                    existing.compiler_failure =
+                        Some(TscDeclarationShapeReason::InconsistentClassInference);
+                } else if !existing.authoritative {
+                    existing.inferred_class_members =
+                        std::mem::take(&mut incoming.inferred_class_members);
+                    existing.declaration_failure = incoming.declaration_failure;
+                    existing.owner_value_dependencies =
+                        std::mem::take(&mut incoming.owner_value_dependencies);
+                    existing.syntax_index = incoming.syntax_index;
+                    existing.authoritative = true;
+                }
+            }
+            return;
+        }
+        self.local_types.push(incoming);
+    }
+}
+
+#[derive(Clone)]
+struct AvailableScopeImport {
+    local_name: String,
+    type_statement: String,
+    value_statement: Option<String>,
+    authored_type_only: bool,
+    owner: TscScriptOwner,
+}
+
+#[derive(Clone)]
+struct TscSemanticSlot {
+    syntax_index: u32,
+    payload_macro_index: u32,
+    effective_macro_index: u32,
+    role: TscSemanticRole,
+    type_span: Option<Span>,
+    member_spans: Vec<Span>,
+    model_name_span: Option<Span>,
+    authored_props: Option<AuthoredPropsArgument>,
+}
+
+#[derive(Clone)]
+enum TscSemanticRole {
+    Props,
+    Emits,
+    Model { name: String },
 }
 
 // ── Extract + Cache API ──────────────────────────────────────────────────────
@@ -338,47 +1035,96 @@ pub struct TscExtractOptions {
     pub filename: Option<String>,
 }
 
+#[derive(Clone)]
+struct ParsedAttrsType {
+    text: String,
+    dependency_paths: Vec<TypeDependencyPathFact>,
+}
+
+#[derive(Clone)]
+enum AttrsTypeParseOutcome {
+    Absent,
+    Complete(ParsedAttrsType),
+    Invalid {
+        subject: TscFailureSubject,
+        reason: TscInvalidAuthoredTypeReason,
+    },
+}
+
+impl AttrsTypeParseOutcome {
+    fn text(&self) -> Result<Option<&str>, TscGenerationError> {
+        match self {
+            Self::Absent => Ok(None),
+            Self::Complete(parsed) => Ok(Some(parsed.text.as_str())),
+            Self::Invalid { subject, reason } => Err(TscGenerationError::UnavailableOutcome {
+                subject: *subject,
+                outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(
+                    *reason,
+                )),
+            }),
+        }
+    }
+
+    fn dependency_paths(&self) -> &[TypeDependencyPathFact] {
+        match self {
+            Self::Complete(parsed) => &parsed.dependency_paths,
+            Self::Absent | Self::Invalid { .. } => &[],
+        }
+    }
+
+    const fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+}
+
+/// Apply terminal generation validation in one canonical order.
+///
+/// Source-owned attrs syntax is parsed without terminal semantic input, so an
+/// invalid authored carrier takes precedence over declaration-carrier safety
+/// failures introduced by that input. Both direct and cached generation must
+/// use this boundary to preserve identical failure selection.
+fn validate_terminal_generation<'a>(
+    attrs_type: &'a AttrsTypeParseOutcome,
+    state: &TscMacroState,
+    mode: TscMode,
+) -> Result<Option<&'a str>, TscGenerationError> {
+    let attrs_type = attrs_type.text()?;
+    validate_declaration_carriers(state, mode)?;
+    Ok(attrs_type)
+}
+
 /// Cached intermediate state from SFC macro extraction.
 ///
 /// Captures everything that depends on the SFC source text alone (steps 1–7)
-/// so that code generation can be repeated with different external types or
-/// modes without re-parsing.
+/// so code generation can be repeated with terminal semantic bundles and
+/// different modes without re-parsing.
 pub struct ExtractedTscState {
     // Note: Debug is manually implemented below (fields contain non-Debug internal types).
     macro_state: TscMacroState,
     generic_params: Option<String>,
-    attrs_type: Option<String>,
+    attrs_type: AttrsTypeParseOutcome,
     root_element_tag: Option<String>,
     test_bindings: Vec<TestBindingEntry>,
     /// Script setup content string (owned).
     content_str: String,
+    /// Full authored SFC bytes. Cached generation never accepts a second,
+    /// potentially mismatched source authority.
+    sfc_source: String,
     /// Filename for source maps.
     filename: Option<String>,
-    /// Unresolved external props type ref name (e.g. `"ImportedProps"`).
-    pub unresolved_props_ref: Option<String>,
-    /// SFC-absolute span of the defineProps type parameter (for source mapping).
-    unresolved_props_type_span: Option<Span>,
-    /// Unresolved external emits type ref name (e.g. `"ImportedEmits"`).
-    pub unresolved_emits_ref: Option<String>,
-    /// SFC-absolute span of the defineEmits type parameter (for source mapping).
-    unresolved_emits_type_span: Option<Span>,
 }
 
 impl std::fmt::Debug for ExtractedTscState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExtractedTscState")
-            .field("unresolved_props_ref", &self.unresolved_props_ref)
-            .field("unresolved_emits_ref", &self.unresolved_emits_ref)
-            .finish_non_exhaustive()
+        f.debug_struct("ExtractedTscState").finish_non_exhaustive()
     }
 }
 
 /// Extract intermediate TSC state from an SFC without external types.
 ///
 /// Runs steps 1–7 of the TSC pipeline (SFC tokenization, OXC parsing, macro
-/// extraction, type tracking) using only companion `<script>` block types.
-/// Records which type references were unresolved so that external types can
-/// be bound later via [`generate_tsc_from_state`].
+/// extraction, type tracking) using only syntax-owned facts. Type-based macro
+/// surfaces remain empty until [`generate_tsc_from_state`] applies a bundle.
 ///
 /// Returns `None` if the SFC has no `<script setup>` block.
 pub fn extract_tsc_state(
@@ -404,88 +1150,36 @@ pub fn extract_tsc_state(
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
 
-    // Collect companion <script> types for same-SFC cross-block resolution (no external types).
-    let companion_types = if let Some(script) = syntax.script() {
-        if let Some(script_content) = script.content {
-            let script_source =
-                &sfc_source[script_content.start as usize..script_content.end as usize];
-            let alloc = Allocator::default();
-            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
-            Some(extract_companion_types(
-                &parse_result.program,
-                script_source.as_bytes(),
-                script_content.start,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
+    let parse_result = Parser::new(&alloc, content_str, SourceType::ts())
+        .with_config(TokensParserConfig)
+        .parse();
+    let tokens = parse_result.tokens.as_slice().to_vec();
     let program = parse_result.program;
 
     // ── 3. Extract script items (macros + imports) — NO external types ─
-    let parsed =
-        parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
+    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
     let test_bindings = collect_test_bindings(&parsed.bindings, content_str, content_span.start);
-
-    // ── 3b. Detect unresolved type refs ────────────────────────────────
-    let mut unresolved_props_ref: Option<String> = None;
-    let mut unresolved_props_type_span: Option<Span> = None;
-    let mut unresolved_emits_ref: Option<String> = None;
-    let mut unresolved_emits_type_span: Option<Span> = None;
-    for item in &parsed.items {
-        if let ScriptItem::Macro(m) = item {
-            match m {
-                ScriptMacro::DefineProps {
-                    type_params: Some(tp),
-                    ..
-                }
-                | ScriptMacro::WithDefaults {
-                    define_props_type_params: Some(tp),
-                    ..
-                } if tp.unresolved_type_ref => {
-                    let type_text =
-                        content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-                    if looks_like_named_type_reference(type_text) {
-                        unresolved_props_ref = Some(type_text.to_string());
-                        unresolved_props_type_span =
-                            Some(local_to_sfc_span(tp.type_span, content_span.start));
-                    }
-                }
-                ScriptMacro::DefineEmits {
-                    type_params: Some(tp),
-                    ..
-                } if tp.unresolved_type_ref => {
-                    let type_text =
-                        content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-                    if looks_like_named_type_reference(type_text) {
-                        unresolved_emits_ref = Some(type_text.to_string());
-                        unresolved_emits_type_span =
-                            Some(local_to_sfc_span(tp.type_span, content_span.start));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
 
     // ── 4. Collect type-only imports ──────────────────────────────────
     let type_imports = collect_type_imports(&parsed.items);
-    let mut type_usage_tracker = TypeUsageTracker::new(&parsed.items, content_str, &type_imports);
+    let mut type_usage_tracker = TypeUsageTracker::new(
+        &parsed.items,
+        &program,
+        &tokens,
+        content_str,
+        content_span.start,
+        &type_imports,
+        TscScriptOwner::Setup,
+    );
 
     // ── 5. Build macro state ──────────────────────────────────────────
     let mut state = build_macro_state(
         &parsed.items,
-        sfc_source,
         content_str,
         content_span.start,
         &type_imports,
-        &program.comments,
         &mut type_usage_tracker,
     );
 
@@ -497,26 +1191,17 @@ pub fn extract_tsc_state(
     });
 
     // ── 6b. Extract attrs type ──────────────────────────────────────
-    let explicit_attrs = setup
-        .attrs
-        .map(|a| sfc_source[a.start as usize..a.end as usize].trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let use_attrs_fallback;
-    let attrs_type = if explicit_attrs.is_some() {
-        explicit_attrs
-    } else {
-        use_attrs_fallback = detect_use_attrs_type_arg_tsc(&program.body, content_str);
-        use_attrs_fallback
-    };
+    let attrs_type = attrs_type_parse_outcome(setup.attrs, sfc_source, &program.body, content_str);
 
     // ── 7. Extract root element tag for attrs fallthrough ──────────
-    if let Some(attrs) = attrs_type.as_deref() {
-        type_usage_tracker.mark_type_text(attrs);
+    type_usage_tracker.mark_dependency_paths(attrs_type.dependency_paths());
+    type_usage_tracker.snapshot_scope_inventory(&mut state);
+    if let Some(script_span) = syntax.script().and_then(|script| script.content) {
+        append_companion_scope_inventory(sfc_source, script_span, &mut state);
     }
     type_usage_tracker.finalize(&mut state);
 
-    let root_element_tag = if attrs_type.is_none() && !state.has_inherit_attrs_false {
+    let root_element_tag = if attrs_type.is_absent() && !state.has_inherit_attrs_false {
         extract_root_element_tag(syntax.template_ast(), sfc_source)
     } else {
         None
@@ -529,56 +1214,32 @@ pub fn extract_tsc_state(
         root_element_tag,
         test_bindings,
         content_str: content_str.to_string(),
+        sfc_source: sfc_source.to_owned(),
         filename: options.filename.clone(),
-        unresolved_props_ref,
-        unresolved_props_type_span,
-        unresolved_emits_ref,
-        unresolved_emits_type_span,
     })
 }
 
 /// Generate TSC output from a previously extracted state.
 ///
-/// Clones the cached macro state, binds any freshly-resolved external types,
-/// and calls the appropriate code generation function.
+/// Clones the cached syntax state, applies terminal macro splices, and calls
+/// the appropriate code generation function.
 pub fn generate_tsc_from_state(
     state: &ExtractedTscState,
-    sfc_source: &str,
     component_name: &str,
     mode: TscMode,
-    external_types: Option<&FxHashMap<String, ResolvedElements>>,
-) -> TscOutput {
+    macro_tsc: MacroTscInput<'_>,
+) -> Result<TscOutput, TscGenerationError> {
+    let sfc_source = state.sfc_source.as_str();
     let component_name = &sanitize_tsc_component_name(component_name);
     let mut macro_state = state.macro_state.clone();
-
-    // Bind external emits if previously unresolved
-    if let (Some(ref emits_ref), Some(ext)) = (&state.unresolved_emits_ref, external_types) {
-        if let Some(resolved) = ext.get(emits_ref.as_str()) {
-            bind_external_emits(&mut macro_state, resolved, state.unresolved_emits_type_span);
-        }
-    }
-
-    // Bind external props for Testing mode if previously unresolved
-    if matches!(mode, TscMode::Testing) {
-        if let (Some(ref props_ref), Some(ext)) = (&state.unresolved_props_ref, external_types) {
-            if let Some(resolved) = ext.get(props_ref.as_str()) {
-                bind_external_testing_props(
-                    &mut macro_state,
-                    resolved,
-                    sfc_source,
-                    &state.content_str,
-                    state.unresolved_props_type_span,
-                );
-            }
-        }
-    }
+    apply_tsc_bundle(&mut macro_state, macro_tsc)?;
 
     let generic_params = state.generic_params.as_deref();
-    let attrs_type = state.attrs_type.as_deref();
+    let attrs_type = validate_terminal_generation(&state.attrs_type, &macro_state, mode)?;
     let root_element_tag = state.root_element_tag.as_deref();
     let filename = state.filename.as_deref();
 
-    match mode {
+    Ok(match mode {
         TscMode::Testing => generate_testing_code(
             component_name,
             &macro_state,
@@ -610,72 +1271,7 @@ pub fn generate_tsc_from_state(
             root_element_tag,
             &state.content_str,
         ),
-    }
-}
-
-/// Populate emits_names and emits_ts from externally-resolved emit signatures.
-fn bind_external_emits(
-    state: &mut TscMacroState,
-    resolved: &ResolvedElements,
-    type_span: Option<Span>,
-) {
-    for emit in &resolved.call_signatures {
-        state.emits_names.push(emit.name.clone());
-        let payload = resolved_emit_payload(&emit.signature);
-        // External emits map back to the defineEmits<T>() type span, mirroring
-        // the direct path behavior (process_emits line 1088: `!emit.map_local` branch).
-        state.emits_ts.push(EmitEntry {
-            name: emit.name.clone(),
-            payload,
-            map_span: type_span,
-        });
-    }
-}
-
-/// Populate testing_props from externally-resolved prop definitions.
-fn bind_external_testing_props(
-    state: &mut TscMacroState,
-    resolved: &ResolvedElements,
-    sfc_source: &str,
-    content_str: &str,
-    type_span: Option<Span>,
-) {
-    // Only populate if testing_props is currently empty (unresolved)
-    if !state.testing_props.is_empty() {
-        return;
-    }
-
-    // Get the props type name for indexed access types (e.g. `ImportedProps["key"]`)
-    let named_root_type = state.props_ts.as_ref().and_then(|pts| match pts {
-        PropsTs::TypeRef(name) | PropsTs::TypeText(name)
-            if looks_like_named_type_reference(name) =>
-        {
-            Some(name.as_str())
-        }
-        _ => None,
-    });
-
-    state.testing_props = resolved
-        .props
-        .iter()
-        .map(|prop| {
-            let name = prop
-                .key_name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-            let ts_type =
-                render_resolved_prop_ts_type(prop, named_root_type, sfc_source, content_str);
-
-            TestingPropBinding {
-                name,
-                optional: prop.optional,
-                ts_type,
-                // External props map back to the defineProps<T>() type span, mirroring
-                // the direct path (process_props line 881: `!prop.map_local` branch).
-                map_span: type_span,
-            }
-        })
-        .collect();
+    })
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -688,8 +1284,16 @@ fn bind_external_testing_props(
 /// # Arguments
 /// * `sfc_source` — full SFC source text
 /// * `component_name` — component name used in the `declare const` statement
-pub fn generate_tsc_output(sfc_source: &str, component_name: &str) -> TscOutput {
-    generate_tsc_output_with_options(sfc_source, component_name, &TscGenOptions::default())
+pub fn generate_tsc_output(
+    sfc_source: &str,
+    component_name: &str,
+) -> Result<TscOutput, TscGenerationError> {
+    generate_tsc_output_with_options(
+        sfc_source,
+        component_name,
+        &TscGenOptions::default(),
+        MacroTscInput::NotRequired,
+    )
 }
 
 /// Sanitize a component name to be a valid TypeScript identifier.
@@ -733,7 +1337,8 @@ pub fn generate_tsc_output_with_options(
     sfc_source: &str,
     component_name: &str,
     tsc_options: &TscGenOptions,
-) -> TscOutput {
+    macro_tsc: MacroTscInput<'_>,
+) -> Result<TscOutput, TscGenerationError> {
     let component_name = &sanitize_tsc_component_name(component_name);
     // ── 1. Tokenize SFC to locate <script setup> ──────────────────────
     let bytes = sfc_source.as_bytes();
@@ -747,6 +1352,7 @@ pub fn generate_tsc_output_with_options(
     tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
 
     let Some(setup) = syntax.script_setup() else {
+        validate_no_tsc_slots(macro_tsc)?;
         // No <script setup>. In Declaration mode every no-setup case must stay
         // declaration-safe: the Options-API runtime stub wraps the default
         // export in a runtime `defineComponent(...)` and the empty stub creates
@@ -765,11 +1371,11 @@ pub fn generate_tsc_output_with_options(
                         content_str,
                         tsc_options.filename.as_deref(),
                     ) {
-                        return output;
+                        return Ok(output);
                     }
                 }
             }
-            return generate_declaration_empty_stub(component_name);
+            return Ok(generate_declaration_empty_stub(component_name));
         }
         // No <script setup> — check for Options API <script> block.
         // If present, pass through its content so defineComponent() props
@@ -777,59 +1383,32 @@ pub fn generate_tsc_output_with_options(
         if let Some(script) = syntax.script() {
             if let Some(content) = script.content {
                 let content_str = &sfc_source[content.start as usize..content.end as usize];
-                return generate_options_api_stub(component_name, content_str);
+                return Ok(generate_options_api_stub(component_name, content_str));
             }
         }
-        return generate_empty_stub(component_name);
+        return Ok(generate_empty_stub(component_name));
     };
     let Some(content_span) = setup.content else {
+        validate_no_tsc_slots(macro_tsc)?;
         if matches!(tsc_options.mode, TscMode::Declaration) {
-            return generate_declaration_empty_stub(component_name);
+            return Ok(generate_declaration_empty_stub(component_name));
         }
-        return generate_empty_stub(component_name);
+        return Ok(generate_empty_stub(component_name));
     };
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
 
-    // Collect companion <script> types for same-SFC cross-block resolution.
-    let companion_types = if let Some(script) = syntax.script() {
-        if let Some(script_content) = script.content {
-            let script_source =
-                &sfc_source[script_content.start as usize..script_content.end as usize];
-            let alloc = Allocator::default();
-            let parse_result = Parser::new(&alloc, script_source, SourceType::ts()).parse();
-            Some(extract_companion_types(
-                &parse_result.program,
-                script_source.as_bytes(),
-                script_content.start,
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts()).parse();
+    let parse_result = Parser::new(&alloc, content_str, SourceType::ts())
+        .with_config(TokensParserConfig)
+        .parse();
+    let tokens = parse_result.tokens.as_slice().to_vec();
     let program = parse_result.program;
 
     // ── 3. Extract script items (macros + imports) ────────────────────
     // content_offset = 0: all spans are relative to content_str
-    let companion_types = match (companion_types, tsc_options.external_types.as_ref()) {
-        (Some(mut ct), Some(ext)) => {
-            for (k, v) in ext {
-                ct.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-            Some(ct)
-        }
-        (Some(ct), None) => Some(ct),
-        (None, Some(ext)) => Some(ext.clone()),
-        (None, None) => None,
-    };
-    let parsed =
-        parse_script_with_companion(&program, ScriptMode::Setup, 0, content_str, companion_types);
+    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
     let test_bindings = if matches!(tsc_options.mode, TscMode::Testing) {
         collect_test_bindings(&parsed.bindings, content_str, content_span.start)
     } else {
@@ -838,18 +1417,29 @@ pub fn generate_tsc_output_with_options(
 
     // ── 4. Collect type-only imports ──────────────────────────────────
     let type_imports = collect_type_imports(&parsed.items);
-    let mut type_usage_tracker = TypeUsageTracker::new(&parsed.items, content_str, &type_imports);
+    let mut type_usage_tracker = TypeUsageTracker::new(
+        &parsed.items,
+        &program,
+        &tokens,
+        content_str,
+        content_span.start,
+        &type_imports,
+        TscScriptOwner::Setup,
+    );
 
     // ── 5. Build macro state ──────────────────────────────────────────
     let mut state = build_macro_state(
         &parsed.items,
-        sfc_source,
         content_str,
         content_span.start,
         &type_imports,
-        &program.comments,
         &mut type_usage_tracker,
     );
+    type_usage_tracker.snapshot_scope_inventory(&mut state);
+    if let Some(script_span) = syntax.script().and_then(|script| script.content) {
+        append_companion_scope_inventory(sfc_source, script_span, &mut state);
+    }
+    apply_tsc_bundle(&mut state, macro_tsc)?;
 
     // ── 6. Extract generic params ────────────────────────────────────
     let generic_params = setup
@@ -858,23 +1448,12 @@ pub fn generate_tsc_output_with_options(
 
     // ── 6b. Extract attrs type ──────────────────────────────────────
     // Priority: `attrs` attribute > `useAttrs<T>()` > `{}` (default)
-    let explicit_attrs = setup
-        .attrs
-        .map(|a| sfc_source[a.start as usize..a.end as usize].trim())
-        .filter(|s| !s.is_empty());
-    let use_attrs_fallback;
-    let attrs_type = if explicit_attrs.is_some() {
-        explicit_attrs
-    } else {
-        use_attrs_fallback = detect_use_attrs_type_arg_tsc(&program.body, content_str);
-        use_attrs_fallback.as_deref()
-    };
+    let attrs_type = attrs_type_parse_outcome(setup.attrs, sfc_source, &program.body, content_str);
 
     // ── 7. Extract root element tag for attrs fallthrough ──────────
-    if let Some(attrs) = attrs_type {
-        type_usage_tracker.mark_type_text(attrs);
-    }
+    type_usage_tracker.mark_dependency_paths(attrs_type.dependency_paths());
     type_usage_tracker.finalize(&mut state);
+    let attrs_type = validate_terminal_generation(&attrs_type, &state, tsc_options.mode)?;
 
     let root_element_tag = if attrs_type.is_none() && !state.has_inherit_attrs_false {
         extract_root_element_tag(syntax.template_ast(), sfc_source)
@@ -891,7 +1470,7 @@ pub fn generate_tsc_output_with_options(
         };
 
     // ── 9. Generate code + source map ────────────────────────────────
-    match tsc_options.mode {
+    Ok(match tsc_options.mode {
         TscMode::Testing => generate_testing_code(
             component_name,
             &state,
@@ -923,7 +1502,7 @@ pub fn generate_tsc_output_with_options(
             root_element_tag.as_deref(),
             content_str,
         ),
-    }
+    })
 }
 
 // ── Step 4: collect type imports ─────────────────────────────────────────────
@@ -998,6 +1577,7 @@ impl<'a> ReconstructedTypeImport<'a> {
     /// - Namespace:                   `import type * as Local from '…'`
     /// - Default:                     `import type Local from '…'`
     fn render_stmt(&self) -> String {
+        let source = quote_ts_string(self.source, '\'');
         match self.kind {
             ImportSpecifierKind::Named => match self.imported {
                 // A string-literal export name (`import { "x-y" as Local }`) is
@@ -1006,29 +1586,54 @@ impl<'a> ReconstructedTypeImport<'a> {
                 // declaration-legal `import type { "x-y" as Local }` form.
                 Some(imported) if self.imported_is_string_literal => {
                     format!(
-                        "import type {{ {} as {} }} from '{}'",
+                        "import type {{ {} as {} }} from {}",
                         quote_module_export_name(imported),
                         self.local,
-                        self.source
+                        source
                     )
                 }
                 Some(imported) if imported != self.local => {
                     format!(
-                        "import type {{ {} as {} }} from '{}'",
-                        imported, self.local, self.source
+                        "import type {{ {} as {} }} from {}",
+                        imported, self.local, source
                     )
                 }
                 // Named non-aliased (or the imported name is unexpectedly
                 // absent): the bare-local form resolves because local ==
                 // imported.
-                _ => format!("import type {{ {} }} from '{}'", self.local, self.source),
+                _ => format!("import type {{ {} }} from {}", self.local, source),
             },
             ImportSpecifierKind::Namespace => {
-                format!("import type * as {} from '{}'", self.local, self.source)
+                format!("import type * as {} from {}", self.local, source)
             }
             ImportSpecifierKind::Default => {
-                format!("import type {} from '{}'", self.local, self.source)
+                format!("import type {} from {}", self.local, source)
             }
+        }
+    }
+
+    fn render_value_stmt(&self) -> String {
+        let source = quote_ts_string(self.source, '\'');
+        match self.kind {
+            ImportSpecifierKind::Named => match self.imported {
+                Some(imported) if self.imported_is_string_literal => format!(
+                    "import {{ {} as {} }} from {}",
+                    quote_module_export_name(imported),
+                    self.local,
+                    source
+                ),
+                Some(imported) if imported != self.local => {
+                    format!(
+                        "import {{ {} as {} }} from {}",
+                        imported, self.local, source
+                    )
+                }
+                _ => format!("import {{ {} }} from {}", self.local, source),
+            },
+            ImportSpecifierKind::Namespace => {
+                format!("import * as {} from {}", self.local, source)
+            }
+            ImportSpecifierKind::Default => format!("import {} from {}", self.local, source),
         }
     }
 }
@@ -1041,13 +1646,20 @@ impl<'a> ReconstructedTypeImport<'a> {
 /// input — printable characters (including the hyphen in `"vue-props"`) pass
 /// through unchanged, so the encoder never over-escapes.
 pub(super) fn quote_module_export_name(unquoted: &str) -> String {
+    quote_ts_string(unquoted, '"')
+}
+
+fn quote_ts_string(unquoted: &str, delimiter: char) -> String {
     let mut out = String::with_capacity(unquoted.len() + 2);
-    out.push('"');
+    out.push(delimiter);
     for ch in unquoted.chars() {
         match ch {
             // Backslash and the closing delimiter must always be escaped.
             '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
+            c if c == delimiter => {
+                out.push('\\');
+                out.push(c);
+            }
             // Line terminators are illegal raw inside a string literal.
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
@@ -1066,11 +1678,795 @@ pub(super) fn quote_module_export_name(unquoted: &str) -> String {
             c => out.push(c),
         }
     }
-    out.push('"');
+    out.push(delimiter);
     out
 }
 
+fn collect_local_type_inventory(
+    program: &Program<'_>,
+    tokens: &[Token],
+    source: &str,
+    source_offset: u32,
+    owner: TscScriptOwner,
+) -> Vec<LocalTypeDecl> {
+    let semantic = SemanticBuilder::new().with_enum_eval(true).build(program);
+    let scoping = semantic.semantic.scoping();
+    let mut contributors = FxHashMap::<String, u32>::default();
+    let mut locals = Vec::new();
+
+    for statement in &program.body {
+        let statement_dependencies =
+            verter_semantic::analysis::decl_dependencies::collect_statement_dependency_names(
+                statement,
+                parser_top_level_owner(owner),
+            );
+        let statement_span = statement.span();
+        let authored_start = leading_jsdoc_start(statement_span.start, &program.comments);
+        let authored_end = statement_span.end;
+        let Some(authored_text) = source.get(authored_start as usize..authored_end as usize) else {
+            continue;
+        };
+        let authored = AuthoredFragment {
+            text: authored_text.to_owned(),
+            source_start: source_offset.saturating_add(authored_start),
+            token_starts: tokens
+                .iter()
+                .filter(|token| token.start() >= authored_start && token.start() < authored_end)
+                .map(|token| token.start() - authored_start)
+                .collect(),
+        };
+        let public = if matches!(statement, Statement::ExportDefaultDeclaration(_)) {
+            let (Some(export), Some(default)) = (
+                token_span(
+                    tokens,
+                    statement_span.start,
+                    statement_span.end,
+                    Kind::Export,
+                ),
+                token_span(
+                    tokens,
+                    statement_span.start,
+                    statement_span.end,
+                    Kind::Default,
+                ),
+            ) else {
+                continue;
+            };
+            render_authored_fragment(
+                &authored,
+                &[DeclarationEdit::Remove {
+                    start: export.start.saturating_sub(authored_start),
+                    end: default.end.saturating_sub(authored_start),
+                }],
+            )
+        } else {
+            render_authored_fragment(&authored, &[])
+        };
+        let mut push_decl =
+            |name: &str, declaration: DeclarationProjection, value_capable: bool| {
+                let ordinal = contributors.entry(name.to_owned()).or_default();
+                let contributor_ordinal = *ordinal;
+                *ordinal = ordinal.saturating_add(1);
+                let mut dependency_names = statement_dependencies
+                    .iter()
+                    .filter(|(path, _)| path.root.name.as_ref() == name)
+                    .flat_map(|(_, dependencies)| {
+                        dependencies
+                            .declaration_carrier_paths
+                            .iter()
+                            .map(|path| path.root().to_owned())
+                    })
+                    .collect::<Vec<_>>();
+                dependency_names.sort();
+                dependency_names.dedup();
+                locals.push(LocalTypeDecl {
+                    name: name.to_owned(),
+                    contributor_ordinal,
+                    source_start: authored.source_start,
+                    owner,
+                    declaration,
+                    dependency_names,
+                    value_capable,
+                });
+            };
+
+        match local_declaration_node(statement) {
+            Some(LocalDeclarationNode::Exact(name)) => {
+                push_decl(name, DeclarationProjection::Ready(public.clone()), false);
+            }
+            Some(LocalDeclarationNode::Class(class)) => {
+                let declaration = if let Some(reason) = unsupported_class_shape(class) {
+                    DeclarationProjection::Unavailable(reason)
+                } else {
+                    build_class_declaration_plan(class, &authored, authored_start, source, tokens)
+                        .map(DeclarationProjection::Class)
+                        .unwrap_or(DeclarationProjection::Unavailable(
+                            TscDeclarationShapeReason::UnsupportedClassShape,
+                        ))
+                };
+                if let Some(name) = class.id.as_ref().map(|id| id.name.as_str()) {
+                    push_decl(name, declaration, true);
+                }
+            }
+            Some(LocalDeclarationNode::Enum(ts_enum)) => {
+                let declaration =
+                    build_enum_declaration_projection(ts_enum, &authored, authored_start, scoping)
+                        .map(DeclarationProjection::Ready)
+                        .unwrap_or(DeclarationProjection::Unavailable(
+                            TscDeclarationShapeReason::UnsupportedEnumShape,
+                        ));
+                push_decl(ts_enum.id.name.as_str(), declaration, true);
+            }
+            None => {}
+        }
+    }
+    locals
+}
+
+enum LocalDeclarationNode<'a> {
+    Exact(&'a str),
+    Class(&'a Class<'a>),
+    Enum(&'a TSEnumDeclaration<'a>),
+}
+
+fn local_declaration_node<'a>(statement: &'a Statement<'a>) -> Option<LocalDeclarationNode<'a>> {
+    fn from_declaration<'a>(declaration: &'a Declaration<'a>) -> Option<LocalDeclarationNode<'a>> {
+        match declaration {
+            Declaration::TSTypeAliasDeclaration(decl) => {
+                Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+            }
+            Declaration::TSInterfaceDeclaration(decl) => {
+                Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+            }
+            Declaration::TSModuleDeclaration(decl) => match &decl.id {
+                TSModuleDeclarationName::Identifier(id) => {
+                    Some(LocalDeclarationNode::Exact(id.name.as_str()))
+                }
+                TSModuleDeclarationName::StringLiteral(_) => None,
+            },
+            Declaration::ClassDeclaration(class) => Some(LocalDeclarationNode::Class(class)),
+            Declaration::TSEnumDeclaration(ts_enum) => Some(LocalDeclarationNode::Enum(ts_enum)),
+            _ => None,
+        }
+    }
+
+    match statement {
+        Statement::TSTypeAliasDeclaration(decl) => {
+            Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+        }
+        Statement::TSInterfaceDeclaration(decl) => {
+            Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+        }
+        Statement::TSModuleDeclaration(decl) => match &decl.id {
+            TSModuleDeclarationName::Identifier(id) => {
+                Some(LocalDeclarationNode::Exact(id.name.as_str()))
+            }
+            TSModuleDeclarationName::StringLiteral(_) => None,
+        },
+        Statement::ClassDeclaration(class) => Some(LocalDeclarationNode::Class(class)),
+        Statement::TSEnumDeclaration(ts_enum) => Some(LocalDeclarationNode::Enum(ts_enum)),
+        Statement::ExportNamedDeclaration(export) => {
+            export.declaration.as_ref().and_then(from_declaration)
+        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(decl) => {
+                Some(LocalDeclarationNode::Exact(decl.id.name.as_str()))
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                Some(LocalDeclarationNode::Class(class))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn leading_jsdoc_start(statement_start: u32, comments: &[Comment]) -> u32 {
+    comments
+        .iter()
+        .filter(|comment| {
+            comment.attached_to == statement_start
+                && comment.position == CommentPosition::Leading
+                && comment.is_block()
+                && matches!(
+                    comment.content,
+                    CommentContent::Jsdoc | CommentContent::JsdocLegal
+                )
+        })
+        .map(|comment| comment.span.start)
+        .min()
+        .unwrap_or(statement_start)
+}
+
+fn render_authored_fragment(
+    fragment: &AuthoredFragment,
+    edits: &[DeclarationEdit],
+) -> RenderedText {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new(&fragment.text, &allocator);
+    for token_start in &fragment.token_starts {
+        let _ = transform.try_add_sourcemap_location(*token_start);
+    }
+    for (offset, byte) in fragment.text.bytes().enumerate() {
+        if byte == b'\n' && offset + 1 < fragment.text.len() {
+            let _ = transform.try_add_sourcemap_location((offset + 1) as u32);
+        }
+    }
+    for edit in edits {
+        match edit {
+            DeclarationEdit::Insert { offset, text } => {
+                transform.prepend_left(*offset, text);
+            }
+            DeclarationEdit::Remove { start, end } => {
+                transform.remove(*start, *end);
+            }
+            DeclarationEdit::Overwrite { start, end, text } => {
+                transform.overwrite(*start, *end, text);
+            }
+            DeclarationEdit::SyntheticType {
+                start,
+                end,
+                text,
+                type_offset,
+            } => {
+                if start == end {
+                    transform.prepend_left_with_unmapped_boundaries(*start, text, &[*type_offset]);
+                } else {
+                    transform.overwrite_with_unmapped_boundaries(
+                        *start,
+                        *end,
+                        text,
+                        &[*type_offset],
+                    );
+                }
+            }
+        }
+    }
+    let (text, ranges, unmapped_boundaries) =
+        transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    compose_authored_transform(text, ranges, unmapped_boundaries, fragment.source_start)
+}
+
+fn relative_range(span: oxc_span::Span, authored_start: u32) -> Option<(u32, u32)> {
+    (span.start >= authored_start && span.end >= span.start)
+        .then_some((span.start - authored_start, span.end - authored_start))
+}
+
+fn class_element_name(element: &ClassElement<'_>) -> Option<String> {
+    match element {
+        ClassElement::MethodDefinition(method) => {
+            method.key.static_name().map(|name| name.into_owned())
+        }
+        ClassElement::PropertyDefinition(property) => {
+            property.key.static_name().map(|name| name.into_owned())
+        }
+        ClassElement::AccessorProperty(property) => {
+            property.key.static_name().map(|name| name.into_owned())
+        }
+        _ => None,
+    }
+}
+
+fn token_span(tokens: &[Token], start: u32, end: u32, kind: Kind) -> Option<oxc_span::Span> {
+    tokens
+        .iter()
+        .find(|token| token.start() >= start && token.end() <= end && token.kind() == kind)
+        .map(Token::span)
+}
+
+fn unsupported_class_shape(class: &Class<'_>) -> Option<TscDeclarationShapeReason> {
+    if !class.decorators.is_empty() {
+        return Some(TscDeclarationShapeReason::ClassDecorator);
+    }
+    if class
+        .super_class
+        .as_ref()
+        .is_some_and(|super_class| !matches!(super_class, Expression::Identifier(_)))
+    {
+        return Some(TscDeclarationShapeReason::ComplexClassHeritage);
+    }
+    for element in &class.body.body {
+        let (decorated, computed, private, parameters) = match element {
+            ClassElement::MethodDefinition(method) => {
+                if !class.declare
+                    && method.kind == MethodDefinitionKind::Constructor
+                    && method.value.body.is_none()
+                {
+                    return Some(TscDeclarationShapeReason::ConstructorOverload);
+                }
+                (
+                    !method.decorators.is_empty(),
+                    method.computed,
+                    matches!(method.key, PropertyKey::PrivateIdentifier(_)),
+                    Some(&method.value.params),
+                )
+            }
+            ClassElement::PropertyDefinition(property) => (
+                !property.decorators.is_empty(),
+                property.computed,
+                matches!(property.key, PropertyKey::PrivateIdentifier(_)),
+                None,
+            ),
+            ClassElement::AccessorProperty(property) => (
+                !property.decorators.is_empty(),
+                property.computed,
+                matches!(property.key, PropertyKey::PrivateIdentifier(_)),
+                None,
+            ),
+            ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => continue,
+        };
+        if decorated {
+            return Some(TscDeclarationShapeReason::DecoratedClassMember);
+        }
+        if computed {
+            return Some(TscDeclarationShapeReason::ComputedClassMember);
+        }
+        if private {
+            return Some(TscDeclarationShapeReason::PrivateClassMember);
+        }
+        if let Some(parameters) = parameters {
+            if parameters.rest.is_some() {
+                return Some(TscDeclarationShapeReason::RestClassParameter);
+            }
+            for parameter in &parameters.items {
+                if !parameter.decorators.is_empty() {
+                    return Some(TscDeclarationShapeReason::DecoratedClassParameter);
+                }
+                if !matches!(parameter.pattern, BindingPattern::BindingIdentifier(_)) {
+                    return Some(TscDeclarationShapeReason::DestructuredClassParameter);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn build_class_declaration_plan(
+    class: &Class<'_>,
+    authored: &AuthoredFragment,
+    authored_start: u32,
+    source: &str,
+    tokens: &[Token],
+) -> Option<ClassDeclarationPlan> {
+    if !class.decorators.is_empty()
+        || class
+            .super_class
+            .as_ref()
+            .is_some_and(|super_class| !matches!(super_class, Expression::Identifier(_)))
+    {
+        return None;
+    }
+    let mut edits = Vec::new();
+    if !class.declare {
+        if let (Some(export), Some(default)) = (
+            token_span(tokens, authored_start, class.span.start, Kind::Export),
+            token_span(tokens, authored_start, class.span.start, Kind::Default),
+        ) {
+            edits.push(DeclarationEdit::Remove {
+                start: export.start.checked_sub(authored_start)?,
+                end: default.end.checked_sub(authored_start)?,
+            });
+            edits.push(DeclarationEdit::Insert {
+                offset: class.span.start.checked_sub(authored_start)?,
+                text: "declare ".to_owned(),
+            });
+        } else {
+            edits.push(DeclarationEdit::Insert {
+                offset: class.span.start.checked_sub(authored_start)?,
+                text: "declare ".to_owned(),
+            });
+        }
+    }
+
+    let mut overloaded = FxHashSet::default();
+    for element in &class.body.body {
+        if let ClassElement::MethodDefinition(method) = element {
+            if method.kind != MethodDefinitionKind::Constructor && method.value.body.is_none() {
+                if let Some(name) = method.key.static_name() {
+                    overloaded.insert((method.r#static, name.into_owned()));
+                }
+            }
+        }
+    }
+
+    let mut occurrences = FxHashMap::<(bool, String, TscInferredClassTypePosition), u32>::default();
+    let mut inferred_sites = Vec::new();
+    for element in &class.body.body {
+        match element {
+            ClassElement::StaticBlock(block) => {
+                let (start, end) = relative_range(block.span, authored_start)?;
+                edits.push(DeclarationEdit::Remove { start, end });
+            }
+            ClassElement::MethodDefinition(method) => {
+                if !method.decorators.is_empty()
+                    || method.computed
+                    || matches!(method.key, PropertyKey::PrivateIdentifier(_))
+                    || method.value.params.rest.is_some()
+                {
+                    return None;
+                }
+                let name = class_element_name(element);
+                let is_overload_implementation = name.as_ref().is_some_and(|name| {
+                    method.kind != MethodDefinitionKind::Constructor
+                        && method.value.body.is_some()
+                        && overloaded.contains(&(method.r#static, name.clone()))
+                });
+                if is_overload_implementation {
+                    let (start, end) = relative_range(method.span, authored_start)?;
+                    edits.push(DeclarationEdit::Remove { start, end });
+                    continue;
+                }
+                if method.value.r#async {
+                    let span = token_span(
+                        tokens,
+                        method.span.start,
+                        method.key.span().start,
+                        Kind::Async,
+                    )?;
+                    edits.push(DeclarationEdit::Remove {
+                        start: span.start.checked_sub(authored_start)?,
+                        end: span.end.checked_sub(authored_start)?,
+                    });
+                }
+                if method.value.generator {
+                    let span = token_span(
+                        tokens,
+                        method.span.start,
+                        method.key.span().start,
+                        Kind::Star,
+                    )?;
+                    edits.push(DeclarationEdit::Remove {
+                        start: span.start.checked_sub(authored_start)?,
+                        end: span.end.checked_sub(authored_start)?,
+                    });
+                }
+                for parameter in &method.value.params.items {
+                    if !parameter.decorators.is_empty() {
+                        return None;
+                    }
+                    let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+                        return None;
+                    };
+                    let is_parameter_property = method.kind == MethodDefinitionKind::Constructor
+                        && (parameter.accessibility.is_some()
+                            || parameter.readonly
+                            || parameter.r#override);
+                    if is_parameter_property {
+                        for modifier in [
+                            Kind::Public,
+                            Kind::Protected,
+                            Kind::Private,
+                            Kind::Readonly,
+                            Kind::Override,
+                        ] {
+                            if let Some(span) = token_span(
+                                tokens,
+                                parameter.span.start,
+                                identifier.span.start,
+                                modifier,
+                            ) {
+                                edits.push(DeclarationEdit::Remove {
+                                    start: span.start.checked_sub(authored_start)?,
+                                    end: span.end.checked_sub(authored_start)?,
+                                });
+                            }
+                        }
+                    }
+                    let parameter_end = parameter
+                        .initializer
+                        .as_ref()
+                        .map(|initializer| initializer.span().end)
+                        .unwrap_or(parameter.span.end)
+                        .checked_sub(authored_start)?;
+                    if let Some(annotation) = &parameter.type_annotation {
+                        if parameter.initializer.is_some() {
+                            edits.push(DeclarationEdit::Remove {
+                                start: annotation.span.end.checked_sub(authored_start)?,
+                                end: parameter_end,
+                            });
+                            if !parameter.optional {
+                                edits.push(DeclarationEdit::Insert {
+                                    offset: identifier.span.end.checked_sub(authored_start)?,
+                                    text: "?".to_owned(),
+                                });
+                            }
+                        }
+                        if is_parameter_property {
+                            let type_text = source.get(
+                                annotation.type_annotation.span().start as usize
+                                    ..annotation.type_annotation.span().end as usize,
+                            )?;
+                            let visibility = match parameter.accessibility {
+                                Some(oxc_ast::ast::TSAccessibility::Private) => "private ",
+                                Some(oxc_ast::ast::TSAccessibility::Protected) => "protected ",
+                                _ => "",
+                            };
+                            edits.push(DeclarationEdit::Insert {
+                                offset: method.span.start.checked_sub(authored_start)?,
+                                text: format!(
+                                    "{visibility}{}{}: {type_text};\n",
+                                    if parameter.readonly { "readonly " } else { "" },
+                                    format_args!(
+                                        "{}{}",
+                                        identifier.name,
+                                        if parameter.optional { "?" } else { "" }
+                                    )
+                                ),
+                            });
+                        }
+                    } else {
+                        let position = if is_parameter_property {
+                            TscInferredClassTypePosition::Property
+                        } else {
+                            TscInferredClassTypePosition::Parameter
+                        };
+                        let key = (method.r#static, identifier.name.to_string(), position);
+                        let occurrence = occurrences.entry(key).or_default();
+                        let mut targets = vec![ClassInferenceTarget {
+                            start: identifier.span.end.checked_sub(authored_start)?,
+                            end: parameter_end,
+                            prefix: if parameter.initializer.is_some() || parameter.optional {
+                                "?: ".to_owned()
+                            } else {
+                                ": ".to_owned()
+                            },
+                            suffix: String::new(),
+                        }];
+                        if is_parameter_property {
+                            let visibility = match parameter.accessibility {
+                                Some(oxc_ast::ast::TSAccessibility::Private) => "private ",
+                                Some(oxc_ast::ast::TSAccessibility::Protected) => "protected ",
+                                _ => "",
+                            };
+                            targets.push(ClassInferenceTarget {
+                                start: method.span.start.checked_sub(authored_start)?,
+                                end: method.span.start.checked_sub(authored_start)?,
+                                prefix: format!(
+                                    "{visibility}{}{}{}: ",
+                                    if parameter.readonly { "readonly " } else { "" },
+                                    identifier.name,
+                                    if parameter.optional { "?" } else { "" }
+                                ),
+                                suffix: ";\n".to_owned(),
+                            });
+                        }
+                        inferred_sites.push(ClassInferenceSite {
+                            name: identifier.name.to_string(),
+                            occurrence: *occurrence,
+                            is_static: method.r#static,
+                            position,
+                            targets,
+                        });
+                        *occurrence = occurrence.saturating_add(1);
+                    }
+                }
+                if let Some(body) = &method.value.body {
+                    let (start, end) = relative_range(body.span, authored_start)?;
+                    edits.push(DeclarationEdit::Overwrite {
+                        start,
+                        end,
+                        text: ";".to_owned(),
+                    });
+                }
+                if matches!(
+                    method.kind,
+                    MethodDefinitionKind::Method | MethodDefinitionKind::Get
+                ) && method.value.return_type.is_none()
+                    && method.value.body.is_some()
+                {
+                    let name = name?;
+                    let key = (
+                        method.r#static,
+                        name.clone(),
+                        TscInferredClassTypePosition::Return,
+                    );
+                    let occurrence = occurrences.entry(key).or_default();
+                    let insertion_offset = method
+                        .value
+                        .body
+                        .as_ref()
+                        .map(|body| body.span.start)
+                        .unwrap_or(method.value.params.span.end)
+                        .checked_sub(authored_start)?;
+                    inferred_sites.push(ClassInferenceSite {
+                        name,
+                        occurrence: *occurrence,
+                        is_static: method.r#static,
+                        position: TscInferredClassTypePosition::Return,
+                        targets: vec![ClassInferenceTarget {
+                            start: insertion_offset,
+                            end: insertion_offset,
+                            prefix: ": ".to_owned(),
+                            suffix: String::new(),
+                        }],
+                    });
+                    *occurrence = occurrence.saturating_add(1);
+                }
+            }
+            ClassElement::PropertyDefinition(property) => {
+                if !property.decorators.is_empty()
+                    || property.computed
+                    || matches!(property.key, PropertyKey::PrivateIdentifier(_))
+                {
+                    return None;
+                }
+                if property.definite {
+                    let boundary = property
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| annotation.span.start)
+                        .or_else(|| {
+                            property
+                                .value
+                                .as_ref()
+                                .map(GetSpan::span)
+                                .map(|span| span.start)
+                        })
+                        .unwrap_or(property.span.end);
+                    let span = token_span(tokens, property.key.span().end, boundary, Kind::Bang)?;
+                    edits.push(DeclarationEdit::Remove {
+                        start: span.start.checked_sub(authored_start)?,
+                        end: span.end.checked_sub(authored_start)?,
+                    });
+                }
+                if property.type_annotation.is_none() {
+                    let name = class_element_name(element)?;
+                    let key = (
+                        property.r#static,
+                        name.clone(),
+                        TscInferredClassTypePosition::Property,
+                    );
+                    let occurrence = occurrences.entry(key).or_default();
+                    inferred_sites.push(ClassInferenceSite {
+                        name,
+                        occurrence: *occurrence,
+                        is_static: property.r#static,
+                        position: TscInferredClassTypePosition::Property,
+                        targets: vec![ClassInferenceTarget {
+                            start: property.key.span().end.checked_sub(authored_start)?,
+                            end: property
+                                .value
+                                .as_ref()
+                                .map(|value| value.span().end)
+                                .unwrap_or(property.span.end)
+                                .checked_sub(authored_start)?,
+                            prefix: if property.optional { "?: " } else { ": " }.to_owned(),
+                            suffix: String::new(),
+                        }],
+                    });
+                    *occurrence = occurrence.saturating_add(1);
+                } else if let Some(value) = &property.value {
+                    let start = property
+                        .type_annotation
+                        .as_ref()?
+                        .span
+                        .end
+                        .checked_sub(authored_start)?;
+                    let end = value.span().end.checked_sub(authored_start)?;
+                    edits.push(DeclarationEdit::Remove { start, end });
+                }
+            }
+            ClassElement::AccessorProperty(property) => {
+                if !property.decorators.is_empty()
+                    || property.computed
+                    || matches!(property.key, PropertyKey::PrivateIdentifier(_))
+                {
+                    return None;
+                }
+                if property.definite {
+                    let boundary = property
+                        .type_annotation
+                        .as_ref()
+                        .map(|annotation| annotation.span.start)
+                        .or_else(|| {
+                            property
+                                .value
+                                .as_ref()
+                                .map(GetSpan::span)
+                                .map(|span| span.start)
+                        })
+                        .unwrap_or(property.span.end);
+                    let span = token_span(tokens, property.key.span().end, boundary, Kind::Bang)?;
+                    edits.push(DeclarationEdit::Remove {
+                        start: span.start.checked_sub(authored_start)?,
+                        end: span.end.checked_sub(authored_start)?,
+                    });
+                }
+                if property.type_annotation.is_none() {
+                    let name = class_element_name(element)?;
+                    let key = (
+                        property.r#static,
+                        name.clone(),
+                        TscInferredClassTypePosition::Property,
+                    );
+                    let occurrence = occurrences.entry(key).or_default();
+                    inferred_sites.push(ClassInferenceSite {
+                        name,
+                        occurrence: *occurrence,
+                        is_static: property.r#static,
+                        position: TscInferredClassTypePosition::Property,
+                        targets: vec![ClassInferenceTarget {
+                            start: property.key.span().end.checked_sub(authored_start)?,
+                            end: property
+                                .value
+                                .as_ref()
+                                .map(|value| value.span().end)
+                                .unwrap_or(property.span.end)
+                                .checked_sub(authored_start)?,
+                            prefix: ": ".to_owned(),
+                            suffix: String::new(),
+                        }],
+                    });
+                    *occurrence = occurrence.saturating_add(1);
+                } else if let Some(value) = &property.value {
+                    let start = property
+                        .type_annotation
+                        .as_ref()?
+                        .span
+                        .end
+                        .checked_sub(authored_start)?;
+                    let end = value.span().end.checked_sub(authored_start)?;
+                    edits.push(DeclarationEdit::Remove { start, end });
+                }
+            }
+            ClassElement::TSIndexSignature(_) => {}
+        }
+    }
+    Some(ClassDeclarationPlan {
+        authored: authored.clone(),
+        edits,
+        inferred_sites,
+    })
+}
+
+fn enum_member_name(member: &TSEnumMember<'_>) -> String {
+    member.id.static_name().to_string()
+}
+
+fn enum_constant_text(value: &ConstantValue) -> Option<String> {
+    match value {
+        ConstantValue::Number(number) if number.is_finite() => Some(number.to_string()),
+        ConstantValue::Number(_) => None,
+        ConstantValue::String(value) => Some(quote_module_export_name(value.as_str())),
+    }
+}
+
+fn build_enum_declaration_projection(
+    ts_enum: &TSEnumDeclaration<'_>,
+    authored: &AuthoredFragment,
+    authored_start: u32,
+    scoping: &oxc_semantic::Scoping,
+) -> Option<RenderedText> {
+    let mut edits = Vec::new();
+    if !ts_enum.declare {
+        edits.push(DeclarationEdit::Insert {
+            offset: ts_enum.span.start.checked_sub(authored_start)?,
+            text: "declare ".to_owned(),
+        });
+    }
+    let body_scope = ts_enum.body.scope_id.get()?;
+    for member in &ts_enum.body.members {
+        let Some(initializer) = &member.initializer else {
+            continue;
+        };
+        let symbol = scoping.get_binding(body_scope, enum_member_name(member).as_str().into());
+        let replacement = symbol
+            .and_then(|symbol| scoping.get_enum_member_value(symbol))
+            .and_then(enum_constant_text);
+        let text = replacement?;
+        let start = member.id.span().end.checked_sub(authored_start)?;
+        let end = initializer.span().end.checked_sub(authored_start)?;
+        edits.push(DeclarationEdit::Overwrite {
+            start,
+            end,
+            text: format!(" = {text}"),
+        });
+    }
+    Some(render_authored_fragment(authored, &edits))
+}
+
 struct TypeUsageTracker<'a> {
+    owner: TscScriptOwner,
     /// Type-only imports (`import type …` / `import { type Foo }`), in source
     /// order, with their full reconstructed shape (named/aliased/default/
     /// namespace). Reconstruction preserves the imported name so an aliased
@@ -1084,20 +2480,24 @@ struct TypeUsageTracker<'a> {
     /// own correct type-only statement so the referenced symbol resolves.
     value_imports: Vec<ReconstructedTypeImport<'a>>,
     value_import_lookup: FxHashMap<&'a str, &'a str>,
-    locals: Vec<LocalTypeDecl<'a>>,
-    local_lookup: FxHashMap<&'a str, usize>,
+    locals: Vec<LocalTypeDecl>,
+    local_lookup: FxHashMap<String, Vec<usize>>,
     needed_imports: FxHashSet<&'a str>,
     /// Value imports observed in a TYPE position (the promotion set), keyed by
     /// local name.
     needed_value_imports: FxHashSet<&'a str>,
-    needed_locals: FxHashSet<&'a str>,
+    needed_locals: FxHashSet<String>,
 }
 
 impl<'a> TypeUsageTracker<'a> {
     fn new(
         items: &[ScriptItem<'a>],
+        program: &Program<'a>,
+        tokens: &[Token],
         content_str: &'a str,
+        content_offset: u32,
         type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
+        owner: TscScriptOwner,
     ) -> Self {
         let mut imports = Vec::new();
         let mut value_imports = Vec::new();
@@ -1132,19 +2532,14 @@ impl<'a> TypeUsageTracker<'a> {
             }
         }
 
-        let mut locals = Vec::new();
+        let locals =
+            collect_local_type_inventory(program, tokens, content_str, content_offset, owner);
         let mut local_lookup = FxHashMap::default();
-        for item in items {
-            if let ScriptItem::TypeDeclaration(td) = item {
-                if let Some(name) = td.name {
-                    let idx = locals.len();
-                    locals.push(LocalTypeDecl {
-                        name,
-                        text: &content_str[td.span.start as usize..td.span.end as usize],
-                    });
-                    local_lookup.insert(name, idx);
-                }
-            }
+        for (index, local) in locals.iter().enumerate() {
+            local_lookup
+                .entry(local.name.clone())
+                .or_insert_with(Vec::new)
+                .push(index);
         }
 
         let import_lookup: FxHashMap<&'a str, &'a str> = type_imports
@@ -1163,6 +2558,7 @@ impl<'a> TypeUsageTracker<'a> {
             .collect();
 
         Self {
+            owner,
             imports,
             import_lookup,
             value_imports,
@@ -1175,77 +2571,66 @@ impl<'a> TypeUsageTracker<'a> {
         }
     }
 
-    fn mark_type_text(&mut self, type_text: &str) {
-        let refs = self.collect_references(type_text, None);
-        for name in refs {
-            self.mark_name(name);
+    fn mark_dependency_paths(&mut self, paths: &[TypeDependencyPathFact]) {
+        for path in paths {
+            self.mark_name(path.root());
         }
     }
 
-    fn mark_name(&mut self, name: &'a str) {
-        if self.local_lookup.contains_key(name) {
-            if self.needed_locals.insert(name) {
-                let refs = {
-                    let decl = &self.locals[self.local_lookup[name]];
-                    self.collect_references(decl.text, Some(name))
-                };
-                for dep in refs {
-                    self.mark_name(dep);
+    fn mark_name(&mut self, name: &str) {
+        if let Some(indices) = self.local_lookup.get(name) {
+            if self.needed_locals.insert(name.to_owned()) {
+                let dependencies = indices
+                    .iter()
+                    .flat_map(|index| self.locals[*index].dependency_names.iter().cloned())
+                    .collect::<FxHashSet<_>>();
+                for dep in dependencies {
+                    self.mark_name(&dep);
                 }
             }
-        } else if self.import_lookup.contains_key(name) {
-            self.needed_imports.insert(name);
-        } else if self.value_import_lookup.contains_key(name) {
+        } else if let Some((canonical, _)) = self.import_lookup.get_key_value(name) {
+            self.needed_imports.insert(*canonical);
+        } else if let Some((canonical, _)) = self.value_import_lookup.get_key_value(name) {
             // A value import (of any form) used in a type position — record its
             // local name for promotion to a declaration-legal `import type`
             // (Declaration path). For `import * as NS`, `NS` is recorded here
             // when `NS.Props` is referenced.
-            self.needed_value_imports.insert(name);
+            self.needed_value_imports.insert(*canonical);
         }
     }
 
-    fn collect_references(&self, text: &str, skip_name: Option<&str>) -> Vec<&'a str> {
-        let mut refs = Vec::new();
-        let mut seen = FxHashSet::default();
-        let bytes = text.as_bytes();
-        let mut idx = 0;
+    fn snapshot_scope_inventory(&self, state: &mut TscMacroState) {
+        state.available_scope_imports.clear();
+        state.available_scope_declarations.clear();
+        self.append_scope_inventory(state);
+    }
 
-        while idx < bytes.len() {
-            if is_ident_start(bytes[idx]) {
-                let start = idx;
-                idx += 1;
-                while idx < bytes.len() && is_ident_continue(bytes[idx]) {
-                    idx += 1;
-                }
-                let token = &text[start..idx];
-                if skip_name.is_some_and(|skip| skip == token) {
-                    continue;
-                }
-
-                if let Some((name, _)) = self.local_lookup.get_key_value(token) {
-                    let name = *name;
-                    if seen.insert(name) {
-                        refs.push(name);
-                    }
-                } else if let Some((name, _)) = self.import_lookup.get_key_value(token) {
-                    let name = *name;
-                    if seen.insert(name) {
-                        refs.push(name);
-                    }
-                } else if let Some((name, _)) = self.value_import_lookup.get_key_value(token) {
-                    // A value import referenced from within a type position
-                    // (e.g. a local type alias body referencing it).
-                    let name = *name;
-                    if seen.insert(name) {
-                        refs.push(name);
-                    }
-                }
-            } else {
-                idx += 1;
-            }
-        }
-
-        refs
+    fn append_scope_inventory(&self, state: &mut TscMacroState) {
+        state
+            .available_scope_imports
+            .extend(self.imports.iter().map(|import| AvailableScopeImport {
+                local_name: import.local.to_owned(),
+                type_statement: import.render_stmt(),
+                value_statement: None,
+                authored_type_only: true,
+                owner: self.owner,
+            }));
+        state
+            .available_scope_imports
+            .extend(
+                self.value_imports
+                    .iter()
+                    .map(|import| AvailableScopeImport {
+                        local_name: import.local.to_owned(),
+                        type_statement: import.render_stmt(),
+                        value_statement: Some(import.render_value_stmt()),
+                        authored_type_only: false,
+                        owner: self.owner,
+                    }),
+            );
+        state
+            .available_scope_declarations
+            .extend(self.locals.iter().cloned());
     }
 
     fn finalize(self, state: &mut TscMacroState) {
@@ -1257,7 +2642,7 @@ impl<'a> TypeUsageTracker<'a> {
             if self.needed_imports.contains(imp.local) {
                 let stmt = imp.render_stmt();
                 if emitted_imports.insert(stmt.clone()) {
-                    state.type_import_stmts.push(stmt);
+                    state.retain_type_import(stmt, self.owner);
                 }
             }
         }
@@ -1271,44 +2656,215 @@ impl<'a> TypeUsageTracker<'a> {
             if self.needed_value_imports.contains(imp.local) {
                 let stmt = imp.render_stmt();
                 if emitted_promotions.insert(stmt.clone()) {
-                    state.declaration_promoted_type_imports.push(stmt);
+                    state.retain_promoted_type_import(stmt, self.owner);
                 }
             }
         }
 
         for local in self.locals {
-            if self.needed_locals.contains(local.name) {
-                state.local_types.push(local.text.to_string());
+            if self.needed_locals.contains(local.name.as_str()) {
+                state.retain_local_type(LocalTypeCarrier {
+                    name: local.name,
+                    contributor_ordinal: local.contributor_ordinal,
+                    owner: local.owner,
+                    declaration: local.declaration,
+                    inferred_class_members: Vec::new(),
+                    declaration_failure: None,
+                    owner_value_dependencies: Vec::new(),
+                    compiler_failure: None,
+                    syntax_index: 0,
+                    authoritative: false,
+                });
             }
         }
     }
 }
 
-fn is_ident_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+fn append_companion_scope_inventory(
+    sfc_source: &str,
+    content_span: Span,
+    state: &mut TscMacroState,
+) {
+    let Some(content) = sfc_source.get(content_span.start as usize..content_span.end as usize)
+    else {
+        return;
+    };
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, content, SourceType::ts())
+        .with_config(TokensParserConfig)
+        .parse();
+    let script = parse_script(&parsed.program, ScriptMode::Options, 0, content);
+    let type_imports = collect_type_imports(&script.items);
+    let tracker = TypeUsageTracker::new(
+        &script.items,
+        &parsed.program,
+        &parsed.tokens,
+        content,
+        content_span.start,
+        &type_imports,
+        TscScriptOwner::Companion,
+    );
+    tracker.append_scope_inventory(state);
+    state
+        .available_scope_declarations
+        .sort_by_key(|declaration| declaration.source_start);
+    let mut ordinals = FxHashMap::<(TscScriptOwner, String), u32>::default();
+    for declaration in &mut state.available_scope_declarations {
+        let ordinal = ordinals
+            .entry((declaration.owner, declaration.name.clone()))
+            .or_default();
+        declaration.contributor_ordinal = *ordinal;
+        *ordinal = ordinal.saturating_add(1);
+    }
 }
 
-fn is_ident_continue(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+fn parse_raw_attrs_type(type_text: &str, source_range: Span) -> AttrsTypeParseOutcome {
+    // Parenthesize the authored payload so statement separators and recovered
+    // alias tails cannot be accepted as part of the synthetic parse envelope.
+    let source = format!("type __VerterAttrsType = ({type_text})");
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
+    let [Statement::TSTypeAliasDeclaration(alias)] = parsed.program.body.as_slice() else {
+        return AttrsTypeParseOutcome::Invalid {
+            subject: TscFailureSubject::ScriptSetupAttrs { source_range },
+            reason: TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+        };
+    };
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return AttrsTypeParseOutcome::Invalid {
+            subject: TscFailureSubject::ScriptSetupAttrs { source_range },
+            reason: TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+        };
+    }
+    AttrsTypeParseOutcome::Complete(ParsedAttrsType {
+        text: type_text.to_owned(),
+        dependency_paths: verter_type_expr_oxc::collect_type_dependency_paths(
+            &alias.type_annotation,
+        )
+        .into_iter()
+        .collect(),
+    })
+}
+
+fn attrs_type_parse_outcome(
+    explicit_attrs: Option<Span>,
+    sfc_source: &str,
+    setup_body: &[Statement<'_>],
+    setup_source: &str,
+) -> AttrsTypeParseOutcome {
+    if let Some(source_range) = explicit_attrs {
+        let Some(authored) = sfc_source.get(source_range.start as usize..source_range.end as usize)
+        else {
+            return AttrsTypeParseOutcome::Invalid {
+                subject: TscFailureSubject::ScriptSetupAttrs { source_range },
+                reason: TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+            };
+        };
+        let type_text = authored.trim();
+        return if type_text.is_empty() {
+            AttrsTypeParseOutcome::Absent
+        } else {
+            parse_raw_attrs_type(type_text, source_range)
+        };
+    }
+
+    detect_use_attrs_type_arg_tsc(setup_body, setup_source)
+        .map(AttrsTypeParseOutcome::Complete)
+        .unwrap_or(AttrsTypeParseOutcome::Absent)
 }
 
 // ── Step 5: build macro state ─────────────────────────────────────────────────
 
+fn absolute_type_span(type_params: &MacroTypeParams, content_offset: u32) -> Option<Span> {
+    Some(Span::new(
+        type_params.type_span.start.saturating_add(content_offset),
+        type_params.type_span.end.saturating_add(content_offset),
+    ))
+}
+
+fn absolute_member_spans(member_spans: &[Span], content_offset: u32) -> Vec<Span> {
+    member_spans
+        .iter()
+        .map(|span| {
+            Span::new(
+                span.start.saturating_add(content_offset),
+                span.end.saturating_add(content_offset),
+            )
+        })
+        .collect()
+}
+
+fn authored_props_argument(
+    type_params: &MacroTypeParams,
+    content_str: &str,
+    content_offset: u32,
+) -> Option<AuthoredPropsArgument> {
+    let type_start = type_params.type_span.start;
+    let type_end = type_params.type_span.end;
+    let text = content_str
+        .get(type_start as usize..type_end as usize)?
+        .to_owned();
+    let mut members = Vec::with_capacity(type_params.prop_members.len());
+    for member in &type_params.prop_members {
+        if member.key_span.start < type_start || member.key_span.end > type_end {
+            return None;
+        }
+        let type_range = match member.type_span {
+            Some(span) if span.start >= type_start && span.end <= type_end => {
+                Some((span.start - type_start, span.end - type_start))
+            }
+            Some(_) => return None,
+            None => None,
+        };
+        let key_start = member.key_span.start - type_start;
+        let key_end = member.key_span.end - type_start;
+        if !text.is_char_boundary(key_start as usize)
+            || !text.is_char_boundary(key_end as usize)
+            || type_range.is_some_and(|(start, end)| {
+                !text.is_char_boundary(start as usize) || !text.is_char_boundary(end as usize)
+            })
+        {
+            return None;
+        }
+        members.push(AuthoredPropMember {
+            name: member.name.clone(),
+            key_start,
+            key_end,
+            type_range,
+            optional: member.optional,
+        });
+    }
+    Some(AuthoredPropsArgument {
+        text,
+        source_start: type_start.saturating_add(content_offset),
+        members,
+    })
+}
+
 fn build_macro_state<'a>(
     items: &[ScriptItem<'a>],
-    sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
     type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
-    comments: &[Comment],
     type_usage_tracker: &mut TypeUsageTracker<'a>,
 ) -> TscMacroState {
     let mut state = TscMacroState::default();
+    let mut syntax_index = 0_u32;
+    let mut macro_index = 0_u32;
 
     for item in items {
         let ScriptItem::Macro(m) = item else {
             continue;
         };
+        let current_syntax_index = syntax_index;
+        syntax_index = syntax_index.saturating_add(1);
+        let payload_macro_index = macro_index;
+        let effective_macro_index = if matches!(m, ScriptMacro::WithDefaults { .. }) {
+            macro_index.saturating_add(1)
+        } else {
+            macro_index
+        };
+        macro_index = effective_macro_index.saturating_add(1);
         match m {
             ScriptMacro::DefineOptions {
                 object_arg: Some(obj),
@@ -1323,18 +2879,38 @@ fn build_macro_state<'a>(
                 array_arg,
                 ..
             } => {
-                process_props(
-                    type_params.as_ref(),
-                    object_arg.as_ref(),
-                    array_arg.as_ref(),
-                    sfc_source,
-                    content_str,
-                    content_offset,
-                    type_imports,
-                    comments,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        payload_macro_index,
+                        effective_macro_index,
+                        role: TscSemanticRole::Props,
+                        type_span: absolute_type_span(type_params, content_offset),
+                        member_spans: absolute_member_spans(
+                            &type_params
+                                .prop_members
+                                .iter()
+                                .map(|member| member.key_span)
+                                .collect::<Vec<_>>(),
+                            content_offset,
+                        ),
+                        model_name_span: None,
+                        authored_props: authored_props_argument(
+                            type_params,
+                            content_str,
+                            content_offset,
+                        ),
+                    });
+                } else {
+                    process_props(
+                        object_arg.as_ref(),
+                        array_arg.as_ref(),
+                        content_str,
+                        content_offset,
+                        type_usage_tracker,
+                        &mut state,
+                    );
+                }
             }
             ScriptMacro::DefineEmits {
                 type_params,
@@ -1342,50 +2918,84 @@ fn build_macro_state<'a>(
                 array_arg,
                 ..
             } => {
-                process_emits(
-                    type_params.as_ref(),
-                    object_arg.as_ref(),
-                    array_arg.as_ref(),
-                    content_str,
-                    content_offset,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        payload_macro_index,
+                        effective_macro_index,
+                        role: TscSemanticRole::Emits,
+                        type_span: absolute_type_span(type_params, content_offset),
+                        member_spans: absolute_member_spans(
+                            &type_params.emit_member_spans,
+                            content_offset,
+                        ),
+                        model_name_span: None,
+                        authored_props: None,
+                    });
+                } else {
+                    process_emits(
+                        object_arg.as_ref(),
+                        array_arg.as_ref(),
+                        content_str,
+                        content_offset,
+                        type_usage_tracker,
+                        &mut state,
+                    );
+                }
             }
             ScriptMacro::DefineModel {
                 span,
                 type_params,
+                name,
                 name_span,
                 ..
             } => {
-                process_model(
-                    type_params.as_ref(),
-                    *span,
-                    *name_span,
-                    content_str,
-                    content_offset,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        payload_macro_index,
+                        effective_macro_index,
+                        role: TscSemanticRole::Model {
+                            name: name.unwrap_or("modelValue").to_string(),
+                        },
+                        type_span: absolute_type_span(type_params, content_offset),
+                        member_spans: Vec::new(),
+                        model_name_span: name_span
+                            .map(|span| local_to_sfc_span(span, content_offset)),
+                        authored_props: None,
+                    });
+                } else {
+                    process_model(*span, *name, *name_span, content_offset, &mut state);
+                }
             }
             ScriptMacro::WithDefaults {
                 define_props_type_params,
                 defaults,
                 ..
             } => {
-                // First, process the inner defineProps (type-only)
-                process_props(
-                    define_props_type_params.as_ref(),
-                    None,
-                    None,
-                    sfc_source,
-                    content_str,
-                    content_offset,
-                    type_imports,
-                    comments,
-                    type_usage_tracker,
-                    &mut state,
-                );
+                if let Some(type_params) = define_props_type_params {
+                    state.semantic_slots.push(TscSemanticSlot {
+                        syntax_index: current_syntax_index,
+                        payload_macro_index,
+                        effective_macro_index,
+                        role: TscSemanticRole::Props,
+                        type_span: absolute_type_span(type_params, content_offset),
+                        member_spans: absolute_member_spans(
+                            &type_params
+                                .prop_members
+                                .iter()
+                                .map(|member| member.key_span)
+                                .collect::<Vec<_>>(),
+                            content_offset,
+                        ),
+                        model_name_span: None,
+                        authored_props: authored_props_argument(
+                            type_params,
+                            content_str,
+                            content_offset,
+                        ),
+                    });
+                }
                 // Then mark props with defaults as optional
                 if let Some(defaults_obj) = defaults {
                     process_props_with_defaults(defaults_obj, &mut state);
@@ -1417,6 +3027,433 @@ fn build_macro_state<'a>(
     }
 
     state
+}
+
+fn apply_tsc_bundle(
+    state: &mut TscMacroState,
+    input: MacroTscInput<'_>,
+) -> Result<(), TscGenerationError> {
+    let bundle = match input {
+        MacroTscInput::Authoritative(bundle) => bundle,
+        MacroTscInput::NotRequired => {
+            let Some(slot) = state.semantic_slots.first() else {
+                return Ok(());
+            };
+            return Err(TscGenerationError::MissingAuthoritativeSemantics {
+                subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+            });
+        }
+    };
+    for slot in state.semantic_slots.clone() {
+        let mut matching = bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.syntax_index == slot.syntax_index);
+        let Some(entry) = matching.next() else {
+            return Err(TscGenerationError::MissingEntry {
+                subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+            });
+        };
+        if matching.next().is_some() {
+            return Err(TscGenerationError::DuplicateEntry {
+                subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+            });
+        }
+        if entry.macro_index != slot.effective_macro_index {
+            return Err(TscGenerationError::MacroIdentityMismatch {
+                subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+            });
+        }
+        let projection = match &entry.outcome {
+            MacroTscOutcome::Complete(projection) => projection,
+            MacroTscOutcome::Partial(failure) => {
+                return Err(TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    outcome: TscUnavailableOutcome::Partial(failure.clone()),
+                });
+            }
+            MacroTscOutcome::Unresolved(failure) => {
+                return Err(TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    outcome: TscUnavailableOutcome::Unresolved(failure.clone()),
+                });
+            }
+            MacroTscOutcome::Unsupported(failure) => {
+                return Err(TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    outcome: TscUnavailableOutcome::Unsupported(failure.clone()),
+                });
+            }
+            MacroTscOutcome::Invalid(failure) => {
+                return Err(TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(
+                        failure.clone(),
+                    )),
+                });
+            }
+        };
+
+        match (&slot.role, projection) {
+            (TscSemanticRole::Props, MacroTscProjection::Props(props)) => {
+                state.props_ts = Some(match &props.public {
+                    TscPublicPropsProjection::AuthoredArgument { anchor } => {
+                        if !matches!(anchor, MacroAnchor::MacroArgument { .. }) {
+                            return Err(TscGenerationError::InvalidMacroAnchor {
+                                subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                            });
+                        }
+                        macro_anchor_span(&slot, *anchor)?;
+                        PropsTs::AuthoredArgument(slot.authored_props.clone().ok_or(
+                            TscGenerationError::MissingAuthoredArgumentGeometry {
+                                subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                            },
+                        )?)
+                    }
+                });
+                state.testing_props = props
+                    .testing_rows
+                    .iter()
+                    .map(|row| {
+                        Ok(TestingPropBinding {
+                            name: row.name.clone(),
+                            optional: row.optional
+                                && !state
+                                    .defaulted_prop_names
+                                    .iter()
+                                    .any(|defaulted| defaulted == &row.name),
+                            ts_type: row.type_text.as_str().to_string(),
+                            map_span: macro_anchor_span(&slot, row.anchor)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, TscGenerationError>>()?;
+                apply_scope_requirements(state, &props.scope, slot.syntax_index)?;
+            }
+            (TscSemanticRole::Emits, MacroTscProjection::Emits(emits)) => {
+                let entries = emits
+                    .events
+                    .iter()
+                    .map(|event| {
+                        Ok(EmitEntry {
+                            name: event.name.clone(),
+                            payload: EmitPayload::Call {
+                                params_text: event.emit_parameters.as_str().to_string(),
+                                handler_params_text: Some(
+                                    event.handler_parameters.as_str().to_string(),
+                                ),
+                            },
+                            map_span: macro_anchor_span(&slot, event.anchor)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, TscGenerationError>>()?;
+                state.emits_ts.extend(entries);
+                apply_scope_requirements(state, &emits.scope, slot.syntax_index)?;
+            }
+            (TscSemanticRole::Model { name }, MacroTscProjection::Model(model))
+                if name == &model.name =>
+            {
+                state.models.push(ModelEntry {
+                    name: model.name.clone(),
+                    optional: model.optional,
+                    ts_type: model.value_type.as_str().to_string(),
+                    map_span: macro_anchor_span(&slot, model.anchor)?,
+                });
+                apply_scope_requirements(state, &model.scope, slot.syntax_index)?;
+            }
+            _ => {
+                return Err(TscGenerationError::RoleMismatch {
+                    subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                })
+            }
+        }
+    }
+    for entry in &bundle.entries {
+        if state
+            .semantic_slots
+            .iter()
+            .any(|slot| slot.syntax_index == entry.syntax_index)
+        {
+            continue;
+        }
+        return Err(TscGenerationError::UnexpectedEntry {
+            subject: TscFailureSubject::macro_syntax(entry.syntax_index),
+        });
+    }
+    Ok(())
+}
+
+fn validate_no_tsc_slots(input: MacroTscInput<'_>) -> Result<(), TscGenerationError> {
+    if let MacroTscInput::Authoritative(bundle) = input {
+        if let Some(entry) = bundle.entries.first() {
+            return Err(TscGenerationError::UnexpectedEntry {
+                subject: TscFailureSubject::macro_syntax(entry.syntax_index),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn macro_anchor_span(
+    slot: &TscSemanticSlot,
+    anchor: MacroAnchor,
+) -> Result<Option<Span>, TscGenerationError> {
+    match anchor {
+        MacroAnchor::Authored {
+            macro_index,
+            member_ordinal: ordinal,
+        } if matches!(&slot.role, TscSemanticRole::Props | TscSemanticRole::Emits)
+            && macro_index == slot.payload_macro_index =>
+        {
+            slot.member_spans
+                .get(ordinal.get() as usize)
+                .copied()
+                .map(Some)
+                .ok_or(TscGenerationError::InvalidAuthoredMemberOrdinal {
+                    subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    member_ordinal: ordinal.get(),
+                })
+        }
+        MacroAnchor::Synthesized {
+            macro_index,
+            row: SynthesizedRowKind::ModelProp,
+        } if matches!(&slot.role, TscSemanticRole::Model { .. })
+            && macro_index == slot.effective_macro_index =>
+        {
+            Ok(slot.model_name_span.or(slot.type_span))
+        }
+        MacroAnchor::MacroArgument { macro_index }
+            if matches!(&slot.role, TscSemanticRole::Props | TscSemanticRole::Emits)
+                && macro_index == slot.payload_macro_index =>
+        {
+            Ok(slot.type_span)
+        }
+        _ => Err(TscGenerationError::InvalidMacroAnchor {
+            subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+        }),
+    }
+}
+
+fn apply_scope_requirements(
+    state: &mut TscMacroState,
+    scope: &TscScopeRequirements,
+    syntax_index: u32,
+) -> Result<(), TscGenerationError> {
+    let retained_declarations = scope
+        .dependency_declarations
+        .iter()
+        .map(|declaration| TscRetainedValueCarrier {
+            owner: declaration.owner,
+            name: declaration.name.clone(),
+            contributor_ordinal: declaration.contributor_ordinal,
+        })
+        .collect::<FxHashSet<_>>();
+    let available_value_carriers = state
+        .available_scope_declarations
+        .iter()
+        .filter(|declaration| declaration.value_capable)
+        .map(|declaration| {
+            (
+                declaration.owner,
+                declaration.name.clone(),
+                declaration.contributor_ordinal,
+            )
+        })
+        .collect::<FxHashSet<_>>();
+    state.direct_owner_value_dependencies.extend(
+        scope
+            .owner_value_dependencies
+            .iter()
+            .cloned()
+            .map(|dependency| (syntax_index, dependency)),
+    );
+    for binding in &scope.retained_bindings {
+        let Some(import) = state.available_scope_imports.iter().find(|import| {
+            import.owner == binding.owner && import.local_name == binding.local_name
+        }) else {
+            return Err(TscGenerationError::MissingScopeBinding {
+                subject: TscFailureSubject::macro_syntax(syntax_index),
+            });
+        };
+        match binding.usage {
+            TscBindingUsage::TypePosition if import.authored_type_only => {
+                state.retain_type_import(import.type_statement.clone(), import.owner);
+            }
+            TscBindingUsage::TypePosition => {
+                state.retain_promoted_type_import(import.type_statement.clone(), import.owner);
+            }
+            TscBindingUsage::ValueQuery | TscBindingUsage::ValuePosition => {
+                let Some(value_statement) = import.value_statement.clone() else {
+                    return Err(TscGenerationError::ValueScopeBindingUnavailable {
+                        subject: TscFailureSubject::macro_syntax(syntax_index),
+                    });
+                };
+                state.retain_value_import(
+                    value_statement,
+                    import.type_statement.clone(),
+                    import.owner,
+                );
+            }
+        }
+    }
+    for dependency in &scope.dependency_declarations {
+        for carrier in &dependency.retained_value_carriers {
+            let retained = retained_declarations.contains(carrier);
+            let value_capable = available_value_carriers.contains(&(
+                carrier.owner,
+                carrier.name.clone(),
+                carrier.contributor_ordinal,
+            ));
+            if !retained || !value_capable {
+                return Err(TscGenerationError::MissingScopeDeclaration {
+                    subject: TscFailureSubject::macro_syntax(syntax_index),
+                });
+            }
+        }
+        let Some(local) = state.available_scope_declarations.iter().find(|local| {
+            local.owner == dependency.owner
+                && local.name == dependency.name
+                && local.contributor_ordinal == dependency.contributor_ordinal
+        }) else {
+            return Err(TscGenerationError::MissingScopeDeclaration {
+                subject: TscFailureSubject::macro_syntax(syntax_index),
+            });
+        };
+        state.retain_local_type(LocalTypeCarrier {
+            name: local.name.clone(),
+            contributor_ordinal: local.contributor_ordinal,
+            owner: local.owner,
+            declaration: local.declaration.clone(),
+            inferred_class_members: dependency.inferred_class_members.clone(),
+            declaration_failure: dependency.declaration_failure,
+            owner_value_dependencies: dependency.owner_value_dependencies.clone(),
+            compiler_failure: None,
+            syntax_index,
+            authoritative: true,
+        });
+    }
+    Ok(())
+}
+
+fn render_class_declaration(
+    plan: &ClassDeclarationPlan,
+    inferred: &[TscInferredClassMember],
+) -> Option<RenderedText> {
+    if inferred.len() != plan.inferred_sites.len() {
+        return None;
+    }
+    let mut edits = plan.edits.clone();
+    let mut consumed = vec![false; inferred.len()];
+    for site in &plan.inferred_sites {
+        let (index, row) = inferred.iter().enumerate().find(|(index, row)| {
+            !consumed[*index]
+                && row.name == site.name
+                && row.occurrence == site.occurrence
+                && row.is_static == site.is_static
+                && row.position == site.position
+        })?;
+        if row.type_text.as_str().is_empty() {
+            return None;
+        }
+        consumed[index] = true;
+        for target in &site.targets {
+            let text = format!(
+                "{}{}{}",
+                target.prefix,
+                row.type_text.as_str(),
+                target.suffix
+            );
+            edits.push(DeclarationEdit::SyntheticType {
+                start: target.start,
+                end: target.end,
+                text,
+                type_offset: target.prefix.len() as u32,
+            });
+        }
+    }
+    consumed
+        .iter()
+        .all(|consumed| *consumed)
+        .then(|| render_authored_fragment(&plan.authored, &edits))
+}
+
+fn carrier_required(state: &TscMacroState, mode: TscMode, owner: TscScriptOwner) -> bool {
+    match mode {
+        TscMode::Declaration => true,
+        TscMode::Testing => owner == TscScriptOwner::Companion,
+        TscMode::Public => state.expose_entries.is_empty() || owner == TscScriptOwner::Companion,
+    }
+}
+
+fn validate_declaration_carriers(
+    state: &TscMacroState,
+    mode: TscMode,
+) -> Result<(), TscGenerationError> {
+    if let Some((syntax_index, _)) = state
+        .direct_owner_value_dependencies
+        .iter()
+        .find(|(_, dependency)| carrier_required(state, mode, dependency.owner))
+    {
+        return Err(TscGenerationError::UnsupportedDeclarationShape {
+            subject: TscFailureSubject::macro_syntax(*syntax_index),
+            reason: TscDeclarationShapeReason::OwnerValueDependencyUnavailable,
+        });
+    }
+    for local in &state.local_types {
+        if !carrier_required(state, mode, local.owner) {
+            continue;
+        }
+        if let Some(failure) = local.declaration_failure {
+            return Err(TscGenerationError::UnsupportedDeclarationShape {
+                subject: TscFailureSubject::macro_syntax(local.syntax_index),
+                reason: TscDeclarationShapeReason::TypeInfoDeclarationFailure(failure),
+            });
+        }
+        if local
+            .owner_value_dependencies
+            .iter()
+            .any(|dependency| carrier_required(state, mode, dependency.owner))
+        {
+            return Err(TscGenerationError::UnsupportedDeclarationShape {
+                subject: TscFailureSubject::macro_syntax(local.syntax_index),
+                reason: TscDeclarationShapeReason::OwnerValueDependencyUnavailable,
+            });
+        }
+        if let Some(reason) = local.compiler_failure {
+            return Err(TscGenerationError::UnsupportedDeclarationShape {
+                subject: TscFailureSubject::macro_syntax(local.syntax_index),
+                reason,
+            });
+        }
+        let reason = match &local.declaration {
+            DeclarationProjection::Ready(_) => None,
+            DeclarationProjection::Class(plan) => {
+                render_class_declaration(plan, &local.inferred_class_members)
+                    .is_none()
+                    .then_some(TscDeclarationShapeReason::InconsistentClassInference)
+            }
+            DeclarationProjection::Unavailable(reason) => Some(*reason),
+        };
+        if let Some(reason) = reason {
+            return Err(TscGenerationError::UnsupportedDeclarationShape {
+                subject: TscFailureSubject::macro_syntax(local.syntax_index),
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn render_local_declaration(local: &LocalTypeCarrier) -> RenderedText {
+    match &local.declaration {
+        DeclarationProjection::Ready(rendered) => rendered.clone(),
+        DeclarationProjection::Class(plan) => {
+            render_class_declaration(plan, &local.inferred_class_members)
+                .expect("carrier validation precedes rendering")
+        }
+        DeclarationProjection::Unavailable(_) => {
+            unreachable!("carrier validation rejects unavailable declarations")
+        }
+    }
 }
 
 /// Given a `withDefaults(defineProps<{...}>(), { key1: ..., key2: ... })` defaults
@@ -1486,143 +3523,15 @@ fn local_to_sfc_span(span: Span, content_offset: u32) -> Span {
     )
 }
 
-fn normalize_resolved_span(span: Span, span_is_absolute: bool, content_offset: u32) -> Span {
-    if span_is_absolute {
-        span
-    } else {
-        local_to_sfc_span(span, content_offset)
-    }
-}
-
-fn slice_checked(source: &str, span: Span) -> Option<&str> {
-    source.get(span.start as usize..span.end as usize)
-}
-
-fn resolved_prop_type_text<'a>(
-    prop: &ResolvedProp,
-    sfc_source: &'a str,
-    content_str: &'a str,
-) -> Option<&'a str> {
-    let type_span = prop.type_span?;
-    if prop.span_is_absolute {
-        slice_checked(sfc_source, type_span).map(str::trim)
-    } else if prop.map_local {
-        slice_checked(content_str, type_span).map(str::trim)
-    } else {
-        None
-    }
-}
-
-fn quote_ts_prop_name(name: &str) -> String {
-    format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-fn render_resolved_prop_ts_type(
-    prop: &ResolvedProp,
-    root_type_text: Option<&str>,
-    sfc_source: &str,
-    content_str: &str,
-) -> String {
-    if let Some(ts_type) = resolved_prop_type_text(prop, sfc_source, content_str) {
-        return ts_type.to_string();
-    }
-
-    if !prop.map_local {
-        if let Some(root_type_text) = root_type_text {
-            if let Some(name) = prop.key_name.as_deref() {
-                return format!("{}[{}]", root_type_text.trim(), quote_ts_prop_name(name));
-            }
-        }
-    }
-
-    runtime_types_to_ts(&prop.types)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn process_props<'a>(
-    type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg<'a>>,
-    sfc_source: &'a str,
     content_str: &'a str,
     content_offset: u32,
-    type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
-    comments: &[Comment],
     type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
-    if let Some(tp) = type_params {
-        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-        let named_root_type = looks_like_named_type_reference(type_text).then_some(type_text);
-
-        state.testing_props = tp
-            .resolved
-            .props
-            .iter()
-            .map(|prop| {
-                let name = prop.key_name.clone().unwrap_or_else(|| {
-                    content_str[prop.key.start as usize..prop.key.end as usize].to_string()
-                });
-                let ts_type =
-                    render_resolved_prop_ts_type(prop, named_root_type, sfc_source, content_str);
-
-                TestingPropBinding {
-                    name,
-                    optional: prop.optional,
-                    ts_type,
-                    map_span: Some(if prop.map_local {
-                        normalize_resolved_span(prop.key, prop.span_is_absolute, content_offset)
-                    } else {
-                        local_to_sfc_span(tp.type_span, content_offset)
-                    }),
-                }
-            })
-            .collect();
-
-        if named_root_type.is_some() {
-            if let Some(info) = type_imports.get(type_text) {
-                let _ = info;
-                state.props_ts = Some(PropsTs::TypeRef(type_text.to_string()));
-            } else {
-                state.props_ts = Some(PropsTs::TypeText(type_text.to_string()));
-            }
-            type_usage_tracker.mark_type_text(type_text);
-        } else if !tp.resolved.props.is_empty() {
-            let entries = tp
-                .resolved
-                .props
-                .iter()
-                .map(|prop| {
-                    let name = prop.key_name.clone().unwrap_or_else(|| {
-                        content_str[prop.key.start as usize..prop.key.end as usize].to_string()
-                    });
-                    let ts_type = render_resolved_prop_ts_type(
-                        prop,
-                        named_root_type,
-                        sfc_source,
-                        content_str,
-                    );
-                    let comment = find_leading_jsdoc(comments, prop.key.start, content_str);
-                    type_usage_tracker.mark_type_text(&ts_type);
-                    InlinePropEntry {
-                        name,
-                        optional: prop.optional,
-                        ts_type,
-                        comment,
-                        map_span: Some(if prop.map_local {
-                            normalize_resolved_span(prop.key, prop.span_is_absolute, content_offset)
-                        } else {
-                            local_to_sfc_span(tp.type_span, content_offset)
-                        }),
-                    }
-                })
-                .collect();
-            state.props_ts = Some(PropsTs::Inline(entries));
-        } else {
-            state.props_ts = Some(PropsTs::TypeText(type_text.to_string()));
-            type_usage_tracker.mark_type_text(type_text);
-        }
-    } else if let Some(obj) = object_arg {
+    if let Some(obj) = object_arg {
         // Object-syntax: uses AST-extracted MacroProperty fields exclusively.
         // No string parsing of prop values — all type info comes from the AST.
         let mut entries = Vec::new();
@@ -1647,7 +3556,7 @@ fn process_props<'a>(
             } else {
                 runtime_types_to_ts(&prop.runtime_types)
             };
-            type_usage_tracker.mark_type_text(&ts_type);
+            type_usage_tracker.mark_dependency_paths(&prop.type_dependency_paths);
 
             let optional = !prop.required || prop.has_default;
             entries.push(InlinePropEntry {
@@ -1737,23 +3646,20 @@ fn build_runtime_prop_value(prop: &crate::utils::oxc::vue::MacroProperty<'_>) ->
     }
 }
 
-/// Map RuntimeType to a JavaScript constructor name for the runtime props section.
-fn runtime_type_to_constructor(rt: &RuntimeType) -> &'static str {
+/// Map authored constructor syntax to the runtime props section.
+fn runtime_type_to_constructor(rt: &RuntimeConstructorSyntax) -> &'static str {
     match rt {
-        RuntimeType::String => "String",
-        RuntimeType::Number => "Number",
-        RuntimeType::Boolean => "Boolean",
-        RuntimeType::Object => "Object",
-        RuntimeType::Array => "Array",
-        RuntimeType::Function => "Function",
-        RuntimeType::Symbol => "Symbol",
-        RuntimeType::Null => "null",
-        RuntimeType::BuiltIn(_) | RuntimeType::Unknown => "Object",
+        RuntimeConstructorSyntax::String => "String",
+        RuntimeConstructorSyntax::Number => "Number",
+        RuntimeConstructorSyntax::Boolean => "Boolean",
+        RuntimeConstructorSyntax::Object => "Object",
+        RuntimeConstructorSyntax::Array => "Array",
+        RuntimeConstructorSyntax::Function => "Function",
+        RuntimeConstructorSyntax::Symbol => "Symbol",
     }
 }
 
 fn process_emits<'a>(
-    type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'a>>,
     array_arg: Option<&MacroArrayArg<'a>>,
     content_str: &str,
@@ -1761,29 +3667,7 @@ fn process_emits<'a>(
     type_usage_tracker: &mut TypeUsageTracker<'a>,
     state: &mut TscMacroState,
 ) {
-    if let Some(tp) = type_params {
-        let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
-        type_usage_tracker.mark_type_text(type_text);
-
-        for emit in &tp.resolved.call_signatures {
-            state.emits_names.push(emit.name.clone());
-            let payload = resolved_emit_payload(&emit.signature);
-            mark_emit_payload_types(type_usage_tracker, &payload);
-            state.emits_ts.push(EmitEntry {
-                name: emit.name.clone(),
-                payload,
-                map_span: Some(if emit.map_local {
-                    normalize_resolved_span(
-                        emit.name_span.unwrap_or(emit.span),
-                        emit.span_is_absolute,
-                        content_offset,
-                    )
-                } else {
-                    local_to_sfc_span(tp.type_span, content_offset)
-                }),
-            });
-        }
-    } else if let Some(arr) = array_arg {
+    if let Some(arr) = array_arg {
         // Array syntax names events by string literal; the name is read from the
         // AST (unwrapping any TS wrapper), never sliced off the element span.
         for elem in &arr.elements {
@@ -1807,7 +3691,7 @@ fn process_emits<'a>(
                 .map(|span| content_str[span.start as usize..span.end as usize].trim())
                 .map(extract_object_emit_payload)
                 .unwrap_or(EmitPayload::Unknown);
-            mark_emit_payload_types(type_usage_tracker, &payload);
+            type_usage_tracker.mark_dependency_paths(&prop.type_dependency_paths);
             state.emits_names.push(name.clone());
             state.emits_ts.push(EmitEntry {
                 name,
@@ -1818,29 +3702,6 @@ fn process_emits<'a>(
     }
 }
 
-fn resolved_emit_payload(signature: &ResolvedCallPayloadForm) -> EmitPayload {
-    match signature {
-        ResolvedCallPayloadForm::Call { params_text } => EmitPayload::Call {
-            params_text: params_text.clone(),
-        },
-        ResolvedCallPayloadForm::Tuple { tuple_text } => EmitPayload::Tuple {
-            tuple_text: tuple_text.clone(),
-        },
-    }
-}
-
-fn mark_emit_payload_types(type_usage_tracker: &mut TypeUsageTracker<'_>, payload: &EmitPayload) {
-    match payload {
-        EmitPayload::Unknown => {}
-        EmitPayload::Call { params_text } => {
-            if !params_text.is_empty() {
-                type_usage_tracker.mark_type_text(params_text);
-            }
-        }
-        EmitPayload::Tuple { tuple_text } => type_usage_tracker.mark_type_text(tuple_text),
-    }
-}
-
 fn extract_object_emit_payload(value_text: &str) -> EmitPayload {
     let trimmed = value_text.trim();
     if trimmed == "null" {
@@ -1848,7 +3709,10 @@ fn extract_object_emit_payload(value_text: &str) -> EmitPayload {
     }
 
     if let Some(params_text) = extract_callable_params_text(trimmed) {
-        return EmitPayload::Call { params_text };
+        return EmitPayload::Call {
+            params_text,
+            handler_params_text: None,
+        };
     }
 
     EmitPayload::Unknown
@@ -1883,33 +3747,16 @@ fn find_matching_paren(text: &str, open_idx: usize) -> Option<usize> {
 }
 
 fn process_model(
-    type_params: Option<&MacroTypeParams>,
     macro_span: Span,
+    name: Option<&str>,
     name_span: Option<Span>,
-    content_str: &str,
     content_offset: u32,
-    type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
-    let model_name = match name_span {
-        Some(ns) => {
-            let s = content_str[ns.start as usize..ns.end as usize].trim();
-            s.trim_matches(|c: char| c == '\'' || c == '"').to_string()
-        }
-        None => "modelValue".to_string(),
-    };
-
-    let ts_type = match type_params {
-        Some(tp) => content_str[tp.type_span.start as usize..tp.type_span.end as usize]
-            .trim()
-            .to_string(),
-        None => "unknown".to_string(),
-    };
-    type_usage_tracker.mark_type_text(&ts_type);
-
     state.models.push(ModelEntry {
-        name: model_name,
-        ts_type,
+        name: name.unwrap_or("modelValue").to_string(),
+        optional: true,
+        ts_type: "unknown".to_string(),
         map_span: Some(local_to_sfc_span(
             name_span.unwrap_or(macro_span),
             content_offset,
@@ -1929,7 +3776,7 @@ fn process_slots(
     };
     let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
     state.slots_ts = Some(type_text.to_string());
-    type_usage_tracker.mark_type_text(type_text);
+    type_usage_tracker.mark_dependency_paths(&tp.type_dependency_paths);
 }
 
 fn process_expose(
@@ -1943,7 +3790,7 @@ fn process_expose(
     if let Some(tp) = type_params {
         let type_text = content_str[tp.type_span.start as usize..tp.type_span.end as usize].trim();
         state.expose_type_text = Some(type_text.to_string());
-        type_usage_tracker.mark_type_text(type_text);
+        type_usage_tracker.mark_dependency_paths(&tp.type_dependency_paths);
         return;
     }
     // Fall back to extracting property entries from object arg
@@ -2049,11 +3896,27 @@ fn render_testing_prop_type(prop: &TestingPropBinding) -> String {
     }
 }
 
+fn js_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len().saturating_add(2));
+    literal.push('"');
+    escape_js_string_into(&mut literal, value);
+    literal.push('"');
+    literal
+}
+
+fn js_property_key(value: &str) -> String {
+    if is_simple_ident(value) {
+        value.to_owned()
+    } else {
+        js_string_literal(value)
+    }
+}
+
 fn render_testing_binding_key(name: &str) -> String {
     if is_testing_decl_ident(name) {
         name.to_string()
     } else {
-        format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+        js_string_literal(name)
     }
 }
 
@@ -2187,7 +4050,9 @@ fn generate_options_api_declaration(
     filename: Option<&str>,
 ) -> Option<TscOutput> {
     let alloc = Allocator::default();
-    let parsed = Parser::new(&alloc, options_script_content, SourceType::ts()).parse();
+    let parsed = Parser::new(&alloc, options_script_content, SourceType::ts())
+        .with_config(TokensParserConfig)
+        .parse();
     let ctx = ScriptParseContext::new(0, options_script_content.as_bytes());
     let macro_args: OptionsComponentMacroArgs =
         extract_options_component_macro_args(&parsed.program, &ctx);
@@ -2205,10 +4070,10 @@ fn generate_options_api_declaration(
     // `Foo`'s import in the emitted declaration. The import first pass of
     // `parse_script` is mode-independent, so it yields the script's `ScriptItem`s
     // (including its imports) for `collect_type_imports` + `TypeUsageTracker`; the
-    // `process_props` / `process_emits` calls below already register used types via
-    // `mark_type_text`, and `type_usage_tracker.finalize` emits exactly the imports
-    // those types reference (type-only directly, value imports promoted to `import
-    // type`) — no separate import engine.
+    // `process_props` / `process_emits` consume parser-owned dependency paths,
+    // and `type_usage_tracker.finalize` emits exactly the imports those paths
+    // reference (type-only directly, value imports promoted to `import type`) —
+    // no rendered declaration text is scanned or reparsed.
     let script = parse_script(
         &parsed.program,
         ScriptMode::Options,
@@ -2216,9 +4081,15 @@ fn generate_options_api_declaration(
         options_script_content,
     );
     let type_imports = collect_type_imports(&script.items);
-    let comments: &[Comment] = &parsed.program.comments;
-    let mut type_usage_tracker =
-        TypeUsageTracker::new(&script.items, options_script_content, &type_imports);
+    let mut type_usage_tracker = TypeUsageTracker::new(
+        &script.items,
+        &parsed.program,
+        &parsed.tokens,
+        options_script_content,
+        0,
+        &type_imports,
+        TscScriptOwner::Companion,
+    );
     let mut state = TscMacroState::default();
 
     // Props: object form populates the full `props_ts` inline surface via the
@@ -2228,14 +4099,10 @@ fn generate_options_api_declaration(
     // `process_props` renders directly).
     if let Some(props_obj) = macro_args.props_object.as_ref() {
         process_props(
-            None,
             Some(props_obj),
             None,
-            sfc_source,
             options_script_content,
             0,
-            &type_imports,
-            comments,
             &mut type_usage_tracker,
             &mut state,
         );
@@ -2261,7 +4128,6 @@ fn generate_options_api_declaration(
     // Emits: both object and array forms populate `emits_ts` via `process_emits`.
     if macro_args.emits_object.is_some() || macro_args.emits_array.is_some() {
         process_emits(
-            None,
             macro_args.emits_object.as_ref(),
             macro_args.emits_array.as_ref(),
             options_script_content,
@@ -2430,10 +4296,11 @@ fn extract_tsc_narrowing(
     }
 
     // Collect prop names from state
-    let prop_names: FxHashSet<&str> = match &state.props_ts {
-        Some(PropsTs::Inline(entries)) => entries.iter().map(|e| e.name.as_str()).collect(),
-        _ => FxHashSet::default(),
-    };
+    let prop_names = state
+        .testing_props
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<FxHashSet<_>>();
 
     if prop_names.is_empty() {
         return None;
@@ -2474,7 +4341,36 @@ fn generate_testing_code(
     out.push_str(
         "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
     );
+    if state.terminal_emits_ts.is_some() {
+        out.push_str(TERMINAL_EMITS_TO_PROPS_TYPE);
+    }
+    for import in state
+        .type_import_stmts
+        .iter()
+        .chain(&state.declaration_promoted_type_imports)
+        .filter(|import| import.owner == TscScriptOwner::Companion)
+    {
+        out.push_str(&import.statement);
+        out.push('\n');
+    }
+    for import in state
+        .declaration_value_imports
+        .iter()
+        .filter(|import| import.owner == TscScriptOwner::Companion)
+    {
+        out.push_str(&import.statement);
+        out.push('\n');
+    }
     out.push_str(MACRO_STUBS);
+
+    for local in state
+        .local_types
+        .iter()
+        .filter(|local| local.owner == TscScriptOwner::Companion)
+    {
+        out.append_rendered(render_local_declaration(local));
+        out.push('\n');
+    }
 
     if let Some(gp) = generic_params {
         for name in extract_generic_param_names(gp) {
@@ -2548,7 +4444,11 @@ fn generate_testing_code(
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+            out.push_str("    ");
+            out.push_str(&js_property_key(&model.name));
+            out.push_str(": ");
+            out.push_str(ctor);
+            out.push_str(",\n");
         }
         out.push_str("  },\n");
     }
@@ -2558,10 +4458,10 @@ fn generate_testing_code(
         let mut names: Vec<String> = state
             .emits_names
             .iter()
-            .map(|n| format!("'{}'", n))
+            .map(|name| js_string_literal(name))
             .collect();
         for model in &state.models {
-            names.push(format!("'update:{}'", model.name));
+            names.push(js_string_literal(&format!("update:{}", model.name)));
         }
         out.push_str(&format!("  emits: [{}],\n", names.join(", ")));
     }
@@ -2575,6 +4475,7 @@ fn generate_testing_code(
     let full_props = render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         None,
@@ -2599,13 +4500,18 @@ fn generate_testing_code(
     out.append_rendered(render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         None,
     ));
     out.push_str(",\n");
     out.push_str("    $emit: ");
-    out.append_rendered(render_emit_fn_type(&state.emits_ts, &state.models));
+    out.append_rendered(render_emit_fn_type(
+        &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
+        &state.models,
+    ));
     out.push_str(",\n");
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
@@ -2660,16 +4566,44 @@ fn generate_code(
     // via a mapped type leaves only the static members (props, emits options)
     // so there is exactly one `new()` — ours — with the correct $props.
     out.push_str("type __OmitNew<T> = { [K in keyof T]: T[K] }\n");
+    if state.terminal_emits_ts.is_some() && !needs_setup_body {
+        out.push_str(
+            "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
+        );
+        out.push_str(
+            "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
+        );
+    }
+    if state.terminal_emits_ts.is_some() {
+        out.push_str(TERMINAL_EMITS_TO_PROPS_TYPE);
+    }
 
     // ── Type import statements ────────────────────────────────────────
-    for stmt in &state.type_import_stmts {
-        out.push_str(stmt);
+    for import in state
+        .type_import_stmts
+        .iter()
+        .chain(&state.declaration_promoted_type_imports)
+        .filter(|import| !needs_setup_body || import.owner == TscScriptOwner::Companion)
+    {
+        out.push_str(&import.statement);
+        out.push('\n');
+    }
+    for import in state
+        .declaration_value_imports
+        .iter()
+        .filter(|import| !needs_setup_body || import.owner == TscScriptOwner::Companion)
+    {
+        out.push_str(&import.statement);
         out.push('\n');
     }
 
     // ── Local type declarations ───────────────────────────────────────
-    for lt in &state.local_types {
-        out.push_str(lt);
+    for lt in state
+        .local_types
+        .iter()
+        .filter(|local| !needs_setup_body || local.owner == TscScriptOwner::Companion)
+    {
+        out.append_rendered(render_local_declaration(lt));
         out.push('\n');
     }
     out.push('\n');
@@ -2720,7 +4654,11 @@ fn generate_code(
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str(&format!("    {}: {},\n", model.name, ctor));
+            out.push_str("    ");
+            out.push_str(&js_property_key(&model.name));
+            out.push_str(": ");
+            out.push_str(ctor);
+            out.push_str(",\n");
         }
         out.push_str("  },\n");
     }
@@ -2730,10 +4668,10 @@ fn generate_code(
         let mut names: Vec<String> = state
             .emits_names
             .iter()
-            .map(|n| format!("'{}'", n))
+            .map(|name| js_string_literal(name))
             .collect();
         for model in &state.models {
-            names.push(format!("'update:{}'", model.name));
+            names.push(js_string_literal(&format!("update:{}", model.name)));
         }
         out.push_str(&format!("  emits: [{}],\n", names.join(", ")));
     }
@@ -2755,14 +4693,12 @@ fn generate_code(
         let mut narrowing_parts: Vec<String> = Vec::new();
         for g in &nr.narrowing.generics {
             // Find the prop type from inline entries
-            let prop_type = match &state.props_ts {
-                Some(PropsTs::Inline(entries)) => entries
-                    .iter()
-                    .find(|e| e.name == g.prop_name)
-                    .map(|e| e.ts_type.as_str())
-                    .unwrap_or("unknown"),
-                _ => "unknown",
-            };
+            let prop_type = state
+                .testing_props
+                .iter()
+                .find(|entry| entry.name == g.prop_name)
+                .map(|entry| entry.ts_type.as_str())
+                .unwrap_or("unknown");
             narrowing_parts.push(format!(
                 "T_{prop} extends {pt} = {pt}",
                 prop = g.prop_name,
@@ -2844,6 +4780,7 @@ fn render_instance_shape_body(
     out.append_rendered(render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         narrowing,
@@ -2854,6 +4791,7 @@ fn render_instance_shape_body(
     out.append_rendered(render_full_props_type(
         &state.props_ts,
         &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
         &state.models,
         &state.defaulted_prop_names,
         narrowing,
@@ -2861,7 +4799,11 @@ fn render_instance_shape_body(
     out.push_str(",\n");
 
     out.push_str("    $emit: ");
-    out.append_rendered(render_emit_fn_type(&state.emits_ts, &state.models));
+    out.append_rendered(render_emit_fn_type(
+        &state.emits_ts,
+        state.terminal_emits_ts.as_deref(),
+        &state.models,
+    ));
     out.push_str(",\n");
     if let Some(ref slots) = state.slots_ts {
         out.push_str(&format!("    $slots: {},\n", slots));
@@ -3016,22 +4958,33 @@ fn generate_declaration_code(
 ) -> TscOutput {
     let mut out = TscWriter::new(512);
 
+    if state.terminal_emits_ts.is_some() {
+        out.push_str(
+            "type __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\n",
+        );
+        out.push_str(
+            "type __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\n",
+        );
+        out.push_str(TERMINAL_EMITS_TO_PROPS_TYPE);
+    }
+
     // ── Type import statements (declaration-legal `import type …`) ────
-    for stmt in &state.type_import_stmts {
-        out.push_str(stmt);
+    for import in state
+        .type_import_stmts
+        .iter()
+        .chain(&state.declaration_promoted_type_imports)
+    {
+        out.push_str(&import.statement);
         out.push('\n');
     }
-    // Value imports used in a type position, promoted to declaration-legal
-    // `import type` (the setup body that brought them into scope in the runtime
-    // path is omitted here).
-    for stmt in &state.declaration_promoted_type_imports {
-        out.push_str(stmt);
+    for import in &state.declaration_value_imports {
+        out.push_str(&import.statement);
         out.push('\n');
     }
 
     // ── Local type declarations ───────────────────────────────────────
     for lt in &state.local_types {
-        out.push_str(lt);
+        out.append_rendered(render_local_declaration(lt));
         out.push('\n');
     }
     out.push('\n');
@@ -3075,27 +5028,38 @@ fn generate_declaration_code(
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedText {
+fn render_emit_fn_type(
+    emits: &[EmitEntry],
+    terminal_emits: Option<&str>,
+    models: &[ModelEntry],
+) -> RenderedText {
     let mut rendered = RenderedText::default();
-    if emits.is_empty() && models.is_empty() {
+    if emits.is_empty() && terminal_emits.is_none() && models.is_empty() {
         rendered.push_str("(event: string, ...args: unknown[]) => void");
         return rendered;
     }
 
     let mut needs_join = false;
+    if let Some(splice) = terminal_emits {
+        rendered.push_str("__Verter_EmitFn<");
+        rendered.push_str(splice);
+        rendered.push_str(">");
+        needs_join = true;
+    }
     for emit in emits {
         if needs_join {
             rendered.push_str(" & ");
         }
         rendered.push_str("((event: ");
+        let event_literal = js_string_literal(&emit.name);
         if let Some(map_span) = emit.map_span {
-            rendered.push_mapped(&format!("'{}'", emit.name), map_span);
+            rendered.push_mapped(&event_literal, map_span);
         } else {
-            rendered.push_str(&format!("'{}'", emit.name));
+            rendered.push_str(&event_literal);
         }
         match &emit.payload {
             EmitPayload::Unknown => rendered.push_str(", ...args: unknown[]) => void)"),
-            EmitPayload::Call { params_text } => {
+            EmitPayload::Call { params_text, .. } => {
                 if params_text.is_empty() {
                     rendered.push_str(") => void)");
                 } else {
@@ -3103,11 +5067,6 @@ fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedTe
                     rendered.push_str(params_text);
                     rendered.push_str(") => void)");
                 }
-            }
-            EmitPayload::Tuple { tuple_text } => {
-                rendered.push_str(", ...args: ");
-                rendered.push_str(tuple_text);
-                rendered.push_str(") => void)");
             }
         }
         needs_join = true;
@@ -3118,10 +5077,11 @@ fn render_emit_fn_type(emits: &[EmitEntry], models: &[ModelEntry]) -> RenderedTe
             rendered.push_str(" & ");
         }
         rendered.push_str("((event: ");
+        let event_literal = js_string_literal(&format!("update:{}", model.name));
         if let Some(map_span) = model.map_span {
-            rendered.push_mapped(&format!("'update:{}'", model.name), map_span);
+            rendered.push_mapped(&event_literal, map_span);
         } else {
-            rendered.push_str(&format!("'update:{}'", model.name));
+            rendered.push_str(&event_literal);
         }
         rendered.push_str(", v: ");
         rendered.push_str(&model.ts_type);
@@ -3146,10 +5106,11 @@ fn render_emits_to_props_type(emits: &[EmitEntry]) -> RenderedText {
             if !first {
                 rendered.push_str("; ");
             }
+            let key_literal = js_string_literal(&key);
             if let Some(map_span) = emit.map_span {
-                rendered.push_mapped(&format!("\"{}\"", key), map_span);
+                rendered.push_mapped(&key_literal, map_span);
             } else {
-                rendered.push_str(&format!("\"{}\"", key));
+                rendered.push_str(&key_literal);
             }
             rendered.push_str("?: ");
             rendered.push_str(&handler);
@@ -3168,11 +5129,23 @@ fn render_props_shape_type(
     let mut rendered = RenderedText::default();
 
     match props_ts {
-        Some(PropsTs::TypeRef(name)) => {
-            rendered.push_str(&wrap_defaulted_props(name, defaulted_prop_names))
-        }
-        Some(PropsTs::TypeText(text)) => {
-            rendered.push_str(&wrap_defaulted_props(text, defaulted_prop_names))
+        Some(PropsTs::AuthoredArgument(argument)) => {
+            let (authored, unresolved_defaults) =
+                render_authored_props_argument(argument, defaulted_prop_names, generic_props);
+            if unresolved_defaults.is_empty() {
+                rendered.append_rendered(authored);
+            } else {
+                let keys = unresolved_defaults
+                    .iter()
+                    .map(|name| js_string_literal(name))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                rendered.push_str("Omit<");
+                rendered.append_rendered(authored_props_clone(&authored));
+                rendered.push_str(&format!(", {keys}> & Partial<Pick<"));
+                rendered.append_rendered(authored);
+                rendered.push_str(&format!(", {keys}>>"));
+            }
         }
         Some(PropsTs::Inline(entries)) if !entries.is_empty() => {
             rendered.push_str("{ ");
@@ -3206,24 +5179,128 @@ fn render_props_shape_type(
     rendered
 }
 
+fn render_authored_props_argument(
+    argument: &AuthoredPropsArgument,
+    defaulted_prop_names: &[String],
+    generic_props: Option<&FxHashSet<&str>>,
+) -> (RenderedText, Vec<String>) {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new(&argument.text, &allocator);
+    let mut handled_defaults = FxHashSet::default();
+    for member in &argument.members {
+        transform
+            .try_add_sourcemap_location(member.key_start)
+            .expect("parser-owned key geometry must be a UTF-8 boundary");
+        if defaulted_prop_names.iter().any(|name| name == &member.name) {
+            handled_defaults.insert(member.name.as_str());
+            if !member.optional {
+                transform.append_left(member.key_end, "?");
+            }
+        }
+        if generic_props.is_some_and(|props| props.contains(member.name.as_str())) {
+            if let Some((start, end)) = member.type_range {
+                transform.overwrite(start, end, &format!("T_{}", member.name));
+            }
+        }
+    }
+    let unresolved_defaults = defaulted_prop_names
+        .iter()
+        .filter(|name| !handled_defaults.contains(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (text, ranges, unmapped_boundaries) =
+        transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    (
+        compose_authored_transform(text, ranges, unmapped_boundaries, argument.source_start),
+        unresolved_defaults,
+    )
+}
+
+fn compose_authored_transform(
+    text: String,
+    ranges: Vec<GeneratedSourceRange>,
+    unmapped_boundaries: Vec<u32>,
+    source_start: u32,
+) -> RenderedText {
+    let mut rendered = RenderedText::default();
+    let mut cursor = 0_usize;
+    for range in ranges {
+        let generated_start = range.generated_start as usize;
+        let generated_end = range.generated_end as usize;
+        if generated_start > cursor {
+            rendered.push_str(&text[cursor..generated_start]);
+        }
+        if generated_end > generated_start {
+            let range_text = &text[generated_start..generated_end];
+            if range.replacement {
+                // Replacement text has no general byte relation to the authored
+                // range. Only the semantic producer that owns a typed token
+                // anchor may map it; declaration-safe inferred insertions and
+                // generic substitutions therefore remain deliberately unmapped.
+                rendered.push_str(range_text);
+            } else {
+                rendered.push_mapped(
+                    range_text,
+                    Span::new(
+                        source_start.saturating_add(range.source_start),
+                        source_start
+                            .saturating_add(range.source_start)
+                            .saturating_add((generated_end - generated_start) as u32),
+                    ),
+                );
+            }
+        }
+        cursor = generated_end;
+    }
+    if cursor < text.len() {
+        rendered.push_str(&text[cursor..]);
+    }
+    for boundary in unmapped_boundaries {
+        let generated_offset = boundary as usize;
+        match rendered
+            .mappings
+            .binary_search_by_key(&generated_offset, |mapping| mapping.generated_offset)
+        {
+            Ok(index) => rendered.mappings[index].source_span = None,
+            Err(index) => rendered.mappings.insert(
+                index,
+                GeneratedMapping {
+                    generated_offset,
+                    source_span: None,
+                },
+            ),
+        }
+    }
+    rendered
+}
+
+fn authored_props_clone(rendered: &RenderedText) -> RenderedText {
+    RenderedText {
+        text: rendered.text.clone(),
+        mappings: rendered.mappings.clone(),
+    }
+}
+
 fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
     models
         .iter()
         .map(|model| {
             let mut rendered = RenderedText::default();
             rendered.push_str("{ ");
+            let model_literal = js_property_key(&model.name);
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&model.name, map_span);
+                rendered.push_mapped(&model_literal, map_span);
             } else {
-                rendered.push_str(&model.name);
+                rendered.push_str(&model_literal);
             }
-            rendered.push_str("?: ");
+            rendered.push_str(if model.optional { "?: " } else { ": " });
             rendered.push_str(&model.ts_type);
             rendered.push_str("; ");
+            let update_literal = js_string_literal(&format!("onUpdate:{}", model.name));
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&format!("\"onUpdate:{}\"", model.name), map_span);
+                rendered.push_mapped(&update_literal, map_span);
             } else {
-                rendered.push_str(&format!("\"onUpdate:{}\"", model.name));
+                rendered.push_str(&update_literal);
             }
             rendered.push_str("?: (v: ");
             rendered.push_str(&model.ts_type);
@@ -3236,6 +5313,7 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
 fn render_full_props_type(
     props_ts: &Option<PropsTs>,
     emits: &[EmitEntry],
+    terminal_emits: Option<&str>,
     models: &[ModelEntry],
     defaulted_prop_names: &[String],
     narrowing: Option<&TscNarrowingInfo>,
@@ -3255,6 +5333,13 @@ fn render_full_props_type(
         parts.push(props_part);
     }
     parts.extend(render_model_props_type(models));
+    if let Some(splice) = terminal_emits {
+        let mut terminal = RenderedText::default();
+        terminal.push_str("__Verter_EmitsToProps<__Verter_EmitFn<");
+        terminal.push_str(splice);
+        terminal.push_str(">>");
+        parts.push(terminal);
+    }
     let emits_part = render_emits_to_props_type(emits);
     if !emits_part.is_empty() {
         parts.push(emits_part);
@@ -3281,14 +5366,17 @@ fn render_full_props_type(
 fn emit_handler_type(emit: &EmitEntry) -> String {
     match &emit.payload {
         EmitPayload::Unknown => "(...args: unknown[]) => void".to_string(),
-        EmitPayload::Call { params_text } => {
+        EmitPayload::Call {
+            params_text,
+            handler_params_text,
+        } => {
+            let params_text = handler_params_text.as_deref().unwrap_or(params_text);
             if params_text.is_empty() {
                 "() => void".to_string()
             } else {
                 format!("({}) => void", params_text)
             }
         }
-        EmitPayload::Tuple { tuple_text } => format!("(...args: {}) => void", tuple_text),
     }
 }
 
@@ -3356,54 +5444,6 @@ fn hyphenate_event_name(s: &str) -> String {
     result
 }
 
-fn looks_like_named_type_reference(type_text: &str) -> bool {
-    let trimmed = type_text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if matches!(trimmed.as_bytes()[0], b'{' | b'[' | b'(' | b'"' | b'\'') {
-        return false;
-    }
-    if trimmed.contains(['|', '&', ';', ':', '=']) {
-        return false;
-    }
-
-    !matches!(
-        trimmed,
-        "string"
-            | "number"
-            | "boolean"
-            | "symbol"
-            | "bigint"
-            | "any"
-            | "unknown"
-            | "never"
-            | "void"
-            | "null"
-            | "undefined"
-            | "true"
-            | "false"
-    )
-}
-
-fn wrap_defaulted_props(base: &str, defaulted_prop_names: &[String]) -> String {
-    if defaulted_prop_names.is_empty() {
-        return base.to_string();
-    }
-
-    let quoted_names = defaulted_prop_names
-        .iter()
-        .map(|name| format!("'{}'", name))
-        .collect::<Vec<_>>()
-        .join(" | ");
-
-    format!(
-        "Omit<{base}, {quoted_names}> & Partial<Pick<{base}, {quoted_names}>>",
-        base = base,
-        quoted_names = quoted_names,
-    )
-}
-
 /// Map HTML tag name to TypeScript DOM element type.
 fn html_tag_to_element_type(tag: &str) -> String {
     let element = match tag {
@@ -3446,12 +5486,12 @@ fn ts_to_constructor(ts: &str) -> &'static str {
     }
 }
 
-/// Convert `RuntimeType` list to a TypeScript type string.
+/// Convert runtime-constructor syntax to a TypeScript type string.
 ///
 /// When a union contains `Function`, the arrow type is wrapped in parentheses
 /// to avoid TS1385 ("Function type notation must be parenthesized when used
 /// in a union or intersection type").
-fn runtime_types_to_ts(types: &[RuntimeType]) -> String {
+fn runtime_types_to_ts(types: &[RuntimeConstructorSyntax]) -> String {
     if types.is_empty() {
         return "unknown".to_string();
     }
@@ -3459,50 +5499,22 @@ fn runtime_types_to_ts(types: &[RuntimeType]) -> String {
     let ts: Vec<&str> = types
         .iter()
         .map(|t| match t {
-            RuntimeType::String => "string",
-            RuntimeType::Number => "number",
-            RuntimeType::Boolean => "boolean",
-            RuntimeType::Object => "Record<string, unknown>",
-            RuntimeType::Array => "unknown[]",
-            RuntimeType::Function => {
+            RuntimeConstructorSyntax::String => "string",
+            RuntimeConstructorSyntax::Number => "number",
+            RuntimeConstructorSyntax::Boolean => "boolean",
+            RuntimeConstructorSyntax::Object => "Record<string, unknown>",
+            RuntimeConstructorSyntax::Array => "unknown[]",
+            RuntimeConstructorSyntax::Function => {
                 if needs_parens {
                     "((...args: unknown[]) => unknown)"
                 } else {
                     "(...args: unknown[]) => unknown"
                 }
             }
-            RuntimeType::Symbol => "symbol",
-            RuntimeType::BuiltIn(_) => "unknown",
-            RuntimeType::Null => "null",
-            RuntimeType::Unknown => "unknown",
+            RuntimeConstructorSyntax::Symbol => "symbol",
         })
         .collect();
     ts.join(" | ")
-}
-
-/// Find a leading JSDoc comment for a property at the given position.
-///
-/// OXC's `Comment.attached_to` is the byte offset of the token the comment precedes.
-/// We match comments where `attached_to == target_start` and the comment is a JSDoc
-/// block comment (starts with `/**`).
-fn find_leading_jsdoc(
-    comments: &[Comment],
-    target_start: u32,
-    content_str: &str,
-) -> Option<String> {
-    for comment in comments {
-        if comment.attached_to == target_start
-            && comment.is_block()
-            && matches!(
-                comment.content,
-                CommentContent::Jsdoc | CommentContent::JsdocLegal
-            )
-        {
-            let text = &content_str[comment.span.start as usize..comment.span.end as usize];
-            return Some(text.to_string());
-        }
-    }
-    None
 }
 
 fn minimal_source_map() -> String {
@@ -3527,32 +5539,48 @@ pub fn build_tsc_source_map(
     let source_resolver = PositionResolver::new_for_sourcemap(sfc_source);
 
     for mapping in mappings {
-        if mapping.generated_offset > code.len()
-            || mapping.source_span.start as usize > sfc_source.len()
-        {
+        if mapping.generated_offset > code.len() {
             continue;
         }
         let (generated_line, generated_col) =
             generated_resolver.offset_to_line_and_col(mapping.generated_offset);
-        let (source_line, source_col) =
-            source_resolver.offset_to_line_and_col(mapping.source_span.start as usize);
-        builder.add_token(
-            (generated_line - 1) as u32,
-            (generated_col - 1) as u32,
-            (source_line - 1) as u32,
-            (source_col - 1) as u32,
-            Some(source_id),
-            None,
-        );
+        if let Some(source_span) = mapping.source_span {
+            if source_span.start as usize > sfc_source.len() {
+                continue;
+            }
+            let (source_line, source_col) =
+                source_resolver.offset_to_line_and_col(source_span.start as usize);
+            builder.add_token(
+                (generated_line - 1) as u32,
+                (generated_col - 1) as u32,
+                (source_line - 1) as u32,
+                (source_col - 1) as u32,
+                Some(source_id),
+                None,
+            );
+        } else {
+            builder.add_token(
+                (generated_line - 1) as u32,
+                (generated_col - 1) as u32,
+                0,
+                0,
+                None,
+                None,
+            );
+        }
     }
 
     builder.into_sourcemap().to_json_string()
 }
 
-/// Detect `useAttrs<T>()` calls in the script setup body and return the type parameter text.
+/// Detect `useAttrs<T>()` calls and retain the original parser-owned type node's
+/// text plus dependency paths.
 ///
 /// Used as a fallback for `attrs_type` when no `attrs` attribute is present on the script tag.
-fn detect_use_attrs_type_arg_tsc<'a>(body: &[Statement<'a>], source: &'a str) -> Option<String> {
+fn detect_use_attrs_type_arg_tsc<'a>(
+    body: &[Statement<'a>],
+    source: &'a str,
+) -> Option<ParsedAttrsType> {
     for stmt in body {
         let call = match stmt {
             Statement::VariableDeclaration(var_decl) => var_decl
@@ -3578,7 +5606,13 @@ fn detect_use_attrs_type_arg_tsc<'a>(body: &[Statement<'a>], source: &'a str) ->
                             let text = &source[span.start as usize..span.end as usize];
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {
-                                return Some(trimmed.to_string());
+                                return Some(ParsedAttrsType {
+                                    text: trimmed.to_owned(),
+                                    dependency_paths:
+                                        verter_type_expr_oxc::collect_type_dependency_paths(param)
+                                            .into_iter()
+                                            .collect(),
+                                });
                             }
                         }
                     }

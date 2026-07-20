@@ -75,6 +75,7 @@ fn typeof_carrier_node(
     let value_root = ValueRootKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from(name),
@@ -277,6 +278,7 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
     let value_root = ValueRootKey {
         scope: ScopeId {
             canonical_id: Arc::from("/holder.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("C"),
@@ -481,6 +483,7 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
     let value_root = ValueRootKey {
         scope: ScopeId {
             canonical_id: Arc::from("/one.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("g"),
@@ -669,6 +672,7 @@ fn typeof_resolution_stays_within_instantiate_window() {
             // resolves back to `SelfT` while `SelfT` is on the active stack.
             let self_t = ResolvedDeclSlotIdentity::type_slot_unscoped(
                 std::sync::Arc::from("/leak.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 std::sync::Arc::from("SelfT"),
             );
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(

@@ -112,6 +112,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -167,6 +168,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -220,6 +222,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -274,6 +277,7 @@ fn instantiate_vue_default_node(
         crate::semantic_query::InstantiateKey::new(
             crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
@@ -310,6 +314,7 @@ fn typeof_default_construct_return_node(
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(canonical_id),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 local_scope: None,
             },
             name: Arc::from("default"),
@@ -416,6 +421,48 @@ fn instantiate_vue_default_resolves_public_instance_object() {
         emit_fn.return_type.as_deref(),
         Some(&TypeExpr::Primitive(PrimitiveName::Void)),
         "the emit signature returns void"
+    );
+}
+
+/// The synthesized Vue default belongs to the carrier instance owner. A
+/// module-owner query with the same canonical/name must not discover that
+/// body by name: exact owner identity is part of the declaration slot.
+#[test]
+fn instantiate_vue_default_rejects_wrong_module_owner() {
+    const A: &str = "/w/A.vue";
+    let host = make_host_with_files(&[(A, A_VUE)]);
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from(A),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("default"),
+            ),
+            Arc::from(Vec::new().into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+        ),
+    )) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
+        QueryResult::Error(_) => return,
+    };
+
+    assert!(
+        !matches!(
+            crate::project_semantic_dispatch::node_data_for(&host_ctx, node).as_deref(),
+            Some(SemanticNodeData::Object(view))
+                if view.members.iter().any(|member| member.name.as_ref() == "$props")
+        ),
+        "a Module(0) slot must not reuse the Instance(0) synthesized default body"
     );
 }
 

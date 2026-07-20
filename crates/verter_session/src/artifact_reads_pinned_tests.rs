@@ -447,7 +447,7 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
 /// content-pinned `ensure_indexed_ready` read gates on the scheduler's
 /// current whole hash, MISSES the stale candidate, and re-materialises
 /// the CURRENT artifact — whose route surface the view then publishes,
-/// agreeing with `current_route_surface_hash()` (the production
+/// agreeing with `current_derived_fact_hash(Route)` (the production
 /// route-fact oracle, which is content-pinned).
 ///
 /// Discriminating fixture: `probe.ts` is materialised (real
@@ -462,7 +462,7 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
 /// A permissive (`get_any`-style, non-hash-pinned) read regression would
 /// return the planted stale candidate instead of re-materialising; the
 /// view's `Route` hash would then be the STALE donor surface and
-/// disagree with `current_route_surface_hash()` — this test FAILS on
+/// disagree with `current_derived_fact_hash(Route)` — this test FAILS on
 /// that regression.
 #[test]
 fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerialization() {
@@ -481,8 +481,8 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
     // from the live (current-content) shallow state. This is the hash a
     // correct `HostStoreView` build must publish.
     let current_route_surface = host
-        .current_route_surface_hash(probe)
-        .expect("probe declares a resolvable route surface → current_route_surface_hash is Some");
+        .current_derived_fact_hash(probe, crate::resolver_core::DerivedFactKind::Route)
+        .expect("probe declares a resolvable route surface → current Route hash is Some");
 
     // A DONOR file with a DIFFERENT export surface. Its shallow state is
     // harvested to give the planted stale `IndexedReady` a route surface
@@ -563,9 +563,9 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
     // route-dependent cache entry.
     assert_eq!(
         view_route_hash,
-        host.current_route_surface_hash(probe),
+        host.current_derived_fact_hash(probe, crate::resolver_core::DerivedFactKind::Route),
         "HostStoreView::build's `Route` derived hash MUST agree with \
-         `current_route_surface_hash()` — the producer and the validator must observe \
+         `current_derived_fact_hash(Route)` — the producer and the validator must observe \
          one route surface for the canonical",
     );
 }

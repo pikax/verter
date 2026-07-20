@@ -317,11 +317,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             }) => (
                 DeclIdentity {
                     canonical_id: Arc::clone(canonical_id),
+                    owner: *owner,
                     whole_hash: *whole_hash,
                     decl_name: Arc::clone(name),
                 },
@@ -354,6 +356,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     Arc::clone(&identity.canonical_id),
+                    identity.owner,
                     Arc::clone(&identity.decl_name),
                 ),
                 args,
@@ -436,10 +439,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // shape) and dropped the decided branch's contribution.
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             }) => Some(DeclIdentity {
                 canonical_id: Arc::clone(canonical_id),
+                owner: *owner,
                 whole_hash: *whole_hash,
                 decl_name: Arc::clone(name),
             }),
@@ -466,6 +471,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
                         Arc::clone(&identity.canonical_id),
+                        identity.owner,
                         Arc::clone(&identity.decl_name),
                     ),
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -527,8 +533,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             graph.node_data(normalised).as_deref()
         {
             let owner_canonical = Arc::clone(&base.canonical_id);
-            let slot =
-                self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+            let slot = self.type_slot_for(
+                Arc::clone(&base.canonical_id),
+                base.owner,
+                Arc::clone(&base.decl_name),
+            );
             let args: Arc<[SemanticNodeId]> = Arc::from(
                 args.iter()
                     .map(|arg| {

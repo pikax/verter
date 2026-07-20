@@ -260,18 +260,32 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "no_text_based_macro_surface_projection_helpers",
             "no_role_inference_from_name_suffix",
             "no_pick_or_omit_string_prefix_check",
-            // Single-resolution-engine shrinking-ledger guards: there is
-            // exactly ONE query-time type-resolution engine (the canonical
-            // typed-IR dispatch). These forbid a NEW production site of the
-            // doomed eager OXC `resolve_type` engine / prepared-surface walker
-            // while the second engine is deleted across the consolidation
-            // stages. The rule is codified in this section + "Shared Optimized
-            // Codebase" (no separate heading).
-            "no_new_from_eager_meta_production_site",
-            "no_new_duplicate_read_surface_members_definition",
-            "no_new_type_surface_engine_path_production_file",
-            "no_new_resolved_elements_production_file",
-            "no_new_prepared_surface_projection_production_file",
+            // The former single-resolution-engine shrinking-ledger scanners
+            // (`no_new_*` name-keyed file scanners over the doomed eager OXC
+            // `resolve_type` engine / `ResolvedElements` / prepared-surface
+            // walker) retired WITH the engine itself: the parser-owned
+            // `type_surface` engine is deleted from the tree, so the ledger
+            // reached its empty floor. The single-engine invariant is now
+            // held structurally (the compiler consumes only the
+            // dependency-neutral macro DTO — no external-type map, no
+            // ResolvedElements input) and behaviourally by the Vue macro
+            // boundary suite registered under "Vue Macro Semantic Boundary".
+        ],
+    ),
+    (
+        // TypeInfo-owned Vue macro compilation boundary: the compiler owns
+        // macro SYNTAX and emission only; typed macro surfaces arrive from
+        // TypeInfo through the explicit `VueMacroSemanticInput` argument,
+        // runtime and TSC are independent demands, and a typed macro without
+        // its required bundle fails closed at the authored anchor.
+        "Vue Macro Semantic Boundary",
+        &[
+            "vmrs_boundary_missing_runtime_semantic_bundle_fails_closed",
+            "vmrs_runtime_bundle_is_the_only_type_based_props_authority",
+            "vmrs_invalid_macro_shapes_render_role_specific_diagnostics_on_both_rails",
+            "vmrs_runtime_failures_preserve_typed_reason_detail_and_absolute_anchor",
+            "vmrs_tsc_unavailable_diagnostics_preserve_exact_outcome_reason_and_detail",
+            "pinned_vue_macro_oracle_carries_provenance_and_discriminating_runtime_facts",
         ],
     ),
     (

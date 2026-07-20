@@ -7,7 +7,7 @@ use std::sync::Arc;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
 use oxc_parser::{ParseOptions, Parser};
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 
 use verter_compiler::diagnostics::DiagnosticSeverity;
 use verter_compiler::parser::types::ParsedSfc;
@@ -20,6 +20,179 @@ use crate::types::{
     HostDiagnostic, HostSeverity, ParseSnapshot, PreprocessorBlockType, PreprocessorRequest,
     SliceHashes, SrcBlockInfo,
 };
+
+/// Closed failure while assigning carrier statements to typed script regions.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ScriptOwnerIndexError {
+    #[error("carrier script regions overlap at [{left_start}, {left_end}) and [{right_start}, {right_end})")]
+    OverlappingRegions {
+        left_start: u32,
+        left_end: u32,
+        right_start: u32,
+        right_end: u32,
+    },
+    #[error("top-level statement {statement_index} at [{start}, {end}) is outside every carrier script region")]
+    UnownedStatement {
+        statement_index: usize,
+        start: u32,
+        end: u32,
+    },
+    #[error("top-level statement {statement_index} at [{start}, {end}) overlaps multiple carrier script regions")]
+    AmbiguousStatement {
+        statement_index: usize,
+        start: u32,
+        end: u32,
+    },
+    #[error(transparent)]
+    InvalidTable(#[from] verter_semantic::analysis::TopLevelOwnerTableError),
+    #[error(transparent)]
+    InvalidRegions(#[from] verter_semantic::analysis::TopLevelOwnerRegionError),
+    #[error("parser owner mapping length mismatch: program has {statement_count} statements, mapping has {owner_count}")]
+    ParserTable {
+        statement_count: usize,
+        owner_count: usize,
+    },
+}
+
+fn script_owner_index_diagnostic(error: &ScriptOwnerIndexError) -> HostDiagnostic {
+    HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: "script-owner-index".to_string(),
+        message: error.to_string(),
+        span: Some(verter_span::Span::new(0, 0)),
+    }
+}
+
+pub(crate) fn top_level_owner_table(
+    program: &Program<'_>,
+    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
+) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+    let Some(artifact) = framework_parse else {
+        return Ok(
+            verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len()),
+        );
+    };
+    top_level_owner_table_from_regions(program, &artifact.common.script_regions)
+}
+
+fn top_level_owner_table_from_regions(
+    program: &Program<'_>,
+    regions: &[verter_language::ScriptRegion],
+) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+    let regions = regions
+        .iter()
+        .map(|region| (region.span, region.kind))
+        .collect::<Vec<_>>();
+    top_level_owner_table_from_region_spans(program, &regions)
+}
+
+fn vue_top_level_owner_table(
+    program: &Program<'_>,
+    parsed: &ParsedSfc,
+) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+    let mut regions = Vec::new();
+    if let Some(span) = parsed.script().and_then(|script| script.content) {
+        regions.push((
+            verter_span::Span::new(span.start, span.end),
+            verter_language::ScriptRegionKind::Module,
+        ));
+    }
+    if let Some(span) = parsed.script_setup().and_then(|script| script.content) {
+        regions.push((
+            verter_span::Span::new(span.start, span.end),
+            verter_language::ScriptRegionKind::Instance,
+        ));
+    }
+    top_level_owner_table_from_region_spans(program, &regions)
+}
+
+fn top_level_owner_table_from_region_spans(
+    program: &Program<'_>,
+    regions: &[(verter_span::Span, verter_language::ScriptRegionKind)],
+) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+    let mut regions = regions.to_vec();
+    // A script block with no inline content — an external `<script src=...>`
+    // block, or a genuinely empty `<script></script>` — contributes NO
+    // top-level statements to the parsed program (an external source is
+    // merged in later, at compile time). The carrier emits an EMPTY content
+    // span for such a block (the `tag_open.end` fallback, `start == end`).
+    // Such a region owns nothing at this stage, so drop it before building
+    // the owner mapping: keeping it would consume an owner ordinal and make
+    // `try_with_regions` reject the empty span as `EmptyRegion`, so a
+    // `<script src=...>` beside a `<script setup>` (or any empty script
+    // block) would fail to index.
+    regions.retain(|(span, _)| span.start < span.end);
+    regions.sort_by_key(|(span, _)| (span.start, span.end));
+    for pair in regions.windows(2) {
+        if pair[1].0.start < pair[0].0.end {
+            return Err(ScriptOwnerIndexError::OverlappingRegions {
+                left_start: pair[0].0.start,
+                left_end: pair[0].0.end,
+                right_start: pair[1].0.start,
+                right_end: pair[1].0.end,
+            });
+        }
+    }
+
+    let mut module_ordinal = 0_u32;
+    let mut instance_ordinal = 0_u32;
+    let mut frontmatter_ordinal = 0_u32;
+    let regions = regions
+        .into_iter()
+        .map(|(span, kind)| {
+            let owner = match kind {
+                verter_language::ScriptRegionKind::Module => {
+                    let owner = verter_type_expr::TopLevelOwnerId::module(module_ordinal);
+                    module_ordinal = module_ordinal.saturating_add(1);
+                    owner
+                }
+                verter_language::ScriptRegionKind::Instance => {
+                    let owner = verter_type_expr::TopLevelOwnerId::instance(instance_ordinal);
+                    instance_ordinal = instance_ordinal.saturating_add(1);
+                    owner
+                }
+                verter_language::ScriptRegionKind::Frontmatter => {
+                    let owner = verter_type_expr::TopLevelOwnerId::frontmatter(frontmatter_ordinal);
+                    frontmatter_ordinal = frontmatter_ordinal.saturating_add(1);
+                    owner
+                }
+            };
+            (span, owner)
+        })
+        .collect::<Vec<_>>();
+
+    let mut owners = Vec::with_capacity(program.body.len());
+    for (statement_index, statement) in program.body.iter().enumerate() {
+        let span = statement.span();
+        let mut matches = regions
+            .iter()
+            .filter(|(region, _)| span.start >= region.start && span.end <= region.end);
+        let Some((_, owner)) = matches.next() else {
+            return Err(ScriptOwnerIndexError::UnownedStatement {
+                statement_index,
+                start: span.start,
+                end: span.end,
+            });
+        };
+        if matches.next().is_some() {
+            return Err(ScriptOwnerIndexError::AmbiguousStatement {
+                statement_index,
+                start: span.start,
+                end: span.end,
+            });
+        }
+        owners.push(*owner);
+    }
+    let table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+        program.body.len(),
+        owners,
+    )?;
+    Ok(table.try_with_regions(
+        regions
+            .into_iter()
+            .map(|(span, owner)| verter_semantic::analysis::TopLevelOwnerRegion { owner, span }),
+    )?)
+}
 
 /// Zero-copy attribute extraction: returns slices borrowed from `source`.
 pub(crate) fn extract_attrs<'a>(props: &[NodeProp], source: &'a str) -> Vec<(&'a str, &'a str)> {
@@ -191,6 +364,7 @@ pub(crate) fn carrier_parse_snapshot(
             parsed,
             provenance,
             VueScriptProgram::ParseHere,
+            None,
         );
         return Some((snapshot, artifact));
     }
@@ -203,6 +377,7 @@ pub(crate) fn carrier_parse_snapshot(
             &artifact,
             provenance,
             FrameworkScriptProgram::ParseHere,
+            None,
         );
         return Some((snapshot, artifact));
     }
@@ -230,6 +405,7 @@ pub(crate) fn capture_synth_script_candidates(
         verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
     >,
     source_type: SourceType,
+    owner_table: &verter_semantic::analysis::TopLevelOwnerTable,
 ) -> verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet {
     use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
     if active_providers.is_empty() {
@@ -256,6 +432,7 @@ pub(crate) fn capture_synth_script_candidates(
             &program,
             module_script_region,
             framework_mode_hint,
+            owner_table,
         );
     // Producer-side locator absolutization: route each envelope through its
     // OWNING provider (typed downcast + coherent `stable_hash` rebuild) so the
@@ -432,6 +609,7 @@ fn build_svelte_snapshot_from_eval_source(
     artifact: &verter_language::FrameworkParseArtifact,
     provenance: &crate::types::MetaProvenance,
     script_program: FrameworkScriptProgram<'_>,
+    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -590,7 +768,7 @@ fn build_svelte_snapshot_from_eval_source(
         .map(oxc_source_type_from_neutral)
         .unwrap_or_else(SourceType::ts);
 
-    let fatal_snapshot = || ParseSnapshot {
+    let fatal_snapshot = |owner_error: Option<&ScriptOwnerIndexError>| ParseSnapshot {
         whole_hash,
         semantic_hash,
         slices: SliceHashes::default(),
@@ -598,7 +776,9 @@ fn build_svelte_snapshot_from_eval_source(
         meta: FileMeta::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
-        parse_diagnostics: DiagnosticsSnapshot::default(),
+        parse_diagnostics: owner_error.map_or_else(DiagnosticsSnapshot::default, |error| {
+            DiagnosticsSnapshot::from_vec(vec![script_owner_index_diagnostic(error)])
+        }),
         script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
@@ -619,14 +799,28 @@ fn build_svelte_snapshot_from_eval_source(
                 "a shared eval program must carry this carrier file's \
                  position-preserving eval source",
             );
-            build_non_sfc_snapshot_from_program(
-                canonical_id,
-                eval_source,
-                source_type,
-                program.borrow_dependent(),
-            )
+            if let Some(owners) = script_owners {
+                build_snapshot_from_program_with_owners(
+                    canonical_id,
+                    eval_source,
+                    source_type,
+                    program.borrow_dependent(),
+                    owners,
+                )
+            } else {
+                match top_level_owner_table(program.borrow_dependent(), Some(artifact)) {
+                    Ok(owners) => build_snapshot_from_program_with_owners(
+                        canonical_id,
+                        eval_source,
+                        source_type,
+                        program.borrow_dependent(),
+                        &owners,
+                    ),
+                    Err(error) => fatal_snapshot(Some(&error)),
+                }
+            }
         }
-        FrameworkScriptProgram::SharedFatal => fatal_snapshot(),
+        FrameworkScriptProgram::SharedFatal => fatal_snapshot(None),
         FrameworkScriptProgram::ParseHere => {
             // No flight-shared program: parse the eval source once here. This is
             // the scheduler Source-stage snapshot lane — counted on the same
@@ -641,14 +835,18 @@ fn build_svelte_snapshot_from_eval_source(
             });
             let result = parser.parse();
             if result.panicked {
-                fatal_snapshot()
+                fatal_snapshot(None)
             } else {
-                build_non_sfc_snapshot_from_program(
-                    canonical_id,
-                    eval_source,
-                    source_type,
-                    &result.program,
-                )
+                match top_level_owner_table(&result.program, Some(artifact)) {
+                    Ok(owners) => build_snapshot_from_program_with_owners(
+                        canonical_id,
+                        eval_source,
+                        source_type,
+                        &result.program,
+                        &owners,
+                    ),
+                    Err(error) => fatal_snapshot(Some(&error)),
+                }
             }
         }
     };
@@ -1004,6 +1202,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     parsed: &ParsedSfc,
     provenance: &crate::types::MetaProvenance,
     script_program: VueScriptProgram<'_>,
+    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -1223,13 +1422,24 @@ pub(crate) fn build_vue_snapshot_from_parsed(
                 "a shared script program must carry this SFC's \
                  position-preserving extracted script",
             );
-            vue_script_walks_from_program(
-                program.source_str(),
-                program.source_type(),
-                program.borrow_dependent(),
-                /* needs_exports */ true,
-                analysis_scope.needs_script_analysis(),
-            )
+            match script_owners {
+                Some(owners) => vue_script_walks_from_program(
+                    program.source_str(),
+                    program.source_type(),
+                    program.borrow_dependent(),
+                    owners,
+                    /* needs_exports */ true,
+                    analysis_scope.needs_script_analysis(),
+                ),
+                None => vue_script_walks_for_sfc(
+                    program.source_str(),
+                    program.source_type(),
+                    program.borrow_dependent(),
+                    parsed,
+                    /* needs_exports */ true,
+                    analysis_scope.needs_script_analysis(),
+                ),
+            }
         }
         VueScriptProgram::SharedFatal => VueScriptOutputs {
             export_signatures: Vec::new(),
@@ -1564,6 +1774,7 @@ fn vue_script_walks_from_program(
     script_source: &str,
     source_type: SourceType,
     program: &Program<'_>,
+    owners: &verter_semantic::analysis::TopLevelOwnerTable,
     needs_exports: bool,
     needs_script_analysis: bool,
 ) -> VueScriptOutputs {
@@ -1594,11 +1805,12 @@ fn vue_script_walks_from_program(
         let (script_analysis, script_panic_diag) = catch_analysis_panic(
             "script analysis",
             std::panic::AssertUnwindSafe(|| {
-                verter_semantic::analysis::build_script_analysis_with_scope_from_program(
+                verter_semantic::analysis::build_script_analysis_with_scope_from_program_with_owners(
                     script_source,
                     source_type,
                     program,
                     verter_semantic::analysis::AnalysisScope::all(),
+                    owners,
                 )
             }),
         );
@@ -1609,6 +1821,32 @@ fn vue_script_walks_from_program(
     }
 
     outputs
+}
+
+fn vue_script_walks_for_sfc(
+    script_source: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    parsed: &ParsedSfc,
+    needs_exports: bool,
+    needs_script_analysis: bool,
+) -> VueScriptOutputs {
+    match vue_top_level_owner_table(program, parsed) {
+        Ok(owners) => vue_script_walks_from_program(
+            script_source,
+            source_type,
+            program,
+            &owners,
+            needs_exports,
+            needs_script_analysis,
+        ),
+        Err(error) => VueScriptOutputs {
+            export_signatures: Vec::new(),
+            script_analysis: needs_script_analysis
+                .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            panic_diags: vec![script_owner_index_diagnostic(&error)],
+        },
+    }
 }
 
 /// The single `.vue` script-program parse for the snapshot path.
@@ -1677,10 +1915,11 @@ fn build_vue_script_outputs(
         return outputs;
     }
 
-    let mut walked = vue_script_walks_from_program(
+    let mut walked = vue_script_walks_for_sfc(
         &script_source,
         source_type,
         &parse_result.program,
+        parsed,
         needs_exports,
         needs_script_analysis,
     );
@@ -1794,6 +2033,7 @@ pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
     framework_parse: &verter_language::FrameworkParseArtifact,
     provenance: &crate::types::MetaProvenance,
     script_program: FrameworkScriptProgram<'_>,
+    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let mut spans: Vec<(u32, u32)> = framework_parse
         .common
@@ -1811,6 +2051,7 @@ pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
         framework_parse,
         provenance,
         script_program,
+        script_owners,
     )
 }
 
@@ -1897,6 +2138,17 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     source_type: SourceType,
     program: &Program<'_>,
 ) -> ParseSnapshot {
+    let owners = verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len());
+    build_snapshot_from_program_with_owners(canonical_id, source, source_type, program, &owners)
+}
+
+fn build_snapshot_from_program_with_owners(
+    canonical_id: &str,
+    source: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
     let slices = SliceHashes::default();
     let descriptor = DescriptorMin::default();
@@ -1905,7 +2157,7 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     let export_signatures =
         verter_semantic::analysis::build_export_signatures_from_program(source, program);
     let mut script_analysis =
-        verter_semantic::analysis::build_script_analysis_with_scope_from_program(
+        verter_semantic::analysis::build_script_analysis_with_scope_from_program_with_owners(
             source,
             source_type,
             program,
@@ -1918,6 +2170,7 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
                 | verter_semantic::analysis::AnalysisScope::VUE_API_USAGE
                 | verter_semantic::analysis::AnalysisScope::EXPORT_SIGNATURES
                 | verter_semantic::analysis::AnalysisScope::SCRIPT_USAGES,
+            owners,
         );
     // Producer-side locator absolutization: fill the analyzer's empty-sentinel
     // macro-payload anchors with THIS snapshot's producing canonical before
@@ -1994,6 +2247,93 @@ mod tests {
         verter_language::LanguageRegistry::global()
             .classify_static(id)
             .static_resolution()
+    }
+
+    fn fragment_span(source: &str, fragment: &str) -> verter_span::Span {
+        let start = source.find(fragment).expect("fixture fragment exists") as u32;
+        verter_span::Span::new(start, start + fragment.len() as u32)
+    }
+
+    #[test]
+    fn carrier_owner_table_preserves_kind_and_per_kind_region_ordinals() {
+        use verter_language::ScriptRegionKind::{Frontmatter, Instance, Module};
+
+        let source = "const moduleValue = 0;\nconst instanceZero = 0;\nconst frontmatter = 0;\nconst instanceOne = 1;";
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(!parsed.panicked);
+        let table = top_level_owner_table_from_region_spans(
+            &parsed.program,
+            &[
+                (fragment_span(source, "const moduleValue = 0;"), Module),
+                (fragment_span(source, "const instanceZero = 0;"), Instance),
+                (fragment_span(source, "const frontmatter = 0;"), Frontmatter),
+                (fragment_span(source, "const instanceOne = 1;"), Instance),
+            ],
+        )
+        .expect("exact carrier regions form a valid owner table");
+
+        assert_eq!(
+            table
+                .statements()
+                .iter()
+                .map(|statement| statement.owner)
+                .collect::<Vec<_>>(),
+            vec![
+                verter_type_expr::TopLevelOwnerId::module(0),
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                verter_type_expr::TopLevelOwnerId::frontmatter(0),
+                verter_type_expr::TopLevelOwnerId::instance(1),
+            ]
+        );
+        assert_eq!(table.regions().len(), 4, "comment ownership needs regions");
+    }
+
+    #[test]
+    fn carrier_owner_table_rejects_unowned_real_statement() {
+        let source = "const owned = 0;\nconst escaped = 1;";
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(!parsed.panicked);
+
+        assert!(matches!(
+            top_level_owner_table_from_region_spans(
+                &parsed.program,
+                &[(
+                    fragment_span(source, "const owned = 0;"),
+                    verter_language::ScriptRegionKind::Module,
+                )],
+            ),
+            Err(ScriptOwnerIndexError::UnownedStatement {
+                statement_index: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn carrier_owner_table_rejects_overlapping_regions_before_assignment() {
+        let source = "const value = 0;";
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(!parsed.panicked);
+
+        assert!(matches!(
+            top_level_owner_table_from_region_spans(
+                &parsed.program,
+                &[
+                    (
+                        verter_span::Span::new(0, source.len() as u32),
+                        verter_language::ScriptRegionKind::Module,
+                    ),
+                    (
+                        verter_span::Span::new(1, source.len() as u32),
+                        verter_language::ScriptRegionKind::Instance,
+                    ),
+                ],
+            ),
+            Err(ScriptOwnerIndexError::OverlappingRegions { .. })
+        ));
     }
 
     /// Runtime half of the `plain_script_dialect_from_file_language`

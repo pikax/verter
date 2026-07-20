@@ -2085,37 +2085,7 @@
     },
     {
       "file": "cache_invalidation.rs",
-      "function": "cache_invalidation_aug_patch_edit_surfaces_augmented_shape",
-      "block": "U11.PUBLIC_RELATION_SESSION",
-      "capability": "CacheInvalidation"
-    },
-    {
-      "file": "cache_invalidation.rs",
-      "function": "cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint",
-      "block": "U11.PUBLIC_RELATION_SESSION",
-      "capability": "CacheInvalidation"
-    },
-    {
-      "file": "cache_invalidation.rs",
-      "function": "cache_invalidation_barrel_edit_redirects_route_to_new_leaf",
-      "block": "U11.PUBLIC_RELATION_SESSION",
-      "capability": "CacheInvalidation"
-    },
-    {
-      "file": "cache_invalidation.rs",
-      "function": "cache_invalidation_basic_selected_leaf_edit_flips_published_surface",
-      "block": "U11.PUBLIC_RELATION_SESSION",
-      "capability": "CacheInvalidation"
-    },
-    {
-      "file": "cache_invalidation.rs",
       "function": "cache_invalidation_in_place_package_edit_flips_published_surface",
-      "block": "U11.PUBLIC_RELATION_SESSION",
-      "capability": "CacheInvalidation"
-    },
-    {
-      "file": "cache_invalidation.rs",
-      "function": "cache_invalidation_unselected_leaf_edit_keeps_warm_cache",
       "block": "U11.PUBLIC_RELATION_SESSION",
       "capability": "CacheInvalidation"
     },
@@ -2124,12 +2094,6 @@
       "function": "demand_boundary_barrel_resolution_does_not_load_unrequested_reexport",
       "block": "U11.PUBLIC_RELATION_SESSION",
       "capability": "DemandBoundary"
-    },
-    {
-      "file": "footprint.rs",
-      "function": "typeinfo_footprint_is_attached_for_named_symbol_request",
-      "block": "U11.PUBLIC_RELATION_SESSION",
-      "capability": "AuditFootprint"
     },
     {
       "file": "footprint.rs",

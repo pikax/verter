@@ -29,6 +29,7 @@
 //! from `scope` (the owning canonical) plus the resolver's augmentation
 //! index, exactly as the eager `Ref` path derives it.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -41,9 +42,9 @@ use crate::resolver_core::bare_name_resolve::{
 };
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    DeclIdentity, HashValue, NodeScopeId, PathSegment, ProjectionMode, ProjectionReductionContext,
-    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    DeclIdentity, HashValue, NodeScopeId, PartialReasonSet, PathSegment, ProjectionMode,
+    ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 
 /// Read-only, value-side resolution context for resolving a graph carrier
@@ -71,6 +72,99 @@ pub(crate) struct CarrierResolverContext<'a> {
     /// The reduction-demand axis (`Published` / `StructuralTransit`) plus the
     /// query mode — selects carrier-vs-execute at the demand point.
     reduction_context: ProjectionReductionContext,
+    /// Call-owned unresolved-import debt for the declaration currently being
+    /// instantiated. The reference never escapes that Instantiate call and is
+    /// absent from carrier-subject rehydration and nested Instantiate calls.
+    authored_resolution_debt: Option<&'a AuthoredResolutionDebtFrame>,
+}
+
+/// One call-owned unresolved-import debt created from an
+/// `AuthoredPartial(MissingExternalOwner)` prepared declaration.
+///
+/// Strict preparation cannot assign a file owner to an unresolved import, but
+/// the normal demand-time reference resolver may still resolve the demanded
+/// binding (notably through ambient external-module declarations). This frame
+/// starts clean and records debt only when body projection actually reaches an
+/// unresolved authored import in a root/surface-composition role. Unrelated
+/// imports and member-value references cannot poison root completeness. It is
+/// deliberately local to one Instantiate call: no dispatcher field,
+/// thread-local state, query-key state, or cross-call aliasing. Nested
+/// Instantiate calls construct independent frames.
+///
+/// `finish` must be called on every non-panicking exit. The drop assertion makes
+/// that discipline structural while allowing unwind cleanup to remain inert.
+pub(super) struct AuthoredResolutionDebtFrame {
+    canonical_id: Arc<str>,
+    owner: verter_type_expr::TopLevelOwnerId,
+    outstanding: Cell<bool>,
+    finished: Cell<bool>,
+}
+
+impl AuthoredResolutionDebtFrame {
+    pub(super) fn new(root_identity: &ResolvedRootIdentity) -> Self {
+        Self {
+            canonical_id: Arc::clone(&root_identity.canonical_id),
+            owner: root_identity.owner,
+            outstanding: Cell::new(false),
+            finished: Cell::new(false),
+        }
+    }
+
+    fn observe_unresolved_import_demand(
+        &self,
+        scope: &NodeScopeId,
+        context: ProjectionReductionContext,
+    ) {
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        else {
+            return;
+        };
+        if canonical_id.as_ref() == self.canonical_id.as_ref() && *owner == self.owner {
+            match context.merge_role() {
+                // A reference inside an object member's value does not remove
+                // any member from the authoritative root surface, and the
+                // lowered value stays an honest unresolved carrier the demand
+                // points retry: authored-partial preparation is
+                // declaration-wide, Instantiate completeness is demand-local —
+                // the member consumer that actually DEMANDS the value degrades
+                // it member-locally, and the demand-time `ImportRoute`
+                // recovery rail (recorded at the unresolved-head site)
+                // invalidates consuming entries when the dependency appears.
+                crate::semantic_query::MemberMergeRole::OwnBody => {}
+                // Root aliases, authored intersection/union arms, and real
+                // interface/class heritage arms contribute to the root
+                // surface. Losing one is authoritative missing-dependency
+                // debt and must keep the Instantiate ReturnOnly.
+                crate::semantic_query::MemberMergeRole::Authored
+                | crate::semantic_query::MemberMergeRole::Heritage => {
+                    self.outstanding.set(true);
+                }
+            }
+        }
+    }
+
+    /// Finalize this call-owned frame and report whether unresolved-owner debt
+    /// remains after normal reference resolution.
+    pub(super) fn finish(&self) -> bool {
+        debug_assert!(
+            !self.finished.replace(true),
+            "authored resolution debt must be finalized exactly once"
+        );
+        self.outstanding.get()
+    }
+}
+
+impl Drop for AuthoredResolutionDebtFrame {
+    fn drop(&mut self) {
+        debug_assert!(
+            std::thread::panicking() || self.finished.get(),
+            "authored resolution debt left an Instantiate call without finalization"
+        );
+    }
 }
 
 impl<'a> CarrierResolverContext<'a> {
@@ -93,6 +187,23 @@ impl<'a> CarrierResolverContext<'a> {
             scope_payload,
             shadowing,
             reduction_context,
+            authored_resolution_debt: None,
+        }
+    }
+
+    /// Attach the call-owned unresolved-owner debt of the declaration whose
+    /// body this resolver is traversing.
+    pub(super) fn with_authored_resolution_debt(
+        mut self,
+        debt: Option<&'a AuthoredResolutionDebtFrame>,
+    ) -> Self {
+        self.authored_resolution_debt = debt;
+        self
+    }
+
+    fn observe_unresolved_authored_import(&self) {
+        if let Some(debt) = self.authored_resolution_debt {
+            debt.observe_unresolved_import_demand(self.scope, self.reduction_context);
         }
     }
 
@@ -223,6 +334,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
+                            identity.owner,
                             Arc::clone(&identity.decl_name),
                         ),
                         type_args,
@@ -238,6 +350,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
+                            identity.owner,
                             Arc::clone(&identity.decl_name),
                         ),
                         type_args,
@@ -365,19 +478,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let reduction_context = ctx.reduction_context();
         let mode = ctx.mode();
 
-        // Global lib-type fast path: an unshadowed `Promise<...>` interns a
-        // nominal `InstantiationRef` carrier in EVERY mode — `Promise` has no
-        // structural reducer arm, so the carrier preserves the declaration
-        // identity + already-lowered type arguments for the demand points.
+        // Global lib-type fast path: an unshadowed runtime nominal interns a
+        // `DeclRef` / `InstantiationRef` carrier in EVERY mode, preserving its
+        // declaration identity for semantic classifiers and reducers.
         // Userland shadowing wins via the same `name_resolution` /
         // `ScopeShadowing` gates the builtin utilities use.
         if !name_resolution.contains_key(name.as_ref())
             && !shadowing.is_shadowing_lib(name.as_ref())
-            && self.is_promise_global_name(name.as_ref())
+            && self.runtime_nominal_global_name(name.as_ref()).is_some()
         {
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Builtin(DeclIdentity {
                     canonical_id: Arc::from("__builtin__"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
                     decl_name: Arc::clone(name),
                 }),
@@ -402,6 +515,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         {
             let builtin_identity = DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name: Arc::clone(name),
             };
@@ -418,18 +532,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the map does not carry (the carrier-subject entry rehydrates an EMPTY
         // map + the scope payload, so the fallback is the whole resolver there).
         let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
-            Some((
-                Arc::clone(&direct.canonical_id),
-                Arc::clone(&direct.symbol_name),
-            ))
-        } else if let NodeScopeId::File { canonical_id, .. } = scope {
+            Some(direct.clone())
+        } else if let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        {
             resolve_bare_name_in_scope(
                 self.ctx,
                 canonical_id.as_ref(),
+                *owner,
                 scope_payload,
                 name.as_ref(),
             )
-            .map(|ri| (ri.canonical_id, ri.symbol_name))
         } else {
             None
         };
@@ -440,7 +556,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // loadable — which is the external ambient-module case the augmentation
         // hook below handles.
         let resolves_to_file = match resolved_root.as_ref() {
-            Some((canonical, _)) if !canonical.is_empty() => {
+            Some(identity) if !identity.canonical_id.is_empty() => {
                 // The DIRECT carrier serve (the LB3 poison shape): the head
                 // probes `IndexedReady` availability, then Navigate/Skeleton/
                 // Shallow interns a `DeclRef`/`InstantiationRef` and returns
@@ -448,7 +564,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // ONLY the fan-out tracer, never the `CacheRead` funnel. The
                 // `IndexedReadyServe` is retained (not immediately `.is_some()`)
                 // so the test seam can consult it before presence collapses.
-                let serve = self.ctx.ensure_indexed_ready_serve(canonical.as_ref());
+                let serve = self
+                    .ctx
+                    .ensure_indexed_ready_serve(identity.canonical_id.as_ref());
                 // Test-only: an armed fence treats a present serve as
                 // `store_published == false` and fans a non-cacheable read onto
                 // every active tracer — the deterministic in-process equivalent
@@ -487,14 +605,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
-        let Some((resolved_canonical, resolved_name)) = resolved_root else {
+        if !resolves_to_file && self.unresolved_head_is_authored_import(scope, name.as_ref()) {
+            ctx.observe_unresolved_authored_import();
+            // Demand-time recovery rail (same as `build_typeof`'s import-miss
+            // arm): the head names an AUTHORED IMPORT whose route is
+            // currently unresolvable, so the lowered value stays an honest
+            // `BareRef` carrier. Observe the owner's `ImportRoute` derived
+            // fact into the active tracer — `generation_current_import_route_hash`
+            // re-resolves known-miss specifiers per generation, so every
+            // consuming warm entry misses to a cold recompute the moment the
+            // dependency appears. This is what lets a carrier-bearing surface
+            // stay COMPLETE + cacheable instead of poisoning root
+            // completeness with member-level partiality.
+            if let NodeScopeId::File { canonical_id, .. } = scope {
+                if let Some(route_hash) = self
+                    .ctx
+                    .host_for_fact_tracer_install()
+                    .generation_current_import_route_hash(canonical_id.as_ref())
+                {
+                    crate::fact_signature_helpers::observe_fact_signature(&[
+                        crate::resolver_core::FactVersionRef::DerivedFactHash {
+                            canonical_id: canonical_id.as_ref().to_string(),
+                            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                            hash: route_hash,
+                        },
+                    ]);
+                }
+            }
+        }
+
+        let Some(resolved_root) = resolved_root else {
             // Enum-member projection (typed, GATED fallback): a dotted
             // `Enum.Member` whose prefix is a proven enum value declaration
             // projects the member's projected type. Gated on the typed
             // `ValueDeclKind::Enum` fact, not a dotted-name heuristic.
-            if let NodeScopeId::File { canonical_id, .. } = scope {
+            if let NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } = scope
+            {
                 if let Some(member_value) = self.resolve_enum_member_value(
                     canonical_id.as_ref(),
+                    *owner,
                     name_resolution,
                     scope_payload,
                     name.as_ref(),
@@ -545,21 +698,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `Opaque(RecursiveRef)` — the dispatcher-local `instantiate_active`
         // stack is the single source of truth (never copied into the context).
         if arg_count == 0
-            && self.is_instantiate_active(resolved_canonical.as_ref(), resolved_name.as_ref())
+            && self.is_instantiate_active(
+                resolved_root.canonical_id.as_ref(),
+                resolved_root.owner,
+                resolved_root.symbol_name.as_ref(),
+            )
         {
             return CarrierResolutionPlan::Ready(self.opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&resolved_name),
+                name: Arc::clone(&resolved_root.symbol_name),
             }));
         }
 
         let whole_hash = self
             .ctx
-            .shallow_file_state(resolved_canonical.as_ref())
+            .shallow_file_state(resolved_root.canonical_id.as_ref())
             .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
-            canonical_id: Arc::clone(&resolved_canonical),
+            canonical_id: Arc::clone(&resolved_root.canonical_id),
+            owner: resolved_root.owner,
             whole_hash,
-            decl_name: Arc::clone(&resolved_name),
+            decl_name: Arc::clone(&resolved_root.symbol_name),
         };
 
         // Carrier modes (Navigate / Skeleton / Shallow) intern a transparent
@@ -591,17 +749,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // short-circuits to the bare `ResolveDecl` result.
         let anchor = match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::clone(&resolved_canonical),
+                canonical_id: Arc::clone(&resolved_root.canonical_id),
+                owner: resolved_root.owner,
                 local_scope: None,
             },
-            name: Arc::clone(&resolved_name),
+            name: Arc::clone(&resolved_root.symbol_name),
         })) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             _ => return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss)),
         };
         let decl_routes_through_instantiate = self
             .ctx
-            .prepared_type_decl(resolved_canonical.as_ref(), resolved_name.as_ref())
+            .prepared_type_decl_return_only(
+                resolved_root.canonical_id.as_ref(),
+                resolved_root.owner,
+                resolved_root.symbol_name.as_ref(),
+            )
             .is_some_and(|prepared| !prepared.type_parameters.is_empty());
         if arg_count == 0 && !decl_routes_through_instantiate {
             CarrierResolutionPlan::Ready(anchor)
@@ -611,6 +774,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context: reduction_context,
             })
         }
+    }
+
+    /// Whether this unresolved head names an authored import binding in the
+    /// exact declaration owner. This is the producer-side provenance gate for
+    /// authored-resolution debt: ambient names and unrelated file imports are
+    /// not inferred from spelling, and same-file declarations retain their
+    /// normal shadowing precedence.
+    fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        else {
+            return false;
+        };
+        self.ctx
+            .shallow_file_state(canonical_id.as_ref())
+            .is_some_and(|state| {
+                !state.has_type_symbol_in(*owner, name)
+                    && state.import_target_in(*owner, name).is_some()
+            })
     }
 
     /// Resolve an `ImportType` head (`import("specifier").qualifier<args>` /
@@ -692,7 +877,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: namespace,
                     path,
-                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                        .with_orthogonal_axes_from(reduction_context),
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
@@ -731,10 +917,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // projects the tail.
         let mut injected = ctx.name_resolution().clone();
         let head_name: Arc<str> = Arc::from(first.as_ref());
-        injected.insert(
-            Arc::clone(&head_name),
-            ResolvedRootIdentity::new(dep_canonical.as_str(), head_name),
-        );
+        let (resolved_head, route_facts) = self
+            .ctx
+            .resolve_imported_type_root_with_facts(dep_canonical.as_str(), head_name.as_ref());
+        self.ctx.observe_borrowed_signature(&route_facts);
+        let Some(resolved_head) = resolved_head else {
+            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss));
+        };
+        injected.insert(Arc::clone(&head_name), resolved_head);
         // Single-segment terminal carries the args; a multi-hop head is bare (its
         // args, if any, were rejected by the error above).
         let head_arg_count = if rest.is_empty() { arg_count } else { 0 };
@@ -765,7 +955,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             match self.execute_type_node(SemanticQueryKey::ProjectPath {
                 base: head_node,
                 path,
-                context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                    .with_orthogonal_axes_from(reduction_context),
             }) {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 _ => self.opaque(QueryError::Miss),
@@ -978,7 +1169,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
                     base: resolved,
                     path: projection_path,
-                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                        .with_orthogonal_axes_from(context),
                 });
                 crate::request_context::observe_component_meta_read_suppress(&path_read);
                 resolved = match path_read.value {
@@ -999,7 +1191,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let data = graph.node_data(node).expect("carrier node data");
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice())
         };
-        let owner_canonical = graph.node_scope(node).and_then(|s| s.canonical_file());
+        let owner_scope = graph.node_scope(node);
+        let owner_canonical = owner_scope.as_ref().and_then(NodeScopeId::canonical_file);
+        let owner = match owner_scope.as_ref() {
+            Some(NodeScopeId::File { owner, .. }) => *owner,
+            Some(NodeScopeId::Global) | None => verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        };
 
         // Rehydrate the value-side resolution inputs from the carrier's scope.
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
@@ -1018,7 +1215,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let scope_payload = scope.canonical_file().and_then(|c| {
                 self.ctx
                     .prepared_decl_bundle(c.as_ref())
-                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle))
+                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, owner))
             });
             let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
             let ctx = CarrierResolverContext::new(
@@ -1044,7 +1241,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let scope_payload = owner_canonical.as_ref().and_then(|c| {
                 self.ctx
                     .prepared_decl_bundle(c.as_ref())
-                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle))
+                    .map(|bundle| DeclarationScopePayload::from_bundle(&bundle, owner))
             });
             let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
             let ctx = CarrierResolverContext::new(
@@ -1161,6 +1358,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // surfaces re-enter THIS normalization through the shallow-synthesis
             // worklist's re-dispatch (not resolved here).
             other => other,
+        }
+    }
+
+    /// Classify a failed carrier rewrite at the Vue runtime publication
+    /// boundary.
+    ///
+    /// Ordinary `Navigate`/`Shallow` demands may preserve an unresolved
+    /// authored reference as a complete identity carrier: downstream TSC and
+    /// diagnostics still need that authored head. Vue runtime publication is
+    /// different. It is about to synthesize a concrete props/emits object, so
+    /// a carrier whose exact scoped head did not resolve cannot be published
+    /// as a complete empty object. Return a typed partial reason and let the
+    /// carrier-normalization prelude force ReturnOnly admission.
+    ///
+    /// The non-empty-path `TypeOf` case is deliberately excluded: its
+    /// resolve/project/apply chain belongs to the path walker, so retaining the
+    /// carrier at entry is not a failed normalization.
+    pub(super) fn carrier_normalization_partial_reasons(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> PartialReasonSet {
+        let (subject, context, deferred_typeof) = match key {
+            SemanticQueryKey::ProjectPath {
+                base,
+                path,
+                context,
+            } => (*base, *context, !path.is_empty()),
+            SemanticQueryKey::KeyOf { base, context } => (*base, *context, false),
+            SemanticQueryKey::MappedType {
+                source, context, ..
+            } => (*source, *context, false),
+            _ => return PartialReasonSet::empty(),
+        };
+        if !context.suppresses_vue_ignored_heritage() {
+            return PartialReasonSet::empty();
+        }
+
+        let Some(data) = self.graph().node_data(subject) else {
+            return PartialReasonSet::MISSING_SEMANTIC_NODE_DATA;
+        };
+        if deferred_typeof && data.typeof_head().is_some() {
+            return PartialReasonSet::empty();
+        }
+        if data.bare_ref_head().is_some()
+            || data.import_type_head().is_some()
+            || data.typeof_head().is_some()
+        {
+            return PartialReasonSet::SEMANTIC_QUERY_FAULT;
+        }
+        match data.as_ref() {
+            SemanticNodeData::Opaque(QueryError::BudgetExceeded(_)) => {
+                PartialReasonSet::BUDGET_EXCEEDED
+            }
+            SemanticNodeData::Opaque(QueryError::Cancelled) => PartialReasonSet::CANCELLED,
+            SemanticNodeData::Opaque(QueryError::UnstableState { .. }) => {
+                PartialReasonSet::UNSTABLE_STATE
+            }
+            SemanticNodeData::Opaque(
+                QueryError::RecursiveRef { .. }
+                | QueryError::AliasCycle { .. }
+                | QueryError::TypeParamCycle,
+            ) => PartialReasonSet::SAME_PATH_RECURSION,
+            SemanticNodeData::Opaque(_) => PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            _ => PartialReasonSet::empty(),
         }
     }
 

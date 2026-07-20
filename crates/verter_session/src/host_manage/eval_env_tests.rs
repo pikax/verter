@@ -248,26 +248,17 @@ fn c1_local_type_declaration_id_graph_native_matches_oracle_presence_and_is_boun
     );
 }
 
-/// C1 — the import guard is LOAD-BEARING and discriminating: a name that
-/// is BOTH an import target AND has a local type header must resolve to
-/// `None` (an imported name has no LOCAL declaration id), even though its
-/// local `type_header` is present. Removing the reader's
-/// `if state.import_target(name).is_some() { return None }` guard would
-/// make the reader fall through to the header-ordinal path and return
-/// `Some` — diverging from the oracle (which keeps its own import guard
-/// and returns `None`).
+/// C1 — a value import and a local type declaration coexist in distinct TS
+/// declaration spaces. The declaration-header inventory is the authority for
+/// C1, so the import must not erase the local type's declaration id.
 ///
-/// Discrimination proof (verified by break → red → revert): deleting the
-/// graph-native import guard makes `graph_native` return `Some` for
-/// `Shared` (its local `type_header` is present) while the oracle stays
-/// `None` → the `assert_eq!(oracle.is_some(), graph.is_some())` and the
-/// `graph.is_none()` assertion both go RED. The precondition assertions
-/// below pin that the collision is REAL (the name is both an import
-/// target and a local type header), so the test cannot silently degrade
-/// into a no-collision case where the guard is irrelevant.
+/// Discrimination proof (verified by break → red → revert): restoring the
+/// former file-wide import guard makes `Shared` return `None` despite its
+/// exact-owner type header. The preconditions pin that the collision is real,
+/// so the positive declaration-id assertions cannot pass vacuously.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision() {
+fn c1_local_type_header_wins_over_same_name_value_import_binding() {
     use crate::types::HostConfig;
     use crate::VerterHost;
 
@@ -278,7 +269,7 @@ fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision
     // `Shared`. A value import and a local type live in different
     // declaration spaces, so the shallow index records BOTH an
     // `import_target("Shared")` and a local `type_header("Shared")` — the
-    // collision the import guard must win.
+    // collision whose type header must remain independently addressable.
     upsert_ts(
         &host,
         "/src/types.ts",
@@ -295,7 +286,7 @@ fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision
         .expect("shallow state must exist");
     assert!(
         state.import_target("Shared").is_some(),
-        "precondition: `Shared` must be an import target (else the guard is not exercised)"
+        "precondition: `Shared` must be an import target (else coexistence is not exercised)"
     );
     assert!(
         state
@@ -303,22 +294,21 @@ fn c1_import_guard_is_load_bearing_for_a_name_with_a_local_type_header_collision
             .header_index()
             .type_header("Shared")
             .is_some(),
-        "precondition: `Shared` must ALSO have a local type header (else the guard is irrelevant — \
-         the header-ordinal path would already return None)"
+        "precondition: `Shared` must ALSO have a local type header (else the declaration-id result \
+         would already be None)"
     );
 
-    // The import guard wins: graph-native returns None, matching the
-    // oracle (which keeps its OWN import guard).
+    // Both consumers select the unique authored owner from the header
+    // inventory; the value import is irrelevant to the local TYPE id.
     let oracle = host.local_type_declaration_id("/src/types.ts", "Shared");
     let graph = host.local_type_declaration_id_graph_native("/src/types.ts", "Shared");
     assert!(
-        oracle.is_none(),
-        "oracle: an imported name has no LOCAL type declaration id even with a same-name local type"
+        oracle.is_some(),
+        "oracle: the same-name value import must not erase the local type declaration id"
     );
     assert!(
-        graph.is_none(),
-        "graph-native: the import guard must win over the local type header — removing it would \
-         return Some here and diverge from the oracle"
+        graph.is_some(),
+        "graph-native: the exact-owner local type header must remain addressable beside the value import"
     );
     assert_eq!(oracle.is_some(), graph.is_some());
 }
@@ -401,9 +391,10 @@ fn c2_peel_value_decl_alias_graph_native_matches_oracle_terminal_and_is_bounded(
          export const dangling: typeof ghost = base\n",
     );
 
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     for name in ["reexp", "base", "dangling"] {
-        let oracle = host.peel_value_decl_alias_for_test("/src/vals.ts", name);
-        let graph = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", name);
+        let oracle = host.peel_value_decl_alias_for_test("/src/vals.ts", owner, name);
+        let graph = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", owner, name);
         assert_eq!(
             oracle, graph,
             "C2 terminal divergence for `{name}`: oracle={oracle:?} graph_native={graph:?}"
@@ -411,9 +402,10 @@ fn c2_peel_value_decl_alias_graph_native_matches_oracle_terminal_and_is_bounded(
     }
 
     // `reexp` peels to `base`.
-    let peeled = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", "reexp");
-    assert_eq!(peeled.0, "/src/vals.ts");
-    assert_eq!(peeled.1, "base", "reexp = typeof base must peel to base");
+    let peeled = host.peel_value_decl_alias_graph_native_for_test("/src/vals.ts", owner, "reexp");
+    assert_eq!(peeled.canonical_id, "/src/vals.ts");
+    assert_eq!(peeled.owner, owner);
+    assert_eq!(peeled.name, "base", "reexp = typeof base must peel to base");
 
     // BOUND: on a FRESH host where ONLY the graph-native peeler runs,
     // whole_env() must NOT be materialised.
@@ -423,7 +415,7 @@ fn c2_peel_value_decl_alias_graph_native_matches_oracle_terminal_and_is_bounded(
         "/src/bvals.ts",
         "export const base = { color: 'red' }\nexport const reexp = base\n",
     );
-    let _ = bound_host.peel_value_decl_alias_graph_native_for_test("/src/bvals.ts", "reexp");
+    let _ = bound_host.peel_value_decl_alias_graph_native_for_test("/src/bvals.ts", owner, "reexp");
     assert!(
         !whole_env_materialized(&bound_host, "/src/bvals.ts"),
         "C2 graph-native reader must NOT materialise whole_env()"
@@ -464,7 +456,7 @@ fn c4_dependency_value_symbol_graph_native_matches_oracle_and_is_bounded() {
             .unwrap_or_else(|| panic!("oracle must know `{name}`"));
 
         let graph = host
-            .dependency_value_symbol_graph_native("/src/dep.ts", name)
+            .dependency_value_symbol_graph_native_for_test("/src/dep.ts", name)
             .unwrap_or_else(|| panic!("graph-native reader must know `{name}`"));
 
         // Field-by-field equivalence (declaration_id is the opaque,
@@ -497,7 +489,7 @@ fn c4_dependency_value_symbol_graph_native_matches_oracle_and_is_bounded() {
 
     // A missing value symbol → None (graph-native miss).
     assert!(host
-        .dependency_value_symbol_graph_native("/src/dep.ts", "nope")
+        .dependency_value_symbol_graph_native_for_test("/src/dep.ts", "nope")
         .is_none());
 }
 
@@ -552,11 +544,12 @@ fn f1_c2_debug_cross_check_is_excluded_for_svelte_rune_modules() {
     // the gate, the rune module is excluded → the divergent terminal does
     // NOT panic. The oracle terminal lands on `$state` (the ambient hop);
     // the call completing WITHOUT a debug panic is the assertion.
-    let (canonical, terminal) =
-        host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", "reexp");
-    assert_eq!(canonical, "/src/runes.svelte.ts");
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let peeled = host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", owner, "reexp");
+    assert_eq!(peeled.canonical_id, "/src/runes.svelte.ts");
+    assert_eq!(peeled.owner, owner);
     assert_eq!(
-        terminal, "$state",
+        peeled.name, "$state",
         "the oracle peels the rune alias to the ambient `$state` (whole_env carries it); the gate \
          excludes the graph-native cross-check that would otherwise panic on this divergence"
     );
@@ -564,9 +557,8 @@ fn f1_c2_debug_cross_check_is_excluded_for_svelte_rune_modules() {
     // A plain (non-`$rune`) value in the SAME rune module still agrees
     // (no ambient divergence), so the gate does not mask real divergences
     // for ordinary symbols.
-    let (_pc, plain_terminal) =
-        host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", "plain");
-    assert_eq!(plain_terminal, "plain");
+    let plain = host.peel_value_decl_alias_for_test("/src/runes.svelte.ts", owner, "plain");
+    assert_eq!(plain.name, "plain");
 }
 
 /// C4 BOUND — on a FRESH host where ONLY
@@ -603,8 +595,8 @@ fn c4_dependency_value_symbol_graph_native_is_bounded_on_fresh_host() {
     );
 
     // Run ONLY the graph-native per-name reader (oracle never called).
-    let theme = host.dependency_value_symbol_graph_native("/src/dep.ts", "theme");
-    let count = host.dependency_value_symbol_graph_native("/src/dep.ts", "count");
+    let theme = host.dependency_value_symbol_graph_native_for_test("/src/dep.ts", "theme");
+    let count = host.dependency_value_symbol_graph_native_for_test("/src/dep.ts", "count");
     assert!(theme.is_some(), "graph-native reader must know `theme`");
     assert!(count.is_some(), "graph-native reader must know `count`");
 
@@ -676,8 +668,7 @@ fn sfc_script_setup_generic_param_is_not_a_type_declaration_id_in_oracle_or_grap
 }
 
 /// A recording `ImportedRuntimeValueResolver` that wraps the REAL
-/// host-backed resolution and records the `(source_canonical_id,
-/// source_name)` pair the materializer computes as the source identity of
+/// host-backed resolution and records the exact source identity the materializer computes for
 /// every binding it actually admits.
 ///
 /// Every method delegates to the same host APIs the production
@@ -688,13 +679,12 @@ fn sfc_script_setup_generic_param_is_not_a_type_declaration_id_in_oracle_or_grap
 /// materializer's binding filter. The hook records inside
 /// `resolve_value_export_target`, which the materializer calls exactly once
 /// per filter-admitted binding (before any hydration-failure `continue`),
-/// mirroring the materializer's `Some(target)`-or-`(dep, imported_name)`
-/// fallback so the recorded pair is byte-identical to the source identity
-/// the materializer computes in BOTH branches.
+/// recording only successfully resolved targets; unresolved targets are not hydrated.
 #[cfg(not(target_arch = "wasm32"))]
 struct RecordingRuntimeValueResolver<'a> {
     host: &'a crate::VerterHost,
-    touched: std::cell::RefCell<std::collections::BTreeSet<(String, String)>>,
+    touched:
+        std::cell::RefCell<std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -708,38 +698,29 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
 
     fn dependency_value_symbol_graph_native(
         &self,
-        source_canonical_id: &str,
-        source_name: &str,
+        source: &crate::resolver_core::ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        self.host
-            .dependency_value_symbol_graph_native(source_canonical_id, source_name)
+        self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(
         &self,
-        canonical_id: &str,
-        symbol_name: &str,
+        source: &crate::resolver_core::ValueDeclIdentity,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        self.host.prepared_value_decl(canonical_id, symbol_name)
+        self.host
+            .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }
 
     fn resolve_value_export_target(
         &self,
-        dep_canonical_id: &str,
-        imported_name: &str,
-    ) -> Option<(String, String)> {
-        // Delegate to the REAL host export-target resolution, then record
-        // the SAME source pair the materializer derives — both the resolved
-        // target and the `(dep, imported_name)` fallback the materializer
-        // applies when resolution misses.
+        requested: &crate::resolver_core::ValueDeclIdentity,
+    ) -> Option<crate::resolver_core::ValueDeclIdentity> {
         let resolved = self
             .host
-            .resolve_value_export_target(dep_canonical_id, imported_name)
-            .map(|target| (target.canonical_id, target.name));
-        let pair = resolved
-            .clone()
-            .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()));
-        self.touched.borrow_mut().insert(pair);
+            .resolve_value_export_target(&requested.canonical_id, &requested.name);
+        if let Some(target) = resolved.as_ref() {
+            self.touched.borrow_mut().insert(target.clone());
+        }
         resolved
     }
 }
@@ -769,7 +750,7 @@ fn materializer_touched_source_pairs(
     host: &crate::VerterHost,
     owner: &str,
     snapshot: &crate::types::FileAnalysisSnapshot,
-) -> std::collections::BTreeSet<(String, String)> {
+) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
     // The materializer's INPUTS (its parameters), identical to what the
     // production `build_fallthrough_eval_env_lightweight` template path
     // passes: the required template runtime-value names + the owner-local
@@ -778,7 +759,7 @@ fn materializer_touched_source_pairs(
         crate::host_manage::component_meta_extract::collect_required_template_runtime_value_names(
             snapshot,
         );
-    let owner_local_value_names: rustc_hash::FxHashSet<String> = host
+    let owner_local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey> = host
         .base_eval_env_arc(owner)
         .map(|env| env.value_symbols.keys().cloned().collect())
         .unwrap_or_default();
@@ -862,8 +843,7 @@ fn c3_fallthrough_runtime_value_deps_graph_native_equals_materializer_touched_fu
         .expect("owner analysis snapshot");
 
     // Graph-native dep extraction (template path → root_reachability None).
-    let deps: std::collections::BTreeSet<(String, String)> =
-        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
 
     // The authoritative materializer-touched FULL pair set (legacy oracle
     // export-target resolution).
@@ -880,15 +860,18 @@ fn c3_fallthrough_runtime_value_deps_graph_native_equals_materializer_touched_fu
     // identity (proving the fixture exercises a non-trivial pair, and the
     // extractor follows the barrel to dep.ts under the underlying name).
     assert!(
-        deps.iter()
-            .any(|(canonical, name)| canonical == "/src/dep.ts" && name == "themeImpl"),
+        deps.iter().any(|identity| {
+            identity.canonical_id == "/src/dep.ts"
+                && identity.owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                && identity.name == "themeImpl"
+        }),
         "the required, template-referenced `theme` must resolve through the barrel to its real \
          source (/src/dep.ts, themeImpl): {deps:?}"
     );
     assert!(
         !deps
             .iter()
-            .any(|(_, name)| name == "helper" || name == "helperImpl"),
+            .any(|identity| identity.name == "helper" || identity.name == "helperImpl"),
         "the unused `helper` must NOT be a graph-native dep (filtered to required names): {deps:?}"
     );
 }
@@ -959,11 +942,14 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
         .expect("owner analysis snapshot");
 
     // The graph-native dep SET (the selection the surface must match).
-    let deps: std::collections::BTreeSet<(String, String)> =
-        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
     assert_eq!(
         deps,
-        std::collections::BTreeSet::from([("/src/dep.ts".to_string(), "themeImpl".to_string())]),
+        std::collections::BTreeSet::from([crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/src/dep.ts".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: "themeImpl".to_string(),
+        }]),
         "the required `theme` resolves through the barrel to its single source pair: {deps:?}"
     );
 
@@ -973,15 +959,22 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
         .expect("the oracle must build the lightweight fallthrough env");
 
     // SURFACE positive: the required cross-file binding `theme` is hydrated.
+    // Owner-aware surface read: SFC setup imports hydrate under the
+    // import's lexical Instance owner, so presence is checked by NAME
+    // across owners (the owner-aware DeclMap's bare-str view is the
+    // ordinary-file compatibility view only).
+    let has_value_named = |env: &verter_semantic::analysis::type_eval::EvalEnv,
+                           name: &str|
+     -> bool { env.value_symbols.keys().any(|key| &*key.name == name) };
     assert!(
-        env.value_symbols.contains_key("theme"),
+        has_value_named(&env, "theme"),
         "the oracle must hydrate the required cross-file binding `theme` into its \
          runtime-value surface (matching the graph-native dep set's required selection)"
     );
     // SURFACE negative: the unused `helper` is NOT hydrated — the surface
     // reflects the SAME required-name filter the dep set applies.
     assert!(
-        !env.value_symbols.contains_key("helper"),
+        !has_value_named(&env, "helper"),
         "the oracle must NOT hydrate the unused `helper` binding (it is not in the \
          graph-native dep set); a surface that hydrated it would diverge from the set"
     );
@@ -990,19 +983,20 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
     // equals the graph-native per-symbol reader for the SOURCE the single dep
     // pair names (`(/src/dep.ts, themeImpl)`) — so the oracle hydrated from the
     // SAME source the graph-native set resolves, not a barrel-stop.
-    let (source_canonical, source_name) = deps.iter().next().expect("one dep pair").clone();
+    let source = deps.iter().next().expect("one dep identity");
     let graph_source = host
-        .dependency_value_symbol_graph_native(&source_canonical, &source_name)
+        .dependency_value_symbol_graph_native(source)
         .expect("graph-native reader must resolve the dep-pair source");
     let oracle_binding = env
         .value_symbols
-        .get("theme")
-        .map(|group| group.primary().clone())
+        .iter()
+        .find(|(key, _)| &*key.name == "theme")
+        .map(|(_, group)| group.primary().clone())
         .expect("the oracle-hydrated `theme` binding must be present");
     assert_eq!(
         oracle_binding.object_shape, graph_source.object_shape,
         "the oracle-hydrated `theme` surface must carry the SAME value content as the \
-         graph-native reader for the dep-pair source `({source_canonical}, {source_name})` \
+         graph-native reader for the dep source `{source:?}` \
          — proving both consumers hydrated from the same source, not a barrel-stop"
     );
     assert_eq!(
@@ -1088,11 +1082,14 @@ fn c3_double_alias_onto_same_source_drives_readiness_without_false_panic() {
     // The graph-native dep set collapses both aliased bindings onto the
     // SINGLE underlying source pair — exactly what makes the retired
     // name-count `>=` proxy unsound.
-    let deps: std::collections::BTreeSet<(String, String)> =
-        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
     assert_eq!(
         deps,
-        std::collections::BTreeSet::from([("/src/m.ts".to_string(), "xImpl".to_string())]),
+        std::collections::BTreeSet::from([crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/src/m.ts".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: "xImpl".to_string(),
+        }]),
         "two aliases onto the same source must yield exactly the single (source_canonical, \
          source_name) pair: {deps:?}"
     );
@@ -1174,51 +1171,25 @@ fn c3_graph_native_dep_reader_does_not_materialize_dependency_whole_env() {
     );
 }
 
-/// The canonical ids carrying a `FileWholeHash` fact in a `FactVersionRef`
-/// list — the participant identities the resolver recorded for invalidation.
-#[cfg(not(target_arch = "wasm32"))]
-fn whole_hash_participants(
-    facts: &[crate::resolver_core::FactVersionRef],
-) -> std::collections::BTreeSet<String> {
-    facts
-        .iter()
-        .filter_map(|f| match f {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. } => {
-                Some(canonical_id.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// FIX A — the VIEW-AWARE value-export root resolver
-/// (`resolve_value_export_root_with_facts_with_store_view`) resolves a
-/// MULTI-HOP value re-export to its FINAL defining value AND returns the
-/// FULL participant chain facts — a `FileWholeHash` for EVERY file on the
-/// walk (`barrel`, `mid`, `a`), not just the immediate barrel. It also peels
-/// the terminal same-file `typeof` value alias (`V: typeof realImpl` →
-/// `realImpl`). This mirrors the type rail's
-/// `resolve_imported_type_root_with_facts_with_store_view`.
+/// The graph-native value-export resolver
+/// (`resolve_value_export_target_graph_native`) resolves a MULTI-HOP value
+/// re-export to its FINAL defining value AND peels the terminal same-file
+/// `typeof` value alias (`V: typeof realImpl` → `realImpl`) — whole-env-free.
 ///
-/// Why this is the discriminating surface (per architecture review + codex
-/// adjudication): the value rail of `build_prepared_import_canonicalization`
-/// is pre-empted by the symbol-space-NEUTRAL type rail for any CROSS-FILE
-/// re-export hop (the type-export route walk follows value-only re-exports
-/// too and records the same chain, then `continue`s), so a prep-integration
-/// multi-hop test cannot isolate the value-rail fold. The resolver itself IS
-/// the regression surface this fix changed: the OLD `resolve_value_export_target`
-/// returned NO chain facts (only the caller recorded the immediate barrel) AND
-/// routed through `peel_value_decl_alias` → `base_eval_env_arc` → `whole_env()`.
+/// This is the DEMAND-path value resolver: prepared import canonicalization
+/// is demand-driven (the bundle records only the DIRECT hop), so the chain
+/// walk + terminal peel run at the value demand and any chain-participant
+/// facts are observed by the demanding query's own tracer, never pinned on a
+/// bundle rail.
 ///
-/// Discriminating (RED-proof): neutralizing the chain-fact fold inside the
-/// resolver (returning `Vec::new()` / dropping `chain_facts`) makes the
-/// `whole_hash_participants` assertion FAIL — the inner `mid` and the final
-/// `a` are no longer recorded, so a retarget of either would stale-serve. The
-/// full chain facts are the SOLE record of the inner participants AT THIS
-/// resolver.
+/// Discriminating (RED-proof): a resolver that stops at the intermediate
+/// barrel (or skips the terminal peel) fails the `(canonical, name)` identity
+/// assertion; a resolver that routes through the legacy
+/// `peel_value_decl_alias` → `base_eval_env_arc` → `whole_env()` oracle fails
+/// the whole-env-free BOUND assertion.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal() {
+fn value_export_target_graph_native_walks_chain_and_peels_terminal() {
     use crate::types::HostConfig;
     use crate::VerterHost;
 
@@ -1233,22 +1204,12 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
     upsert_ts(&host, "/src/mid.ts", "export { V } from './a'\n");
     upsert_ts(&host, "/src/barrel.ts", "export { V } from './mid'\n");
 
-    let view = host
-        .resolver_store_view_read()
-        .into_cold_seed_view()
-        .into_inner();
-    let (identity, facts) =
-        host.resolve_value_export_root_with_facts_with_store_view(&view, "/src/barrel.ts", "V");
+    let identity = host.resolve_value_export_target_graph_native("/src/barrel.ts", "V");
 
     // (1) Final defining value: the cross-file chain resolves to /src/a.ts and
-    // the terminal same-file `typeof` alias peels `V` -> `realImpl`. This is the
-    // resolver's own end-to-end behavior; at the production call site the
-    // cross-file hops are taken by the symbol-space-neutral TYPE rail and this
-    // resolver runs only for the same-file terminal peel, but the unit resolver
-    // walks the full chain identically (and is what the integration relies on if
-    // the ordering ever changes).
+    // the terminal same-file `typeof` alias peels `V` -> `realImpl`.
     let identity =
-        identity.expect("the value export root must resolve through the multi-hop chain");
+        identity.expect("the value export target must resolve through the multi-hop chain");
     assert_eq!(
         (identity.canonical_id.as_str(), identity.name.as_str()),
         ("/src/a.ts", "realImpl"),
@@ -1257,35 +1218,21 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
          unpeeled `V`)"
     );
 
-    // (2) FULL participant chain facts: a `FileWholeHash` for EVERY file on the
-    // walk — barrel, mid, AND a. The inner `mid` (and the final `a`) being
-    // present is the discriminator that catches an inner-barrel retarget; a rail
-    // that recorded only the immediate barrel could not.
-    let participants = whole_hash_participants(&facts);
-    for required in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
-        assert!(
-            participants.contains(required),
-            "the value-export root resolver must record a FileWholeHash for EVERY participant on \
-             the value re-export chain — missing `{required}` (recorded: {participants:?}). The \
-             inner participant facts are the SOLE catcher of an inner-barrel retarget."
-        );
-    }
-
-    // (3) BOUND: the resolver is graph-native — it does NOT materialise any
+    // (2) BOUND: the resolver is graph-native — it does NOT materialise any
     // participant's whole_env() (the correctness defect the graph-native rail
     // avoids: the legacy `resolve_value_export_target` routed through
     // `peel_value_decl_alias` -> `base_eval_env_arc` -> `whole_env()`).
     for participant in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
         assert!(
             !whole_env_materialized(&host, participant),
-            "the value-export root resolver must NOT materialise `{participant}`'s whole_env() \
-             during prep — it is graph-native (export-graph walk + per-symbol header peel), never \
-             the legacy `peel_value_decl_alias`/`base_eval_env_arc` oracle"
+            "the value-export resolver must NOT materialise `{participant}`'s whole_env() \
+             during resolution — it is graph-native (export-graph walk + per-symbol header \
+             peel), never the legacy `peel_value_decl_alias`/`base_eval_env_arc` oracle"
         );
     }
 }
 
-/// FIX A' (normalization parity): the value-export root resolver normalizes its
+/// Normalization parity: the graph-native value-export resolver normalizes its
 /// FINAL canonical through `resolve_eval_dependency_canonical` — exactly as the
 /// TYPE rail normalizes its final `defining_canonical`
 /// (`imported_type_root.rs`). When a value re-export terminates at a `.js`
@@ -1296,7 +1243,7 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
 /// against the pre-fix resolver (which returned `/pkg/impl.js`) and PASSES against
 /// the normalized resolver (`/pkg/impl.d.ts`).
 #[test]
-fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() {
+fn value_export_target_graph_native_normalizes_final_canonical_like_type_rail() {
     use crate::types::HostConfig;
     use crate::VerterHost;
 
@@ -1313,13 +1260,9 @@ fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() 
     upsert_ts(&host, "/pkg/impl.js", "export const W = { from: 'pkg' }\n");
     upsert_ts(&host, "/pkg/barrel.ts", "export { W } from './impl.js'\n");
 
-    let view = host
-        .resolver_store_view_read()
-        .into_cold_seed_view()
-        .into_inner();
-    let (identity, _facts) =
-        host.resolve_value_export_root_with_facts_with_store_view(&view, "/pkg/barrel.ts", "W");
-    let identity = identity.expect("the value export root must resolve the `.js` terminal");
+    let identity = host
+        .resolve_value_export_target_graph_native("/pkg/barrel.ts", "W")
+        .expect("the value export target must resolve the `.js` terminal");
 
     // FULL (canonical, symbol) identity: the normalization-parity fix pins the
     // CANONICAL; this assertion ALSO pins the SYMBOL axis so a resolver that
@@ -1380,7 +1323,7 @@ fn fallthrough_env_without_required_runtime_values_shares_the_memo_env_arc() {
         .base_eval_env_arc("/src/Solo.vue")
         .expect("memo whole-env resolves");
     assert!(
-        Arc::ptr_eq(&env, &memo_env),
+        Arc::ptr_eq(&env.env, &memo_env),
         "no required runtime values ⇒ the fallthrough env must BE the memo's \
          whole-env Arc (zero whole-env clones on this path)"
     );

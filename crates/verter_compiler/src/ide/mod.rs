@@ -81,6 +81,9 @@ pub struct IdeScriptOptions<'a> {
     pub has_scoped_style: bool,
     /// Runtime module name (e.g., `"vue"`).
     pub runtime_module_name: &'a str,
+    /// Structurally validated runtime macro semantics. IDE codegen consumes
+    /// only authoritative public binding names from this DTO.
+    pub macro_runtime: Option<&'a verter_macro_dto::MacroRuntimeBundle>,
     /// Types module name (e.g., `"$verter/types"` or `"@verter/types"`).
     pub types_module_name: &'a str,
     /// Whether the SFC uses Vapor mode.

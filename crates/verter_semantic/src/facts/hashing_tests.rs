@@ -816,6 +816,7 @@ fn signature_fact(has_authored_return: bool) -> FunctionSignature {
         return_ty: has_authored_return.then(|| TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/ws/a.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("f"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -823,10 +824,13 @@ fn signature_fact(has_authored_return: bool) -> FunctionSignature {
                 Vec::<verter_type_expr::locators::TypeBodyPathStep>::new().into_boxed_slice(),
             ),
         }),
+        return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             },
         },
     }

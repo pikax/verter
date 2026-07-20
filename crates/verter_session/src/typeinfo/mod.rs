@@ -40,6 +40,7 @@
 
 pub mod adapters;
 pub mod evaluate_type_expression;
+pub(crate) mod footprint_attach;
 pub mod framework_surface;
 pub mod raise;
 pub mod request_validation;
@@ -49,6 +50,7 @@ pub mod shallow_surface;
 pub mod surface;
 pub mod symbol_inventory;
 pub mod types;
+pub(crate) mod vue_macro_codegen;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the
 // exact output-SINK modules that project — NOT subtree-wide:

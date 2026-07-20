@@ -97,6 +97,7 @@ verter_semantic = { path = "../verter_semantic" }
 verter_session_query = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 verter_no_storedspan = { workspace = true }
+verter_macro_dto = { workspace = true }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 verter_span = { path = "../verter_span" }

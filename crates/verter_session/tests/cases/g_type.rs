@@ -18,3 +18,5 @@ mod type_resolution_audit_read_once;
 mod type_resolution_audit_tls_propagation;
 #[path = "g_type/typeinfo_request_validation.rs"]
 mod typeinfo_request_validation;
+#[path = "g_type/vue_macro_runtime_oracle.rs"]
+mod vue_macro_runtime_oracle;

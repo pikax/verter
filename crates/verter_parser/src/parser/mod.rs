@@ -1635,9 +1635,25 @@ impl Syntax {
             return;
         };
 
-        let mut seen_slot_names: smallvec::SmallVec<[(&[u8], Span); 4]> = smallvec::SmallVec::new();
+        // Official Vue allows the SAME slot name across mutually exclusive
+        // `v-if` / `v-else-if` / `v-else` siblings: only one branch is ever
+        // active. A true duplicate is a same-name slot that is NOT on the
+        // same exclusive if-chain (a different chain, an independent `v-if`,
+        // or an unconditional sibling). `content.v_if_chains` is the
+        // pre-computed grouping of consecutive conditional siblings.
+        let chain_id_for_child = |child_idx: usize| -> Option<usize> {
+            content
+                .v_if_chains
+                .iter()
+                .position(|chain| chain.member_indices.contains(&child_idx))
+        };
 
-        for &child_id in &content.children {
+        // (slot_name, exclusive_chain_id, span) — chain_id is `None` when the
+        // slot node is not part of a conditional chain.
+        type SeenSlot<'b> = (&'b [u8], Option<usize>, Span);
+        let mut seen_slot_names: smallvec::SmallVec<[SeenSlot; 4]> = smallvec::SmallVec::new();
+
+        for (child_idx, &child_id) in content.children.iter().enumerate() {
             let child = &ast.nodes[child_id.0];
             let AstNodeKind::Element(child_el) = &child.kind else {
                 continue;
@@ -1657,18 +1673,32 @@ impl Syntax {
             };
 
             let slot_span = Span::new(v_slot.start, v_slot.name_end);
+            let chain_id = chain_id_for_child(child_idx);
 
-            // Check for duplicate
-            if let Some((_, first_span)) =
-                seen_slot_names.iter().find(|(name, _)| *name == slot_name)
+            // Same name on the SAME exclusive if-chain is valid (Vue parity):
+            // both slots require a chain id and must share it.
+            let is_exclusive_with_existing = seen_slot_names.iter().any(|(name, prev_chain, _)| {
+                *name == slot_name
+                    && chain_id.is_some()
+                    && prev_chain.is_some()
+                    && chain_id == *prev_chain
+            });
+            if is_exclusive_with_existing {
+                continue;
+            }
+
+            // Same name anywhere else (different chain / independent `v-if` /
+            // unconditional) is a true duplicate.
+            if seen_slot_names
+                .iter()
+                .any(|(name, _, _)| *name == slot_name)
             {
-                let _ = first_span; // first occurrence span available if needed
                 self.diagnostics.push(
                     Diagnostic::error("syntax", CompilerErrorCode::XVSlotDuplicateSlotNames)
                         .with_span(slot_span),
                 );
             } else {
-                seen_slot_names.push((slot_name, slot_span));
+                seen_slot_names.push((slot_name, chain_id, slot_span));
             }
         }
     }

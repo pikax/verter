@@ -12,7 +12,7 @@ use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
     prepared_decl::PreparedDeclBundle, route_db::RouteDb, FactVersionRef, FallthroughNodeKey,
     ResolutionNodeKey, ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView,
-    ValidatedFactCache,
+    ValidatedFactAdmission, ValidatedFactCache,
 };
 
 pub struct StableRequestState<K, V>
@@ -46,6 +46,17 @@ where
         TView: StoreView + ?Sized,
     {
         self.cache.get_if_valid(key, view)
+    }
+
+    pub(crate) fn get_if_valid_with_admission<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+    ) -> Option<(Arc<V>, ValidatedFactAdmission<V>)>
+    where
+        TView: StoreView + ?Sized,
+    {
+        self.cache.get_if_valid_with_admission(key, view)
     }
 
     /// Strict-self-root warm read — forwards to
@@ -96,9 +107,21 @@ where
         value: Arc<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) {
+    ) -> Option<ValidatedFactAdmission<V>> {
         self.cache
-            .insert_arc_with_kind(key, value, facts, cache_kind);
+            .insert_arc_with_kind(key, value, facts, cache_kind)
+    }
+
+    pub(crate) fn resign_arc_with_kind(
+        &self,
+        key: &K,
+        admission: &ValidatedFactAdmission<V>,
+        value: Arc<V>,
+        facts: Vec<FactVersionRef>,
+        cache_kind: &'static str,
+    ) -> bool {
+        self.cache
+            .resign_arc_with_kind(key, admission, value, facts, cache_kind)
     }
 
     pub fn cached_values(&self) -> Vec<Arc<V>> {

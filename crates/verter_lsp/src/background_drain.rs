@@ -1050,7 +1050,18 @@ async fn apply_owner_resolved_carrier_sync(
             let mut attempted: Vec<ProviderPathKind> = Vec::new();
             let mut synced: Vec<ProviderPathKind> = Vec::new();
 
-            let api = block_in_place_if_available(|| documents.host.get_public_api(canonical_id));
+            let api =
+                match block_in_place_if_available(|| documents.host.get_public_api(canonical_id)) {
+                    Ok(api) => api,
+                    Err(error) => {
+                        crate::report_public_api_projection_error(
+                            "background_drain.owner_resolved",
+                            canonical_id,
+                            &error,
+                        );
+                        return CarrierApplyOutcome::Pending;
+                    }
+                };
             if let (Some(api), Some(dts_path)) = (api.as_ref(), committed_state.api_path.clone()) {
                 attempted.push(ProviderPathKind::Api);
                 let result = if committed_state.api_background_loaded {
@@ -1276,7 +1287,18 @@ pub(super) async fn sync_api_to_provider_background_task(
     let Some(dts_path) = transition.next.api_path.clone() else {
         return;
     };
-    let Some(api) = block_in_place_if_available(|| host.get_public_api(&canonical_id)) else {
+    let api = match block_in_place_if_available(|| host.get_public_api(&canonical_id)) {
+        Ok(api) => api,
+        Err(error) => {
+            crate::report_public_api_projection_error(
+                "background_drain.api_task",
+                &canonical_id,
+                &error,
+            );
+            return;
+        }
+    };
+    let Some(api) = api else {
         return;
     };
     let stale_paths = transition.stale_paths;

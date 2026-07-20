@@ -376,7 +376,18 @@ impl VerterLanguageServer {
                 let mut committed_state = transition.next;
                 let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
                 if let Some(dts_path) = committed_state.api_path.clone() {
-                    if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
+                    let api = match self.documents.host.get_public_api(&canonical_id) {
+                        Ok(api) => api,
+                        Err(error) => {
+                            crate::report_public_api_projection_error(
+                                "sync_api_to_provider",
+                                &canonical_id,
+                                &error,
+                            );
+                            return;
+                        }
+                    };
+                    if let Some(api) = api {
                         let result = if committed_state.api_background_loaded {
                             sync.sync_dts(&dts_path, &api.code).await
                         } else {
@@ -2209,7 +2220,19 @@ impl VerterLanguageServer {
         }
 
         // Fast path: host already has the file — sync directly from cached artifacts.
-        if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+        let public_api = match self.documents.host.get_public_api(canonical_id) {
+            Ok(api) => api,
+            Err(error) => {
+                crate::report_public_api_projection_error(
+                    "sync_imported_carrier_api_lightweight",
+                    canonical_id,
+                    &error,
+                );
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                return;
+            }
+        };
+        if let Some(api) = public_api {
             let ide = if is_tsgo {
                 self.documents.host.get_ide(canonical_id, &profile)
             } else {
@@ -2385,7 +2408,19 @@ impl VerterLanguageServer {
                             .await;
                     }
                 }
-                if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                let api = match self.documents.host.get_public_api(canonical_id) {
+                    Ok(api) => api,
+                    Err(error) => {
+                        crate::report_public_api_projection_error(
+                            "sync_imported_carrier_api_lightweight.bootstrap",
+                            canonical_id,
+                            &error,
+                        );
+                        self.queue_snapshot_provider_sync(canonical_id.to_string());
+                        return;
+                    }
+                };
+                if let Some(api) = api {
                     let _ = self
                         .sync_carrier_api_unresolved(canonical_id, &api.code)
                         .await;
@@ -2556,7 +2591,18 @@ impl VerterLanguageServer {
                 }
 
                 // Sync .vue.ts as secondary provider support output.
-                if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                let api = match self.documents.host.get_public_api(canonical_id) {
+                    Ok(api) => api,
+                    Err(error) => {
+                        crate::report_public_api_projection_error(
+                            "sync_compiled_carrier_to_provider",
+                            canonical_id,
+                            &error,
+                        );
+                        return;
+                    }
+                };
+                if let Some(api) = api {
                     if let Some(dts_path) = committed_state.api_path.clone() {
                         let is_bg = self.is_background_loaded_for_source_kind(
                             canonical_id,

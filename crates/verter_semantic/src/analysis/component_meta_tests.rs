@@ -29,6 +29,7 @@ pub(crate) fn test_payload(field_index: u32) -> MacroPayloadLocator {
     MacroPayloadLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(""),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         },
@@ -83,6 +84,7 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
 fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
     AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineProps,
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         is_type_based: true,
         type_references: Vec::new(),
         binding_name: None,
@@ -1024,6 +1026,226 @@ fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
         trailing.bindings.is_empty(),
         "no shape-derived bindings at this layer — the typed binding surface is host-raised"
     );
+}
+
+fn test_slot(name: &str) -> crate::analysis::types::AnalyzedSlotField {
+    crate::analysis::types::AnalyzedSlotField {
+        name: name.to_string(),
+        is_required: false,
+        span: verter_span::Span::default(),
+        bindings: Vec::new(),
+        return_type: None,
+        description: None,
+        tags: Vec::new(),
+        payload: None,
+        return_expr_scope: None,
+    }
+}
+
+fn test_slot_binding(
+    slot: &str,
+    binding: &str,
+    primitive: PrimitiveName,
+) -> crate::analysis::type_expand::ExpandedField {
+    crate::analysis::type_expand::ExpandedField {
+        name: format!("{slot}.{binding}"),
+        r#type: SourcePosition::Present(closed_leaf(primitive)),
+        raw_type: None,
+        optional: false,
+        exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+        execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+        diagnostics: Vec::new(),
+        shallow_source: None,
+        declared_in_macro_type_arg: false,
+    }
+}
+
+fn test_expanded_slot(
+    name: &str,
+    optional: bool,
+) -> crate::analysis::type_expand::ExpandedProperty {
+    crate::analysis::type_expand::ExpandedProperty {
+        name: name.to_string(),
+        ty: SourcePosition::Present(closed_ref("SlotFn")),
+        optional,
+        readonly: false,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        declared_in_macro_type_arg: false,
+    }
+}
+
+#[test]
+fn graph_binding_rows_join_authored_slots_when_the_expanded_shape_is_empty() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![test_slot("leading"), test_slot("content")],
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact_symbolic(
+                crate::analysis::type_expand::ExpandedObjectShape::empty(),
+            ),
+        }],
+        slot_bindings: vec![
+            test_slot_binding("leading", "item", PrimitiveName::String),
+            test_slot_binding("leading", "index", PrimitiveName::Number),
+            test_slot_binding("content", "item", PrimitiveName::String),
+            test_slot_binding("content", "index", PrimitiveName::Number),
+        ],
+        ..Default::default()
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    let result = extract_component_meta(input);
+
+    let slot_names: Vec<_> = result.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(slot_names, vec!["leading", "content"]);
+    for slot in &result.slots {
+        let binding_names: Vec<_> = slot
+            .bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect();
+        assert_eq!(binding_names, vec!["item", "index"], "slot={}", slot.name);
+        assert!(slot.is_scoped, "graph bindings make {} scoped", slot.name);
+    }
+}
+
+#[test]
+fn partial_slot_shape_merges_authored_expanded_and_binding_lanes_deterministically() {
+    let mut default = test_slot("default");
+    default
+        .bindings
+        .push(crate::analysis::types::AnalyzedSlotFieldBinding {
+            name: "item".to_string(),
+            type_annotation: Some("AuthoredItem".to_string()),
+            span: verter_span::Span::default(),
+            payload: lower_for_test(Some("AuthoredItem")).0,
+            binding_expr_scope: lower_for_test(Some("AuthoredItem")).1,
+        });
+    let mut content = test_slot("content");
+    content.is_required = true;
+    content.description = Some("Authored content slot".to_string());
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![test_slot("leading"), default, content],
+        ..make_define_props(vec![])
+    }];
+    let unresolved = crate::analysis::type_expand::ExpansionDiagnostic {
+        reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
+        context: "open DynamicSlots arm".to_string(),
+        property_name: None,
+    };
+    let content_binding_diagnostic = crate::analysis::type_expand::ExpansionDiagnostic {
+        reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
+        context: "symbolic content binding".to_string(),
+        property_name: Some("content.item".to_string()),
+    };
+    let mut partial_content = test_slot_binding("content", "item", PrimitiveName::String);
+    partial_content.exactness = crate::analysis::type_expand::ExpansionExactness::Incomplete;
+    partial_content.diagnostics = vec![content_binding_diagnostic.clone()];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::incomplete(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        test_expanded_slot("default", false),
+                        test_expanded_slot("footer", true),
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+                crate::analysis::type_expand::ExpansionExecutionStatus::Interrupted,
+                vec![unresolved.clone()],
+            ),
+        }],
+        slot_bindings: vec![
+            test_slot_binding("leading", "item", PrimitiveName::String),
+            test_slot_binding("default", "item", PrimitiveName::Number),
+            partial_content,
+            // Duplicate exact identity: the first graph row is authoritative.
+            test_slot_binding("content", "item", PrimitiveName::Boolean),
+            test_slot_binding("footer", "action", PrimitiveName::Boolean),
+        ],
+        ..Default::default()
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    let result = extract_component_meta(input);
+
+    let slot_names: Vec<_> = result.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(slot_names, vec!["leading", "default", "content", "footer"]);
+    for slot in &result.slots {
+        assert_eq!(
+            slot.bindings.len(),
+            1,
+            "slot={} must dedupe binding identity",
+            slot.name
+        );
+    }
+
+    let default = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .unwrap();
+    assert!(
+        default.is_required,
+        "expanded optionality remains authoritative"
+    );
+    assert_eq!(
+        default.bindings[0].type_source,
+        SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+        "exact evaluated binding source wins over the authored source"
+    );
+
+    let content = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .unwrap();
+    assert!(
+        content.is_required,
+        "authored optionality survives when shape membership is absent"
+    );
+    assert_eq!(
+        content.description.as_deref(),
+        Some("Authored content slot")
+    );
+    assert_eq!(
+        content.bindings[0].type_source,
+        SourcePosition::Present(closed_leaf(PrimitiveName::String)),
+        "first exact slot/binding identity wins"
+    );
+    let binding_expansion = content.bindings[0]
+        .type_expansion
+        .as_ref()
+        .expect("graph binding keeps expansion metadata");
+    assert_eq!(
+        binding_expansion.exactness,
+        crate::analysis::type_expand::ExpansionExactness::Incomplete
+    );
+    assert_eq!(
+        binding_expansion.diagnostics,
+        vec![content_binding_diagnostic]
+    );
+
+    assert_eq!(result.macro_expansion_diagnostics.len(), 1);
+    let macro_diagnostic = &result.macro_expansion_diagnostics[0];
+    assert_eq!(
+        macro_diagnostic.exactness,
+        crate::analysis::type_expand::ExpansionExactness::Incomplete
+    );
+    assert_eq!(
+        macro_diagnostic.execution_status,
+        crate::analysis::type_expand::ExpansionExecutionStatus::Interrupted
+    );
+    assert_eq!(macro_diagnostic.diagnostics, vec![unresolved]);
 }
 
 #[test]

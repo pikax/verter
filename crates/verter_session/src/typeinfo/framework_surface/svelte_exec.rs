@@ -447,6 +447,11 @@ fn member_declaration_origin(
         declaration_id: None,
         resolved_name: member_name.clone(),
         canonical_source: canonical_source.clone(),
+        owner: if canonical_source == owner {
+            verter_type_expr::TopLevelOwnerId::instance(0)
+        } else {
+            verter_type_expr::TopLevelOwnerId::ordinary_file()
+        },
         span,
         // A surface member is not itself a named interface/alias/class
         // declaration — its declaration kind is the MEMBER declaration, which
@@ -1248,6 +1253,75 @@ fn instance_export_display_node(
     node
 }
 
+/// Resolve one exact owner-qualified Svelte value export into the shared named
+/// member DTO. Instance-surface and module-declaration projectors use this
+/// single resolver so aliases preserve their public name while `typeof`
+/// targets the captured local [`verter_type_expr::DeclBindingKey`].
+pub(crate) fn resolve_svelte_value_export_member(
+    ctx: &dyn ResolverContext,
+    owner: &str,
+    exported_name: &str,
+    binding_key: &verter_type_expr::DeclBindingKey,
+    source_span: Option<verter_span::Span>,
+) -> crate::typeinfo::framework_surface::results::NamedTypeMember {
+    use crate::typeinfo::framework_surface::results::{NamedTypeMember, NamedTypeMemberOutput};
+
+    let dispatch = ctx.dispatch();
+    let read = dispatch.execute_read(dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(Arc::from(owner), binding_key.owner),
+            name: Arc::clone(&binding_key.name),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    ));
+    crate::request_context::observe_component_meta_read_suppress(&read);
+
+    let node = match read.value {
+        QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
+        QueryResult::Error(_) => None,
+    };
+    let (value, type_annotation, type_references) = node.map_or((None, None, Vec::new()), |node| {
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let reduced = dispatch.reduce_output_node_with_context(node, context);
+        if reduced.result_is_partial() {
+            crate::request_context::mark_request_result_partial();
+        }
+        let shallow =
+            crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                &dispatch,
+                reduced.node_id(),
+            )
+            .map(NamedTypeMemberOutput::from_raised_shallow)
+            .unwrap_or(NamedTypeMemberOutput::Opaque);
+        let graph = ctx.project_type_store().semantic_graph();
+        let display_node = instance_export_display_node(graph, reduced.node_id());
+        let type_annotation = crate::semantic_query::display::display(
+            graph,
+            &SemanticQueryValue::TypeNode(display_node),
+            DisplayNeeds::empty(),
+        )
+        .into();
+        let mut reference_names = rustc_hash::FxHashSet::default();
+        crate::resolver_core::component_meta_registry::collect_node_ref_names(
+            ctx,
+            display_node,
+            &mut reference_names,
+        );
+        let mut type_references: Vec<_> = reference_names.into_iter().collect();
+        type_references.sort();
+        (Some(shallow), Some(type_annotation), type_references)
+    });
+
+    NamedTypeMember {
+        name: exported_name.to_string(),
+        is_optional: false,
+        value,
+        type_annotation,
+        type_references,
+        source_span,
+    }
+}
+
 /// EXPOSE from the exported instance-script members. Each export is a named
 /// member of the public instance; the member type stays a shallow `Ref` to the
 /// exported binding (shallow-by-default — the consumer re-resolves on demand).
@@ -1256,80 +1330,24 @@ fn resolve_instance_exports(
     owner: &str,
     facts: Option<&SvelteScriptFacts>,
 ) -> ResolvedMacroPayload {
-    use crate::typeinfo::framework_surface::results::{
-        ExposeSurface, NamedTypeMember, NamedTypeMemberOutput,
-    };
+    use crate::typeinfo::framework_surface::results::ExposeSurface;
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
     if facts.instance_exports.is_empty() {
         return ResolvedOutcome::Missing;
     }
-    let dispatch = ctx.dispatch();
     let members = facts
         .instance_exports
         .iter()
         .map(|export| {
-            let read = dispatch.execute_read(dispatch.typeof_key_for(
-                ValueRootKey {
-                    scope: ScopeId::file(Arc::from(owner)),
-                    name: Arc::from(export.local_name.as_str()),
-                },
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ));
-            crate::request_context::observe_component_meta_read_suppress(&read);
-
-            let node = match read.value {
-                QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
-                QueryResult::Error(_) => None,
-            };
-            let (value, type_annotation, type_references) =
-                node.map_or((None, None, Vec::new()), |node| {
-                    let context =
-                        ProjectionReductionContext::published(ProjectionMode::Expanded);
-                    let reduced = dispatch.reduce_output_node_with_context(node, context);
-                    if reduced.result_is_partial() {
-                        crate::request_context::mark_request_result_partial();
-                    }
-                    let shallow = crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
-                        &dispatch,
-                        reduced.node_id(),
-                    )
-                    .map(NamedTypeMemberOutput::from_raised_shallow)
-                    .unwrap_or(NamedTypeMemberOutput::Opaque);
-                    let graph = ctx.project_type_store().semantic_graph();
-                    // A function-valued export reduces to a call-signature-only
-                    // object node; unwrap it to its `Function` node so the
-                    // display sidecar renders the idiomatic arrow form
-                    // (`focus: () => void`) rather than the guarded object colon
-                    // form (`{ (): void }`). Display-only: the shallow `value`
-                    // above still classifies the reduced node.
-                    let display_node = instance_export_display_node(graph, reduced.node_id());
-                    let type_annotation = crate::semantic_query::display::display(
-                        graph,
-                        &SemanticQueryValue::TypeNode(display_node),
-                        DisplayNeeds::empty(),
-                    )
-                    .into();
-                    let mut reference_names = rustc_hash::FxHashSet::default();
-                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
-                        ctx,
-                        display_node,
-                        &mut reference_names,
-                    );
-                    let mut type_references: Vec<_> = reference_names.into_iter().collect();
-                    type_references.sort();
-                    (Some(shallow), Some(type_annotation), type_references)
-                });
-
-            NamedTypeMember {
-                name: export.exported_name.clone(),
-                is_optional: false,
-                value,
-                type_annotation,
-                type_references,
-                source_span: Some(export.source_span),
-            }
+            resolve_svelte_value_export_member(
+                ctx,
+                owner,
+                &export.exported_name,
+                &export.binding_key,
+                Some(export.source_span),
+            )
         })
         .collect();
     let dtos = MacroSurfaceDtos {

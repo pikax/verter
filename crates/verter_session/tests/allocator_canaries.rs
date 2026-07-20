@@ -336,6 +336,7 @@ mod canary_absolutize_already_absolute_zero_alloc {
                 // ALREADY-ABSOLUTE anchor: nothing to rewrite.
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from("/already/absolute.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from("Anchored"),
                     space: LocatorSymbolSpace::Type,
                 },

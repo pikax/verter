@@ -255,6 +255,10 @@ mod tests {
             is_production: true,
             ..CompileProfile::default()
         };
+        let custom_element = CompileProfile {
+            custom_element: true,
+            ..CompileProfile::default()
+        };
         let sourcemap = CompileProfile {
             source_map: true,
             ..CompileProfile::default()
@@ -263,12 +267,17 @@ mod tests {
         let h_base = compile_profile_hash(&base);
         let h_ssr = compile_profile_hash(&ssr);
         let h_prod = compile_profile_hash(&prod);
+        let h_custom_element = compile_profile_hash(&custom_element);
         let h_sm = compile_profile_hash(&sourcemap);
 
         assert_ne!(h_base, h_ssr, "ssr diff should produce different hash");
         assert_ne!(
             h_base, h_prod,
             "production diff should produce different hash"
+        );
+        assert_ne!(
+            h_base, h_custom_element,
+            "custom-element script policy must produce a separate compile slot"
         );
         assert_ne!(
             h_base, h_sm,

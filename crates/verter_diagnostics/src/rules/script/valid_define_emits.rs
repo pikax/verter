@@ -61,6 +61,7 @@ mod tests {
     fn make_emit_macro(start: u32, end: u32) -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
             type_references: vec![],
             binding_name: None,

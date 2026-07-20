@@ -14,7 +14,7 @@ use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
     ClosedTypeFact, FactOrLocator, FunctionParamFact, FunctionSignatureFact, LeafTypeFact,
     ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, ProjectedMemberFact, ProjectedTypeFact,
-    ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact,
+    ResolvedLocalShape, ReturnInferenceCompleteness, SemanticTypeSource, SynthesizedMemberFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
@@ -24,13 +24,14 @@ use verter_type_expr::span_origins::{
     FunctionParamSelector, FunctionParamSpanOrigin, FunctionSpansOrigin, MemberSpansOrigin,
     SourceSynthetic,
 };
-use verter_type_expr::MemberVisibility;
+use verter_type_expr::{MemberVisibility, TopLevelOwnerId};
 
 const CHILD: &str = "/components/Child.vue";
 
 fn anchor(canonical: &str) -> AuthoredAnchor {
     AuthoredAnchor {
         canonical_id: Arc::from(canonical),
+        owner: TopLevelOwnerId::ordinary_file(),
         symbol: Arc::from("ChildProps"),
         space: LocatorSymbolSpace::Type,
     }
@@ -184,6 +185,7 @@ fn projected_member_and_function_positions_absolutize_deeply() {
                 .into_boxed_slice(),
             ),
             return_ty: Some(slot("/lib/keep.ts")),
+            return_inference: ReturnInferenceCompleteness::NotInferred,
             has_implementation_body: false,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }));

@@ -136,11 +136,11 @@ fn rune_ambient_inventory() -> &'static RuneAmbientInventory {
         );
         let value_decls: FxHashMap<String, Arc<LoweredValueDecl>> = values
             .into_iter()
-            .map(|(name, lowered)| (name, Arc::new(lowered)))
+            .map(|(key, lowered)| (key.name.to_string(), Arc::new(lowered)))
             .collect();
         let type_decls: FxHashMap<String, Arc<LoweredTypeDecl>> = types
             .into_iter()
-            .map(|(name, lowered)| (name, Arc::new(lowered)))
+            .map(|(key, lowered)| (key.name.to_string(), Arc::new(lowered)))
             .collect();
 
         RuneAmbientInventory {
@@ -312,6 +312,7 @@ mod tests {
         let mut env = EvalEnv::default();
         let user = verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: "$state".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: verter_type_expr::facts::ValueTypeAnnotationFact {

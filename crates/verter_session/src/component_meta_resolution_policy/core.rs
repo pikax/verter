@@ -17,6 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::facts::SemanticTypeSource;
+use verter_type_expr::TopLevelOwnerId;
 
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
@@ -40,13 +41,13 @@ use super::cycle_guard::NormalizedTypeArgs;
 pub(super) struct PolicyRegistry<'a> {
     /// `name → &SemanticTypeSource` of the resolved registry entry.
     source_by_name: FxHashMap<&'a str, &'a SemanticTypeSource>,
-    /// `name → canonical_source` of the declaration.
-    canonical_source_by_name: FxHashMap<&'a str, &'a str>,
+    /// `name → (canonical_source, lexical owner)` of the declaration.
+    declaration_scope_by_name: FxHashMap<&'a str, (&'a str, TopLevelOwnerId)>,
     /// Distinct, non-empty declaration scopes drawn from the registry meta.
     /// Used as fallback scopes for cross-file declaration lookup of
     /// transitively-referenced types (e.g. types referenced from a macro
     /// argument's declaration but not registered as a top-level macro arg).
-    fallback_scopes: Vec<&'a str>,
+    fallback_scopes: Vec<(&'a str, TopLevelOwnerId)>,
 }
 
 impl<'a> PolicyRegistry<'a> {
@@ -62,18 +63,20 @@ impl<'a> PolicyRegistry<'a> {
                 source_by_name.insert(entry.name.as_str(), source);
             }
         }
-        let mut canonical_source_by_name = FxHashMap::default();
-        let mut fallback_scopes: Vec<&'a str> = Vec::new();
+        let mut declaration_scope_by_name = FxHashMap::default();
+        let mut fallback_scopes: Vec<(&'a str, TopLevelOwnerId)> = Vec::new();
         for meta in type_registry_meta.iter() {
             let canonical = meta.declaration.canonical_source.as_str();
-            canonical_source_by_name.insert(meta.name.as_str(), canonical);
-            if !canonical.is_empty() && !fallback_scopes.contains(&canonical) {
-                fallback_scopes.push(canonical);
+            let owner = meta.declaration.owner;
+            declaration_scope_by_name.insert(meta.name.as_str(), (canonical, owner));
+            let scope = (canonical, owner);
+            if !canonical.is_empty() && !fallback_scopes.contains(&scope) {
+                fallback_scopes.push(scope);
             }
         }
         Self {
             source_by_name,
-            canonical_source_by_name,
+            declaration_scope_by_name,
             fallback_scopes,
         }
     }
@@ -90,11 +93,11 @@ impl<'a> PolicyRegistry<'a> {
             .filter(|source| source_bare_ref_name(source) != Some(name))
     }
 
-    fn canonical_source(&self, name: &str) -> Option<&'a str> {
-        self.canonical_source_by_name
+    fn declaration_scope(&self, name: &str) -> Option<(&'a str, TopLevelOwnerId)> {
+        self.declaration_scope_by_name
             .get(name)
             .copied()
-            .filter(|s| !s.is_empty())
+            .filter(|(canonical, _)| !canonical.is_empty())
     }
 }
 
@@ -102,6 +105,7 @@ pub(super) struct PolicyCtx<'a, 'h> {
     pub(super) registry: &'a PolicyRegistry<'a>,
     pub(super) engine: &'a mut ComponentMetaQueryEngine<'h>,
     pub(super) owner_canonical: &'a str,
+    pub(super) owner: TopLevelOwnerId,
     pub(super) host: &'a VerterHost,
     /// Set of `ResolvedRootIdentity` values that participate in
     /// type-role-bearing Vue SFC macros (`defineProps`, `defineEmits`,
@@ -150,7 +154,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     /// (authored locators self-anchor; only producer-local empty anchors
     /// absolutize against the scope).
     pub(super) fn raise_source(&self, source: &SemanticTypeSource) -> Option<HotTypeRef> {
-        self.raise_source_in_scope(source, self.owner_canonical)
+        self.raise_source_in_scope(source, self.owner_canonical, self.owner)
     }
 
     /// [`Self::raise_source`] under an explicit name-resolution scope — the
@@ -159,12 +163,14 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         &self,
         source: &SemanticTypeSource,
         scope_canonical_id: &str,
+        scope_owner: TopLevelOwnerId,
     ) -> Option<HotTypeRef> {
         let dispatch = ProjectSemanticDispatch::new(self.resolver_ctx());
         dispatch.raise_semantic_type_source_to_hot(
             source,
             SourceRaiseContext {
                 scope_canonical_id,
+                scope_owner,
                 context: ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 ),
@@ -203,24 +209,28 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         // self-referential seed carries no body knowledge and falls
         // through to the engine's declaration-body route below.
         if let Some(body) = self.registry.registry_body(name) {
-            let canonical = self
+            let (canonical, owner) = self
                 .registry
-                .canonical_source(name)
-                .unwrap_or(self.owner_canonical)
-                .to_string();
+                .declaration_scope(name)
+                .unwrap_or((self.owner_canonical, self.owner));
             return Some(DeclLookup {
-                canonical_source: canonical,
+                canonical_source: canonical.to_string(),
+                owner,
                 body: body.clone(),
             });
         }
-        let mut scopes: Vec<String> = vec![self.owner_canonical.to_string()];
-        for fallback in self.registry.fallback_scopes.iter() {
-            if !scopes.iter().any(|existing| existing.as_str() == *fallback) {
-                scopes.push(fallback.to_string());
+        let mut scopes: Vec<(String, TopLevelOwnerId)> =
+            vec![(self.owner_canonical.to_string(), self.owner)];
+        for &(fallback_canonical, fallback_owner) in self.registry.fallback_scopes.iter() {
+            if !scopes.iter().any(|(existing_canonical, existing_owner)| {
+                existing_canonical.as_str() == fallback_canonical
+                    && *existing_owner == fallback_owner
+            }) {
+                scopes.push((fallback_canonical.to_string(), fallback_owner));
             }
         }
-        for scope in scopes {
-            let decl = self.engine.resolve_type_declaration(&scope, name);
+        for (scope, owner) in scopes {
+            let decl = self.engine.resolve_type_declaration(&scope, owner, name);
             if decl.canonical_source.is_empty() {
                 continue;
             }
@@ -229,12 +239,13 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             } else {
                 decl.resolved_name.clone()
             };
-            if let Some(locator) = self
-                .engine
-                .named_decl_body(&decl.canonical_source, &resolved_name)
+            if let Some(locator) =
+                self.engine
+                    .named_decl_body(&decl.canonical_source, decl.owner, &resolved_name)
             {
                 return Some(DeclLookup {
                     canonical_source: decl.canonical_source,
+                    owner: decl.owner,
                     body: SemanticTypeSource::Authored(locator),
                 });
             }
@@ -249,7 +260,12 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     /// not-yet-loaded paths) fall back to `HashValue::default()` — the
     /// `(canonical_source, name)` pair is still a deterministic identity
     /// for the cycle guard within a single policy invocation.
-    pub(super) fn decl_identity_for(&self, canonical_source: &str, name: &str) -> DeclIdentity {
+    pub(super) fn decl_identity_for(
+        &self,
+        canonical_source: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DeclIdentity {
         let whole_hash = self
             .host
             .shallow_file_state(canonical_source)
@@ -257,6 +273,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             .unwrap_or_default();
         DeclIdentity {
             canonical_id: Arc::from(canonical_source),
+            owner,
             whole_hash,
             decl_name: Arc::from(name),
         }
@@ -291,14 +308,18 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     /// Type-role classification is structural, not nominal — never a
     /// name-suffix check.
     pub(super) fn is_macro_participating(&self, name: &str) -> bool {
-        if let Some(identity) = resolve_ref_to_root_identity(self.host, self.owner_canonical, name)
-        {
+        if let Some(identity) = resolve_ref_to_root_identity(
+            self.resolver_ctx(),
+            self.owner_canonical,
+            self.owner,
+            name,
+        ) {
             if self.macro_participating_idents.contains(&identity) {
                 return true;
             }
         }
-        if let Some(canonical) = self.registry.canonical_source(name) {
-            let identity = ResolvedRootIdentity::new(canonical, name);
+        if let Some((canonical, owner)) = self.registry.declaration_scope(name) {
+            let identity = ResolvedRootIdentity::new_in_owner(canonical, owner, name);
             return self.macro_participating_idents.contains(&identity);
         }
         false
@@ -307,6 +328,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
 
 pub(super) struct DeclLookup {
     pub(super) canonical_source: String,
+    pub(super) owner: TopLevelOwnerId,
     pub(super) body: SemanticTypeSource,
 }
 
@@ -397,7 +419,7 @@ fn rewrite_ref_node(
     // name — two `Foo`s in different files produce different identities;
     // `Pick<X, 'a'>` and `Pick<X, 'b'>` produce different normalized
     // type-args so they navigate independently.
-    let decl_identity = ctx.decl_identity_for(&lookup.canonical_source, name);
+    let decl_identity = ctx.decl_identity_for(&lookup.canonical_source, lookup.owner, name);
     let normalized_args = NormalizedTypeArgs::normalize_nodes(arg_nodes, ctx);
     let guard_key = (decl_identity, normalized_args);
 
@@ -445,7 +467,8 @@ fn rewrite_ref_body_with_guard(
     if !arg_nodes.is_empty() {
         return None;
     }
-    let body_hot = ctx.raise_source_in_scope(&lookup.body, &lookup.canonical_source)?;
+    let body_hot =
+        ctx.raise_source_in_scope(&lookup.body, &lookup.canonical_source, lookup.owner)?;
     let body_node = body_hot.node();
     if body_root_is_resolvable(body_node, ctx) {
         // Publish the located declaration's body SOURCE. Nested positions

@@ -9,8 +9,8 @@ const __comp = defineComponent({
 })
 
 declare const WithDefaults: __OmitNew<typeof __comp> & {
-  new(props?: import("vue").PublicProps & Omit<Props, 'count' | 'label'> & Partial<Pick<Props, 'count' | 'label'>>): {
-    $props: import("vue").PublicProps & Omit<Props, 'count' | 'label'> & Partial<Pick<Props, 'count' | 'label'>>,
+  new(props?: import("vue").PublicProps & Omit<Props, "count" | "label"> & Partial<Pick<Props, "count" | "label">>): {
+    $props: import("vue").PublicProps & Omit<Props, "count" | "label"> & Partial<Pick<Props, "count" | "label">>,
     $emit: (event: string, ...args: unknown[]) => void,
     $data: {},
     $attrs: import("vue").HTMLAttributes,
@@ -18,4 +18,4 @@ declare const WithDefaults: __OmitNew<typeof __comp> & {
   }
 }
 export default WithDefaults
-//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovV2l0aERlZmF1bHRzLnZ1ZSJdLCJzb3VyY2VzQ29udGVudCI6WyI8c2NyaXB0IHNldHVwIGxhbmc9XCJ0c1wiPlxuaW50ZXJmYWNlIFByb3BzIHtcbiAgY291bnQ6IG51bWJlclxuICBsYWJlbDogc3RyaW5nXG59XG53aXRoRGVmYXVsdHMoZGVmaW5lUHJvcHM8UHJvcHM+KCksIHsgY291bnQ6IDAsIGxhYmVsOiAnaGknIH0pXG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2IC8+PC90ZW1wbGF0ZT5cbiJdLCJtYXBwaW5ncyI6IiJ9
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovV2l0aERlZmF1bHRzLnZ1ZSJdLCJzb3VyY2VzQ29udGVudCI6WyI8c2NyaXB0IHNldHVwIGxhbmc9XCJ0c1wiPlxuaW50ZXJmYWNlIFByb3BzIHtcbiAgY291bnQ6IG51bWJlclxuICBsYWJlbDogc3RyaW5nXG59XG53aXRoRGVmYXVsdHMoZGVmaW5lUHJvcHM8UHJvcHM+KCksIHsgY291bnQ6IDAsIGxhYmVsOiAnaGknIH0pXG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2IC8+PC90ZW1wbGF0ZT5cbiJdLCJtYXBwaW5ncyI6IkE7QTtBQUNBLFVBQVUsTUFBTTtBQUNoQixFQUFFLEtBQUssRUFBRTtBQUNULEVBQUUsS0FBSyxFQUFFO0FBQ1QsQztBO0E7QTs7QTtBLDBDLEtBQ3lCLEssb0NBQUEsSyxxQjtBLHdDLEtBQUEsSyxvQ0FBQSxLLHFCO0EsVywyQztBO0E7QTtBO0E7QSJ9

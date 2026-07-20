@@ -1171,6 +1171,7 @@ fn materialize_output_source(
     dispatch: &ProjectSemanticDispatch<'_>,
     cap: &MetaResolveProjectorsOutputCap<'_, '_>,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> Result<TypeExpr, crate::meta_resolve::ComponentMetaOutputFailure> {
     use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
@@ -1190,7 +1191,12 @@ fn materialize_output_source(
                     ProjectionMode::Navigate,
                 );
             let hot = dispatch
-                .raise_semantic_type_source_to_hot_strict(other, scope_canonical_id, transit_ctx)
+                .raise_semantic_type_source_to_hot_strict(
+                    other,
+                    scope_canonical_id,
+                    scope_owner,
+                    transit_ctx,
+                )
                 .map_err(|failure| match failure {
                     crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::InteriorMiss(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path }

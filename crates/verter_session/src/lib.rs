@@ -409,12 +409,12 @@ pub use resolver_store::{
 // The session-overlay copy-on-write counter is deliberately NOT re-exported: it lives
 // per-host on `VerterHost::provenance().session_overlay_cows` (own-host gate metric).
 
-// Re-export for the LSP: standalone @verter/types .d.ts content.
-pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
-
-// Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
-// without adding verter_compiler as a direct dependency.
+// Downstream re-exports (LSP/MCP/FFI): the standalone @verter/types .d.ts
+// content, CompileTarget, and the dependency-neutral public-API projection
+// subject — adapters must not depend on compiler/protocol internals.
 pub use verter_compiler::compile::CompileTarget;
+pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
+pub use verter_protocol::types::PublicApiProjectionSubject;
 
 use std::sync::Arc;
 

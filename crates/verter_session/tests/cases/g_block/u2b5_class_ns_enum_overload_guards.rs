@@ -51,8 +51,12 @@ fn hash16(byte: u8) -> [u8; 16] {
 fn slot(canonical: &str, name: &str, space: SemanticSymbolSpace) -> ResolvedDeclSlotIdentity {
     // Zero-env slot via the fixture constructor (the typed env tail is
     // in-crate sealed), re-spaced to the requested symbol space.
-    ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from(name))
-        .with_symbol_space(space)
+    ResolvedDeclSlotIdentity::type_slot_unscoped(
+        Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from(name),
+    )
+    .with_symbol_space(space)
 }
 
 fn dummy_node() -> SemanticNodeId {
@@ -690,7 +694,10 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     let typeof_key = SemanticQueryKey::TypeOf {
         value_root: verter_session::semantic_query::ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: verter_session::semantic_query::ScopeId::file(Arc::from(canonical)),
+                scope: verter_session::semantic_query::ScopeId::file(
+                    Arc::from(canonical),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::from("Foo"),
             },
             typeof_project_identity,

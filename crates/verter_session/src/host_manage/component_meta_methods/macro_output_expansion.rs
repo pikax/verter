@@ -148,6 +148,10 @@ fn materialize_admitted_expansion_node(
 /// node-domain branch EXACTLY: `produced_node_id` (audit parity — set as soon as
 /// the carrier head resolves, whether or not the materialisation then succeeds)
 /// and the materialised expr.
+// `Materialized` carries the sealed materialisation by value: it is the
+// dominant outcome of a transient (never stored) expansion result — same
+// disposition as the `resolver_store` slot enums.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum DefineModelOutputExpansion {
     /// The carrier head resolved and materialised. `produced_node_id` is the
     /// resolved head; `normalized` the sealed materialisation.
@@ -172,6 +176,7 @@ pub(crate) enum DefineModelOutputExpansion {
 /// (a generic `ProjectPath`, or the slot-binding `Function → params[0] → member`
 /// descent). The variant→trace mapping lives in the eval_env caller so the two
 /// branches keep their distinct `macro_projection_failover` reason strings.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MacroPathOutputExpansion {
     /// The terminal hop resolved to a node and materialised.
     Materialized {
@@ -291,8 +296,15 @@ pub(crate) fn expand_generic_project_path_output(
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: base_id,
         path: terminal_path,
+        // Publication demand is Navigate-only (Shallow-by-default): the
+        // projector publishes the terminal path shape shallow and never
+        // eagerly materialises it — a `Published(Expanded)` here re-enters
+        // the giant-tree Instantiate(Expanded) pathology (e.g. eager
+        // `Pick` expansion) that the carrier-stop and the ChatMessages
+        // zero-eager-expansion gate forbid. The terminal materialisation
+        // happens on demand at the sealed sink below.
         context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
+            ProjectionMode::Navigate,
         ),
     });
     match projected {

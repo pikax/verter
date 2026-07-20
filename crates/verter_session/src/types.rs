@@ -1202,6 +1202,9 @@ pub struct CompileProfile {
     pub filename: Option<String>,
     /// Production mode: strips dev-only code (`__file`, HMR).
     pub is_production: bool,
+    /// Compile a Vue SFC as a custom element. This is a script runtime-prop
+    /// policy axis and is independent of template `custom_elements`.
+    pub custom_element: bool,
     /// Server-side rendering mode.
     pub ssr: bool,
     /// SSR asset-collection module id registered on `ssrContext.modules`.
@@ -1290,6 +1293,7 @@ impl Default for CompileProfile {
         Self {
             filename: None,
             is_production: false,
+            custom_element: false,
             ssr: false,
             ssr_module_id: None,
             hmr_strategy: HmrStrategy::None,
@@ -2137,6 +2141,103 @@ pub struct TscResponse {
     pub source_map: Option<Arc<str>>,
 }
 
+/// Typed failure produced while projecting a framework carrier's public API.
+///
+/// Absence remains [`Ok(None)`](Result::Ok): this error channel is reserved for
+/// a carrier that was selected and then failed its closed projection contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicApiProjectionError {
+    /// Vue TSC generation rejected an incomplete, mismatched, or unsafe macro
+    /// projection.
+    TscGeneration(verter_compiler::tsc::TscGenerationError),
+}
+
+impl PublicApiProjectionError {
+    /// Stable machine-readable error family.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::TscGeneration(_) => "tsc-generation",
+        }
+    }
+
+    /// Stable machine-readable error detail.
+    #[must_use]
+    pub const fn detail_code(&self) -> &'static str {
+        match self {
+            Self::TscGeneration(error) => error.code(),
+        }
+    }
+
+    /// Dependency-neutral syntax carrier associated with the failure.
+    #[must_use]
+    pub const fn subject(&self) -> crate::PublicApiProjectionSubject {
+        let subject = match self {
+            Self::TscGeneration(error) => error.subject(),
+        };
+        match subject {
+            verter_compiler::tsc::TscFailureSubject::Macro { syntax_index } => {
+                crate::PublicApiProjectionSubject::Macro { syntax_index }
+            }
+            verter_compiler::tsc::TscFailureSubject::ScriptSetupAttrs { source_range } => {
+                crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
+            }
+        }
+    }
+
+    /// Parser-owned macro syntax slot, when the subject is a macro.
+    #[must_use]
+    pub const fn macro_syntax_index(&self) -> Option<u32> {
+        match self {
+            Self::TscGeneration(error) => error.macro_syntax_index(),
+        }
+    }
+
+    /// Declaration-shape detail, when applicable.
+    #[must_use]
+    pub const fn declaration_shape_reason(
+        &self,
+    ) -> Option<verter_compiler::tsc::TscDeclarationShapeReason> {
+        match self {
+            Self::TscGeneration(error) => error.declaration_shape_reason(),
+        }
+    }
+
+    /// Authored member ordinal, when applicable.
+    #[must_use]
+    pub const fn member_ordinal(&self) -> Option<u32> {
+        match self {
+            Self::TscGeneration(error) => error.member_ordinal(),
+        }
+    }
+
+    /// Exact unavailable TypeInfo outcome, when applicable.
+    #[must_use]
+    pub const fn unavailable_outcome(
+        &self,
+    ) -> Option<&verter_compiler::tsc::TscUnavailableOutcome> {
+        match self {
+            Self::TscGeneration(error) => error.unavailable_outcome(),
+        }
+    }
+}
+
+impl From<verter_compiler::tsc::TscGenerationError> for PublicApiProjectionError {
+    fn from(error: verter_compiler::tsc::TscGenerationError) -> Self {
+        Self::TscGeneration(error)
+    }
+}
+
+impl std::fmt::Display for PublicApiProjectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TscGeneration(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for PublicApiProjectionError {}
+
 /// Controls which public API surface the host generates for a Vue SFC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicApiMode {
@@ -2796,10 +2897,6 @@ pub(crate) struct StyleOverrideWithAnalysis {
 /// Maximum recursion depth for external type resolution.
 ///
 /// Safety net for pathological barrel chains. The barrel resolution cache
-/// and visiting set handle all practical cases; this limit only fires for
-/// truly extreme input (e.g., 130+ nested `export *` chains).
-pub(crate) const MAX_RESOLVE_DEPTH: usize = 128;
-
 /// Maximum distinct `(canonical,type)` external-resolution pairs per request.
 ///
 /// This is a hard safety cap for component-meta and macro type resolution.
@@ -2807,25 +2904,6 @@ pub(crate) const MAX_RESOLVE_DEPTH: usize = 128;
 /// fail explicitly instead of continuing to allocate until the caller runs
 /// out of memory.
 pub(crate) const MAX_EXTERNAL_TYPE_RESOLVE_STEPS: usize = 2_000;
-
-/// Error from [`VerterHost::resolve_external_type_from_loaded_files`].
-#[derive(Debug, Clone)]
-pub enum ExternalTypeResolveError {
-    /// The root dependency could not be resolved.
-    MissingRootDependency,
-    /// Recursion depth exceeded the configured limit.
-    DepthLimitExceeded {
-        limit: usize,
-        type_name: String,
-        last_dep: String,
-    },
-    /// Total distinct external-type resolution steps exceeded the hard limit.
-    StepLimitExceeded {
-        limit: usize,
-        type_name: String,
-        last_dep: String,
-    },
-}
 
 /// Cached host-owned component-meta resolved state.
 ///
@@ -3116,7 +3194,7 @@ pub struct MetaProvenance {
     /// declaration closure; a whole-file env demand (fallthrough /
     /// runtime values) lowers the file's full declaration set once.
     pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
-    /// `ShallowFileState::from_analysis_with_resolver` builds initiated
+    /// `ShallowFileState::from_route_inventory_with_resolver` builds initiated
     /// by host call sites. Exactly 1 per cold canonical build.
     pub shallow_state_builds: std::sync::atomic::AtomicU64,
     /// Cold `IndexedReady` materialisations (base + overlay

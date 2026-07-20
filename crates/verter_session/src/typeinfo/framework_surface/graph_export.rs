@@ -1155,6 +1155,7 @@ mod tests {
             declaration_id: None,
             resolved_name: "Size".to_string(),
             canonical_source: "/lib/props.ts".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             span: verter_span::Span::default(),
             kind: ResolvedDeclarationKind::TypeAlias,
             text: None,

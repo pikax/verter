@@ -973,8 +973,13 @@ fn collect_function_infer_binder_names(func: &FunctionExpr, out: &mut Vec<Arc<st
 /// root the value lookup in, so it cannot be structurally lowered.
 fn value_root_scope(scope: &NodeScopeId) -> Result<ScopeId, StructuralLowerError> {
     match scope {
-        NodeScopeId::File { canonical_id, .. } => Ok(ScopeId {
+        NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } => Ok(ScopeId {
             canonical_id: Arc::clone(canonical_id),
+            owner: *owner,
             local_scope: None,
         }),
         NodeScopeId::Global => Err(StructuralLowerError::UnsupportedWithoutResolution {
@@ -1174,15 +1179,18 @@ fn build_script_setup_seed_frames(
     let decl = match scope {
         NodeScopeId::Global => DeclIdentity {
             canonical_id: Arc::from(""),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from("<script-setup>"),
         },
         NodeScopeId::File {
             canonical_id,
+            owner,
             whole_hash,
             ..
         } => DeclIdentity {
             canonical_id: Arc::clone(canonical_id),
+            owner: *owner,
             whole_hash: *whole_hash,
             decl_name: Arc::from("<script-setup>"),
         },
@@ -1274,25 +1282,19 @@ struct MacroSlot {
 
 impl std::fmt::Debug for MacroHotMirror {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let demanded = self.cells.get().map_or(0, |cells| {
+            cells.iter().filter(|c| c.committed.get().is_some()).count()
+        });
         f.debug_struct("MacroHotMirror")
-            .field(
-                "demanded",
-                &self
-                    .cells
-                    .get()
-                    .map(|c| c.iter().filter(|x| x.committed.get().is_some()).count())
-                    .unwrap_or(0),
-            )
+            .field("demanded", &demanded)
             .finish()
     }
 }
 
+/// A clone is a distinct artifact instance, so it starts with an EMPTY
+/// per-artifact demand mirror; re-demand repopulates it (interned nodes are
+/// content-addressed, so a re-lower hits the same node ids).
 impl Clone for MacroHotMirror {
-    /// A cloned artifact starts with an EMPTY mirror: the `HotTypeRef`
-    /// handles are interned ids valid for the project graph, but the mirror
-    /// is a per-artifact demand cache and a clone is a distinct artifact
-    /// instance. Re-demand repopulates it (the underlying interned nodes are
-    /// content-addressed, so a re-lower hits the same node ids).
     fn clone(&self) -> Self {
         Self {
             cells: OnceLock::new(),
@@ -1457,6 +1459,7 @@ fn build_macro_hot_ref(
     let graph = ctx.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(owner_canonical),
+        owner: mac.owner,
         whole_hash: indexed.whole_hash,
         local_scope: None,
     };

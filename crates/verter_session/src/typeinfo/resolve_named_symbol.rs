@@ -192,6 +192,16 @@ impl VerterHost {
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        // Footprint-attachment pipeline: plant the per-request accumulator
+        // (and the workspace VFS audit sink) so the dispatch path's
+        // passive-observer emissions attribute to THIS request — the same
+        // scope the component-meta entry installs. Mined into the record
+        // after the request body completes.
+        let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
+            self,
+            request_id,
+            footprint_capture,
+        );
         // Thread the host's projection-op budget so this dispatch path
         // honours the same fuse as every other resolution entry-point;
         // a tripped budget surfaces as a `BudgetExceeded` dispatch
@@ -203,7 +213,7 @@ impl VerterHost {
             RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
-            None,
+            footprint_scope.accumulator(),
             self.config.projection_op_budget,
         );
 
@@ -298,6 +308,14 @@ impl VerterHost {
             None
         };
 
+        // Finalise the footprint through the shared miner: drain THIS
+        // request's accumulator, build the per-file attribution vector,
+        // and mine the deterministic footprint. `(None, [])` when
+        // capture is off — the record then carries `footprint: None`
+        // exactly as before.
+        let (footprint, files) =
+            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_id.to_string(),
@@ -307,9 +325,9 @@ impl VerterHost {
             timings,
             memory,
             store,
-            footprint: None,
+            footprint,
             scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
+            files,
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
             capture_state: verter_audit::AuditCaptureState::ActiveStored,
@@ -544,6 +562,20 @@ fn resolve_named_symbol_in_current_view(
 ) {
     let scope_arc: Arc<str> = Arc::from(canonical_id);
 
+    // Owner-agnostic entry → exact authored owner. This public
+    // named-symbol surface takes no owner, so the dispatch scope owner is
+    // selected through the SAME header-inventory rule the C1 consumer
+    // uses (`unique_local_type_declaration_owner_in`): the sole authored
+    // declaring owner when the canonical declares the name (a
+    // `<script setup>`-local declaration resolves under its Instance
+    // owner, where the script-setup `generic="T"` params bind), and the
+    // ordinary-file view otherwise (import-routed names, ambient names,
+    // multi-owner ambiguity — each fails closed exactly as before).
+    let entry_owner = host
+        .routed_shallow_state(canonical_id)
+        .and_then(|state| crate::VerterHost::unique_local_type_declaration_owner_in(&state, name))
+        .unwrap_or_else(verter_type_expr::TopLevelOwnerId::ordinary_file);
+
     // Resolve the bare declaration. The dispatch entry-point
     // memoises this through its `execute_cooperative` path. Note
     // that `ResolveDecl` may legitimately return an
@@ -557,6 +589,7 @@ fn resolve_named_symbol_in_current_view(
     let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::clone(&scope_arc),
+            owner: entry_owner,
             local_scope: None,
         },
         name: Arc::from(name),
@@ -599,11 +632,12 @@ fn resolve_named_symbol_in_current_view(
     };
     let scope_node = NodeScopeId::File {
         canonical_id: Arc::clone(&scope_arc),
+        owner: entry_owner,
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
     let _ = &scope_node;
-    let base = dispatch.type_slot_for(Arc::clone(&scope_arc), Arc::from(name));
+    let base = dispatch.type_slot_for(Arc::clone(&scope_arc), entry_owner, Arc::from(name));
 
     let instantiate_key =
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
@@ -709,13 +743,15 @@ pub(crate) fn materialize_through_aliases(
             Some(SemanticNodeData::Opaque(
                 crate::semantic_query::QueryError::DeclPlaceholder {
                     canonical_id,
+                    owner,
                     name,
                     whole_hash: _,
                 },
             )) => {
                 // Materialise the placeholder by dispatching an
                 // empty-args Instantiate against its identity.
-                let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let base =
+                    dispatch.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
                 let key =
                     SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                         base,
@@ -825,6 +861,7 @@ pub(crate) fn materialize_through_aliases(
                             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                                 scope: ScopeId {
                                     canonical_id: Arc::clone(&identity.canonical_id),
+                                    owner: identity.owner,
                                     local_scope: None,
                                 },
                                 name: Arc::clone(&identity.decl_name),
@@ -844,6 +881,7 @@ pub(crate) fn materialize_through_aliases(
                     }) => {
                         let inst_base = dispatch.type_slot_for(
                             Arc::clone(&ref_base.canonical_id),
+                            ref_base.owner,
                             Arc::clone(&ref_base.decl_name),
                         );
                         let inst_result = match dispatch

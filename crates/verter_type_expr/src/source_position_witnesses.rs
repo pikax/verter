@@ -15,6 +15,7 @@ use crate::PrimitiveName;
 fn anchor() -> AuthoredAnchor {
     AuthoredAnchor {
         canonical_id: std::sync::Arc::from("/ws/a.ts"),
+        owner: crate::TopLevelOwnerId::ordinary_file(),
         symbol: std::sync::Arc::from("A"),
         space: LocatorSymbolSpace::Type,
     }

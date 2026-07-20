@@ -32,6 +32,7 @@ use crate::semantic_query::ProjectionMode;
 /// signal.
 pub(crate) fn reduce_published_field_types(
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
@@ -113,6 +114,7 @@ pub(crate) fn reduce_published_field_types(
             &dispatch,
             transit_ctx,
             scope_canonical_id,
+            scope_owner,
             &mut field.r#type,
             field.shallow_source.as_ref(),
             false,
@@ -140,6 +142,7 @@ pub(crate) fn reduce_published_field_types(
                 &dispatch,
                 transit_ctx,
                 scope_canonical_id,
+                scope_owner,
                 &mut property.ty,
                 shallow.as_ref(),
                 true,
@@ -165,6 +168,7 @@ pub(crate) fn reduce_published_field_types(
             &current,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id,
+                scope_owner,
                 context: transit_ctx,
                 interior_failures: None,
             },
@@ -203,6 +207,7 @@ pub(crate) fn reduce_published_field_types(
             &current,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id,
+                scope_owner,
                 context: transit_ctx,
                 interior_failures: None,
             },
@@ -238,6 +243,7 @@ pub(crate) fn reduce_published_field_types(
             &current,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id,
+                scope_owner,
                 context: transit_ctx,
                 interior_failures: None,
             },
@@ -278,6 +284,7 @@ fn finalize_published_prop_source(
     dispatch: &ProjectSemanticDispatch<'_>,
     transit_ctx: crate::semantic_query::ProjectionReductionContext,
     scope_canonical_id: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
     position: &mut verter_type_expr::facts::SourcePosition,
     shallow_source: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
     apply_ref_identity_upgrade: bool,
@@ -311,6 +318,7 @@ fn finalize_published_prop_source(
         &current,
         crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
             scope_canonical_id,
+            scope_owner,
             context: transit_ctx,
             interior_failures: None,
         },

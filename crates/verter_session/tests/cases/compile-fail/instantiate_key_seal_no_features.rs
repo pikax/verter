@@ -29,7 +29,11 @@ use verter_session::semantic_query::{
 
 fn main() {
     let prc = ProjectionReductionContext::published(ProjectionMode::Expanded);
-    let base = ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/x.ts"), Arc::from("Foo"));
+    let base = ResolvedDeclSlotIdentity::type_slot_unscoped(
+        Arc::from("/x.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Foo"),
+    );
     let args: Arc<[SemanticNodeId]> = Arc::from(Vec::new().into_boxed_slice());
 
     // 1. The raw test constructors are DELETED — no such associated function.

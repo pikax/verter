@@ -43,18 +43,17 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 
-use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::ProjectTypeStore;
 use crate::request_context::bump_resolver_store_view_call;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
 use crate::resolver_core::resolver_context::ResolverContext;
+use crate::resolver_core::ValueDeclIdentity;
 use crate::resolver_core::{FactReadSetCell, FactVersionRef, ShallowFileState, StoreView};
 use crate::resolver_store::HostStoreView;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
@@ -217,22 +216,35 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     fn prepared_type_decl(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> Result<
+        Option<Arc<PreparedTypeDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
         // Overlay-aware view (same rationale as `prepared_decl_bundle`).
-        self.inner
-            .prepared_type_decl_with_store_view(&self.view, canonical_id, symbol_name)
+        self.inner.prepared_type_decl_in_with_store_view(
+            &self.view,
+            canonical_id,
+            owner,
+            symbol_name,
+        )
     }
 
     #[inline]
     fn prepared_value_decl(
         &self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<Arc<PreparedValueDecl>> {
         // Overlay-aware view (same rationale as `prepared_decl_bundle`).
-        self.inner
-            .prepared_value_decl_with_store_view(&self.view, canonical_id, symbol_name)
+        self.inner.prepared_value_decl_in_with_store_view(
+            &self.view,
+            canonical_id,
+            owner,
+            symbol_name,
+        )
     }
 
     #[inline]
@@ -260,14 +272,6 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
             self.complete_canonical(canonical_id);
         }
         loaded
-    }
-
-    #[inline]
-    fn external_type_analysis(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Arc<AnalyzedExternalTypeSource>> {
-        crate::VerterHost::external_type_analysis(self.inner, canonical_id)
     }
 
     #[inline]
@@ -323,16 +327,13 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String) {
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         // Route through the view-bound shim so the cached imported-root
         // entry validates against the request-bound overlay-aware view
         // rather than rebuilding a fresh owned workspace snapshot per
         // call (the carrier site identified by 6.e attribution).
-        self.inner.resolve_imported_type_root_with_store_view(
-            &self.view,
-            dep_canonical,
-            imported_name,
-        )
+        self.inner
+            .resolve_imported_type_root_with_context(self, dep_canonical, imported_name)
     }
 
     #[inline]
@@ -341,7 +342,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         // Facts-returning variant for memoized-build callers: the same
@@ -349,27 +350,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // list the caller records onto the active tracer so the enclosing
         // cache entry invalidates on a barrel retarget.
         self.inner
-            .resolve_imported_type_root_with_facts_with_store_view(
-                &self.view,
-                dep_canonical,
-                imported_name,
-            )
-    }
-
-    #[inline]
-    fn resolve_named_type_export_target(
-        &self,
-        dep_canonical: &str,
-        requested_name: &str,
-    ) -> Option<(String, String)> {
-        // Route through the view-bound variant so the cached route
-        // validates against the request-bound view (the carrier site
-        // at `route_surface.rs`).
-        self.inner.resolve_named_type_export_target_with_store_view(
-            &self.view,
-            dep_canonical,
-            requested_name,
-        )
+            .resolve_imported_type_root_with_facts_with_context(self, dep_canonical, imported_name)
     }
 
     #[inline]
@@ -425,6 +406,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     fn resolve_type_declaration_for_dep(
         &self,
         dep_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
         // Route through the context-aware variant so the
@@ -436,6 +418,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
             self.inner,
             self,
             dep_canonical,
+            owner,
             requested_name,
         )
     }
@@ -542,7 +525,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
-    f: impl FnOnce(&dyn ResolverContext) -> R,
+    f: impl FnOnce(&(dyn ResolverContext + Sync)) -> R,
 ) -> R {
     let view = crate::VerterHost::resolver_store_view(host).into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());

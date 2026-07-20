@@ -72,6 +72,7 @@ fn type_resolution_audit_shared_graph_reused_across_entry_points() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/Probe.vue"),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             local_scope: None,
         },
         name: Arc::from("Outer"),

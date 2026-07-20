@@ -24,7 +24,8 @@ use crate::fact_signature_helpers::named_fact_tracer;
 use crate::host_manage::component_meta_trace_custom;
 use crate::meta_resolve::ResolvedComponentMetaState;
 use crate::resolver_core::{
-    ComponentMetaComputeOutcome, ComponentMetaRequestHost, RequestSource, SingleflightRole,
+    ComponentMetaCacheLookup, ComponentMetaComputeOutcome, ComponentMetaRequestHost, RequestSource,
+    SingleflightRole,
 };
 use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
@@ -153,11 +154,24 @@ pub(crate) struct ViewBoundRequestHost<'a> {
     pub(crate) overlay: std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
 }
 
+/// Call-owned proof that one exact resolved-meta candidate was admitted by
+/// the stable request that returned it. Post-resolution extraction may enrich
+/// only this candidate, while its cache key, project generation, external
+/// supersession fingerprint, and state allocation still match.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedMetaAdmissionProof {
+    pub(crate) cache_key: crate::resolver_core::ResolutionNodeKey,
+    pub(crate) candidate: crate::resolver_core::ValidatedFactAdmission<ResolvedComponentMetaState>,
+    pub(crate) project_generation: u64,
+    pub(crate) external_supersession_fingerprint: u64,
+}
+
 impl ComponentMetaRequestHost for VerterHost {
     type View = crate::resolver_store::HostStoreView;
     type Mode = ProjectionMode;
     type Resolution = ResolvedComponentMetaState;
     type CapturedInputs = CapturedComponentMetaInputs;
+    type AdmissionProof = ResolvedMetaAdmissionProof;
 
     fn cache_key(
         &self,
@@ -252,7 +266,7 @@ impl ComponentMetaRequestHost for VerterHost {
         canonical: &str,
         mode: Self::Mode,
         store_view: &Self::View,
-    ) -> Option<Self::Resolution> {
+    ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
         component_meta_trace_custom!(
             "try_get_cached_component_meta",
             format!("owner={} mode={mode:?}", canonical),
@@ -261,7 +275,9 @@ impl ComponentMetaRequestHost for VerterHost {
         // so the per-warm-hit `HostStoreView` rebuild is eliminated on
         // the bare-host hot path (bypass audit
         // top-leverage fix).
-        let result = self.try_get_cached_resolved_meta_with_store_view(store_view, canonical, mode);
+        let result = self.try_get_cached_resolved_meta_with_store_view_and_admission(
+            store_view, canonical, mode,
+        );
         component_meta_trace_custom!(
             "try_get_cached_component_meta_result",
             format!("owner={} mode={mode:?} hit={}", canonical, result.is_some()),
@@ -354,8 +370,8 @@ impl ComponentMetaRequestHost for VerterHost {
         canonical: &str,
         mode: Self::Mode,
         result: &Self::Resolution,
-    ) {
-        self.store_cached_resolved_meta(canonical, mode, result, &result.fact_versions);
+    ) -> Option<Self::AdmissionProof> {
+        self.store_cached_resolved_meta(canonical, mode, result, &result.fact_versions)
     }
 
     fn resolution_completeness(
@@ -371,6 +387,7 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
     type Mode = ProjectionMode;
     type Resolution = ResolvedComponentMetaState;
     type CapturedInputs = CapturedComponentMetaInputs;
+    type AdmissionProof = ResolvedMetaAdmissionProof;
 
     fn cache_key(
         &self,
@@ -423,12 +440,12 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         store_view: &Self::View,
-    ) -> Option<Self::Resolution> {
+    ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
         // View-aware variant: thread the request-bound view through so
         // the per-warm-hit rebuild is eliminated on the view-bound hot
         // path (bypass-audit top-leverage fix).
         self.host
-            .try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(
+            .try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission(
                 store_view,
                 canonical,
                 mode,
@@ -521,14 +538,14 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         result: &Self::Resolution,
-    ) {
+    ) -> Option<Self::AdmissionProof> {
         self.host.store_cached_resolved_meta_for_view_fingerprint(
             canonical,
             mode,
             result,
             &result.fact_versions,
             self.view.fingerprint(),
-        );
+        )
     }
 
     fn resolution_completeness(

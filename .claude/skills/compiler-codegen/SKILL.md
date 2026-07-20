@@ -83,7 +83,7 @@ code_transform/
 utils/
 +-- oxc/                  # OXC parser utilities
 |   +-- bindings/         # Expression binding extraction
-|   +-- vue/              # Vue-specific OXC helpers (macros, type resolution, v-for, v-slot)
+|   +-- vue/              # Vue-specific OXC helpers (macro syntax, v-for, v-slot)
 +-- vue/                  # Vue runtime helpers (tag detection, patch flags)
 ```
 
@@ -153,6 +153,85 @@ Private component-call checks may map only byte-identical authored tokens. Synth
 2. Bindings passed to `template/code_gen/` via `generate_template()` parameter
 3. `BindingResolver` determines correct accessor prefix (`_ctx.`, `$setup.`, `__props.`) and suffix (`.value` for refs)
 4. Binding patches accumulated in `CodeGenOutput`, batch-applied to `CodeTransform`
+
+## Vue Macro Semantic Boundary (CRITICAL)
+
+The compiler owns Vue macro syntax and code emission, not typed macro
+resolution. Parser macro facts are limited to authored spans, runtime
+object/array constructors, defaults-object shape, model names/options, and
+other syntax needed to preserve the source. Typed `defineProps`,
+`defineEmits`, and `defineModel` surfaces arrive from TypeInfo through the
+explicit `VueMacroSemanticInput` compile argument:
+
+- `Unavailable`
+- `Runtime(Arc<MacroRuntimeBundle>)`
+- `Tsc(Arc<MacroTscBundle>)`
+- `RuntimeAndTsc { runtime, tsc }`
+
+Runtime and TSC are independent demands. Bundler script emission consumes only
+`MacroRuntimeBundle`; declaration emission consumes only `MacroTscBundle`.
+Entries join macro syntax by stable `syntax_index`. Runtime entries contain
+the normalized props/emits/model shapes. TSC entries contain terminal splice
+text and are emitted directly; the compiler does not parse or reinterpret the
+splice. A property-form emits tuple remains one terminal rest-tuple parameter
+(`...args: [value: T]`) in both `TscEmitRow.emit_parameters` and
+`handler_parameters`; flattening it to `value: T` loses the authored tuple
+shape and is forbidden.
+
+Profile-aware public-API projection treats a script/content block override as
+an immutable one-file session overlay. The batch fixed view, TypeInfo macro
+producer (`SessionResolverContext`), syntax extraction, and whole-hash revision
+fence must all observe that exact overlay source. Override extraction is
+request-local and must not populate the raw-source `cached_tsc_extract` slot.
+
+Resolved invalid roots cross this boundary only as closed
+`MacroInvalidReason` facts. The compiler renders their public diagnostic once,
+using the typed reason plus the parser-owned macro role and authored type span;
+authored type text is presentation data and must never be used to reclassify
+the semantic outcome. Runtime and TSC invalid outcomes share this renderer.
+
+Local declaration carriers preserve TypeInfo refusal detail through
+`TscDependencyDeclaration.declaration_failure`: structural inference budgets
+remain the closed depth/work variants, while deterministic unsupported and
+unresolved declaration shapes remain distinct. The compiler forwards that
+typed detail in `TscDeclarationShapeReason`; it never collapses the carrier to
+a generic semantic-inference failure or a diagnostic string.
+
+The compiler must never resolve a typed macro parameter, build a companion
+type environment, accept a compiler-owned external-type map, or merge
+host-resolved types into parser state. `PreparedScript` parses setup and
+companion blocks once for syntax reuse only. Typed prop bindings are registered
+from the runtime DTO; runtime-form object/array bindings remain parser-owned
+syntax facts.
+
+A target that encounters a typed macro without its required bundle, with a
+degraded entry, or with a projection for the wrong macro role fails closed at
+the authored macro/type anchor using `XMissingMacroSemanticBundle` or
+`XUnavailableMacroSemanticResult`. Before runtime codegen, the compiler
+structurally validates the whole bundle: syntax/effective macro identities,
+roles, `withDefaults` association, public names, authored-member ordinals, and
+synthesized model-row anchors must all match parser-owned syntax. Any invalid
+row suppresses the entire runtime bundle; a `Complete` row with a degraded
+member remains usable, emits `type: null`, and reports the typed reason/detail
+at the exact authored key (or model-name/type) span.
+
+Parser model-name facts carry both an OXC-decoded semantic value and the exact
+authored literal span. Runtime/TSC joins compare the decoded value, retain the
+span only for mappings and diagnostics, and serialize typed emit/model public
+names with the canonical JavaScript string escaper.
+
+`withDefaults` syntax remains parser-owned. A statically eligible object
+(supported keys, no spread) is folded into each DTO-derived prop row, preserving
+the first duplicate and method/default expression syntax. Dynamic, spread, or
+unsupported-key defaults preserve the whole authored expression and emit
+exactly one `_mergeDefaults`. Runtime prop rendering follows three independent
+profiles: development emits `type`, `required: true|false`, `skipCheck`, then a
+static default; production retains only Vue-required Boolean/Function types and
+defaults; production custom-element mode retains every `type` field, including
+`type: null`. `CodegenOptions.custom_element` selects the script policy and is
+independent of template tag matching in `custom_elements`. Model props use
+Vue's separate model policy (no synthesized `required`; custom-element mode
+does not widen production model types).
 
 ## IDE Prefixed-Expression Emit Substrate (`ide/template/emit.rs`)
 

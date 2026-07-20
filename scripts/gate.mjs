@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // gate.mjs — canonical agent Rust gate runner (production CLI).
 //
-// PRINCIPLE (gate-correctness/security): the production gate binary runs ONLY the real gate — archive →
-// nextest run → direct libtest → verdict (plus the gate-adjacent `--prepare` warm utility, which is a
+// PRINCIPLE (gate-correctness/security): the production gate binary runs ONLY the real gate — oracle
+// verification → archive → nextest run → direct libtest → verdict (plus the gate-adjacent `--prepare`
+// warm utility, which is a
 // PREPARE, never a gate PASS). It exposes NO test-seam, NO classifier hook, NO custom-command mode, and NO
 // environment variable that can make `node scripts/gate.mjs <anything>` return the gate success contract
 // without actually building and running the test suite. The reusable internals (the classifiers, the
@@ -199,6 +200,7 @@ import {
   // freshness-tooling preflight (verdict-gating authority)
   preflightFreshnessTooling,
   pnpmInstallCommand,
+  vueMacroOracleGateCommands,
   selectSessionSuites,
   ensureRequiredWindowsDebugSidecars,
   deriveSuitePkgInfo,
@@ -709,13 +711,41 @@ async function runPrepare(ctx) {
   return EXIT_PASS;
 }
 
+async function runVueMacroOracleChecks(ctx) {
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+  for (const invocation of vueMacroOracleGateCommands(process.execPath)) {
+    log(`Vue macro oracle: ${invocation.name} …`);
+    const result = await runContainedStep({
+      cmd: invocation.cmd,
+      args: invocation.args,
+      cwd: repoRealpath,
+      env: cargoEnv,
+      phase: "test",
+      deadlineMs,
+      stallMs,
+      targetDir: runnerTarget,
+    });
+    if (result.reason) {
+      err(`${invocation.name} ${result.reason} after ${Math.round(result.durationMs / 1000)}s`);
+      return mapStepReason(result);
+    }
+    if (result.code !== 0) {
+      err(`${invocation.name} failed (exit ${result.code})`);
+      return EXIT_FAIL;
+    }
+    log(`${invocation.name} passed in ${Math.round(result.durationMs / 1000)}s`);
+  }
+  return EXIT_PASS;
+}
+
 // ----------------------------------------------------------------------------------------------------
 // runGate: the full canonical gate.
-//   1. archive (build ONCE) + list (parse rust-suites).
-//   2. SURFACE 1 — nextest run from the archive (process isolation).
-//   3. SURFACE 2 — directly exec every verter_session suite (kind ∈ {lib,test}) with cwd = its package
+//   1. Verify the pinned Vue macro oracle and its extractor.
+//   2. archive (build ONCE) + list (parse rust-suites).
+//   3. SURFACE 1 — nextest run from the archive (process isolation).
+//   4. SURFACE 2 — directly exec every verter_session suite (kind ∈ {lib,test}) with cwd = its package
 //      manifest dir (the in-process / libtest surface). ZERO recompile (reads the archived artifacts).
-//   4. Aggregate failures across both surfaces; tolerated-only => PASS-WITH-TOLERATED.
+//   5. Aggregate failures across both surfaces; tolerated-only => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
@@ -802,6 +832,9 @@ async function runGate(opts, ctx) {
   log(
     `freshness-tooling preflight: ${preflight.action} — tolerance ${freshnessToleranceAllowed ? "ALLOWED (pnpm not resolvable AND buf not resolvable; the Rust byte-pin would skip)" : "DISABLED (tools present/installed; a freshness FAIL is a HARD regression)"}`,
   );
+
+  const vueMacroOracleResult = await runVueMacroOracleChecks(ctx);
+  if (vueMacroOracleResult !== EXIT_PASS) return vueMacroOracleResult;
 
   // This CLI has NO self-test seam and NO ambient-env divert: runGate ALWAYS issues the real archive
   // build + nextest run + direct libtest execution. (The reusable multi-step seam lives in

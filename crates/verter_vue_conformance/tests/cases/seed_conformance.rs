@@ -26,17 +26,76 @@
 //! cell's assembled Verter module, golden, and comparator reasons.
 
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use verter_compiler::compile::{CodegenOptions, CompileDiagnosticSeverity, VerterCompileOptions};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_vue_conformance::compare::{compare_modules, Comparison, DiagnosticRow, ModuleInput};
 use verter_vue_conformance::{
-    corpus_file, corpus_root, Backend, GoldenMeta, KnownDivergenceCell, KnownDivergences, Manifest,
-    Topology,
+    corpus_file, corpus_root, read_text_normalized, Backend, GoldenMeta, KnownDivergenceCell,
+    KnownDivergences, Manifest, Topology,
 };
 
 use crate::common::{authored, case_sfc_source, golden_code};
 
 const MAX_REASONS: usize = 24;
+
+/// Recursively collect every file under `dir` (corpus trees are small).
+fn collect_corpus_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_corpus_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// Standalone host over the corpus (seed cases + vendored `support/` modules)
+/// that produces the authoritative TypeInfo-owned macro semantic bundles — the
+/// SAME `vue_macro_semantic_input` handoff the host's own audited compile path
+/// and the `verter-tsc` validation-carrier stage thread. Compiling a cell with
+/// [`verter_compiler::compile::VueMacroSemanticInput::Unavailable`] instead
+/// would degrade type-based macros (`defineProps<T>()` et al.) to their
+/// unresolved fallback and spuriously diverge from the official goldens.
+fn corpus_host() -> &'static VerterHost {
+    static HOST: OnceLock<VerterHost> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let root = corpus_root();
+        let mut files = Vec::new();
+        collect_corpus_files(&root.join("cases"), &mut files);
+        collect_corpus_files(&root.join("support"), &mut files);
+        for path in files {
+            let (is_vue, is_ts) = match path.extension().and_then(|e| e.to_str()) {
+                Some("vue") => (true, false),
+                Some("ts") => (false, true),
+                _ => (false, false),
+            };
+            if !is_vue && !is_ts {
+                continue;
+            }
+            let source = read_text_normalized(&path).expect("read corpus file");
+            let canonical_id = path.to_string_lossy().replace('\\', "/");
+            let _ = host.upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: if is_vue {
+                    FileLanguage::vue()
+                } else {
+                    FileLanguage::script_ts()
+                },
+                aliases: Vec::new(),
+            });
+        }
+        host
+    })
+}
 
 fn dispositions_path() -> std::path::PathBuf {
     corpus_root().join("known-divergences.json")
@@ -98,12 +157,18 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
         force_vapor: backend == Backend::Vapor,
         ..Default::default()
     };
+    // The authoritative macro semantic bundle for this case, produced by the
+    // shared corpus host (the shipped `vue_macro_semantic_input` handoff).
+    let canonical_id = corpus_file(&corpus_root(), &format!("cases/{case_id}.vue"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let macro_semantics = corpus_host().vue_macro_semantic_input(&canonical_id, options.target);
     // A Verter compile panic is itself a divergence signal, not a harness
     // crash — keep the suite able to report every cell. (`AssertUnwindSafe`:
     // the oxc allocator is not `UnwindSafe`; a panic mid-compile poisons
     // nothing we reuse — the allocator is dropped right after.)
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        verter_compiler::compile::compile(&sfc, &options, &verter_options, &alloc)
+        verter_compiler::compile::compile(&sfc, &options, &verter_options, &macro_semantics, &alloc)
     }));
     let result = match result {
         Ok(result) => result,

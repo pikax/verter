@@ -12,7 +12,13 @@ fn extract(source: &str) -> RawTemplateData {
         extract_template_data: true,
         ..Default::default()
     };
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     result
         .template_data
         .expect("extract_template_data was set but no data returned")

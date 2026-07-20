@@ -376,6 +376,7 @@ fn test_cannot_rename_type_only_import() {
         vec![],
         vec![AnalyzedImport {
             source: "./types".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
                 name: "Props".to_string(),

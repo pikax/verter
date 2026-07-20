@@ -997,9 +997,13 @@ fn relate_maps_to_dedicated_relate_family_not_indexed_access() {
 //     single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
 //     NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes, keeping the
 //     enum driven by the legitimately-present env-heavy variants (`FamilyKey` is
-//     112B with the boxed payload). DISCRIMINATES against the inline shape: with
-//     `RelateMemoKey` embedded by value the enum is >= 144B + discriminant
-//     (>= 152B) and this bound FAILS; boxed it is 112B and the bound PASSES.
+//     136B with the boxed payload — the `Instantiate` variant's env-bearing
+//     `ResolvedDeclSlotIdentity` base carries the exact-owner field, so the
+//     legitimate envelope is 8B wider than the pre-owner-aware 112B). The
+//     boxed `ClassifyBroadRuntime` subject payload obeys the same discipline.
+//     DISCRIMINATES against the inline shape: with `RelateMemoKey` embedded by
+//     value the enum is >= 144B + discriminant (>= 152B) and this bound FAILS;
+//     boxed it is 136B and the bound PASSES.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1007,12 +1011,17 @@ fn family_key_does_not_embed_relate_memo_key_by_value() {
     let family_key = family_key_size_for_tests();
     let relate_memo = std::mem::size_of::<RelateMemoKey>();
 
-    // The bound (128B) is derived from the env-heavy variants that legitimately
-    // drive the enum size (boxed `FamilyKey` measures 112B), with a small margin
-    // for incidental growth — but well BELOW the inline `RelateMemoKey` size
-    // (144B) + discriminant. An inline `Relate` payload pushes the enum past this
-    // bound; the boxed payload stays under it.
-    const FAMILY_KEY_KEYSPACE_BOUND: usize = 128;
+    // The bound (136B) is derived from the env-heavy variants that legitimately
+    // drive the enum size: the `Instantiate` variant's owner-aware
+    // `ResolvedDeclSlotIdentity` base (defining canonical + exact top-level
+    // owner + merged symbol + symbol space + sealed T/L/J env tail) plus its
+    // args / resolve-env / body-source / provenance / merge-role /
+    // vue-heritage axes measures exactly 136B. ZERO growth margin is
+    // intentional — any new key axis must justify itself here — and the bound
+    // stays well BELOW the inline `RelateMemoKey` size (144B) + discriminant.
+    // An inline `Relate` payload pushes the enum past this bound; the boxed
+    // payload stays at it.
+    const FAMILY_KEY_KEYSPACE_BOUND: usize = 136;
 
     assert!(
         family_key <= FAMILY_KEY_KEYSPACE_BOUND,

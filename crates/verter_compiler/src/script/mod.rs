@@ -25,6 +25,13 @@ use crate::template::code_gen::types::CodeGenOutput;
 /// Options for script code generation.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptCodeGenOptions<'a> {
+    /// Authoritative runtime macro semantics for type-based codegen.
+    pub macro_runtime: Option<&'a verter_macro_dto::MacroRuntimeBundle>,
+    /// Vue production policy for runtime prop/model declarations.
+    pub is_production: bool,
+    /// Vue custom-element runtime-prop policy. Independent of template
+    /// custom-element tag matching.
+    pub custom_element: bool,
     /// Component name (used in `__name` property).
     pub component_name: &'a str,
     /// Scoped style ID (e.g., `"data-v-abc123"`).
@@ -49,6 +56,24 @@ pub struct ScriptCodeGenOptions<'a> {
     /// only included in `__returned__` when their name appears in this set.
     /// `None` means no template — all imports are included.
     pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
+}
+
+/// Visit every public binding name supplied by one authoritative runtime macro
+/// shape. Runtime and IDE codegen share this projection so binding ownership
+/// cannot diverge between their independent output lanes.
+pub(crate) fn visit_runtime_macro_binding_names(
+    shape: &verter_macro_dto::MacroRuntimeShape,
+    mut visit: impl FnMut(&str),
+) {
+    match shape {
+        verter_macro_dto::MacroRuntimeShape::Props(props) => {
+            for prop in &props.props {
+                visit(&prop.name);
+            }
+        }
+        verter_macro_dto::MacroRuntimeShape::Model(model) => visit(&model.prop.name),
+        verter_macro_dto::MacroRuntimeShape::Emits(_) => {}
+    }
 }
 
 /// Shared mutable context for script processing functions.

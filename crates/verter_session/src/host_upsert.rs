@@ -22,6 +22,13 @@ use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
 use verter_scheduler::stage::Priority;
 
+/// Synthetic-source SFC block splicing behind the override upsert paths —
+/// pure text helpers with no host/cache/scheduler access (all
+/// upsert/eviction-relevant logic stays in THIS file, the single file the
+/// `host_upsert_performs_no_reverse_dependent_eviction` guard scans).
+mod block_splice;
+use block_splice::build_synthetic_source;
+
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
 /// `Result<HostUpdateResult, HostError>` the single-file
@@ -627,6 +634,28 @@ impl VerterHost {
                     self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
                 }
             }
+            // Cache-state is a no-op, but the *result* is still a full
+            // description of the live parse: bundlers re-resolve external
+            // `<style src>` / `<template src>` / `<script src>` on every
+            // transform. Returning empty vectors here drops those requests
+            // on a warm re-upsert and compile fails with HOST_MISSING_EXTERNAL
+            // (zyronon-douyin switches.vue + switches.less).
+            let import_specifiers = parse
+                .script_analysis
+                .imports
+                .iter()
+                .map(|imp| crate::types::ScriptImportInfo {
+                    is_type_only: imp.is_type_only,
+                    bindings: imp.bindings.iter().map(|b| b.name.clone()).collect(),
+                    source: imp.source.clone(),
+                })
+                .collect();
+            let module_references = parse
+                .script_analysis
+                .module_references
+                .iter()
+                .map(crate::types::ScriptModuleReference::from)
+                .collect();
             return Ok(HostUpdateResult {
                 canonical_id,
                 changed: false,
@@ -638,11 +667,11 @@ impl VerterHost {
                 changed_lsp_ids: Vec::new(),
                 removed_lsp_ids: Vec::new(),
                 diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: Vec::new(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
+                external_source_requests: parse.external_requests.clone(),
+                import_specifiers,
+                module_references,
+                preprocessor_requests: parse.preprocessor_requests.clone(),
+                export_signatures: parse.export_signatures.clone(),
                 parse_duration_ms,
             });
         }
@@ -1342,157 +1371,4 @@ impl VerterHost {
 
         // Legacy path (WASM)
     }
-}
-
-/// Build a synthetic SFC source with preprocessed content replacing original
-/// block content and `lang` attributes stripped.
-///
-/// The synthetic source preserves the same byte structure (tags, offsets) where
-/// possible, but replaces block content and removes `lang="xxx"` from template
-/// and script tags so the compiler treats them as native HTML/JS.
-fn build_synthetic_source(
-    original: &str,
-    meta: &FileMeta,
-    template_override: Option<&ContentOverride>,
-    script_override: Option<&ContentOverride>,
-) -> String {
-    // Simple approach: scan and replace content using string markers.
-    // We look for the block tags, strip lang attributes, and replace content.
-    let mut result = original.to_string();
-
-    // Replace template content (if override provided)
-    if let Some(tpl) = template_override {
-        result = replace_block_content(&result, "template", &tpl.code, true);
-    }
-
-    // Replace script content (if override provided)
-    if let Some(scr) = script_override {
-        // Determine which script tag to target
-        let tag = if meta.script_lang.is_some() {
-            "script"
-        } else {
-            // No non-native script lang; should not happen, but handle gracefully
-            "script"
-        };
-        result = replace_block_content(&result, tag, &scr.code, true);
-    }
-
-    result
-}
-
-/// Replace the content of an SFC block tag and optionally strip its `lang` attribute.
-///
-/// Finds `<{tag}...>...content...</{tag}>` and replaces the content between
-/// the opening and closing tags. If `strip_lang` is true, removes `lang="xxx"`
-/// from the opening tag.
-fn replace_block_content(source: &str, tag: &str, new_content: &str, strip_lang: bool) -> String {
-    let bytes = source.as_bytes();
-
-    // Find the opening tag
-    let open_pattern = format!("<{}", tag);
-    let Some(tag_start) = find_tag_start(bytes, &open_pattern) else {
-        return source.to_string();
-    };
-
-    // Find the end of the opening tag (the `>`)
-    let Some(tag_end) = find_char_after(bytes, tag_start, b'>') else {
-        return source.to_string();
-    };
-    let content_start = tag_end + 1;
-
-    // Find the closing tag
-    let close_pattern = format!("</{}", tag);
-    let Some(close_start) = find_pattern_after(bytes, content_start, close_pattern.as_bytes())
-    else {
-        return source.to_string();
-    };
-
-    // Build the result
-    let mut result = String::with_capacity(source.len() + new_content.len());
-
-    // Opening tag (with optional lang stripping)
-    let opening_tag = &source[tag_start..content_start];
-    if strip_lang {
-        result.push_str(&source[..tag_start]);
-        result.push_str(&strip_lang_attr(opening_tag));
-    } else {
-        result.push_str(&source[..content_start]);
-    }
-
-    // New content
-    result.push_str(new_content);
-
-    // From closing tag to end
-    result.push_str(&source[close_start..]);
-
-    result
-}
-
-/// Strip `lang="..."` or `lang='...'` from an opening tag string.
-fn strip_lang_attr(tag: &str) -> String {
-    // Match lang="..." or lang='...' with optional whitespace around =
-    let bytes = tag.as_bytes();
-    let mut result = String::with_capacity(tag.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        // Check if we're at "lang"
-        if i + 4 <= bytes.len()
-            && bytes[i..i + 4].eq_ignore_ascii_case(b"lang")
-            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
-        {
-            // Skip past lang="..."
-            let mut j = i + 4;
-            // Skip whitespace around =
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'=' {
-                j += 1;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
-                    let quote = bytes[j];
-                    j += 1;
-                    while j < bytes.len() && bytes[j] != quote {
-                        j += 1;
-                    }
-                    if j < bytes.len() {
-                        j += 1; // skip closing quote
-                    }
-                }
-                // Also consume any trailing whitespace after the value
-                // but keep at least one space if we're between attributes
-                i = j;
-                continue;
-            }
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-    result
-}
-
-fn find_tag_start(bytes: &[u8], pattern: &str) -> Option<usize> {
-    let pat = pattern.as_bytes();
-    bytes
-        .windows(pat.len())
-        .position(|w| w.eq_ignore_ascii_case(pat))
-}
-
-fn find_char_after(bytes: &[u8], start: usize, ch: u8) -> Option<usize> {
-    bytes[start..]
-        .iter()
-        .position(|&b| b == ch)
-        .map(|p| start + p)
-}
-
-fn find_pattern_after(bytes: &[u8], start: usize, pattern: &[u8]) -> Option<usize> {
-    if start >= bytes.len() {
-        return None;
-    }
-    bytes[start..]
-        .windows(pattern.len())
-        .position(|w| w.eq_ignore_ascii_case(pattern))
-        .map(|p| start + p)
 }

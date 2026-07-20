@@ -68,11 +68,29 @@ impl ComponentDefaultSynth for VueComponentDefaultSynth {
     fn synthesise(&self, cx: ComponentDefaultSynthCtx<'_>) -> Option<LoweredValueDecl> {
         let ComponentDefaultSynthCtx {
             canonical_id: _,
-            language: _,
+            language,
             macros,
             script_candidates: _,
         } = cx;
         crate::resolver_core::vue_default_synth::synthesise_vue_default_value_symbol(macros)
+            .or_else(|| {
+                // EVERY genuine `.vue` carrier is a component: a scriptless /
+                // macro-less SFC still IS its own implicit `export default`
+                // (the empty-instance component). Without this arm the file
+                // has NO `default` on its shallow EXPORT surface, so a barrel
+                // `export { default as X } from './X.vue'` route walk — the
+                // strict export-surface walk value resolution now shares with
+                // the type rail — misses at the terminal hop and fallthrough
+                // child routing fails. Mirrors the Svelte leg's
+                // always-synthesize contract (an empty candidate set is the
+                // empty-default case, never a no-op). The typeinfo SCRATCH
+                // surface (routed to this leg by the registry despite its
+                // `.ts` classification) keeps the macros-only behavior: a
+                // scratch with no inlined macros synthesizes nothing.
+                language
+                    .is_vue()
+                    .then(crate::resolver_core::vue_default_synth::empty_vue_default_value_symbol)
+            })
     }
 }
 
@@ -122,6 +140,7 @@ mod tests {
     fn type_based_props_macro() -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -137,6 +156,7 @@ mod tests {
             parsed_type_argument: Some(MacroPayloadLocator {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from("/App.vue"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("default"),
                     space: LocatorSymbolSpace::Value,
                 },
@@ -166,16 +186,44 @@ mod tests {
         );
     }
 
+    /// EVERY genuine `.vue` carrier is a component: a macro-less SFC still
+    /// synthesises the EMPTY-instance `default` (so barrel
+    /// `export { default as X } from './X.vue'` route walks find it on the
+    /// shallow export surface), while a NON-vue language row (the typeinfo
+    /// scratch surface, routed to this leg despite its `.ts` classification)
+    /// keeps the macros-only behavior and synthesises nothing.
     #[test]
-    fn vue_synth_returns_none_without_type_based_macros() {
+    fn vue_synth_empty_default_for_macroless_vue_carrier_none_for_scratch() {
         let candidates = FrameworkScriptCandidateSet::default();
-        let cx = ComponentDefaultSynthCtx {
+        let synth = VueComponentDefaultSynth;
+
+        // Genuine `.vue` carrier, no macros → the EMPTY-instance default.
+        let vue_cx = ComponentDefaultSynthCtx {
             canonical_id: "/App.vue",
             language: &FileLanguage::vue(),
             macros: &[],
             script_candidates: &candidates,
         };
-        let synth = VueComponentDefaultSynth;
-        assert!(synth.synthesise(cx).is_none());
+        let empty_default = synth
+            .synthesise(vue_cx)
+            .expect("a macro-less genuine .vue carrier synthesises the empty default");
+        assert_eq!(
+            empty_default.kind,
+            verter_semantic::analysis::type_eval::ValueDeclKind::Class,
+            "the empty-instance default keeps the class-shaped construct contract"
+        );
+
+        // Scratch surface (`.ts` classification routed to the Vue leg):
+        // macros-only behavior — no macros, no synthesised default.
+        let scratch_cx = ComponentDefaultSynthCtx {
+            canonical_id: "/scratch.ts",
+            language: &FileLanguage::script_ts(),
+            macros: &[],
+            script_candidates: &candidates,
+        };
+        assert!(
+            synth.synthesise(scratch_cx).is_none(),
+            "a macro-less non-vue scratch surface must NOT synthesise a default"
+        );
     }
 }

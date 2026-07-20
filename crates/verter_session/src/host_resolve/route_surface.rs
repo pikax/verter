@@ -2,75 +2,22 @@
 //! dependency-source readers.
 //!
 //! Owns:
-//! - `current_route_surface_hash` — the single route-fact production
-//!   helper (IndexedReady is the SOLE route-surface authority).
 //! - `route_surface_is_edge_current` — the shared edge-currency oracle.
 //! - `resolve_prepared_decl_target` /
 //!   `resolve_decl_in_scope_with_reexport_chain` (test-only) — host-state
 //!   helpers that consult the prepared-decl bundles.
-//! - `resolve_named_type_export_target` — the production wrapper around
-//!   the route-DB cooperative resolve that also runs `ensure_indexed_ready_serve`
-//!   on the resolved target.
-//! - `read_dep_source_for_type_resolution` — effective-source reader for
-//!   external type resolution.
-//! - `collect_external_types_from_loaded_files` — adapter that drives the
-//!   `HostExternalMacroTypeCollector` over a file's macro-type deps.
+//! - `resolve_named_type_export_target` — test-only route-DB fixture that
+//!   materialises the resolved target through `ensure_indexed_ready_serve`.
+//! - `read_dep_source_for_type_resolution` — test-only effective-source reader.
 
 #[cfg(test)]
 use std::sync::Arc;
 
-use super::external_macro_collector::HostExternalMacroTypeCollector;
-use super::frontier_helpers::ResolvedExternalTypes;
+#[cfg(test)]
 use crate::host_manage::component_meta_trace_custom;
-use crate::types::*;
 use crate::VerterHost;
 
 impl VerterHost {
-    /// The current route-surface hash for `canonical` — the single
-    /// route-fact production helper. ONE source, identical to the source
-    /// [`crate::resolver_store::HostStoreView`] snapshots route facts
-    /// from: the current-content `IndexedReady` artifact. There is no
-    /// secondary route-surface artifact; a route-only file the indexed
-    /// store has not materialised simply has no `Route` fact yet (its
-    /// first traversal materialises it through `ensure_indexed_ready_serve`).
-    ///
-    /// The lookup is content-pinned to the scheduler's authoritative
-    /// current hash when one exists; a scheduler-invisible canonical
-    /// reads through the NON-RECURSING artifact-only authority
-    /// ([`Self::artifact_current_indexed_raw`] — declines for any
-    /// scheduler-tracked canonical, so a permissive multi-candidate
-    /// read can never bake a stale content hash into the route-fact
-    /// oracle), matching the source order the store-view validator
-    /// uses.
-    pub(crate) fn current_route_surface_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
-        let canonical = normalized_canonical.as_str();
-        let current_hash = self
-            .effective_file_state(canonical, None)
-            .map(|state| state.whole_hash);
-        let indexed = match current_hash {
-            Some(current_hash) => self
-                .project_type_store
-                .indexed()
-                .get(canonical, current_hash),
-            None => self.artifact_current_indexed_raw(canonical),
-        }?;
-        // The indexed artifact is the route-surface authority ONLY while
-        // edge-current: an artifact with cross-file edges whose baked
-        // edges are stale (a dependency appeared / retargeted while the
-        // owner content stayed put) produces NO `Route` fact, forcing a
-        // cold re-resolve against the live file set.
-        if !self.indexed_surface_is_current(canonical, &indexed) {
-            return None;
-        }
-        indexed
-            .shallow_state
-            .has_resolvable_surface()
-            .then(|| crate::resolver_store::hash_route_surface(&indexed.shallow_state))
-    }
-
     /// The COMPLETE reuse gate for an `IndexedReady` surface: the
     /// edge-currency oracle ([`Self::route_surface_is_edge_current`])
     /// PLUS the `project_generation` stamp for any surface with
@@ -197,7 +144,7 @@ impl VerterHost {
 
     /// host-level re-export chain walking helper.
     ///
-    /// Resolves a bare-name reference in a scope, walking the
+    /// Resolves a bare-name reference in an exact owner scope, walking the
     /// re-export chain to the declaring file. Returns the canonical
     /// `DeclIdentity` describing the declaring file, the resolved
     /// symbol name, and the file's whole-hash.
@@ -207,9 +154,8 @@ impl VerterHost {
     /// 1. `resolve_bare_name_in_scope` → `(canonical_id, symbol_name)`.
     /// 2. `resolve_prepared_decl_target` → final declaring location.
     ///
-    /// Returns `None` only when the bare name cannot be resolved at
-    /// all and the requested scope is itself missing a shallow
-    /// state.
+    /// Returns `None` when the bare name is not visible from that owner. It
+    /// never falls back to another top-level owner in the same file.
     ///
     /// Test-only — exercised by the in-tree
     /// `host_resolve_tests::resolve_decl_in_scope_with_reexport_chain_*`
@@ -220,50 +166,44 @@ impl VerterHost {
     pub(crate) fn resolve_decl_in_scope_with_reexport_chain(
         &self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<crate::semantic_query::DeclIdentity> {
         let scope_payload_arc = self.prepared_decl_bundle(scope_canonical_id).map(|bundle| {
             std::sync::Arc::new(
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                     &bundle,
+                    scope_owner,
                 ),
             )
         });
         let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self,
             scope_canonical_id,
+            scope_owner,
             scope_payload_arc.as_deref(),
             symbol_name,
-        )
-        .map(|root| (root.canonical_id, root.symbol_name))
-        .unwrap_or_else(|| {
-            let interner = self.project_type_store().identity_interner();
-            (
-                interner.intern(scope_canonical_id),
-                interner.intern(symbol_name),
-            )
-        });
+        )?;
         // Walk the re-export chain to land on the declaring file.
-        let (declaring_canonical, declaring_symbol) =
-            self.resolve_prepared_decl_target(resolved_root.0.as_ref(), resolved_root.1.as_ref());
+        let (declaring_canonical, declaring_symbol) = self.resolve_prepared_decl_target(
+            resolved_root.canonical_id.as_ref(),
+            resolved_root.symbol_name.as_ref(),
+        );
         let whole_hash = self
             .shallow_file_state(declaring_canonical.as_str())
             .map(|s| s.whole_hash)
             .unwrap_or_default();
         Some(crate::semantic_query::DeclIdentity {
             canonical_id: std::sync::Arc::from(declaring_canonical.as_str()),
+            owner: resolved_root.owner,
             whole_hash,
             decl_name: std::sync::Arc::from(declaring_symbol.as_str()),
         })
     }
 
-    /// Test-only bare wrapper around the view-bound variant. Production
-    /// callers go through `ctx.resolve_named_type_export_target` (which
-    /// routes through the request-bound `_with_store_view`); the
-    /// test-only arm on `impl ResolverContext for VerterHost` reaches
-    /// this wrapper on test fixtures that call `host.<method>` directly.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
+    /// Test-only bare wrapper around the view-bound route-resolution fixture
+    /// surface.
+    #[cfg(test)]
     pub(crate) fn resolve_named_type_export_target(
         &self,
         dep_canonical: &str,
@@ -286,8 +226,8 @@ impl VerterHost {
         )
     }
 
-    /// View-bound variant — production-reachable through ctx-bound
-    /// `HostResolverContext` / `SessionResolverContext` callers.
+    /// View-bound test fixture variant.
+    #[cfg(test)]
     pub(crate) fn resolve_named_type_export_target_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
@@ -361,102 +301,5 @@ impl VerterHost {
             )
         );
         Some(eval_source.to_string())
-    }
-
-    pub(super) fn collect_external_types_from_loaded_files(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        owner_canonical: &str,
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        profile_hash: Option<u64>,
-    ) -> (
-        Option<ResolvedExternalTypes>,
-        Vec<HostDiagnostic>,
-        std::collections::BTreeSet<String>,
-    ) {
-        self.collect_external_types_from_loaded_files_with_view(
-            ctx,
-            owner_canonical,
-            macro_type_deps,
-            script_imports,
-            profile_hash,
-            None,
-        )
-    }
-
-    /// Test-only driver that exercises the PRODUCTION external-macro collector
-    /// ([`HostExternalMacroTypeCollector`] — the sole legacy `ResolvedElements`
-    /// caller) through a bare-host ctx, without reaching for the full IDE
-    /// virtual-file pipeline.
-    #[cfg(test)]
-    pub(crate) fn collect_external_types_from_loaded_files_for_test(
-        &self,
-        owner_canonical: &str,
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        profile_hash: Option<u64>,
-    ) -> (
-        Option<ResolvedExternalTypes>,
-        Vec<HostDiagnostic>,
-        std::collections::BTreeSet<String>,
-    ) {
-        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
-            self.collect_external_types_from_loaded_files(
-                ctx,
-                owner_canonical,
-                macro_type_deps,
-                script_imports,
-                profile_hash,
-            )
-        })
-    }
-
-    /// View-aware variant of [`Self::collect_external_types_from_loaded_files`].
-    ///
-    /// Plumbs `view` into the [`HostExternalMacroTypeCollector`] so the
-    /// per-macro-type-dep loop routes through the session-aware type-resolution
-    /// path. Base callers (`view = None`) get the historical behaviour.
-    pub(super) fn collect_external_types_from_loaded_files_with_view(
-        &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        owner_canonical: &str,
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        profile_hash: Option<u64>,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> (
-        Option<ResolvedExternalTypes>,
-        Vec<HostDiagnostic>,
-        std::collections::BTreeSet<String>,
-    ) {
-        let collected = crate::resolver_core::collect_external_macro_types(
-            &HostExternalMacroTypeCollector {
-                host: self,
-                view,
-                ctx,
-            },
-            owner_canonical,
-            macro_type_deps,
-            script_imports,
-            profile_hash,
-        );
-
-        (
-            collected.resolved,
-            collected
-                .diagnostics
-                .into_iter()
-                .map(|diag| HostDiagnostic {
-                    // The collector tiers severity by the dep's structural
-                    // position (surface miss = error, member miss = warning).
-                    severity: diag.severity,
-                    code: diag.code,
-                    message: diag.message,
-                    span: diag.span,
-                })
-                .collect(),
-            collected.tracked_dependencies,
-        )
     }
 }

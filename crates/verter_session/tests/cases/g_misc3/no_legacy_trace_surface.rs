@@ -350,9 +350,19 @@ fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     );
 }
 
-/// `IndexedReadyBuilt` does NOT fire on an overwrite (stale-sweep).
+/// `IndexedReadyBuilt` fires per BUILT CONTENT VERSION, never on a
+/// same-content reinsert.
+///
+/// The event's read-once meaning is "this request BUILT the artifact for
+/// this `(canonical, whole_hash)`" — so a SAME-content reinsert (a
+/// base-equivalent no-op / edge-refresh reusing the content-addressed
+/// payload) records NOTHING, while a DIFFERENT-content insert under the
+/// same canonical (the edit-cycle rebuild) records exactly once with the
+/// NEW hash. The second half is what lets the typeinfo edit-cycle
+/// contracts observe the rebuilt leaf in the V2 request footprint
+/// (`cache_invalidation_basic_selected_leaf_edit_flips_published_surface`).
 #[test]
-fn indexed_ready_built_event_not_fired_on_overwrite() {
+fn indexed_ready_built_event_fires_per_new_content_version_not_on_same_content_reinsert() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::{
         accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
@@ -371,28 +381,49 @@ fn indexed_ready_built_event_not_fired_on_overwrite() {
     // entry but no event fires because no accumulator is active.
     db.insert(Arc::from("/x.ts"), Arc::clone(&ir_a));
 
-    // Now install an accumulator, and insert a NEW entry under
-    // the same canonical — this is an OVERWRITE. No event should
-    // fire because `prev.is_some()`.
+    // Install an accumulator for the assertions below.
     let acc = Arc::new(RequestFootprintAccumulator::new());
     let ctx = RequestContext::new(1, Arc::from("/owner"), true, Some(Arc::clone(&acc)));
     let _guard = RequestContextGuard::install(ctx);
 
+    // SAME-content reinsert: the current content key already holds a
+    // base-equivalent entry — a no-op serve, NOT a build. No event.
+    db.insert(Arc::from("/x.ts"), Arc::clone(&ir_a));
+    let state = acc.drain();
+    let same_content_events: Vec<_> = state
+        .structured_events
+        .iter()
+        .filter(|ev| matches!(ev, StructuredAuditEvent::IndexedReadyBuilt { .. }))
+        .collect();
+    assert_eq!(
+        same_content_events.len(),
+        0,
+        "IndexedReadyBuilt must NOT fire on a same-content reinsert (no build \
+         happened — the stored version was re-served). Events: {:?}",
+        state.structured_events
+    );
+
+    // DIFFERENT-content insert under the same canonical — the edit-cycle
+    // rebuild. Exactly one event, carrying the NEW content hash.
     let mut whole_hash_b = [0u8; 16];
     whole_hash_b[0] = 0x02;
     let ir_b = Arc::new(IndexedReady::new_for_test(whole_hash_b));
     db.insert(Arc::from("/x.ts"), Arc::clone(&ir_b));
 
     let state = acc.drain();
-    let fresh_events: Vec<_> = state
+    let rebuild_events: Vec<_> = state
         .structured_events
         .iter()
-        .filter(|ev| matches!(ev, StructuredAuditEvent::IndexedReadyBuilt { .. }))
+        .filter_map(|ev| match ev {
+            StructuredAuditEvent::IndexedReadyBuilt { whole_hash, .. } => Some(*whole_hash),
+            _ => None,
+        })
         .collect();
     assert_eq!(
-        fresh_events.len(),
-        0,
-        "IndexedReadyBuilt must NOT fire on overwrite — prev.is_some() gate. Events: {:?}",
+        rebuild_events,
+        [whole_hash_b],
+        "a content-changed insert is a genuine build of a NEW content version and \
+         must record exactly one IndexedReadyBuilt with the new hash. Events: {:?}",
         state.structured_events
     );
 }

@@ -492,11 +492,22 @@ fn script_setup_lang_ts_with_type_define_props() {
     // Regression: lang="ts" with defineProps<{...}>() caused a panic because
     // type-based prop binding spans include the content offset (absolute),
     // while content_str is local (relative).
-    let (code, bindings) = gen_tsx_script(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "msg",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let (code, bindings) = gen_tsx_script_with_runtime(
         r#"<script setup lang="ts">
 defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
+        &runtime,
     );
 
     assert!(
@@ -515,10 +526,21 @@ defineProps<{ msg: string }>()
 #[test]
 fn script_setup_lang_ts_with_assigned_define_props() {
     // const props = defineProps<{...}>() — "props" is SetupConst, "count" is Props
-    let (code, bindings) = gen_tsx_script(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "count",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Number],
+        )],
+    )]);
+    let (code, bindings) = gen_tsx_script_with_runtime(
         r#"<script setup lang="ts">
 const props = defineProps<{ count: number }>()
 </script>"#,
+        &runtime,
     );
 
     assert!(code.contains("defineProps"));
@@ -538,7 +560,24 @@ const props = defineProps<{ count: number }>()
 #[test]
 fn script_setup_lang_ts_with_interface_props() {
     // defineProps with a type reference to a local interface
-    let (code, bindings) = gen_tsx_script(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop(
+                "title",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop(
+                "count",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let (code, bindings) = gen_tsx_script_with_runtime(
         r#"<script setup lang="ts">
 interface MyProps {
   title: string
@@ -546,6 +585,7 @@ interface MyProps {
 }
 defineProps<MyProps>()
 </script>"#,
+        &runtime,
     );
 
     assert!(code.contains("defineProps"));
