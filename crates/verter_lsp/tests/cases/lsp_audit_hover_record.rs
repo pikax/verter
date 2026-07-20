@@ -7,7 +7,6 @@
 //! records store empty.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{LspRequestPayload, RequestKind, RequestKindPayload};
@@ -135,7 +134,6 @@ async fn run_with_audit_publishes_record_when_audit_enabled() {
         LspMethodTag::Hover,
         canonical,
         Some(position),
-        Duration::from_secs(5),
         async move { Ok(7u8) },
         |payload, value| {
             payload.response_size_bytes = u32::from(*value);
@@ -162,7 +160,6 @@ async fn run_with_audit_short_circuits_when_audit_disabled() {
             line: 0,
             character: 0,
         }),
-        Duration::from_secs(1),
         async move { Ok(1u8) },
         |payload, _value| {
             payload.response_size_bytes = 1;

@@ -209,14 +209,12 @@ impl VerterLanguageServer {
             return;
         }
         let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), uri);
-        let budget = host.config().lsp_method_timeouts.diagnostics;
         let uri_for_body = uri.clone();
         let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
             canonical_id,
             None,
-            budget,
             async move {
                 self.publish_full_diagnostics(&uri_for_body).await;
                 let count = self

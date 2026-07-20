@@ -1,6 +1,7 @@
 pub mod line_index;
 pub mod position_map;
 pub mod provider_projection;
+pub mod registration_signal;
 pub mod sfc_scanner;
 
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub struct DocumentRegistry {
     /// captures the current snapshot set under a fence and maps a returned offset
     /// only against the exact generation it captured.
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
+    /// Signalled on every document registration (a request racing `did_open` waits on it).
+    pub(crate) registration: registration_signal::RegistrationSignal,
 }
 
 /// Tracked state for an open document.
@@ -87,6 +90,7 @@ impl DocumentRegistry {
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
+            registration: registration_signal::RegistrationSignal::default(),
         }
     }
 
@@ -178,6 +182,7 @@ impl DocumentRegistry {
                 virtual_source_uri: Some(source_uri),
             };
             self.documents.insert(uri_str.clone(), state);
+            self.registration.signal();
             return HostUpdateResult::no_change(uri_str);
         }
 
@@ -240,6 +245,7 @@ impl DocumentRegistry {
         };
 
         self.documents.insert(uri_str.clone(), state);
+        self.registration.signal();
 
         result.unwrap_or_else(|e| {
             tracing::error!("upsert failed for {}: {:?}", uri_str, e);

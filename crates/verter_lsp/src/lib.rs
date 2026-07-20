@@ -46,6 +46,8 @@ mod resilient_provider;
 mod uri;
 
 #[cfg(test)]
+mod hot_path_overhead_tests;
+#[cfg(test)]
 #[allow(
     unused_must_use,
     clippy::unused_enumerate_index,

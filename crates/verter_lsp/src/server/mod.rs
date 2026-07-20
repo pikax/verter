@@ -586,6 +586,24 @@ fn e2e_provider_only_completions_enabled() -> bool {
 }
 
 impl VerterLanguageServer {
+    /// Select this request's production deadline from the configured budget
+    /// table. `pick` names the row, so a handler without an audit tag still
+    /// takes its bound from the same configured table as the audited ones
+    /// rather than carrying a literal of its own.
+    fn request_deadline(
+        &self,
+        pick: impl FnOnce(&verter_session::LspMethodBudgets) -> std::time::Duration,
+    ) -> std::time::Duration {
+        pick(
+            &self
+                .documents
+                .host()
+                .config()
+                .lsp_method_timeouts
+                .request_deadlines,
+        )
+    }
+
     fn enqueue_did_change_provider_update(&self) -> DidChangeProviderTurn {
         let completion = Arc::new(tokio::sync::Notify::new());
         let predecessor = self
@@ -1276,7 +1294,11 @@ impl LanguageServer for VerterLanguageServer {
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
-        nav_features::handle_completion_resolve(self, item).await
+        crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.completion),
+            nav_features::handle_completion_resolve(self, item),
+        )
+        .await
     }
 
     async fn goto_definition(
@@ -1290,7 +1312,11 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        nav_features_navigation::handle_goto_type_definition(self, params).await
+        crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.goto_definition),
+            nav_features_navigation::handle_goto_type_definition(self, params),
+        )
+        .await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -1301,7 +1327,11 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        nav_features_navigation::handle_prepare_rename(self, params).await
+        crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.goto_definition),
+            nav_features_navigation::handle_prepare_rename(self, params),
+        )
+        .await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -1330,11 +1360,19 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
-        aux_features::handle_document_highlight(self, params).await
+        crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.goto_definition),
+            aux_features::handle_document_highlight(self, params),
+        )
+        .await
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
-        aux_features::handle_signature_help(self, params).await
+        crate::audit_harness::run_with_deadline(
+            self.request_deadline(|b| b.code_action),
+            aux_features::handle_signature_help(self, params),
+        )
+        .await
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {

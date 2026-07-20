@@ -315,7 +315,36 @@ impl TestSessionBuilder {
             Arc::new(verter_workspace::FilesystemWorkspace::new(
                 verter_workspace::FilesystemOptions::default(),
             ));
-        let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+        // The production request deadlines are human-scaled to a single healthy
+        // provider (hover 1.5s, definition 2.5s, ...). This harness deliberately
+        // spawns real providers, and the suite runs dozens of them concurrently
+        // under nextest — a pathological CPU-starvation environment where a
+        // normally-3ms tsserver hover can be scheduled out past a second. That is
+        // the canonical "slow machine" the deadlines are configurable for: raise
+        // every kind to the long batch backstop so these tests validate provider
+        // CORRECTNESS rather than measuring latency under contention. The wedge /
+        // fail-closed repros do not use this harness — they build their config
+        // directly and set their own tight deadline.
+        let config = HostConfig {
+            lsp_method_timeouts: verter_session::LspMethodTimeoutsConfig {
+                request_deadlines: verter_session::LspMethodBudgets {
+                    hover: std::time::Duration::from_secs(15),
+                    goto_definition: std::time::Duration::from_secs(15),
+                    completion: std::time::Duration::from_secs(15),
+                    references: std::time::Duration::from_secs(15),
+                    diagnostics: std::time::Duration::from_secs(15),
+                    document_symbols: std::time::Duration::from_secs(15),
+                    semantic_tokens: std::time::Duration::from_secs(15),
+                    inlay_hints: std::time::Duration::from_secs(15),
+                    code_action: std::time::Duration::from_secs(15),
+                    rename: std::time::Duration::from_secs(15),
+                    other: std::time::Duration::from_secs(15),
+                },
+                ..HostConfig::default().lsp_method_timeouts
+            },
+            ..HostConfig::default()
+        };
+        let host = Arc::new(VerterHost::new(config, vfs_workspace));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&provider);
         // Construct the server with the per-session store-dir override installed:
