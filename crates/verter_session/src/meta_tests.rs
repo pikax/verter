@@ -4110,6 +4110,7 @@ defineProps<Props>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/GateIndex.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Props",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4232,6 +4233,7 @@ defineProps<Props>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/CtorRoot.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Props",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4278,6 +4280,7 @@ defineProps<Root>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/IdxKind.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4287,6 +4290,7 @@ defineProps<Root>()
     assert!(
         !resolver_host.owner_local_macro_root_has_surface(
             "/IdxKind.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineEmits,
         ),
@@ -4332,6 +4336,7 @@ defineProps<Root>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/CallRoot.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4341,11 +4346,64 @@ defineProps<Root>()
     assert!(
         !resolver_host.owner_local_macro_root_has_surface(
             "/CallRoot.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineExpose,
         ),
         "a call-signature-only root MUST NOT read as a non-empty expose surface — expose \
          publishes named members only",
+    );
+}
+
+#[test]
+fn owner_local_macro_root_authority_gate_isolates_same_name_module_and_instance_roots() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OwnerGateIsolation.vue",
+            r#"<script lang="ts">
+type Root = { moduleOnly: string }
+</script>
+<script setup lang="ts">
+type Root = { (): void }
+defineProps<Root>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/OwnerGateIsolation.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(resolver_host.owner_local_macro_root_has_surface(
+        "/OwnerGateIsolation.vue",
+        verter_type_expr::TopLevelOwnerId::module(0),
+        "Root",
+        AnalyzedMacroKind::DefineExpose,
+    ));
+    assert!(resolver_host.owner_local_macro_root_has_surface(
+        "/OwnerGateIsolation.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "Root",
+        AnalyzedMacroKind::DefineProps,
+    ));
+    assert!(
+        !resolver_host.owner_local_macro_root_has_surface(
+            "/OwnerGateIsolation.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Root",
+            AnalyzedMacroKind::DefineExpose,
+        ),
+        "the instance gate must not read the same-name module member surface",
     );
 }
 

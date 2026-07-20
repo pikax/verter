@@ -488,6 +488,7 @@ where
                     // authoritative entry for this root.
                     if !host.owner_local_macro_root_has_surface(
                         owner_canonical,
+                        mac.owner,
                         root_name,
                         mac.kind,
                     ) {

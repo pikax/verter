@@ -128,6 +128,7 @@ impl ComponentMetaResolverHost for TestHost {
     fn owner_local_macro_root_has_surface(
         &self,
         _owner_canonical: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
         _macro_kind: AnalyzedMacroKind,
     ) -> bool {

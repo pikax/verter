@@ -190,11 +190,12 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
 impl HostComponentMetaResolver<'_> {
     /// Shared owner-local macro-root presence gate, decided in NODE DOMAIN.
     ///
-    /// Lowers the bare root reference at `Navigate` and resolves its one-level
-    /// `SurfaceView` through the SOLE query-time dispatch at `Published(Shallow)`
-    /// (the same demand the prior `ExpandedObjectShape` bridge resolved), then
-    /// decides per macro kind whether the root carries a non-empty macro surface
-    /// directly off the `SurfaceView` — never materialising it to a `TypeExpr` /
+    /// Lowers the bare root reference in its exact lexical `owner` at
+    /// `Navigate` and resolves its one-level `SurfaceView` through the SOLE
+    /// query-time dispatch at `Published(Shallow)` (the same demand the prior
+    /// `ExpandedObjectShape` bridge resolved), then decides per macro kind
+    /// whether the root carries a non-empty macro surface directly off the
+    /// `SurfaceView` — never materialising it to a `TypeExpr` /
     /// `ExpandedObjectShape`.
     ///
     /// Construct signatures and index signatures live on dedicated `SurfaceView`
@@ -206,6 +207,7 @@ impl HostComponentMetaResolver<'_> {
     fn owner_local_macro_root_surface_presence(
         &self,
         owner_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> bool {
@@ -216,8 +218,9 @@ impl HostComponentMetaResolver<'_> {
             type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
         };
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
-        let Some(base) = dispatch.lower_type_expr_in_scope_with_mode(
+        let Some(base) = dispatch.lower_type_expr_in_owner_scope_with_mode(
             owner_canonical,
+            owner,
             &root_ref,
             crate::semantic_query::ProjectionMode::Navigate,
         ) else {
@@ -478,7 +481,12 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         candidate_roots
             .into_iter()
             .filter(|root_name| {
-                self.owner_local_macro_root_surface_presence(owner_canonical, root_name, mac.kind)
+                self.owner_local_macro_root_surface_presence(
+                    owner_canonical,
+                    mac.owner,
+                    root_name,
+                    mac.kind,
+                )
             })
             .map(str::to_string)
             .collect()
@@ -487,6 +495,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     fn owner_local_macro_root_has_surface(
         &self,
         owner_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> bool {
@@ -502,7 +511,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         // `Published(Shallow)` one-level `SurfaceView`), decided in node domain —
         // no `ExpandedObjectShape` materialisation, NOT the retired prepared-decl
         // walker.
-        self.owner_local_macro_root_surface_presence(owner_canonical, root_name, macro_kind)
+        self.owner_local_macro_root_surface_presence(owner_canonical, owner, root_name, macro_kind)
     }
 
     fn resolve_native_props(

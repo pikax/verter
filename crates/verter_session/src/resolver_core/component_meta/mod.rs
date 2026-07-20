@@ -315,8 +315,8 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
             .is_empty()
     }
 
-    /// Whether the owner-local root `root_name` projects to a NON-EMPTY
-    /// prepared macro surface for `macro_kind`.
+    /// Whether the owner-local root `(owner, root_name)` projects to a
+    /// NON-EMPTY prepared macro surface for `macro_kind`.
     ///
     /// This is the authority gate for the cold resolver's owner-local arm: it
     /// pushes an authoritative [`ResolvedMacroMeta`] entry for the root iff
@@ -328,6 +328,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     fn owner_local_macro_root_has_surface(
         &self,
         _owner_canonical: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
         _root_name: &str,
         _macro_kind: AnalyzedMacroKind,
     ) -> bool {
