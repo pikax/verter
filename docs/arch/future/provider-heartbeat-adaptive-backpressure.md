@@ -1,8 +1,17 @@
 # Future work — provider heartbeat + machine-adaptive backpressure
 
-Status: **design / not yet fully scheduled.** The bounded-and-safe first slice may land with the
-sync-priority fix (the active-doc-starvation block); the full adaptive subsystem is a follow-up.
-This doc captures the requirement + design so it can be planned properly.
+Status: **ONE CANDIDATE, not the chosen solution — pending research into proven IDE patterns.**
+The heartbeat was a user SUGGESTION to explore, not a decision. This problem (feeding documents to
+a TS backend at scale without crashing it, prioritizing the active file) is ALREADY SOLVED by
+established systems — VS Code's built-in TypeScript extension, Volar, tsserver's own project system,
+tsgo. A research task (`report-ide-document-feeding-patterns.md`) is finding their proven pattern,
+which may be STRUCTURAL rather than a heartbeat: established extensions largely do NOT flood the
+backend with every file — they open the active/demand-driven set and let the backend's PROJECT
+SYSTEM load the rest lazily. If that is the answer, the fix is to change Verter's 'sweep every
+companion' feeding model, and a heartbeat may be unnecessary (a workaround for a wrong feeding
+model). Treat the design below as the fallback candidate; adopt the proven pattern the research
+identifies first. The active-document-PRIORITY rule (open files served first, never starved by
+background work) is proven-universal and holds regardless.
 
 ## Problem
 
