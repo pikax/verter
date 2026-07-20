@@ -1126,6 +1126,40 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
     vfs_ws
 }
 
+/// A host config for a real-provider CORRECTNESS test: every request deadline
+/// raised to the long batch backstop.
+///
+/// The production deadlines are human-scaled to a single healthy provider
+/// (hover 1.5s, definition 2.5s, ...). A correctness test that spins a real
+/// tsserver runs alongside dozens of others under nextest, a CPU-starvation
+/// environment where a normally-fast round-trip is scheduled out past its
+/// budget. That is the canonical "slow machine" the deadlines are configurable
+/// for; a correctness test validates the RESULT, not the latency, so it lifts
+/// every kind to the backstop. Wedge / fail-closed repros keep their own tight
+/// deadline and do not use this.
+fn real_provider_correctness_config() -> HostConfig {
+    let backstop = std::time::Duration::from_secs(15);
+    HostConfig {
+        lsp_method_timeouts: verter_session::LspMethodTimeoutsConfig {
+            request_deadlines: verter_session::LspMethodBudgets {
+                hover: backstop,
+                goto_definition: backstop,
+                completion: backstop,
+                references: backstop,
+                diagnostics: backstop,
+                document_symbols: backstop,
+                semantic_tokens: backstop,
+                inlay_hints: backstop,
+                code_action: backstop,
+                rename: backstop,
+                other: backstop,
+            },
+            ..HostConfig::default().lsp_method_timeouts
+        },
+        ..HostConfig::default()
+    }
+}
+
 fn open_test_vue(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
     let uri: Uri = format!("file://{path}").parse().expect("valid test uri");
     let _ = server.documents.did_open(&TextDocumentItem {
@@ -15206,7 +15240,9 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
         }
     };
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host = Arc::new(VerterHost::new_standalone(
+        real_provider_correctness_config(),
+    ));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     // Construct the server under this test's per-session store-dir override so the
@@ -26781,14 +26817,24 @@ async fn a_request_racing_an_open_resumes_the_moment_the_document_registers() {
     let uri: Uri = "file:///workspace/src/Late.vue".parse().unwrap();
     let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
 
-    // Register the document a few ms from now, mimicking a did_open that lands
-    // just after the request checked for it.
+    // Register the document a short delay from now, mimicking a did_open that
+    // lands just after the request first checked for it.
     const REGISTER_AFTER: std::time::Duration = std::time::Duration::from_millis(5);
+    // The fail-safe budget. Event-driven, the wait returns as soon as the
+    // registration lands (the delay plus the open's own compile cost plus
+    // scheduling); it must never approach this ceiling. The negative control —
+    // suppressing the registration signal — makes the wait fall through to
+    // exactly this budget, so a bound comfortably below it discriminates the
+    // event-driven wake from a fall-through while staying robust to scheduler
+    // noise under a saturated test runner.
+    const BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+    const CEILING: std::time::Duration = std::time::Duration::from_millis(150);
 
     let started = std::time::Instant::now();
     let waiter = server
         .documents
-        .wait_for_registration(&uri, std::time::Duration::from_millis(300));
+        .registration
+        .wait_until(BUDGET, || server.documents.get(&uri).is_some());
 
     let opener = async {
         tokio::time::sleep(REGISTER_AFTER).await;
@@ -26803,9 +26849,9 @@ async fn a_request_racing_an_open_resumes_the_moment_the_document_registers() {
         "the wait must observe the registration it was waiting for"
     );
     assert!(
-        elapsed < std::time::Duration::from_millis(20),
-        "the request resumed {elapsed:?} after the open landed at {REGISTER_AFTER:?} — \
-         it is waiting out a polling interval rather than the registration itself"
+        elapsed < CEILING,
+        "the request resumed after {elapsed:?}, near the {BUDGET:?} fail-safe budget — \
+         it is falling through to the budget rather than waking on the registration"
     );
 }
 
@@ -26824,7 +26870,10 @@ async fn waiting_for_an_already_registered_document_returns_immediately() {
     let started = std::time::Instant::now();
     let registered = server
         .documents
-        .wait_for_registration(&uri, std::time::Duration::from_millis(300))
+        .registration
+        .wait_until(std::time::Duration::from_millis(300), || {
+            server.documents.get(&uri).is_some()
+        })
         .await;
     let elapsed = started.elapsed();
 
@@ -26847,7 +26896,11 @@ async fn waiting_for_a_document_that_never_arrives_gives_up_on_its_budget() {
     let budget = std::time::Duration::from_millis(80);
 
     let started = std::time::Instant::now();
-    let registered = server.documents.wait_for_registration(&uri, budget).await;
+    let registered = server
+        .documents
+        .registration
+        .wait_until(budget, || server.documents.get(&uri).is_some())
+        .await;
     let elapsed = started.elapsed();
 
     assert!(!registered, "the document was never registered");

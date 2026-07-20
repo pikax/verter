@@ -1,6 +1,7 @@
 pub mod line_index;
 pub mod position_map;
 pub mod provider_projection;
+pub mod registration_signal;
 pub mod sfc_scanner;
 
 use std::sync::Arc;
@@ -45,16 +46,8 @@ pub struct DocumentRegistry {
     /// captures the current snapshot set under a fence and maps a returned offset
     /// only against the exact generation it captured.
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
-    /// Signalled whenever a document is registered.
-    ///
-    /// tower-lsp dispatches `did_open` and a request for the same document
-    /// concurrently, so a completion can arrive before the open has registered.
-    /// The request has to wait for the registration, and waiting for an event by
-    /// re-checking on a timer costs the request the remainder of whichever poll
-    /// interval it landed in — a document that registers 1ms after a check still
-    /// holds the request for the rest of that step. Waiting on the registration
-    /// itself costs the request only the time the registration actually took.
-    registration: tokio::sync::Notify,
+    /// Signalled on every document registration (a request racing `did_open` waits on it).
+    pub(crate) registration: registration_signal::RegistrationSignal,
 }
 
 /// Tracked state for an open document.
@@ -97,34 +90,7 @@ impl DocumentRegistry {
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
-            registration: tokio::sync::Notify::new(),
-        }
-    }
-
-    /// Wait until `uri` is registered, or `budget` elapses.
-    ///
-    /// Returns `true` once the document is present. Event-driven: a request
-    /// racing an in-flight `did_open` resumes the instant the open registers,
-    /// rather than at the end of whatever polling step it happened to land in.
-    ///
-    /// Interest is registered BEFORE the presence re-check, so a registration
-    /// landing between the two cannot be missed.
-    pub async fn wait_for_registration(&self, uri: &Uri, budget: std::time::Duration) -> bool {
-        if self.get(uri).is_some() {
-            return true;
-        }
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            let notified = self.registration.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            if self.get(uri).is_some() {
-                return true;
-            }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return self.get(uri).is_some();
-            }
+            registration: registration_signal::RegistrationSignal::default(),
         }
     }
 
@@ -216,7 +182,7 @@ impl DocumentRegistry {
                 virtual_source_uri: Some(source_uri),
             };
             self.documents.insert(uri_str.clone(), state);
-            self.registration.notify_waiters();
+            self.registration.signal();
             return HostUpdateResult::no_change(uri_str);
         }
 
@@ -279,7 +245,7 @@ impl DocumentRegistry {
         };
 
         self.documents.insert(uri_str.clone(), state);
-        self.registration.notify_waiters();
+        self.registration.signal();
 
         result.unwrap_or_else(|e| {
             tracing::error!("upsert failed for {}: {:?}", uri_str, e);

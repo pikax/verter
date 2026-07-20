@@ -701,22 +701,18 @@ async fn handle_completion_attempt(
 
     // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
     // a completion request concurrently, so a completion can arrive BEFORE the
-    // document is registered in `documents`. Returning `Ok(None)` here is what the
-    // editor renders as a document-text (word) fallback — the exact D1 defect.
-    // Hold briefly for the in-flight open to land (bounded; a real editor only
-    // sends completion for a document it is opening) instead of falling open into
-    // silence. Once the document registers, the normal path answers typed.
+    // document is registered. Wait for the registration event (bounded 300ms)
+    // rather than polling — the request resumes the instant the open lands, not
+    // at a poll-step boundary. Each request stays independent: an unrelated
+    // concurrent open cannot cancel a valid request into an empty response.
     if server.documents.get(uri).is_none() {
         drop(edit_fence);
-        // Wait for the open to register, bounded at 300ms. Event-driven: the
-        // completion resumes the instant the document lands, so a registration
-        // that completes in 2ms costs the request 2ms. Polling charged it the
-        // remainder of whichever step it landed in instead. Each request remains
-        // independent: unrelated concurrent completions cannot cancel a valid
-        // request into an empty response.
         server
             .documents
-            .wait_for_registration(uri, std::time::Duration::from_millis(300))
+            .registration
+            .wait_until(std::time::Duration::from_millis(300), || {
+                server.documents.get(uri).is_some()
+            })
             .await;
         edit_fence = server.did_change_mutex.lock().await;
     }

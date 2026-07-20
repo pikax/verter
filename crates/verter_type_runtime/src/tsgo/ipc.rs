@@ -79,6 +79,9 @@ impl PendingRequests {
         self.map.lock().unwrap().remove(&id)
     }
 
+    /// How many requests are in flight. The leak surface: a request abandoned
+    /// without releasing its slot shows up here and nowhere else.
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.map.lock().unwrap().len()
     }

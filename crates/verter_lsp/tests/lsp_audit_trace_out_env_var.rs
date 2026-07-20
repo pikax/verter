@@ -7,7 +7,6 @@
 //! audited LSP run, and asserts the file holds the produced record.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_lsp::audit_harness;

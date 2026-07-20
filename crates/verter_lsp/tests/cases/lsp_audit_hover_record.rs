@@ -7,7 +7,6 @@
 //! records store empty.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{LspRequestPayload, RequestKind, RequestKindPayload};
