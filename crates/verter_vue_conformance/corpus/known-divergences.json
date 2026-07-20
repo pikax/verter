@@ -6,38 +6,37 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createVNode`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `withCtx`",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[3]/FunctionDeclaration[0] \u2014 private binding key: verter (scope#0, decl#9, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#73, decl#0, slot[], Param) vs golden (scope#81, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#73, decl#1, slot[], Param) vs golden (scope#81, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#73, decl#2, slot[], Param) vs golden (scope#81, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#73, decl#3, slot[], Param) vs golden (scope#81, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#73, decl#4, slot[], Param) vs golden (scope#81, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#73, decl#5, slot[], Param) vs golden (scope#81, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 6 vs golden 7",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#9, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
+        "[import] /imports(vue) — unexpected imported helper/name `createVNode`",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[3]/FunctionDeclaration[0] — private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#70, decl#0, slot[], Param) vs golden (scope#81, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#70, decl#1, slot[], Param) vs golden (scope#81, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#70, decl#2, slot[], Param) vs golden (scope#81, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#70, decl#3, slot[], Param) vs golden (scope#81, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#70, decl#4, slot[], Param) vs golden (scope#81, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#70, decl#5, slot[], Param) vs golden (scope#81, decl#5, slot[], Param)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression — node kind: verter `CallExpression` vs golden `SequenceExpression`",
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] — private binding key: verter (scope#0, decl#8, slot[], Function) vs golden (scope#0, decl#7, slot[], Function)"
       ],
-      "total": 13,
-      "note": "runtime helper sets differ (Verter-only: `createVNode`, `withCtx`; official-only: \u2014); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
+      "total": 12,
+      "note": "runtime helper sets differ (Verter-only: `createVNode`, `withCtx`; official-only: —); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
     },
     {
       "case": "built-ins/keep-alive",
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `KeepAlive`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createComponentWithFallback`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `resolveComponent`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `setInsertionState`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `template`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `VaporKeepAlive`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createDynamicComponent`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `extend`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 6"
+        "[import] /imports(vue) — unexpected imported helper/name `KeepAlive`",
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `resolveComponent`",
+        "[import] /imports(vue) — unexpected imported helper/name `setInsertionState`",
+        "[import] /imports(vue) — unexpected imported helper/name `template`",
+        "[import] /imports(vue) — missing imported helper/name `VaporKeepAlive`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[import] /imports(vue) — missing imported helper/name `createDynamicComponent`",
+        "[import] /imports(vue) — missing imported helper/name `extend`",
+        "[structure] Program — child count: verter 8 vs golden 6"
       ],
       "total": 10,
       "note": "runtime helper sets differ (Verter-only: `KeepAlive`, `createComponentWithFallback`, `resolveComponent`, `setInsertionState`, `template`; official-only: `VaporKeepAlive`, `createComponent`, `createDynamicComponent`, `extend`); module item count differs (extra host-assembly statements)"
@@ -47,14 +46,13 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createVNode`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `withCtx`",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params[0]/param[0] \u2014 private binding key: verter (scope#39, decl#0, slot[], Param) vs golden (scope#33, decl#0, slot[], Param)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[0]/param[0] \u2014 private binding key: verter (scope#51, decl#0, slot[], Param) vs golden (scope#45, decl#0, slot[], Param)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[1]/param[0] \u2014 private binding key: verter (scope#51, decl#1, slot[], Param) vs golden (scope#45, decl#1, slot[], Param)",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 6 vs golden 7"
+        "[import] /imports(vue) — unexpected imported helper/name `createVNode`",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params[0]/param[0] — private binding key: verter (scope#36, decl#0, slot[], Param) vs golden (scope#33, decl#0, slot[], Param)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[0]/param[0] — private binding key: verter (scope#48, decl#0, slot[], Param) vs golden (scope#45, decl#0, slot[], Param)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[1]/param[0] — private binding key: verter (scope#48, decl#1, slot[], Param) vs golden (scope#45, decl#1, slot[], Param)",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression — node kind: verter `CallExpression` vs golden `SequenceExpression`"
       ],
-      "total": 6,
+      "total": 5,
       "note": "runtime helper sets differ (Verter resolves KeepAlive via `createVNode`/`withCtx`; official uses `KeepAlive` + `toDisplayString`); private binding/scope ordinals cascade from the structural diffs above; further structural divergence (see reasons)"
     },
     {
@@ -62,22 +60,21 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `withCtx`",
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
-      "total": 2,
-      "note": "runtime helper sets differ (Verter-only: `withCtx`; official-only: \u2014); module item count differs (extra host-assembly statements)"
+      "total": 1,
+      "note": "runtime helper sets differ (Verter-only: `withCtx`; official-only: —); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "built-ins/teleport",
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `Teleport`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createComponentWithFallback`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `VaporTeleport`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — unexpected imported helper/name `Teleport`",
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — missing imported helper/name `VaporTeleport`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 5,
       "note": "runtime helper sets differ (Verter-only: `Teleport`, `createComponentWithFallback`; official-only: `VaporTeleport`, `createComponent`); module item count differs (extra host-assembly statements)"
@@ -87,18 +84,17 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `withCtx`",
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
-      "total": 2,
-      "note": "runtime helper sets differ (Verter-only: `withCtx`; official-only: \u2014); Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "total": 1,
+      "note": "runtime helper sets differ (Verter-only: `withCtx`; official-only: —); Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "components/child-comp",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -108,37 +104,37 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `child`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7"
+        "[import] /imports(vue) — missing imported helper/name `child`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[structure] Program — child count: verter 8 vs golden 7"
       ],
       "total": 3,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `child`, `setText`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `child`, `setText`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "components/child-comp",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "components/component-is",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#64, decl#0, slot[], Param) vs golden (scope#78, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#64, decl#1, slot[], Param) vs golden (scope#78, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#64, decl#2, slot[], Param) vs golden (scope#78, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#64, decl#3, slot[], Param) vs golden (scope#78, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#64, decl#4, slot[], Param) vs golden (scope#78, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#64, decl#5, slot[], Param) vs golden (scope#78, decl#5, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[1]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#64, decl#3, slot[], Param) vs golden (scope#78, decl#3, slot[], Param)"
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#64, decl#0, slot[], Param) vs golden (scope#78, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#64, decl#1, slot[], Param) vs golden (scope#78, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#64, decl#2, slot[], Param) vs golden (scope#78, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#64, decl#3, slot[], Param) vs golden (scope#78, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#64, decl#4, slot[], Param) vs golden (scope#78, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#64, decl#5, slot[], Param) vs golden (scope#78, decl#5, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[1]/CallExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#64, decl#3, slot[], Param) vs golden (scope#78, decl#3, slot[], Param)"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -148,10 +144,10 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createComponentWithFallback`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `resolveComponent`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createDynamicComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `resolveComponent`",
+        "[import] /imports(vue) — missing imported helper/name `createDynamicComponent`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 4,
       "note": "runtime helper sets differ (Verter-only: `createComponentWithFallback`, `resolveComponent`; official-only: `createDynamicComponent`); module item count differs (extra host-assembly statements)"
@@ -161,7 +157,7 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -171,9 +167,9 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createComponentWithFallback`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 3,
       "note": "runtime helper sets differ (Verter-only: `createComponentWithFallback`; official-only: `createComponent`); module item count differs (extra host-assembly statements)"
@@ -183,26 +179,26 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 5 vs golden 4"
+        "[structure] Program — child count: verter 5 vs golden 4"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "components/slots",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 3 vs golden 4",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#59, decl#0, slot[], Param) vs golden (scope#67, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#59, decl#1, slot[], Param) vs golden (scope#67, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#59, decl#2, slot[], Param) vs golden (scope#67, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#59, decl#3, slot[], Param) vs golden (scope#67, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#59, decl#4, slot[], Param) vs golden (scope#67, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#59, decl#5, slot[], Param) vs golden (scope#67, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[1]/ComputedMemberExpression \u2014 node kind: verter `StaticMemberExpression` vs golden `ComputedMemberExpression`",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrowFunctionExpression[1]/FunctionBody[0]/ExpressionStatement[0]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 3 vs golden 4",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#59, decl#0, slot[], Param) vs golden (scope#67, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#59, decl#1, slot[], Param) vs golden (scope#67, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#59, decl#2, slot[], Param) vs golden (scope#67, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#59, decl#3, slot[], Param) vs golden (scope#67, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#59, decl#4, slot[], Param) vs golden (scope#67, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#59, decl#5, slot[], Param) vs golden (scope#67, decl#5, slot[], Param)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[1]/ComputedMemberExpression — node kind: verter `StaticMemberExpression` vs golden `ComputedMemberExpression`",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrowFunctionExpression[1]/FunctionBody[0]/ExpressionStatement[0]/ArrayExpression[0]/spread — node kind: verter `LogicalExpression` vs golden `spread`"
       ],
       "total": 10,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -212,11 +208,11 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `child`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createComponentWithFallback`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `next`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createComponent`",
-        "[structure] Program \u2014 child count: verter 11 vs golden 9"
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `createComponentWithFallback`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — missing imported helper/name `createComponent`",
+        "[structure] Program — child count: verter 11 vs golden 9"
       ],
       "total": 5,
       "note": "runtime helper sets differ (Verter-only: `child`, `createComponentWithFallback`, `next`; official-only: `createComponent`); module item count differs (extra host-assembly statements)"
@@ -226,7 +222,7 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[0]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrowFunctionExpression[1]/FunctionBody[0]/ExpressionStatement[0]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[0]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrowFunctionExpression[1]/FunctionBody[0]/ExpressionStatement[0]/ArrayExpression[0]/spread — node kind: verter `LogicalExpression` vs golden `spread`"
       ],
       "total": 1,
       "note": "cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`)"
@@ -236,50 +232,50 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `createCommentVNode`",
-        "[structure] Program \u2014 child count: verter 5 vs golden 8"
+        "[import] /imports(vue) — missing imported helper/name `createCommentVNode`",
+        "[structure] Program — child count: verter 5 vs golden 8"
       ],
       "total": 2,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `createCommentVNode`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `createCommentVNode`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "conditionals/if-else-if-else",
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 9 vs golden 8"
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 9 vs golden 8"
       ],
       "total": 3,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "conditionals/if-else-if-else",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `createCommentVNode`",
-        "[structure] Program \u2014 child count: verter 3 vs golden 6"
+        "[import] /imports(vue) — missing imported helper/name `createCommentVNode`",
+        "[structure] Program — child count: verter 3 vs golden 6"
       ],
       "total": 2,
-      "note": "Verter emits no `createCommentVNode` branch markers (official marks v-if chain fallbacks) and does not hoist the branch constants official hoists \u2014 module item count differs (verter 3 vs golden 6)"
+      "note": "Verter emits no `createCommentVNode` branch markers (official marks v-if chain fallbacks) and does not hoist the branch constants official hoists — module item count differs (verter 3 vs golden 6)"
     },
     {
       "case": "directives/html",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression \u2014 node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#61, decl#0, slot[], Param) vs golden (scope#73, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#61, decl#1, slot[], Param) vs golden (scope#73, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#61, decl#2, slot[], Param) vs golden (scope#73, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#61, decl#3, slot[], Param) vs golden (scope#73, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#61, decl#4, slot[], Param) vs golden (scope#73, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#61, decl#5, slot[], Param) vs golden (scope#73, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression — node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#61, decl#0, slot[], Param) vs golden (scope#73, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#61, decl#1, slot[], Param) vs golden (scope#73, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#61, decl#2, slot[], Param) vs golden (scope#73, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#61, decl#3, slot[], Param) vs golden (scope#73, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#61, decl#4, slot[], Param) vs golden (scope#73, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#61, decl#5, slot[], Param) vs golden (scope#73, decl#5, slot[], Param)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 5 vs golden 8"
       ],
       "total": 10,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -289,7 +285,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -299,12 +295,12 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] \u2014 private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression \u2014 node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params[0]/param[0] \u2014 private binding key: verter (scope#27, decl#0, slot[], Param) vs golden (scope#28, decl#0, slot[], Param)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[0]/param[0] \u2014 private binding key: verter (scope#39, decl#0, slot[], Param) vs golden (scope#40, decl#0, slot[], Param)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[1]/param[0] \u2014 private binding key: verter (scope#39, decl#1, slot[], Param) vs golden (scope#40, decl#1, slot[], Param)",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8"
+        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] — private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression — node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params[0]/param[0] — private binding key: verter (scope#27, decl#0, slot[], Param) vs golden (scope#28, decl#0, slot[], Param)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[0]/param[0] — private binding key: verter (scope#39, decl#0, slot[], Param) vs golden (scope#40, decl#0, slot[], Param)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[1]/param[0] — private binding key: verter (scope#39, decl#1, slot[], Param) vs golden (scope#40, decl#1, slot[], Param)",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 5 vs golden 8"
       ],
       "total": 6,
       "note": "v-html hoist shape: Verter hoists the props OBJECT where official hoists the dynamic keys ARRAY; private binding/scope ordinals cascade from the structural diffs above; further structural divergence (see reasons)"
@@ -314,15 +310,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#63, decl#0, slot[], Param) vs golden (scope#74, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#63, decl#1, slot[], Param) vs golden (scope#74, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#63, decl#2, slot[], Param) vs golden (scope#74, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#63, decl#3, slot[], Param) vs golden (scope#74, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#63, decl#4, slot[], Param) vs golden (scope#74, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#63, decl#5, slot[], Param) vs golden (scope#74, decl#5, slot[], Param)",
-        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#63, decl#0, slot[], Param) vs golden (scope#74, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#63, decl#1, slot[], Param) vs golden (scope#74, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#63, decl#2, slot[], Param) vs golden (scope#74, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#63, decl#3, slot[], Param) vs golden (scope#74, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#63, decl#4, slot[], Param) vs golden (scope#74, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#63, decl#5, slot[], Param) vs golden (scope#74, decl#5, slot[], Param)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -332,7 +328,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -342,7 +338,7 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`"
       ],
       "total": 1,
       "note": "v-show return shape: Verter wraps the returned vnode in a SequenceExpression (`(_openBlock(), ...)`) where official inline returns the CallExpression directly"
@@ -352,49 +348,49 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `toDisplayString`",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[0] \u2014 private binding key: verter (scope#0, decl#4, slot[], Const) vs golden (scope#0, decl#5, slot[], Const)",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression \u2014 node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
-        "[identifier] Program[3]/FunctionDeclaration[0] \u2014 private binding key: verter (scope#0, decl#5, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#61, decl#0, slot[], Param) vs golden (scope#76, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#61, decl#1, slot[], Param) vs golden (scope#76, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#61, decl#2, slot[], Param) vs golden (scope#76, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#61, decl#3, slot[], Param) vs golden (scope#76, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#61, decl#4, slot[], Param) vs golden (scope#76, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#61, decl#5, slot[], Param) vs golden (scope#76, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8",
-        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] \u2014 private binding key: verter (scope#0, decl#5, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)"
+        "[import] /imports(vue) — missing imported helper/name `toDisplayString`",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[0] — private binding key: verter (scope#0, decl#4, slot[], Const) vs golden (scope#0, decl#5, slot[], Const)",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression — node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
+        "[identifier] Program[3]/FunctionDeclaration[0] — private binding key: verter (scope#0, decl#5, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#61, decl#0, slot[], Param) vs golden (scope#76, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#61, decl#1, slot[], Param) vs golden (scope#76, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#61, decl#2, slot[], Param) vs golden (scope#76, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#61, decl#3, slot[], Param) vs golden (scope#76, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#61, decl#4, slot[], Param) vs golden (scope#76, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#61, decl#5, slot[], Param) vs golden (scope#76, decl#5, slot[], Param)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 5 vs golden 8",
+        "[identifier] Program[4]/ExpressionStatement[0]/AssignmentExpression[2] — private binding key: verter (scope#0, decl#5, slot[], Function) vs golden (scope#0, decl#6, slot[], Function)"
       ],
       "total": 14,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `toDisplayString`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `toDisplayString`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
     },
     {
       "case": "directives/text",
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `renderEffect`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `toDisplayString`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — missing imported helper/name `renderEffect`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `toDisplayString`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 5,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `renderEffect`, `setText`, `toDisplayString`, `txt`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `renderEffect`, `setText`, `toDisplayString`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "directives/text",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `toDisplayString`",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression \u2014 node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params[0]/param[0] \u2014 private binding key: verter (scope#27, decl#0, slot[], Param) vs golden (scope#31, decl#0, slot[], Param)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[0]/param[0] \u2014 private binding key: verter (scope#39, decl#0, slot[], Param) vs golden (scope#43, decl#0, slot[], Param)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[1]/param[0] \u2014 private binding key: verter (scope#39, decl#1, slot[], Param) vs golden (scope#43, decl#1, slot[], Param)",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 8"
+        "[import] /imports(vue) — missing imported helper/name `toDisplayString`",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression — node kind: verter `ObjectExpression` vs golden `ArrayExpression`",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params[0]/param[0] — private binding key: verter (scope#27, decl#0, slot[], Param) vs golden (scope#31, decl#0, slot[], Param)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[0]/param[0] — private binding key: verter (scope#39, decl#0, slot[], Param) vs golden (scope#43, decl#0, slot[], Param)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[0]/params[1]/param[0] — private binding key: verter (scope#39, decl#1, slot[], Param) vs golden (scope#43, decl#1, slot[], Param)",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 5 vs golden 8"
       ],
       "total": 6,
       "note": "v-text codegen divergence (pre-existing, same as non-inline): the `textContent` expression is lost into an EMPTY hoisted object and `toDisplayString` is never imported; private binding/scope ordinals cascade; further structural divergence (see reasons)"
@@ -404,16 +400,16 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrayExpression[1]/ObjectExpression[0]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrayExpression[2]/BinaryExpression[2]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrayExpression[1]/ObjectExpression[0]/ObjectProperty[1]/StaticMemberExpression[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ArrayExpression[2]/BinaryExpression[2]/StaticMemberExpression[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)"
       ],
       "total": 10,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -423,7 +419,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -433,16 +429,16 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ObjectExpression[0]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/BinaryExpression[0]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ObjectExpression[0]/ObjectProperty[1]/StaticMemberExpression[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[0]/ObjectProperty[1]/CallExpression[1]/ObjectExpression[1]/ObjectProperty[1]/BinaryExpression[0]/StaticMemberExpression[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)"
       ],
       "total": 10,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -452,7 +448,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -462,17 +458,17 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#80, decl#0, slot[], Param) vs golden (scope#94, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#80, decl#1, slot[], Param) vs golden (scope#94, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#80, decl#2, slot[], Param) vs golden (scope#94, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#80, decl#4, slot[], Param) vs golden (scope#94, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#80, decl#5, slot[], Param) vs golden (scope#94, decl#5, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[2]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[2]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[2]/CallExpression[1]/ConditionalExpression[0]/BinaryExpression[0]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#80, decl#0, slot[], Param) vs golden (scope#94, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#80, decl#1, slot[], Param) vs golden (scope#94, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#80, decl#2, slot[], Param) vs golden (scope#94, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#80, decl#4, slot[], Param) vs golden (scope#94, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#80, decl#5, slot[], Param) vs golden (scope#94, decl#5, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[2]/CallExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[0]/BinaryExpression[2]/CallExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/BinaryExpression[2]/CallExpression[1]/ConditionalExpression[0]/BinaryExpression[0]/StaticMemberExpression[0] — private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#94, decl#3, slot[], Param)"
       ],
       "total": 11,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -482,19 +478,19 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 3,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "elements-text/multi-root",
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 9 vs golden 8"
+        "[structure] Program — child count: verter 9 vs golden 8"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -504,8 +500,8 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/ObjectExpression[0]/ObjectProperty[0] \u2014 leaf kind: verter ident `color` vs golden str `color`",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/ObjectExpression[0]/ObjectProperty[0] — leaf kind: verter ident `color` vs golden str `color`",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread — node kind: verter `LogicalExpression` vs golden `spread`"
       ],
       "total": 2,
       "note": "cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string"
@@ -515,7 +511,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -525,7 +521,7 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread \u2014 node kind: verter `LogicalExpression` vs golden `spread`"
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/spread — node kind: verter `LogicalExpression` vs golden `spread`"
       ],
       "total": 1,
       "note": "cache shape: Verter caches the child vnode directly (`_cache[i] || (_cache[i] = v)`); official spreads a cached array (`[...(_cache[i] || ...)]`)"
@@ -535,7 +531,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -545,7 +541,7 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -555,29 +551,29 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7"
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 8 vs golden 7"
       ],
       "total": 3,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "script-setup/props-emits-runtime",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "script-setup/props-type-withdefaults",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -587,39 +583,39 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `defineComponent`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `defineVaporComponent`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7"
+        "[import] /imports(vue) — unexpected imported helper/name `defineComponent`",
+        "[import] /imports(vue) — missing imported helper/name `defineVaporComponent`",
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 8 vs golden 7"
       ],
       "total": 5,
-      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: \u2014; official-only: `defineVaporComponent`, `setText`, `txt`); module item count differs (extra host-assembly statements)"
+      "note": "Verter wraps every script-setup component in `_defineComponent(...)` (+ its `/*@__PURE__*/` annotation); official RC.1 non-inline emits a plain component object literal when no runtime option requires the wrapper; runtime helper sets differ (Verter-only: —; official-only: `defineVaporComponent`, `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "script-setup/props-type-withdefaults",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "v-bind/dynamic-arg",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
-        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 6 vs golden 7"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 6 vs golden 7"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -629,9 +625,9 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `setProp`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setDynamicProps`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `setDynamicProps`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 3,
       "note": "runtime helper sets differ (Verter-only: `setProp`; official-only: `setDynamicProps`); module item count differs (extra host-assembly statements)"
@@ -641,7 +637,7 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 6 vs golden 7"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 6 vs golden 7"
       ],
       "total": 1,
       "note": "dynamic-argument handling: structural divergence inside the render call (see reasons)"
@@ -651,17 +647,17 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[literal] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[0] \u2014 str: verter `textContent` vs golden `.text-content`",
-        "[literal] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[1] \u2014 str: verter `data-x` vs golden `^data-x`",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 7 vs golden 8"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[literal] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[0] — str: verter `textContent` vs golden `.text-content`",
+        "[literal] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[1] — str: verter `data-x` vs golden `^data-x`",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 7 vs golden 8"
       ],
       "total": 11,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -671,21 +667,21 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `setDOMProp`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — missing imported helper/name `setDOMProp`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 2,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `setDOMProp`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `setDOMProp`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-bind/prop-attr-modifiers",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] \u2014 private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
-        "[literal] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[0] \u2014 str: verter `textContent` vs golden `.text-content`",
-        "[literal] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[1] \u2014 str: verter `data-x` vs golden `^data-x`",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 7 vs golden 8"
+        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] — private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
+        "[literal] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[0] — str: verter `textContent` vs golden `.text-content`",
+        "[literal] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ArrayExpression[1] — str: verter `data-x` vs golden `^data-x`",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 7 vs golden 8"
       ],
       "total": 4,
       "note": "Verter drops the `.`/`^` modifier prefixes in the hoisted keys array (`textContent` vs `.text-content`, `data-x` vs `^data-x`); declaration ordinal shifts from the hoisted-array presence; further structural divergence (see reasons)"
@@ -695,15 +691,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
-        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 7 vs golden 8"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
+        "[structure] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 7 vs golden 8"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -713,7 +709,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -723,8 +719,8 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] \u2014 private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
-        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression \u2014 child count: verter 7 vs golden 8"
+        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] — private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
+        "[structure] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression — child count: verter 7 vs golden 8"
       ],
       "total": 2,
       "note": "declaration ordinal shifts from the hoisted-array presence; further structural divergence (see reasons)"
@@ -734,16 +730,16 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 5 vs golden 6",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[1]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
-        "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[2]/ObjectProperty[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 5 vs golden 6",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[1]/ObjectProperty[1]/StaticMemberExpression[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
+        "[identifier] Program[3]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[2]/ObjectExpression[2]/ObjectProperty[1]/StaticMemberExpression[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)"
       ],
       "total": 10,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -753,7 +749,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -763,8 +759,8 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] \u2014 private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
-        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[5] \u2014 private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)"
+        "[identifier] Program[1]/VariableDeclaration[1]/VariableDeclarator[0] — private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)",
+        "[identifier] Program[2]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[2]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[5] — private binding key: verter (scope#0, decl#3, slot[], Const) vs golden (scope#0, decl#2, slot[], Const)"
       ],
       "total": 2,
       "note": "declaration ordinal shifts from the hoisted-array presence (the `_hoisted_1` const shifts `decl#` ordinals on the component object)"
@@ -774,15 +770,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -792,17 +788,17 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `child`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `next`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `setProp`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createFor`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setInsertionState`",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[2]/VariableDeclaration \u2014 node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
-        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1] \u2014 str: verter `<ul>\n    <li> ` vs golden `<ul>`",
-        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[2] \u2014 leaf kind: verter bool `true` vs golden num `4607182418800017408`",
-        "[structure] Program[4]/FunctionDeclaration[1]/params \u2014 child count: verter 2 vs golden 6",
-        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody \u2014 child count: verter 5 vs golden 4"
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `createFor`",
+        "[import] /imports(vue) — missing imported helper/name `setInsertionState`",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration — node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
+        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1] — str: verter `<ul>\n    <li> ` vs golden `<ul>`",
+        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[2] — leaf kind: verter bool `true` vs golden num `4607182418800017408`",
+        "[structure] Program[4]/FunctionDeclaration[1]/params — child count: verter 2 vs golden 6",
+        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody — child count: verter 5 vs golden 4"
       ],
       "total": 11,
       "note": "runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; further structural divergence (see reasons)"
@@ -812,15 +808,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#80, decl#0, slot[], Param) vs golden (scope#91, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#80, decl#1, slot[], Param) vs golden (scope#91, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#80, decl#2, slot[], Param) vs golden (scope#91, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#91, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#80, decl#4, slot[], Param) vs golden (scope#91, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#80, decl#5, slot[], Param) vs golden (scope#91, decl#5, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#91, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#80, decl#0, slot[], Param) vs golden (scope#91, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#80, decl#1, slot[], Param) vs golden (scope#91, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#80, decl#2, slot[], Param) vs golden (scope#91, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#91, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#80, decl#4, slot[], Param) vs golden (scope#91, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#80, decl#5, slot[], Param) vs golden (scope#91, decl#5, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#80, decl#3, slot[], Param) vs golden (scope#91, decl#3, slot[], Param)"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -830,17 +826,17 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `child`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `next`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `setProp`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createFor`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setInsertionState`",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[2]/VariableDeclaration \u2014 node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
-        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1] \u2014 str: verter `<ul>\n    <li>\n        \u2014  \n    ` vs golden `<ul>`",
-        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[2] \u2014 leaf kind: verter bool `true` vs golden num `4607182418800017408`",
-        "[structure] Program[4]/FunctionDeclaration[1]/params \u2014 child count: verter 2 vs golden 6",
-        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody \u2014 child count: verter 5 vs golden 4"
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `createFor`",
+        "[import] /imports(vue) — missing imported helper/name `setInsertionState`",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration — node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
+        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1] — str: verter `<ul>\n    <li>\n        —  \n    ` vs golden `<ul>`",
+        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[2] — leaf kind: verter bool `true` vs golden num `4607182418800017408`",
+        "[structure] Program[4]/FunctionDeclaration[1]/params — child count: verter 2 vs golden 6",
+        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody — child count: verter 5 vs golden 4"
       ],
       "total": 11,
       "note": "runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; further structural divergence (see reasons)"
@@ -850,15 +846,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#72, decl#0, slot[], Param) vs golden (scope#83, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#72, decl#1, slot[], Param) vs golden (scope#83, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#72, decl#2, slot[], Param) vs golden (scope#83, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#72, decl#4, slot[], Param) vs golden (scope#83, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#72, decl#5, slot[], Param) vs golden (scope#83, decl#5, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/SequenceExpression[1]/CallExpression[3]/CallExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#72, decl#3, slot[], Param) vs golden (scope#83, decl#3, slot[], Param)"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -868,17 +864,17 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `child`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `next`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `setProp`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `createFor`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `setInsertionState`",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[2]/VariableDeclaration \u2014 node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
-        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1] \u2014 str: verter `<ul>\n    <li> :  ` vs golden `<ul>`",
-        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[2] \u2014 leaf kind: verter bool `true` vs golden num `4607182418800017408`",
-        "[structure] Program[4]/FunctionDeclaration[1]/params \u2014 child count: verter 2 vs golden 6",
-        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody \u2014 child count: verter 5 vs golden 4"
+        "[import] /imports(vue) — unexpected imported helper/name `child`",
+        "[import] /imports(vue) — unexpected imported helper/name `next`",
+        "[import] /imports(vue) — unexpected imported helper/name `setProp`",
+        "[import] /imports(vue) — missing imported helper/name `createFor`",
+        "[import] /imports(vue) — missing imported helper/name `setInsertionState`",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression — child count: verter 2 vs golden 3",
+        "[structure] Program[2]/VariableDeclaration — node kind: verter `ExpressionStatement` vs golden `VariableDeclaration`",
+        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[1] — str: verter `<ul>\n    <li> :  ` vs golden `<ul>`",
+        "[literal] Program[3]/VariableDeclaration[1]/VariableDeclarator[1]/CallExpression[2] — leaf kind: verter bool `true` vs golden num `4607182418800017408`",
+        "[structure] Program[4]/FunctionDeclaration[1]/params — child count: verter 2 vs golden 6",
+        "[structure] Program[4]/FunctionDeclaration[2]/FunctionBody — child count: verter 5 vs golden 4"
       ],
       "total": 11,
       "note": "runtime helper sets differ (Verter-only: `child`, `next`, `setProp`; official-only: `createFor`, `setInsertionState`); private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); render signature: Verter always emits the full `(_ctx, _cache, $props, $setup, $data, $options)` form; official emits the short `(_ctx, _cache)` form for template-only SFCs (no bindings); static style attribute: Verter normalizes it to a JS object with unquoted keys; official hoists the original attribute string; further structural divergence (see reasons)"
@@ -888,17 +884,17 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
-        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 7",
-        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[2]/ArrayExpression[0]/ArrayExpression[1]/StaticMemberExpression[0] \u2014 private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
-        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[1]/LogicalExpression \u2014 node kind: verter `CallExpression` vs golden `LogicalExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#69, decl#0, slot[], Param) vs golden (scope#80, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#69, decl#1, slot[], Param) vs golden (scope#80, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#69, decl#2, slot[], Param) vs golden (scope#80, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#69, decl#4, slot[], Param) vs golden (scope#80, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#69, decl#5, slot[], Param) vs golden (scope#80, decl#5, slot[], Param)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[1]/CallExpression — child count: verter 5 vs golden 7",
+        "[identifier] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[2]/ArrayExpression[0]/ArrayExpression[1]/StaticMemberExpression[0] — private binding key: verter (scope#69, decl#3, slot[], Param) vs golden (scope#80, decl#3, slot[], Param)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[1]/LogicalExpression — node kind: verter `CallExpression` vs golden `LogicalExpression`"
       ],
       "total": 11,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -908,19 +904,19 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `child`",
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[import] /imports(vue) — missing imported helper/name `child`",
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 2,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `child`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `child`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-model/checkbox",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[1]/CallExpression \u2014 child count: verter 5 vs golden 7",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[1]/LogicalExpression \u2014 node kind: verter `CallExpression` vs golden `LogicalExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[0]/CallExpression[1]/CallExpression — child count: verter 5 vs golden 7",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/SequenceExpression[1]/CallExpression[3]/ArrayExpression[1]/LogicalExpression — node kind: verter `CallExpression` vs golden `LogicalExpression`"
       ],
       "total": 2,
       "note": "v-model checkbox transform: structural divergence in the update-handler shape (see reasons)"
@@ -930,15 +926,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#63, decl#0, slot[], Param) vs golden (scope#74, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#63, decl#1, slot[], Param) vs golden (scope#74, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#63, decl#2, slot[], Param) vs golden (scope#74, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#63, decl#3, slot[], Param) vs golden (scope#74, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#63, decl#4, slot[], Param) vs golden (scope#74, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#63, decl#5, slot[], Param) vs golden (scope#74, decl#5, slot[], Param)",
-        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#63, decl#0, slot[], Param) vs golden (scope#74, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#63, decl#1, slot[], Param) vs golden (scope#74, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#63, decl#2, slot[], Param) vs golden (scope#74, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#63, decl#3, slot[], Param) vs golden (scope#74, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#63, decl#4, slot[], Param) vs golden (scope#74, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#63, decl#5, slot[], Param) vs golden (scope#74, decl#5, slot[], Param)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -948,7 +944,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -958,7 +954,7 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`"
       ],
       "total": 1,
       "note": "v-model return shape: Verter wraps the returned vnode in a SequenceExpression (`(_openBlock(), ...)`) where official inline returns the CallExpression directly"
@@ -968,15 +964,15 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params \u2014 child count: verter 2 vs golden 3",
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody \u2014 child count: verter 4 vs golden 5",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] \u2014 private binding key: verter (scope#66, decl#0, slot[], Param) vs golden (scope#77, decl#0, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] \u2014 private binding key: verter (scope#66, decl#1, slot[], Param) vs golden (scope#77, decl#1, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] \u2014 private binding key: verter (scope#66, decl#2, slot[], Param) vs golden (scope#77, decl#2, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] \u2014 private binding key: verter (scope#66, decl#3, slot[], Param) vs golden (scope#77, decl#3, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] \u2014 private binding key: verter (scope#66, decl#4, slot[], Param) vs golden (scope#77, decl#4, slot[], Param)",
-        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] \u2014 private binding key: verter (scope#66, decl#5, slot[], Param) vs golden (scope#77, decl#5, slot[], Param)",
-        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[1]/params — child count: verter 2 vs golden 3",
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody — child count: verter 4 vs golden 5",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[0]/param[0] — private binding key: verter (scope#66, decl#0, slot[], Param) vs golden (scope#77, decl#0, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[1]/param[0] — private binding key: verter (scope#66, decl#1, slot[], Param) vs golden (scope#77, decl#1, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[2]/param[0] — private binding key: verter (scope#66, decl#2, slot[], Param) vs golden (scope#77, decl#2, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[3]/param[0] — private binding key: verter (scope#66, decl#3, slot[], Param) vs golden (scope#77, decl#3, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[4]/param[0] — private binding key: verter (scope#66, decl#4, slot[], Param) vs golden (scope#77, decl#4, slot[], Param)",
+        "[identifier] Program[2]/FunctionDeclaration[1]/params[5]/param[0] — private binding key: verter (scope#66, decl#5, slot[], Param) vs golden (scope#77, decl#5, slot[], Param)",
+        "[structure] Program[2]/FunctionDeclaration[2]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`"
       ],
       "total": 9,
       "note": "private binding/scope ordinals cascade from the structural diffs above (declaration-order shift); further structural divergence (see reasons); official always destructures `expose: __expose` and calls `__expose()` in `setup()`; Verter emits those only when `defineExpose` is used"
@@ -986,7 +982,7 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 6"
+        "[structure] Program — child count: verter 7 vs golden 6"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -996,7 +992,7 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/CallExpression \u2014 node kind: verter `SequenceExpression` vs golden `CallExpression`"
+        "[structure] Program[1]/VariableDeclaration[1]/VariableDeclarator[1]/ObjectExpression[1]/ObjectProperty[1]/FunctionExpression[2]/FunctionBody[1]/ReturnStatement[0]/ArrowFunctionExpression[1]/FunctionBody[0]/ReturnStatement[0]/CallExpression — node kind: verter `SequenceExpression` vs golden `CallExpression`"
       ],
       "total": 1,
       "note": "v-model return shape: Verter wraps the returned vnode in a SequenceExpression (`(_openBlock(), ...)`) where official inline returns the CallExpression directly"
@@ -1006,7 +1002,7 @@
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -1016,29 +1012,29 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 missing imported helper/name `setText`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `txt`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7"
+        "[import] /imports(vue) — missing imported helper/name `setText`",
+        "[import] /imports(vue) — missing imported helper/name `txt`",
+        "[structure] Program — child count: verter 8 vs golden 7"
       ],
       "total": 3,
-      "note": "runtime helper sets differ (Verter-only: \u2014; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
+      "note": "runtime helper sets differ (Verter-only: —; official-only: `setText`, `txt`); module item count differs (extra host-assembly statements)"
     },
     {
       "case": "v-on/inline",
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "v-on/key-modifiers",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -1048,9 +1044,9 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createInvoker`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `withVaporKeys`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7"
+        "[import] /imports(vue) — unexpected imported helper/name `createInvoker`",
+        "[import] /imports(vue) — missing imported helper/name `withVaporKeys`",
+        "[structure] Program — child count: verter 8 vs golden 7"
       ],
       "total": 3,
       "note": "runtime helper sets differ (Verter-only: `createInvoker`; official-only: `withVaporKeys`); module item count differs (extra host-assembly statements)"
@@ -1060,17 +1056,17 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "v-on/method-ref",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 6 vs golden 5"
+        "[structure] Program — child count: verter 6 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -1080,10 +1076,10 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createInvoker`",
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `delegateEvents`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `on`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 6"
+        "[import] /imports(vue) — unexpected imported helper/name `createInvoker`",
+        "[import] /imports(vue) — unexpected imported helper/name `delegateEvents`",
+        "[import] /imports(vue) — missing imported helper/name `on`",
+        "[structure] Program — child count: verter 8 vs golden 6"
       ],
       "total": 4,
       "note": "runtime helper sets differ (Verter-only: `createInvoker`, `delegateEvents`; official-only: `on`); module item count differs (extra host-assembly statements)"
@@ -1093,17 +1089,17 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 4 vs golden 3"
+        "[structure] Program — child count: verter 4 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array \u2014 one extra module item (same patch-flag policy divergence tracked non-inline)"
+      "note": "Verter hoists the dynamic-props keys array (`const _hoisted_1 = [...]`) and emits `PROPS` where official inline emits `NEED_HYDRATION` without a keys array — one extra module item (same patch-flag policy divergence tracked non-inline)"
     },
     {
       "case": "v-on/modifiers",
       "backend": "vdom",
       "topology": "non-inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 7 vs golden 5"
+        "[structure] Program — child count: verter 7 vs golden 5"
       ],
       "total": 1,
       "note": "module item count differs (extra host-assembly statements)"
@@ -1113,12 +1109,12 @@
       "backend": "vapor",
       "topology": "non-inline",
       "reasons": [
-        "[import] /imports(vue) \u2014 unexpected imported helper/name `createInvoker`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `child`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `next`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `withModifiers`",
-        "[import] /imports(vue) \u2014 missing imported helper/name `withVaporModifiers`",
-        "[structure] Program \u2014 child count: verter 8 vs golden 7"
+        "[import] /imports(vue) — unexpected imported helper/name `createInvoker`",
+        "[import] /imports(vue) — missing imported helper/name `child`",
+        "[import] /imports(vue) — missing imported helper/name `next`",
+        "[import] /imports(vue) — missing imported helper/name `withModifiers`",
+        "[import] /imports(vue) — missing imported helper/name `withVaporModifiers`",
+        "[structure] Program — child count: verter 8 vs golden 7"
       ],
       "total": 6,
       "note": "runtime helper sets differ (Verter-only: `createInvoker`; official-only: `child`, `next`, `withModifiers`, `withVaporModifiers`); module item count differs (extra host-assembly statements)"
@@ -1128,10 +1124,10 @@
       "backend": "vdom",
       "topology": "inline",
       "reasons": [
-        "[structure] Program \u2014 child count: verter 5 vs golden 3"
+        "[structure] Program — child count: verter 5 vs golden 3"
       ],
       "total": 1,
-      "note": "Verter hoists the dynamic-props keys arrays (`_hoisted_1`/`_hoisted_2`) and emits `PROPS` flags where official inline emits no keys arrays (plain props objects, `NEED_HYDRATION` only on the `onClickOnceCapture` anchor) \u2014 two extra module items"
+      "note": "Verter hoists the dynamic-props keys arrays (`_hoisted_1`/`_hoisted_2`) and emits `PROPS` flags where official inline emits no keys arrays (plain props objects, `NEED_HYDRATION` only on the `onClickOnceCapture` anchor) — two extra module items"
     }
   ]
 }

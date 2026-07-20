@@ -17890,8 +17890,8 @@ fn force_js_with_defaults_spread_strips_full_defaults_object() {
     let result = compile_sfc_with_runtime(
         r#"
 <script setup lang="ts">
-const base = { as: 'div' }
-function make<T>(v: T): T { return v }
+import { base } from './base'
+import { make } from './make'
 interface Props { as?: string; n?: number }
 const props = withDefaults(defineProps<Props>(), {
   ...base,
@@ -19925,8 +19925,22 @@ fn with_defaults_destructure_default_setup_local_stays_valid() {
     // NOT hoisted out of setup() — a setup-local default is therefore VALID
     // (official emits only a warning, never the scope error). Only the direct
     // `defineProps` reactive-destructure form hoists the defaults.
-    let result = compile_sfc(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "x",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_sfc_with_runtime(
         "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x = dft } = withDefaults(defineProps<{ x?: string }>(), {})\n</script>\n<template><div>{{ x }}</div></template>",
+        runtime,
     );
     assert!(
         !result
