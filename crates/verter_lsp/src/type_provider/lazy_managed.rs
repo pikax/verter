@@ -87,6 +87,55 @@ pub struct LazyManagedTypeProvider {
 pub(crate) const ACTIVATION_RETRY_COOLDOWN: std::time::Duration =
     std::time::Duration::from_millis(250);
 
+/// Records the outcome of one activation attempt on EVERY exit path.
+///
+/// An attempt that is cancelled rather than completed — the caller's deadline
+/// expired and dropped the activation future while the factory was still running
+/// — is recorded as a failure on drop. Left unrecorded, the retry cooldown never
+/// arms and every subsequent request starts a fresh managed child.
+struct ActivationAttempt<'a> {
+    last_failure: &'a Mutex<Option<(std::time::Instant, String)>>,
+    settled: bool,
+}
+
+impl<'a> ActivationAttempt<'a> {
+    fn new(last_failure: &'a Mutex<Option<(std::time::Instant, String)>>) -> Self {
+        Self {
+            last_failure,
+            settled: false,
+        }
+    }
+
+    fn settle_success(&mut self) {
+        self.settled = true;
+        *self.lock_failure_slot() = None;
+    }
+
+    fn settle_failure(&mut self, message: String) {
+        self.settled = true;
+        *self.lock_failure_slot() = Some((std::time::Instant::now(), message));
+    }
+
+    /// Poison-tolerant: this is also taken from `Drop`, where a panicking
+    /// `unwrap` during unwind would abort the process.
+    fn lock_failure_slot(&self) -> std::sync::MutexGuard<'_, Option<(std::time::Instant, String)>> {
+        self.last_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Drop for ActivationAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            *self.lock_failure_slot() = Some((
+                std::time::Instant::now(),
+                "activation was cancelled before it completed".to_string(),
+            ));
+        }
+    }
+}
+
 impl LazyManagedTypeProvider {
     #[must_use]
     pub fn new<F, Fut>(factory: F) -> Self
@@ -125,6 +174,13 @@ impl LazyManagedTypeProvider {
             }
         }
 
+        // Every exit path from here must record an outcome, INCLUDING cancellation.
+        // The production request deadline drops the handler body, so an activation
+        // cancelled mid-factory never reaches the terminal arms below: without a
+        // drop record the cooldown never arms, the `OnceCell` stays unset, and the
+        // next request spawns another managed child — one per request, unbounded.
+        let mut attempt = ActivationAttempt::new(&self.last_activation_failure);
+
         let result = match (self.factory)().await {
             Ok(provider) => match self.replay(&provider).await {
                 Ok(()) => Ok(provider),
@@ -142,13 +198,12 @@ impl LazyManagedTypeProvider {
         };
         match result {
             Ok(provider) => {
-                *self.last_activation_failure.lock().unwrap() = None;
+                attempt.settle_success();
                 let _ = self.provider.set(provider.clone());
                 Ok(provider)
             }
             Err(error) => {
-                *self.last_activation_failure.lock().unwrap() =
-                    Some((std::time::Instant::now(), error.message.clone()));
+                attempt.settle_failure(error.message.clone());
                 Err(error)
             }
         }

@@ -643,3 +643,58 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
         "shutdown must never spawn a third real provider"
     );
 }
+
+/// A CANCELLED activation must still arm the retry cooldown.
+///
+/// The production request deadline (and every `tokio::time::timeout` around a
+/// handler) DROPS the handler body, so an activation cancelled while the factory
+/// is still running never reaches its terminal outcome arm. Without a drop
+/// record, `last_activation_failure` stays unset, the cooldown never arms, the
+/// `OnceCell` stays unset — and the very next request spawns ANOTHER managed
+/// child, one per request, unbounded.
+#[tokio::test]
+async fn a_cancelled_activation_still_arms_the_retry_cooldown() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let provider = LazyManagedTypeProvider::new({
+        let attempts = Arc::clone(&attempts);
+        move || {
+            let attempts = Arc::clone(&attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                // Park forever: only cancellation ends this activation attempt.
+                std::future::pending::<()>().await;
+                Err(verter_type_runtime::protocol::TypeProviderError::new(
+                    "unreachable",
+                ))
+            }
+        }
+    });
+
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            provider.get_hover("/w/a.tsx", 0),
+        )
+        .await
+        .is_err(),
+        "the first activation must be cancelled while its factory is still running"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "the factory must have actually started once, else this test proves nothing"
+    );
+
+    // The next request lands inside the cooldown window.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        provider.get_hover("/w/a.tsx", 0),
+    )
+    .await;
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "a cancelled activation must arm the cooldown: the next request must not spawn \
+         another managed child"
+    );
+}
