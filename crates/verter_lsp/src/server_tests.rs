@@ -26280,3 +26280,74 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
     drain_handle.abort();
     drop(service);
 }
+
+/// A carrier sync that FAILED inside the import-set preamble must leave the memo
+/// COLD, so the next request RETRIES that carrier.
+///
+/// Publishing the memo over a failed leg warm-skips the entire preamble until an
+/// unrelated edit bumps the generation: the failure arms only queue
+/// `pending_snapshot_provider_sync`, whose sole drain is background init, so a
+/// transient provider error strands the carrier for the rest of the session.
+#[tokio::test]
+async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    // Fail ONLY the imported child's IDE companion; every other sync succeeds, so
+    // the preamble reaches its publish point with exactly one failed leg.
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+    let child_ide_path = verter_workspace::carrier_ide_provider_path(&child_id, false);
+    provider.set_fail_sync_path(&child_ide_path);
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let child_sync_attempts = |calls: Vec<MockCall>| {
+        calls
+            .into_iter()
+            .filter(|call| match call {
+                MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. } => path == &child_ide_path,
+                _ => false,
+            })
+            .count()
+    };
+
+    // Reach assertion: the first pass must ACTUALLY attempt the failing sync,
+    // otherwise the retry assertion below would be vacuous.
+    let before = child_sync_attempts(provider.calls());
+    assert!(
+        before > 0,
+        "the first request must actually attempt the child's IDE companion sync \
+         ({child_ide_path}), else this test proves nothing"
+    );
+
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let after = child_sync_attempts(provider.calls());
+    assert!(
+        after > before,
+        "a FAILED carrier sync must leave the import memo cold so the next request \
+         retries it; attempts stayed at {before} (after: {after})"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}

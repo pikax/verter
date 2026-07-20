@@ -571,7 +571,7 @@ pub(super) async fn handle_did_open(
 
     if prewarm_imported_carrier_apis {
         for import_id in &imported_carrier_priority_ids {
-            server
+            let _ = server
                 .sync_imported_carrier_api_lightweight(import_id)
                 .await;
         }
@@ -613,7 +613,7 @@ pub(super) async fn handle_did_open(
             let should_sync =
                 !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
             if should_sync {
-                server
+                let _ = server
                     .sync_imported_carrier_api_lightweight(import_id)
                     .await;
             }
