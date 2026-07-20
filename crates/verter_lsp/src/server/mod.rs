@@ -112,6 +112,7 @@ mod nav_features;
 // Navigation method bodies that map source positions onto the generated
 // artifact and back: goto_definition, goto_type_definition, references,
 // prepare_rename, rename.
+mod nav_features_css;
 mod nav_features_navigation;
 
 // Completion-resolve auto-import edit translation:

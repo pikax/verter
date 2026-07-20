@@ -82,83 +82,10 @@ pub(super) async fn handle_goto_definition(
 
     if server.editor_owns_carrier_source_features() {
         // CSS-native results have no TS correlate — the editor's TS plugin can
-        // never own them, so the server still serves EXACTLY the css leg
-        // (class token → rule, style class → usages), plus the global
-        // cross-file declarations for globally-declared classes.
-        let css_result = (|| {
-            let doc = server.documents.get(uri)?;
-            let analysis = server.documents.get_analysis(uri);
-            let blocks = scan_sfc_blocks(&doc.source);
-            let mut def = crate::features::definition::css_only_definition_at_position(
-                position,
-                &doc.source,
-                &blocks,
-                analysis.as_ref(),
-                &doc.line_index,
-            )?;
-            match def {
-                GotoDefinitionResponse::Scalar(ref mut loc) => {
-                    if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
-                        loc.uri = uri.clone();
-                    }
-                }
-                GotoDefinitionResponse::Array(ref mut locs) => {
-                    for loc in locs.iter_mut() {
-                        if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
-                            loc.uri = uri.clone();
-                        }
-                    }
-                }
-                GotoDefinitionResponse::Link(_) => {}
-            }
-            Some(def)
-        })();
-        let global_css_class = (|| {
-            let doc = server.documents.get(uri)?;
-            let analysis = server.documents.get_analysis(uri)?;
-            let offset = doc.line_index.position_to_offset(position)? as usize;
-            let blocks = scan_sfc_blocks(&doc.source);
-            crate::css::global_classes::global_class_target_at(
-                offset,
-                &doc.source,
-                &blocks,
-                &analysis,
-            )
-        })();
-        if let Some(class_name) = global_css_class {
-            let origin_canonical = server.documents.get_canonical_id(uri);
-            let encoding = server.position_encoding.read().clone();
-            let mut locations: Vec<Location> = match css_result {
-                Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
-                Some(GotoDefinitionResponse::Array(locs)) => locs,
-                _ => Vec::new(),
-            };
-            let cross = block_in_place_if_available(|| {
-                crate::css::global_classes::collect_cross_file_global_class_locations(
-                    server.documents.host(),
-                    origin_canonical.as_deref(),
-                    &class_name,
-                    encoding,
-                    true,
-                )
-            });
-            for loc in cross {
-                if !locations
-                    .iter()
-                    .any(|l| l.uri == loc.uri && l.range == loc.range)
-                {
-                    locations.push(loc);
-                }
-            }
-            return Ok(match locations.len() {
-                0 => None,
-                1 => Some(GotoDefinitionResponse::Scalar(
-                    locations.into_iter().next().unwrap(),
-                )),
-                _ => Some(GotoDefinitionResponse::Array(locations)),
-            });
-        }
-        return Ok(css_result);
+        // never own them, so the server still serves EXACTLY the css leg.
+        return Ok(super::nav_features_css::editor_owned_css_definition(
+            server, uri, position,
+        ));
     }
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
@@ -321,45 +248,13 @@ pub(super) async fn handle_goto_definition(
 
     // B4: a GLOBAL css class token (declared non-scoped / :global) extends its
     // definition targets with every global declaration workspace-wide.
-    let global_css_class = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri)?;
-        let offset = doc.line_index.position_to_offset(position)? as usize;
-        let blocks = scan_sfc_blocks(&doc.source);
-        crate::css::global_classes::global_class_target_at(offset, &doc.source, &blocks, &analysis)
-    })();
-    if let Some(class_name) = global_css_class {
-        let origin_canonical = server.documents.get_canonical_id(uri);
-        let encoding = server.position_encoding.read().clone();
-        let mut locations: Vec<Location> = match verter_result {
-            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
-            Some(GotoDefinitionResponse::Array(locs)) => locs,
-            _ => Vec::new(),
-        };
-        let cross = block_in_place_if_available(|| {
-            crate::css::global_classes::collect_cross_file_global_class_locations(
-                server.documents.host(),
-                origin_canonical.as_deref(),
-                &class_name,
-                encoding,
-                true,
-            )
-        });
-        for loc in cross {
-            if !locations
-                .iter()
-                .any(|l| l.uri == loc.uri && l.range == loc.range)
-            {
-                locations.push(loc);
-            }
-        }
-        return Ok(match locations.len() {
-            0 => None,
-            1 => Some(GotoDefinitionResponse::Scalar(
-                locations.into_iter().next().unwrap(),
-            )),
-            _ => Some(GotoDefinitionResponse::Array(locations)),
-        });
+    if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        return Ok(super::nav_features_css::merge_global_class_definitions(
+            server,
+            uri,
+            &class_name,
+            verter_result,
+        ));
     }
 
     // If verter already resolved a cross-file definition, return it directly.
@@ -780,56 +675,9 @@ pub(super) async fn handle_references(
         // CSS-native references have no TS correlate — the server still
         // serves EXACTLY the css leg (same-file occurrences + the
         // workspace-wide global-class extension).
-        let css_locations = (|| {
-            let doc = server.documents.get(uri)?;
-            let analysis = server.documents.get_analysis(uri)?;
-            let offset = doc.line_index.position_to_offset(position)? as usize;
-            let blocks = scan_sfc_blocks(&doc.source);
-            let mut locations = crate::features::references::css_only_references_at_position(
-                offset,
-                &doc.source,
-                &blocks,
-                &analysis,
-                &doc.line_index,
-            )?;
-            for loc in &mut locations {
-                if loc.uri.as_str() == crate::features::references::SAME_FILE_URI_STR {
-                    loc.uri = uri.clone();
-                }
-            }
-            let global = crate::css::global_classes::global_class_target_at(
-                offset,
-                &doc.source,
-                &blocks,
-                &analysis,
-            );
-            Some((locations, global))
-        })();
-        let Some((mut locations, global)) = css_locations else {
-            return Ok(None);
-        };
-        if let Some(class_name) = global {
-            let origin_canonical = server.documents.get_canonical_id(uri);
-            let encoding = server.position_encoding.read().clone();
-            let cross = block_in_place_if_available(|| {
-                crate::css::global_classes::collect_cross_file_global_class_locations(
-                    server.documents.host(),
-                    origin_canonical.as_deref(),
-                    &class_name,
-                    encoding,
-                    false,
-                )
-            });
-            for loc in cross {
-                if !locations
-                    .iter()
-                    .any(|l| l.uri == loc.uri && l.range == loc.range)
-                {
-                    locations.push(loc);
-                }
-            }
-        }
-        return Ok((!locations.is_empty()).then_some(locations));
+        return Ok(super::nav_features_css::editor_owned_css_references(
+            server, uri, position,
+        ));
     }
 
     // Virtual file: route directly through TSGO
@@ -950,34 +798,13 @@ pub(super) async fn handle_references(
     // non-scoped block or under :global). The provider has no CSS knowledge —
     // this leg completes natively and returns. Scoped classes never enter
     // (fail closed: same-file only via the native path above).
-    let global_css_class = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri)?;
-        let offset = doc.line_index.position_to_offset(position)? as usize;
-        let blocks = scan_sfc_blocks(&doc.source);
-        crate::css::global_classes::global_class_target_at(offset, &doc.source, &blocks, &analysis)
-    })();
-    if let Some(class_name) = global_css_class {
-        let origin_canonical = server.documents.get_canonical_id(uri);
-        let encoding = server.position_encoding.read().clone();
-        let mut locations = verter_result.unwrap_or_default();
-        let cross = block_in_place_if_available(|| {
-            crate::css::global_classes::collect_cross_file_global_class_locations(
-                server.documents.host(),
-                origin_canonical.as_deref(),
-                &class_name,
-                encoding,
-                false,
-            )
-        });
-        for loc in cross {
-            if !locations
-                .iter()
-                .any(|l| l.uri == loc.uri && l.range == loc.range)
-            {
-                locations.push(loc);
-            }
-        }
+    if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        let locations = super::nav_features_css::merge_global_class_references(
+            server,
+            uri,
+            &class_name,
+            verter_result.unwrap_or_default(),
+        );
         return Ok((!locations.is_empty()).then_some(locations));
     }
 
