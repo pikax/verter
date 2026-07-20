@@ -127,6 +127,7 @@ fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -143,6 +144,7 @@ fn test_transport_with_pending(
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -2432,6 +2434,7 @@ async fn test_read_loop_exits_on_eof() {
         contents_cache,
         stdin_tx,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -2501,6 +2504,7 @@ async fn test_provider_operations_fail_after_process_death() {
         Arc::clone(&contents_cache),
         stdin_tx,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     let provider = TsgoTypeProvider {
@@ -2509,6 +2513,7 @@ async fn test_provider_operations_fail_after_process_death() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // All operations should NOT hang, which is the critical invariant.
@@ -2587,6 +2592,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         Arc::clone(&contents_cache),
         stdin_tx,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
     let provider = TsgoTypeProvider {
         transport,
@@ -2594,6 +2600,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::clone(&contents_cache),
         diagnostics_cache,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // Insert under a mixed-case, backslash-separated Windows-style path.
@@ -3036,6 +3043,7 @@ async fn test_drop_kills_child_process() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // Drop the provider — Drop impl should call start_kill().
@@ -3071,6 +3079,7 @@ async fn test_child_pid_returns_id() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // After the process has exited, id() returns None.
@@ -3203,6 +3212,7 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
         contents_cache,
         stdin_tx,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     // Spawn a mock "TSGO" task that reads requests from mock_stdout_writer
@@ -3521,6 +3531,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         Arc::clone(&contents_cache),
         stdin_tx,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
@@ -3793,6 +3804,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     let total = MAX_COMPLETION_DETAIL_ENRICH + 70;
@@ -3868,6 +3880,7 @@ async fn get_completion_details_enriches_full_small_list() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     let items: Vec<Completion> = (0..5)
@@ -3950,6 +3963,7 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     let handle = CompletionResolveData::Lsp {
@@ -4294,4 +4308,214 @@ fn cache_root_key_folds_case_per_fs_policy() {
             "case-variant npm cache roots stay distinct on a case-sensitive filesystem"
         );
     }
+}
+
+// ─── Fabricated-position deletion + teardown-intent crash-signal disarm ───
+
+/// A contents-cache miss must FAIL CLOSED: no `(0, byte-offset)` fabricated
+/// position may ever be sent to the engine (a malformed position is a
+/// documented tsgo-crasher). Every positional feature returns its empty
+/// result AND the wire stays silent.
+#[tokio::test]
+async fn contents_cache_miss_fails_closed_without_fabricating_positions() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+
+    // Deliberately NOT loaded/opened: the contents cache has no entry.
+    let path = if cfg!(windows) {
+        "D:/w/Missing.vue.tsx"
+    } else {
+        "/w/Missing.vue.tsx"
+    };
+
+    let hover = provider.get_hover(path, 10).await;
+    assert!(
+        matches!(hover, Ok(None)),
+        "hover on a contents-cache miss fails closed, got {hover:?}"
+    );
+    let completions = provider.get_completions(path, 10, None).await.unwrap();
+    assert!(
+        completions.items.is_empty() && !completions.is_incomplete,
+        "completions on a miss fail closed, got {completions:?}"
+    );
+    assert!(
+        provider.get_definition(path, 10).await.unwrap().is_empty(),
+        "definition on a miss fails closed"
+    );
+    assert!(
+        provider
+            .get_type_definition(path, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "type definition on a miss fails closed"
+    );
+    assert!(
+        provider.get_references(path, 10).await.unwrap().is_empty(),
+        "references on a miss fails closed"
+    );
+    assert!(
+        provider
+            .get_rename_locations(path, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rename locations on a miss fail closed"
+    );
+    let signature_help = provider.get_signature_help(path, 10).await;
+    assert!(
+        matches!(signature_help, Ok(None)),
+        "signature help on a miss fails closed, got {signature_help:?}"
+    );
+    assert!(
+        provider
+            .get_document_highlights(path, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "document highlights on a miss fail closed"
+    );
+
+    // NEGATIVE CONTROL: none of the calls above may have put a request on the
+    // wire — the engine never sees a fabricated position.
+    let mut buf = [0u8; 512];
+    let wire = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        relay_side.read(&mut buf),
+    )
+    .await;
+    assert!(
+        wire.is_err(),
+        "no request frame may be sent on a contents-cache miss, got {:?} bytes",
+        wire.map(|read| read.unwrap_or_default())
+    );
+}
+
+/// The positive control for the fail-closed suite: WITH cached contents the
+/// hover request IS sent (the fail-closed path discriminates on the cache
+/// miss, not on some always-empty stub).
+#[tokio::test]
+async fn contents_cache_hit_still_sends_the_hover_request() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+
+    let path = if cfg!(windows) {
+        "D:/w/Present.vue.tsx"
+    } else {
+        "/w/Present.vue.tsx"
+    };
+    provider
+        .load_file(path, "const present = 1;\n")
+        .await
+        .expect("load cached contents");
+
+    let hover_task = tokio::spawn(async move { provider.get_hover(path, 6).await });
+
+    // The didOpen + hover frames must arrive on the wire.
+    let mut framer = MessageFramer::new();
+    let mut chunk = [0u8; 8192];
+    let mut saw_hover = false;
+    'outer: for _ in 0..64 {
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            relay_side.read(&mut chunk),
+        )
+        .await
+        .expect("wire produced frames")
+        .expect("wire readable");
+        if n == 0 {
+            break;
+        }
+        framer.push(&chunk[..n]);
+        while let Some(message) = framer.next_message().expect("parse frames") {
+            if message.get("method").and_then(|m| m.as_str()) == Some("textDocument/hover") {
+                saw_hover = true;
+                break 'outer;
+            }
+        }
+    }
+    assert!(saw_hover, "a cache HIT must still send the hover request");
+    hover_task.abort();
+}
+
+/// A deliberate `shutdown()` disarms the EOF crash signal: the torn-down
+/// child's stdout EOF must NOT wake the resilient monitor (which would mint a
+/// spurious "crashed. Restarting" notification and respawn an engine into a
+/// dying session).
+#[tokio::test]
+async fn shutdown_disarms_the_eof_crash_signal() {
+    let (provider_side, relay_side) = tokio::io::duplex(4096);
+    let (read, write) = tokio::io::split(provider_side);
+    let crash_notify = Arc::new(Notify::new());
+    let provider =
+        TsgoTypeProvider::from_transport_parts(read, write, None, Some(Arc::clone(&crash_notify)));
+
+    provider.shutdown().await.expect("shutdown");
+    // The engine-side EOF that teardown produces.
+    drop(relay_side);
+
+    let fired = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        crash_notify.notified(),
+    )
+    .await;
+    assert!(
+        fired.is_err(),
+        "a deliberate shutdown's EOF must NOT fire the crash signal"
+    );
+}
+
+/// The positive control: WITHOUT a shutdown, the same EOF still fires the
+/// crash signal (the disarm discriminates on teardown intent, not on a dead
+/// signal path).
+#[tokio::test]
+async fn eof_without_shutdown_still_fires_the_crash_signal() {
+    let (provider_side, relay_side) = tokio::io::duplex(4096);
+    let (read, write) = tokio::io::split(provider_side);
+    let crash_notify = Arc::new(Notify::new());
+    let _provider =
+        TsgoTypeProvider::from_transport_parts(read, write, None, Some(Arc::clone(&crash_notify)));
+
+    drop(relay_side);
+
+    let fired =
+        tokio::time::timeout(std::time::Duration::from_secs(5), crash_notify.notified()).await;
+    assert!(
+        fired.is_ok(),
+        "an unexpected EOF (no teardown intent) must fire the crash signal"
+    );
+}
+
+/// `shutdown`/`exit` are declared WITHOUT params in LSP; a `"params": null`
+/// body makes strict engines (tsgo) log
+/// `InvalidParams: expected no params, got null` on every teardown. The frame
+/// builder must omit the key entirely for null params and keep it otherwise.
+#[test]
+fn jsonrpc_body_omits_null_params_and_keeps_real_params() {
+    let exit = jsonrpc_body(None, "exit", &serde_json::Value::Null);
+    assert!(
+        exit.get("params").is_none(),
+        "null params must be OMITTED, got {exit}"
+    );
+    assert_eq!(exit.get("method").and_then(|m| m.as_str()), Some("exit"));
+    assert!(exit.get("id").is_none(), "a notification carries no id");
+
+    let shutdown = jsonrpc_body(Some(7), "shutdown", &serde_json::Value::Null);
+    assert!(
+        shutdown.get("params").is_none(),
+        "null request params must be OMITTED, got {shutdown}"
+    );
+    assert_eq!(shutdown.get("id").and_then(|id| id.as_i64()), Some(7));
+
+    let hover = jsonrpc_body(
+        Some(8),
+        "textDocument/hover",
+        &serde_json::json!({ "position": { "line": 1, "character": 2 } }),
+    );
+    assert!(
+        hover.get("params").is_some(),
+        "real params must be preserved, got {hover}"
+    );
 }
