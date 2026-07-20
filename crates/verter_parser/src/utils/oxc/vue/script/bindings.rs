@@ -115,12 +115,28 @@ fn enum_is_all_literal(ts_enum: &oxc_ast::ast::TSEnumDeclaration) -> bool {
         .all(|member| member.initializer.as_ref().is_none_or(is_static_node))
 }
 
-/// Official `isStaticNode` (compiler-dom): scalar literals (string /
-/// numeric / boolean / null / bigint) and static compositions of them
-/// (unary / binary / logical / conditional / sequence / template-literal /
-/// parenthesized). Object/array expressions are NOT static.
-fn is_static_node(expr: &Expression) -> bool {
+/// Official `unwrapTSNode`: strip the TS-only expression wrappers
+/// (`x as T` / `<T>x` / `x!` / `x satisfies T` / `x<T>` instantiation) to reach
+/// the underlying value expression. Recursive so stacked wrappers collapse.
+fn unwrap_ts_node<'a, 'b>(expr: &'b Expression<'a>) -> &'b Expression<'a> {
     match expr {
+        Expression::TSAsExpression(e) => unwrap_ts_node(&e.expression),
+        Expression::TSSatisfiesExpression(e) => unwrap_ts_node(&e.expression),
+        Expression::TSNonNullExpression(e) => unwrap_ts_node(&e.expression),
+        Expression::TSTypeAssertion(e) => unwrap_ts_node(&e.expression),
+        Expression::TSInstantiationExpression(e) => unwrap_ts_node(&e.expression),
+        _ => expr,
+    }
+}
+
+/// Official `isStaticNode` (compiler-dom): `unwrapTSNode` first, then scalar
+/// literals (string / numeric / boolean / null / bigint) and static
+/// compositions of them (unary / binary / logical / conditional / sequence /
+/// template-literal / parenthesized). Object/array expressions are NOT static.
+/// Unwrapping first means a wrapped literal (`1 as const`, `2 satisfies number`,
+/// `x!`) is still static, matching official `isAllLiteral` / `walkDeclaration`.
+fn is_static_node(expr: &Expression) -> bool {
+    match unwrap_ts_node(expr) {
         Expression::UnaryExpression(u) => is_static_node(&u.argument),
         Expression::LogicalExpression(b) => is_static_node(&b.left) && is_static_node(&b.right),
         Expression::BinaryExpression(b) => is_static_node(&b.left) && is_static_node(&b.right),

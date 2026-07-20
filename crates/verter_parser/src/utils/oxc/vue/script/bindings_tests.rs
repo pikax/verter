@@ -496,6 +496,31 @@ fn enum_declaration_non_literal_member_is_setup_const() {
     assert_eq!(find(&b, "E"), Some(BindingType::SetupConst));
 }
 
+/// @ai-generated — official `isAllLiteral` runs `isStaticNode` (which
+/// `unwrapTSNode`s first), so members carrying `as const` / `satisfies` /
+/// non-null `!` over scalar literals are still all-literal → literal-const.
+#[test]
+fn enum_ts_wrapped_literal_members_are_literal_const() {
+    let b = classify("enum E { A = 1 as const, B = 2 satisfies number, C = 3! }");
+    assert_eq!(find(&b, "E"), Some(BindingType::LiteralConst));
+}
+
+/// @ai-generated — a TS wrapper over a NON-static member (a call) does NOT make
+/// it static, so the enum stays setup-const (the unwrap must not over-accept).
+#[test]
+fn enum_ts_wrapped_non_static_member_stays_setup_const() {
+    let b = classify("enum E { A = make() as const }");
+    assert_eq!(find(&b, "E"), Some(BindingType::SetupConst));
+}
+
+/// @ai-generated — a static composition member (binary of literals) is static →
+/// the enum is all-literal.
+#[test]
+fn enum_static_composition_member_is_literal_const() {
+    let b = classify("enum E { A = 1 + 2, B = -3 }");
+    assert_eq!(find(&b, "E"), Some(BindingType::LiteralConst));
+}
+
 // ── TypeScript-only declarations (NO binding) ────────────────────────
 
 /// @ai-generated

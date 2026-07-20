@@ -16593,6 +16593,68 @@ fn define_options_non_literal_enum_member_is_compile_error() {
 }
 
 // =========================================================================
+// R5-FIX1 — `is_static_node` unwraps TS wrappers (official `unwrapTSNode`)
+// =========================================================================
+//
+// Official `isStaticNode` calls `unwrapTSNode(node)` FIRST, stripping
+// `as`/`satisfies`/`!`/type-assertion/instantiation wrappers before the
+// scalar-literal / static-composition match. So an all-literal enum whose
+// members carry those wrappers is still `literal-const` and stays valid in
+// `defineOptions`/`defineProps`/etc.
+
+#[test]
+fn r5_fix1_enum_ts_wrapped_literal_members_stay_valid() {
+    // `1 as const` / `2 satisfies number` unwrap to scalar literals → every
+    // member is static → the enum is all-literal (literal-const) → referencing
+    // it in defineOptions is valid (no scope-reference error).
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nenum E { A = 1 as const, B = 2 satisfies number }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "TS-wrapped all-literal enum must stay valid (official unwrapTSNode), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix1_enum_nonnull_and_assertion_wrapped_members_stay_valid() {
+    // Non-null `!` and angle-bracket type-assertion wrappers over scalar
+    // literals also unwrap to statics → all-literal enum stays valid.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nenum E { A = 1!, B = (2 as const) }\ndefineOptions({ y: E.B })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "non-null / parenthesized TS-wrapped enum members must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn r5_fix1_enum_non_static_ts_wrapped_member_still_rejected() {
+    // `foo() as const` unwraps to a CALL expression — NOT static — so the enum
+    // is setup-const and referencing it in defineOptions is rejected. This is
+    // the negative guard proving the unwrap does not over-accept.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nfunction foo(): number { return 1 }\nenum E { A = foo() as const }\ndefineOptions({ x: E.A })\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(D1_OFFICIAL_MESSAGE)),
+        "non-static TS-wrapped enum member must keep the enum setup-const (rejected), got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
 // FIX3 — scope check for defineProps / defineEmits / defineModel
 // =========================================================================
 
