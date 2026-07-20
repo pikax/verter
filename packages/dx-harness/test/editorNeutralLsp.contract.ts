@@ -313,6 +313,21 @@ afterAll(() => {
   );
   console.log(`editor-neutral LSP receipt: ${receiptPath}`);
 
+  // Accepted-universe ratification (self-declared-universe check per "Verification
+  // Must Prove Execution"). The inventory is independently discovered by
+  // createEditorNeutralContractInventory(); this pin ratifies its expected size so a
+  // silently added/dropped case fails the gate rather than passing unnoticed.
+  // Derivation of 89 (every contributing case is a required, adversarially-reviewed
+  // landed block — none accidental):
+  //   73  initial editor-neutral provider contract.
+  //   +9  → 82: the neutral-LSP hardening range (provider evidence, navigation
+  //        evidence, Svelte event-inference modes), the jsconfig lax-carrier family
+  //        across all three routes, the lax-js plain-file control, and the B8
+  //        tsgo-preferred provider-recommendation case.
+  //   +7  → 89: the B4 CSS class-intel cases (class hover/definition/references +
+  //        v-bind) across the applicable routes.
+  // EXPECTED_EXECUTIONS is COMPUTED from per-route applicability (see ROUTES.reduce
+  // above), never hardcoded; the .toBe(265) below is a drift-guard on that computation.
   expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(89);
   expect(
     EXPECTED_EXECUTIONS,
