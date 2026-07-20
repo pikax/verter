@@ -406,8 +406,20 @@ fn check_define_model_scope_references(
         _ => false,
     };
     let options = if has_name {
-        // Official reads `node.arguments[1]` without unwrapping.
-        call.arguments.get(1).and_then(|a| a.as_expression())
+        // Official reads `node.arguments[1]` WITHOUT `unwrapTSNode`, so a
+        // TS-wrapped named options object (`({ … } as T)`) is intentionally NOT
+        // statically analysed (parity is preserved). OXC, however, materialises
+        // `(expr)` as an explicit `ParenthesizedExpression` node, whereas Babel
+        // (official's parser) folds parentheses into an `extra.parenthesized`
+        // flag with no wrapper node — so a merely-parenthesised options object
+        // (`({ … })`) still satisfies official's `options.type === "ObjectExpression"`
+        // test. Peel ONLY the paren node (never the TS wrappers) so the named
+        // form reaches the same ObjectExpression and the get/set-aware scope
+        // check applies instead of being silently skipped.
+        call.arguments
+            .get(1)
+            .and_then(|a| a.as_expression())
+            .map(strip_parens)
     } else {
         Some(arg0)
     };
@@ -459,6 +471,23 @@ fn unwrap_ts_node<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
             Expression::TSInstantiationExpression(inner) => &inner.expression,
             _ => break,
         };
+    }
+    current
+}
+
+/// Peel `ParenthesizedExpression` wrappers ONLY (never the TS wrapper nodes).
+///
+/// OXC represents `(expr)` as an explicit `ParenthesizedExpression` node, while
+/// Babel — official's parser — records parentheses as an `extra.parenthesized`
+/// flag on the inner node and exposes no wrapper. Where official reads a raw
+/// argument WITHOUT `unwrapTSNode` (the `defineModel("name", options)` named
+/// options arg), a merely-parenthesised value must have its OXC paren node peeled
+/// to match Babel, but a TS-wrapped value must be left intact so it is treated
+/// as non-statically-analysable exactly as official treats it.
+fn strip_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    let mut current = expr;
+    while let Expression::ParenthesizedExpression(inner) = current {
+        current = &inner.expression;
     }
     current
 }

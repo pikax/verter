@@ -17020,6 +17020,76 @@ fn define_model_default_function_scope_local_stays_valid() {
     );
 }
 
+// =========================================================================
+// R7-1 — parenthesized NAMED defineModel options must still be scope-checked
+// =========================================================================
+//
+// OXC materialises `(expr)` as an explicit `ParenthesizedExpression` node,
+// whereas Babel (the official parser) folds parentheses into an
+// `extra.parenthesized` flag and exposes no wrapper node. For the NAMED form
+// `defineModel("name", ({ ... }))`, official reads `node.arguments[1]` and tests
+// `options.type === "ObjectExpression"` — which holds in Babel because there is
+// no wrapper node. We must peel the paren node (ONLY the paren node, NOT the TS
+// wrappers, matching official's un-`unwrapTSNode`'d `arguments[1]`) to reach the
+// same ObjectExpression; otherwise ALL scope checks are skipped and a hoisted
+// `default: <setup-local>` is wrongly accepted.
+
+#[test]
+fn define_model_named_paren_default_setup_local_still_errors() {
+    // The R7-1 defect: parenthesized named options — `default: f` (a setup-local)
+    // is a hoisted runtime option and must be rejected. Was ACCEPTED (the paren
+    // wrapper node was not recognised as an ObjectExpression, skipping the check).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', ({ default: f }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "parenthesized named defineModel `default` referencing a setup-local must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_paren_get_skips_but_default_errors() {
+    // Mixed: a `get` transformer (setup-scoped, valid) alongside a hoisted
+    // `default: f` (invalid). Peeling the paren must restore the get/set split —
+    // `get` stays fine while `default: f` is still rejected.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', ({ get: () => f.value, default: f }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "parenthesized named defineModel with a hoisted `default: f` must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_model_named_paren_get_only_stays_valid() {
+    // A parenthesized named options object with ONLY a `get` transformer
+    // referencing a setup-local stays valid (get is emitted back into setup()).
+    // Guards against the paren-peel over-rejecting the setup-scoped transformer.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = defineModel('count', ({ get: () => f.value }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "parenthesized named defineModel with only a `get` transformer must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
 #[test]
 fn with_defaults_local_ref_default_is_compile_error() {
     // Type-based defineProps + runtime defaults with a setup-local reference —
