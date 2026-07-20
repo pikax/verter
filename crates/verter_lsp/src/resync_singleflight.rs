@@ -11,7 +11,7 @@
 //! one coalesced re-arm: every trigger that arrives while a sweep runs is folded
 //! into a single pending bit, so 10 concurrent triggers run the sweep at most
 //! twice (the in-flight one, then one re-run that reflects the latest state).
-//! B6's repair lease is per-DOCUMENT; this is the project-level counterpart the
+//! The per-document IDE-sync repair lease is per-DOCUMENT; this is the project-level counterpart the
 //! resync path lacked.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -98,7 +98,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     /// T4-core — a burst of concurrent resync triggers coalesces to AT MOST two
-    /// sweeps (one in-flight + one re-arm), never N. Pre-Fix-E every trigger ran
+    /// sweeps (one in-flight + one re-arm), never N. Without this gate every trigger runs
     /// a full sweep.
     #[tokio::test]
     async fn concurrent_triggers_coalesce_to_at_most_two_sweeps() {

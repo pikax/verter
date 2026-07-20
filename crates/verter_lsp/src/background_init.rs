@@ -66,7 +66,7 @@ pub(super) struct BackgroundInitArgs {
     pub(super) decl_overlay_owner: Arc<super::DeclOverlayOwner>,
     /// Project-level coalescing singleflight for `resync_open_files`, shared with
     /// the server so concurrent init generations collapse their resync sweeps.
-    pub(super) resync_coordinator: Arc<crate::resync_coordinator::ResyncCoordinator>,
+    pub(super) resync_coordinator: Arc<crate::resync_singleflight::ResyncCoordinator>,
 }
 
 struct PublishedWorkspaceBuild {
@@ -325,8 +325,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         // workspace folders and tsconfig paths are configured. Coalesced so a
         // superseded init generation's resync folds into the live one instead of
         // stacking a second full close+reopen sweep on the interactive lane.
-        crate::resync_coordinator::resync_open_files_coalesced(&resync_coordinator, Arc::clone(tp))
-            .await;
+        crate::resync_singleflight::resync_open_files_coalesced(
+            &resync_coordinator,
+            Arc::clone(tp),
+        )
+        .await;
     }
 
     // 4. Generation check → commit snapshot
@@ -375,7 +378,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // so it picks up the newly available modules and clears stale TS2307 diagnostics.
     if aliased_imports_synced {
         if let Some(tp) = &type_provider {
-            crate::resync_coordinator::resync_open_files_coalesced(
+            crate::resync_singleflight::resync_open_files_coalesced(
                 &resync_coordinator,
                 Arc::clone(tp),
             )

@@ -977,7 +977,7 @@ pub struct LspMethodTimeoutsConfig {
     /// body when `audit_enabled = false` (the production default).
     ///
     /// The per-method budgets above are the tight audit-supersede SLO, applied
-    /// only when audit is enabled. Before B12 that meant production ran every
+    /// only when audit is enabled. Without this, production would run every
     /// handler with ZERO timeout — a hung provider wedged the handler forever.
     /// This is the production wedge backstop: generous by design (well above a
     /// legitimate slow round-trip, so it never fail-closes a request that is

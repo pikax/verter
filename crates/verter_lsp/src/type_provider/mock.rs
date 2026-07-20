@@ -143,7 +143,7 @@ mod inner {
         fail_next_hovers: usize,
         /// When `true`, `get_definition` RECORDS its call and then returns a
         /// future that NEVER resolves, simulating a wedged type provider (a
-        /// managed tsgo stuck in a busy dispatch loop). Drives the B12 handler
+        /// managed tsgo stuck in a busy dispatch loop). Drives the handler
         /// deadline repro: without an always-on production request deadline the
         /// definition handler parks on this forever.
         hang_definition: bool,
@@ -273,7 +273,7 @@ mod inner {
         }
 
         /// Make every subsequent `get_definition` RECORD its call and then hang
-        /// forever (a wedged type provider). The B12 handler-deadline repro uses
+        /// forever (a wedged type provider). The handler-deadline repro uses
         /// this to prove the definition handler now fails closed on a deadline
         /// instead of parking.
         pub fn hang_definition(&self) {

@@ -8,7 +8,7 @@
 /// of slow semantic handlers then occupy every slot, the framed-stdin forwarder
 /// stalls, and the server stops reading client stdin entirely — so provider-free
 /// control requests (`$/verter/getStatistics`, `$/cancelRequest`) are STARVED and
-/// no client-side rescue can land. B12's always-on per-request deadline stops a
+/// no client-side rescue can land. The always-on per-request deadline stops a
 /// handler occupying a slot forever; this generous cap additionally guarantees
 /// control requests get a slot immediately alongside a burst of semantic work.
 pub const LSP_MAX_CONCURRENCY: usize = 64;
@@ -29,7 +29,7 @@ pub mod features;
 pub mod project_resolver;
 pub mod provider_surface_store;
 pub mod provider_sync;
-pub mod resync_coordinator;
+pub mod resync_singleflight;
 pub mod server;
 pub mod statistics;
 pub mod svelte_assets;

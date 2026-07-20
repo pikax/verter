@@ -1408,7 +1408,7 @@ impl VerterLanguageServer {
     }
 
     /// The current-file leg's imported-carrier + barrel preamble, wrapped in a
-    /// per-document singleflight + freshness memo (former B13). A go-to-definition
+    /// per-document singleflight + freshness memo. A go-to-definition
     /// storm on an UNCHANGED document paid a full import-graph BFS re-walk + carrier
     /// gateway reconcile on EVERY request; this skips both entirely when nothing
     /// that could change the resolved import set has advanced since the last pass.

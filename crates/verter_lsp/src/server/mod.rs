@@ -407,7 +407,7 @@ pub struct VerterLanguageServer {
     /// document instance that initiated stale work.
     ide_sync_open_generations: Arc<DashMap<String, u64>>,
     ide_sync_next_generation: std::sync::atomic::AtomicU64,
-    /// Per-document import-set sync memo (former B13). Records the workspace
+    /// Per-document import-set sync memo. Records the workspace
     /// `(content_generation, resolver_snapshot_generation)` after a successful
     /// imported-carrier + barrel preamble, so a go-to-definition storm on an
     /// unchanged document skips the per-request import-graph BFS re-walk +
@@ -424,9 +424,9 @@ pub struct VerterLanguageServer {
     /// init fires a full close+reopen sweep of every open file up to twice per
     /// pass, and a superseded init generation can fire it concurrently with the
     /// live one; this collapses an overlapping burst to at most one in-flight
-    /// sweep plus one coalesced re-arm (the resync counterpart to B6's
+    /// sweep plus one coalesced re-arm (the resync counterpart to the
     /// per-document repair lease).
-    resync_coordinator: Arc<crate::resync_coordinator::ResyncCoordinator>,
+    resync_coordinator: Arc<crate::resync_singleflight::ResyncCoordinator>,
     #[cfg(test)]
     ide_sync_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     #[cfg(test)]
@@ -1000,7 +1000,7 @@ impl VerterLanguageServer {
             ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
             import_sync_memo: Arc::new(DashMap::new()),
             import_sync_locks: Arc::new(DashMap::new()),
-            resync_coordinator: Arc::new(crate::resync_coordinator::ResyncCoordinator::new()),
+            resync_coordinator: Arc::new(crate::resync_singleflight::ResyncCoordinator::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]

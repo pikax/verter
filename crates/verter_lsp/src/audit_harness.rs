@@ -126,7 +126,7 @@ where
     P: FnOnce(&mut LspRequestPayload, &T),
 {
     if !host.config().audit_enabled {
-        // B12: always-on production request deadline. The per-method `budget`
+        // Always-on production request deadline. The per-method `budget`
         // above is the audit-supersede SLO and only applied when audit is
         // enabled; with audit off (the production default) every handler body
         // used to run UNBOUNDED, so a hung type provider wedged the handler (and,

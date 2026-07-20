@@ -414,7 +414,7 @@ impl LspTransport {
     /// `crash_notify` so the [`crate::resilient::ResilientTypeProvider`] restart
     /// machinery recovers the session — unless a deliberate teardown is in flight.
     ///
-    /// Before B12 only the response-timeout arm counted; a request parked on a
+    /// Only the response-timeout arm used to count, so a request parked on a
     /// full lane behind a stalled writer never reached this path, so the wedge
     /// detector never fired for a stdin-side deadlock.
     fn note_hang_failure(&self) {
@@ -476,7 +476,7 @@ impl LspTransport {
 
                 let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
                 // The lane send and the response wait SHARE one deadline so the
-                // whole round-trip is bounded by `timeout_secs`. The pre-B12 code
+                // whole round-trip is bounded by `timeout_secs`. An unbounded enqueue
                 // did an UNBOUNDED `send().await` here, so a full lane behind a
                 // writer stalled on a busy child parked the request forever —
                 // BEFORE the response timeout even started, and without counting
@@ -795,7 +795,7 @@ async fn read_loop(
             });
             let body = serde_json::to_string(&reply).unwrap_or_default();
             let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-            // Enqueue the auto-response on the UNBOUNDED control lane. Before B12
+            // Enqueue the auto-response on the UNBOUNDED control lane. A blocking enqueue here
             // this was a blocking `interactive_tx.send().await` on a bounded lane:
             // when the interactive lane was full behind a stalled writer, the read
             // loop parked HERE and stopped draining the child's stdout — the child
