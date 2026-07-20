@@ -61,6 +61,16 @@ export interface CorpusKindSummary {
   readonly errorCount: number;
 }
 
+/**
+ * What a sampled process is, structurally.
+ *  - `server`     — the spawned `verter-lsp` process itself.
+ *  - `provider`   — the type provider the server (or the relay) owns.
+ *  - `descendant` — any other process in the server/relay tree. Sampled and
+ *                   bounded like the rest: an unsampled descendant is exactly
+ *                   how a memory blow-up escapes the per-process ceiling.
+ */
+export type CorpusProcessRole = "server" | "provider" | "descendant";
+
 /** RSS trend for one tracked process over the session. */
 export interface CorpusProcessMemoryTrend {
   /** Structural role, e.g. "verter-lsp" | "provider" | "relay". */
@@ -74,6 +84,45 @@ export interface CorpusProcessMemoryTrend {
   readonly maxRssBytes: number | null;
   /** Downsampled series (bounded length) for trend inspection. */
   readonly samples: readonly { readonly atMs: number; readonly rssBytes: number }[];
+  /** Structural role; absent on receipts written before roles existed. */
+  readonly role?: CorpusProcessRole;
+  /** Parent pid as observed in the process table (evidence for the role). */
+  readonly parentPid?: number | null;
+  /** Process image/command name as observed (evidence, never a matcher input). */
+  readonly image?: string | null;
+}
+
+/**
+ * How the sampled provider process was established.
+ *  - `verified`     — the sampled pid exists and is structurally a descendant
+ *                     of the server (or of the relay the harness spawned).
+ *  - `mismatched`   — the sampled pid is the server itself, the harness itself,
+ *                     or something outside the server/relay tree: the sampler
+ *                     is bounding the WRONG process.
+ *  - `missing`      — no provider pid was ever observed, or it had vanished
+ *                     from the process table when sampling started.
+ *  - `unobservable` — the platform could not enumerate the process table at
+ *                     all; the provider ceiling is explicitly unenforced.
+ */
+export type CorpusProviderAttributionStatus =
+  | "verified"
+  | "mismatched"
+  | "missing"
+  | "unobservable";
+
+/** Provable attribution of the provider RSS sample (gate-integrity evidence). */
+export interface CorpusProviderAttribution {
+  readonly status: CorpusProviderAttributionStatus;
+  readonly providerPid: number | null;
+  /** Human-readable evidence for the status — always populated. */
+  readonly detail: string;
+  /**
+   * Server/relay-tree processes that were discovered but never sampled. MUST
+   * be empty: an unsampled tree member is unbounded memory.
+   */
+  readonly unattributedPids: readonly number[];
+  /** Distinct processes actually sampled over the session. */
+  readonly sampledProcessCount: number;
 }
 
 /** Exact request/response accounting for one route (non-vacuity evidence). */
@@ -112,6 +161,56 @@ export interface CorpusRouteWallClock {
   readonly budgetExceeded: boolean;
 }
 
+/**
+ * How route sessions were scheduled.
+ *  - `serial`   — one route session at a time on this executor (the default).
+ *  - `parallel` — route sessions run concurrently on this executor.
+ *
+ * CI fan-out (one route per machine) is NOT `parallel`: each machine runs a
+ * single-route `serial` gate, which is why its latency stays gating.
+ */
+export type CorpusExecutionTopology = "serial" | "parallel";
+
+/**
+ * What the operator/CI attests about this executor.
+ *  - `dedicated`  — this process owns the machine/container (pinned resources).
+ *  - `shared`     — other work runs here; latency is not a valid measurement.
+ *  - `unattested` — nothing was claimed (the local-developer default).
+ */
+export type CorpusExecutorAttestation = "dedicated" | "shared" | "unattested";
+
+/** Whether a route's measurements were taken free of gate-induced contention. */
+export type CorpusIsolationMode = "isolated" | "contended";
+
+/**
+ * Per-route isolation record — first-class receipt data, recorded by the
+ * ORCHESTRATOR from what it observed, never self-declared by a route runner.
+ *
+ * `latencyGating` is the single authority for whether this route's latency
+ * percentiles are allowed to decide pass/fail. Contended routes still report
+ * their percentiles, but as clearly labelled ADVISORY numbers.
+ */
+export interface CorpusRouteIsolation {
+  readonly topology: CorpusExecutionTopology;
+  readonly executor: CorpusExecutorAttestation;
+  readonly mode: CorpusIsolationMode;
+  /** Peak concurrent route sessions observed during this route's window. */
+  readonly observedConcurrentRoutes: number;
+  /** True ⇒ latency percentiles gate. False ⇒ they are advisory only. */
+  readonly latencyGating: boolean;
+  /** Why the mode was chosen — always populated, never a bare claim. */
+  readonly evidence: string;
+  /** A `dedicated` attestation refuted by observed concurrency: a hard defect. */
+  readonly attestationContradicted: boolean;
+}
+
+/** Opt-in early-stop accounting (census detail traded for speed). */
+export interface CorpusRouteEarlyStop {
+  readonly enabled: boolean;
+  readonly stopped: boolean;
+  readonly reason: string | null;
+}
+
 /** The per-route section of the receipt. */
 export interface CorpusRouteReport {
   readonly route: CorpusGateRoute;
@@ -128,6 +227,17 @@ export interface CorpusRouteReport {
   readonly memory: readonly CorpusProcessMemoryTrend[];
   readonly liveness: CorpusRouteLiveness;
   readonly wallClock: CorpusRouteWallClock;
+  /**
+   * Isolation record for this route. The route runner emits a fail-closed
+   * UNPROVEN value; the orchestrator overwrites it with what it observed.
+   * Optional in the TYPE only so receipts written before isolation existed
+   * still load — a missing value is treated as UNPROVEN (never gating).
+   */
+  readonly isolation?: CorpusRouteIsolation;
+  /** Provider-sample attribution evidence (gate integrity). */
+  readonly providerAttribution?: CorpusProviderAttribution;
+  /** Opt-in early stop; `enabled: false` on the default path. */
+  readonly earlyStop?: CorpusRouteEarlyStop;
   /**
    * Stable hash of the sampled relative-path list — proves two receipts ran
    * the same sample without embedding corpus file names.
@@ -149,11 +259,28 @@ export interface CorpusGateThresholds {
   readonly allowedEmptyCategories: readonly string[];
 }
 
+/** Machine resources observed at run time (capability gate for parallelism). */
+export interface CorpusMachineCapability {
+  readonly cpuCount: number;
+  readonly totalMemBytes: number;
+}
+
 /** Fully resolved gate configuration (corpus path never enters the receipt). */
 export interface CorpusGateConfig {
   readonly corpusDir: string;
   readonly corpusLabel: string;
   readonly routes: readonly CorpusGateRoute[];
+  /** Requested scheduling topology; downgraded when the machine cannot isolate. */
+  readonly topology: CorpusExecutionTopology;
+  /** What the operator/CI attests about this executor. */
+  readonly executor: CorpusExecutorAttestation;
+  /** `true` ⇒ a route whose latency is not gating FAILS the run (CI strictness). */
+  readonly requireIsolatedLatency: boolean;
+  /** Whole-run wall-clock target (reported; fatal only when opted in). */
+  readonly gateBudgetMs: number;
+  readonly gateBudgetFatal: boolean;
+  /** Opt-in: stop a route once its verdict is already decided by a failure. */
+  readonly fastMode: boolean;
   readonly sampleSize: number;
   readonly maxProbesPerFile: number;
   readonly requestTimeoutMs: number;
@@ -188,6 +315,35 @@ export interface CorpusGateConfigEcho {
   readonly thresholds: CorpusGateThresholds;
 }
 
+/** How this run was executed — receipt-level, first-class. */
+export interface CorpusGateExecution {
+  readonly requestedTopology: CorpusExecutionTopology;
+  readonly effectiveTopology: CorpusExecutionTopology;
+  /** Why a requested topology was not honoured (capability gate), if so. */
+  readonly downgradeReason: string | null;
+  readonly executor: CorpusExecutorAttestation;
+  readonly machine: CorpusMachineCapability;
+  readonly requireIsolatedLatency: boolean;
+  /**
+   * Opt-in early stop. `true` ⇒ routes may stop once a failure already decided
+   * their verdict, so per-kind census counts are DELIBERATELY incomplete.
+   */
+  readonly fastMode: boolean;
+  /** Routes whose latency percentiles gated (the rest are advisory). */
+  readonly latencyGatingRoutes: readonly CorpusGateRoute[];
+  /** Routes whose latency percentiles are ADVISORY (contended measurement). */
+  readonly latencyAdvisoryRoutes: readonly CorpusGateRoute[];
+}
+
+/** Whole-run wall-clock budget accounting. */
+export interface CorpusGateBudget {
+  readonly targetMs: number;
+  readonly actualMs: number;
+  readonly exceeded: boolean;
+  /** True ⇒ a breach was promoted to a gating failure (opt-in). */
+  readonly fatal: boolean;
+}
+
 /** The machine-readable receipt one gate run emits. */
 export interface CorpusGateReceipt {
   readonly schemaVersion: 1;
@@ -204,4 +360,14 @@ export interface CorpusGateReceipt {
   /** Acceptance-bar failures over the whole run; empty ⇒ pass. */
   readonly assertionFailures: readonly string[];
   readonly pass: boolean;
+  /** Execution topology + isolation summary; absent on pre-topology receipts. */
+  readonly execution?: CorpusGateExecution;
+  /** Whole-run wall-clock budget accounting; absent on pre-budget receipts. */
+  readonly budget?: CorpusGateBudget;
+  /**
+   * Recorded-but-NOT-gating observations, every one prefixed `ADVISORY` — most
+   * importantly latency breaches on contended routes. Never merged into
+   * `assertionFailures`, never able to flip `pass`.
+   */
+  readonly advisories?: readonly string[];
 }

@@ -101,6 +101,20 @@ export function compareCorpusReceipts(
     if (before.sampleManifestHash !== after.sampleManifestHash) {
       caveats.push(`route ${route}: sample manifest differs — latency deltas are approximate`);
     }
+    // Fidelity: a latency delta is only a gating comparison when BOTH sides
+    // were measured in isolation. Fail closed — a receipt that recorded no
+    // isolation counts as non-gating, so an old receipt cannot launder a
+    // contended number into a gating verdict.
+    const advisorySides = [
+      before.isolation?.latencyGating === true ? null : "baseline",
+      after.isolation?.latencyGating === true ? null : "current",
+    ].filter((side): side is string => side !== null);
+    if (advisorySides.length > 0) {
+      caveats.push(
+        `route ${route}: latency was ADVISORY (not measured in isolation) in the ` +
+          `${advisorySides.join(" and ")} receipt — these deltas are NOT a gating comparison`,
+      );
+    }
     lines.push({
       route,
       metric: "wedged",

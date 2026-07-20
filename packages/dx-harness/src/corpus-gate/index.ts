@@ -2,16 +2,34 @@
  * The corpus benchmark gate — public API.
  *
  * `runCorpusGate` orchestrates: deterministic sampling of the external corpus,
- * one bounded benchmark session per requested route (serially — routes share
- * the machine, parallel sessions would corrupt each other's latency), receipt
- * assembly, acceptance-bar evaluation, receipt emission, and (optionally) a
- * diff against a prior receipt. Each route session is additionally raced
- * against its wall-clock budget from OUT here so the gate can never wedge even
- * if a session's own bounds all fail.
+ * one bounded benchmark session per requested route, receipt assembly,
+ * acceptance-bar evaluation, receipt emission, and (optionally) a diff against
+ * a prior receipt. Each route session is additionally raced against its
+ * wall-clock budget from OUT here so the gate can never wedge even if a
+ * session's own bounds all fail.
+ *
+ * Routes run SERIALLY by default: they are independent sessions, but three
+ * language servers plus their providers on one box distort exactly the p95
+ * this gate exists to protect. `parallel` is opt-in, capability-gated, and
+ * records every route it overlapped as CONTENDED — latency then reports as
+ * advisory while every other assertion keeps gating. The way to buy wall clock
+ * WITHOUT losing latency fidelity is the CI fan-out: one route per machine,
+ * each running a single-route serial gate on a dedicated executor.
+ *
+ * Isolation is stamped HERE, from the orchestrator's own observation of how
+ * many sessions were in flight during each route's window — a route runner
+ * cannot declare its own measurement valid.
  */
 import { profileCorpus, selectRepresentativeSample } from "./sample.js";
 import { runCorpusRoute, type RunCorpusRouteOptions } from "./session.js";
-import { evaluateCorpusGate } from "./assertions.js";
+import { evaluateCorpusGate, evaluateCorpusGateAdvisories } from "./assertions.js";
+import {
+  RouteConcurrencyTracker,
+  UNPROVEN_ISOLATION,
+  classifyIsolation,
+  probeMachineCapability,
+  resolveExecutionTopology,
+} from "./topology.js";
 import {
   compareCorpusReceipts,
   formatCompare,
@@ -23,11 +41,39 @@ import type {
   CorpusGateConfig,
   CorpusGateReceipt,
   CorpusGateRoute,
+  CorpusMachineCapability,
   CorpusRouteReport,
 } from "./types.js";
 
 export * from "./types.js";
-export { CORPUS_GATE_DIR_ENV, resolveCorpusGateEnv, resolveThresholds } from "./config.js";
+export {
+  CORPUS_GATE_DIR_ENV,
+  DEFAULT_GATE_BUDGET_MS,
+  resolveCorpusGateEnv,
+  resolveThresholds,
+} from "./config.js";
+export {
+  MIN_CORES_PER_PARALLEL_ROUTE,
+  MIN_MEMORY_BYTES_PER_PARALLEL_ROUTE,
+  RouteConcurrencyTracker,
+  UNPROVEN_ISOLATION,
+  classifyIsolation,
+  probeMachineCapability,
+  resolveExecutionTopology,
+  type IsolationObservation,
+  type TopologyResolution,
+} from "./topology.js";
+export {
+  ProcessTreeSampler,
+  classifyProviderAttribution,
+  descendantPids,
+  processImage,
+  snapshotProcessTable,
+  unsampledTreeMembers,
+  type AttributionInput,
+  type ProcessRow,
+  type ProcessTreeRoots,
+} from "./processTree.js";
 export {
   enumerateCorpusVueFiles,
   profileCorpus,
@@ -62,7 +108,19 @@ export {
   type CorpusCompareLine,
   type CorpusCompareResult,
 } from "./receipt.js";
-export { evaluateCorpusGate, evaluateRoute } from "./assertions.js";
+export {
+  evaluateCorpusGate,
+  evaluateCorpusGateAdvisories,
+  evaluateRoute,
+  evaluateRouteAdvisories,
+  reportIsolation,
+} from "./assertions.js";
+export {
+  formatShardSummary,
+  summarizeShards,
+  type ShardSummary,
+  type ShardWallClock,
+} from "./shards.js";
 
 /** A route runner — injectable so the hermetic unit suite needs no server. */
 export type CorpusRouteRunner = (
@@ -75,6 +133,12 @@ export type CorpusRouteRunner = (
 export interface RunCorpusGateOptions {
   readonly runRoute?: CorpusRouteRunner;
   readonly log?: (message: string) => void;
+  /**
+   * Machine resources override. Production probes the real machine; the
+   * hermetic suite injects a capability so the topology decision under test is
+   * the code's, not the test runner's core count.
+   */
+  readonly machine?: CorpusMachineCapability;
 }
 
 export interface CorpusGateOutcome {
@@ -82,6 +146,8 @@ export interface CorpusGateOutcome {
   readonly receiptPath: string;
   /** Acceptance-bar failures; empty ⇒ the bar passed. */
   readonly failures: readonly string[];
+  /** Recorded-but-NOT-gating observations (every line prefixed `ADVISORY`). */
+  readonly advisories: readonly string[];
   /** Present when a baseline receipt was configured. */
   readonly compare: CorpusCompareResult | null;
   readonly compareText: readonly string[];
@@ -139,6 +205,15 @@ async function raceRoute(
         references: emptyKind(),
       },
       memory: [],
+      providerAttribution: {
+        status: "missing",
+        providerPid: null,
+        detail: "the route runner never settled — no provider was ever observed",
+        unattributedPids: [],
+        sampledProcessCount: 0,
+      },
+      earlyStop: { enabled: config.fastMode, stopped: false, reason: null },
+      isolation: UNPROVEN_ISOLATION,
       liveness: { checks: 0, failures: 0 },
       wallClock: {
         budgetMs: config.routeBudgetMs,
@@ -183,23 +258,71 @@ export async function runCorpusGate(
       `${sampleRelativePaths.length} sampled, routes: ${config.routes.join(", ")}`,
   );
 
-  const routes: Partial<Record<CorpusGateRoute, CorpusRouteReport>> = {};
-  for (const route of config.routes) {
-    log(`[corpus-gate] route ${route}: starting bounded session`);
-    const report = await raceRoute(
-      runRoute(route, config, sampleRelativePaths, { log }),
-      route,
-      config,
-      log,
-    );
-    routes[route] = report;
+  const machine = options.machine ?? probeMachineCapability();
+  const topology = resolveExecutionTopology(config.topology, config.routes.length, machine);
+  if (topology.downgradeReason !== null) {
     log(
-      `[corpus-gate] route ${route}: done in ${report.wallClock.elapsedMs}ms — ` +
-        `${report.accounting.requestsSent} requests, wedged=${report.wedged}, ` +
-        `completed=${report.completed}`,
+      `[corpus-gate] topology ${config.topology} DOWNGRADED to ${topology.effective}: ` +
+        `${topology.downgradeReason}`,
+    );
+  }
+  log(
+    `[corpus-gate] topology=${topology.effective} executor=${config.executor} ` +
+      `machine=${machine.cpuCount} cores / ${Math.round(machine.totalMemBytes / 1024 ** 3)} GiB` +
+      (config.fastMode ? " fastMode=ON (census deliberately incomplete on failure)" : ""),
+  );
+
+  const tracker = new RouteConcurrencyTracker();
+  const gateStartedAt = Date.now();
+  const runOne = async (route: CorpusGateRoute): Promise<CorpusRouteReport> => {
+    const release = tracker.start(route);
+    log(`[corpus-gate] route ${route}: starting bounded session`);
+    try {
+      const report = await raceRoute(
+        runRoute(route, config, sampleRelativePaths, { log }),
+        route,
+        config,
+        log,
+      );
+      log(
+        `[corpus-gate] route ${route}: done in ${report.wallClock.elapsedMs}ms — ` +
+          `${report.accounting.requestsSent} requests, wedged=${report.wedged}, ` +
+          `completed=${report.completed}`,
+      );
+      return report;
+    } finally {
+      release();
+    }
+  };
+
+  const routes: Partial<Record<CorpusGateRoute, CorpusRouteReport>> = {};
+  if (topology.effective === "parallel") {
+    const settled = await Promise.all(config.routes.map((route) => runOne(route)));
+    for (const report of settled) routes[report.route] = report;
+  } else {
+    for (const route of config.routes) {
+      routes[route] = await runOne(route);
+    }
+  }
+
+  // Isolation is stamped from what the ORCHESTRATOR observed, overwriting the
+  // route runner's fail-closed placeholder. A runner cannot vouch for itself.
+  for (const route of config.routes) {
+    const report = routes[route];
+    if (!report) continue;
+    const isolation = classifyIsolation({
+      topology: topology.effective,
+      executor: config.executor,
+      observedConcurrentRoutes: tracker.peakFor(route),
+    });
+    routes[route] = { ...report, isolation };
+    log(
+      `[corpus-gate] route ${route}: latency ${isolation.latencyGating ? "GATING" : "ADVISORY"} ` +
+        `(${isolation.mode}) — ${isolation.evidence}`,
     );
   }
 
+  const gateElapsedMs = Date.now() - gateStartedAt;
   const receiptBase: Omit<CorpusGateReceipt, "assertionFailures" | "pass"> = {
     schemaVersion: 1,
     harness: "corpus-gate",
@@ -216,18 +339,45 @@ export async function runCorpusGate(
       thresholds: config.thresholds,
     },
     routes,
+    execution: {
+      requestedTopology: topology.requested,
+      effectiveTopology: topology.effective,
+      downgradeReason: topology.downgradeReason,
+      executor: config.executor,
+      machine,
+      requireIsolatedLatency: config.requireIsolatedLatency,
+      fastMode: config.fastMode,
+      latencyGatingRoutes: config.routes.filter(
+        (route) => routes[route]?.isolation?.latencyGating === true,
+      ),
+      latencyAdvisoryRoutes: config.routes.filter(
+        (route) => routes[route] !== undefined && routes[route]?.isolation?.latencyGating !== true,
+      ),
+    },
+    budget: {
+      targetMs: config.gateBudgetMs,
+      actualMs: gateElapsedMs,
+      exceeded: gateElapsedMs > config.gateBudgetMs,
+      fatal: config.gateBudgetFatal,
+    },
   };
-  const failures = evaluateCorpusGate(
-    { ...receiptBase, assertionFailures: [], pass: false },
-    config.routes,
-    config.thresholds,
-  );
+  const draft: CorpusGateReceipt = { ...receiptBase, assertionFailures: [], pass: false };
+  const failures = evaluateCorpusGate(draft, config.routes, config.thresholds, {
+    requireIsolatedLatency: config.requireIsolatedLatency,
+  });
+  const advisories = evaluateCorpusGateAdvisories(draft, config.routes, config.thresholds);
   const receipt: CorpusGateReceipt = {
     ...receiptBase,
     assertionFailures: failures,
     pass: failures.length === 0,
+    advisories,
   };
   const receiptPath = writeCorpusReceipt(receipt, config.receiptPath);
+  for (const advisory of advisories) log(`[corpus-gate] ${advisory}`);
+  log(
+    `[corpus-gate] wall clock ${gateElapsedMs}ms vs ${config.gateBudgetMs}ms budget ` +
+      `(${gateElapsedMs > config.gateBudgetMs ? "OVER" : "within"}${config.gateBudgetFatal ? ", fatal" : ", reported"})`,
+  );
 
   let compare: CorpusCompareResult | null = null;
   let compareText: string[] = [];
@@ -237,5 +387,5 @@ export async function runCorpusGate(
     compareText = formatCompare(compare);
     for (const line of compareText) log(`[corpus-gate:compare] ${line}`);
   }
-  return { receipt, receiptPath, failures, compare, compareText };
+  return { receipt, receiptPath, failures, advisories, compare, compareText };
 }

@@ -30,17 +30,56 @@
  *  - VERTER_CORPUS_GATE_RSS_MAX_BYTES        per-process RSS ceiling (4 GiB)
  *  - VERTER_CORPUS_GATE_ALLOWED_EMPTY        csv of categories allowed to be
  *                                            empty ("classToken")
+ *  - VERTER_CORPUS_GATE_TOPOLOGY             serial | parallel ("serial")
+ *  - VERTER_CORPUS_GATE_EXECUTOR             dedicated | shared | unattested
+ *                                            ("unattested")
+ *  - VERTER_CORPUS_GATE_REQUIRE_ISOLATION    "1" ⇒ a route whose latency is not
+ *                                            gating FAILS the run
+ *  - VERTER_CORPUS_GATE_BUDGET_MS            whole-run wall-clock target (1200000)
+ *  - VERTER_CORPUS_GATE_BUDGET_FATAL         "1" ⇒ a budget breach is a failure
+ *  - VERTER_CORPUS_GATE_FAST                 "1" ⇒ opt-in early stop once a
+ *                                            route's verdict is already decided
  */
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
   CORPUS_GATE_ROUTES,
+  type CorpusExecutionTopology,
+  type CorpusExecutorAttestation,
   type CorpusGateConfig,
   type CorpusGateEnvResolution,
   type CorpusGateRoute,
   type CorpusGateThresholds,
 } from "./types.js";
+
+/** The whole-gate wall-clock target: the budget this verification must fit. */
+export const DEFAULT_GATE_BUDGET_MS = 20 * 60_000;
+
+const TOPOLOGIES: readonly CorpusExecutionTopology[] = ["serial", "parallel"];
+const EXECUTORS: readonly CorpusExecutorAttestation[] = ["dedicated", "shared", "unattested"];
+
+function parseTopology(raw: string | undefined): CorpusExecutionTopology {
+  const value = raw?.trim();
+  if (value === undefined || value === "") return "serial";
+  if (!(TOPOLOGIES as readonly string[]).includes(value)) {
+    throw new Error(
+      `VERTER_CORPUS_GATE_TOPOLOGY must be one of ${TOPOLOGIES.join(", ")}, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return value as CorpusExecutionTopology;
+}
+
+function parseExecutor(raw: string | undefined): CorpusExecutorAttestation {
+  const value = raw?.trim();
+  if (value === undefined || value === "") return "unattested";
+  if (!(EXECUTORS as readonly string[]).includes(value)) {
+    throw new Error(
+      `VERTER_CORPUS_GATE_EXECUTOR must be one of ${EXECUTORS.join(", ")}, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return value as CorpusExecutorAttestation;
+}
 
 export const CORPUS_GATE_DIR_ENV = "VERTER_CORPUS_GATE_DIR";
 
@@ -129,6 +168,12 @@ export function resolveCorpusGateEnv(env: NodeJS.ProcessEnv): CorpusGateEnvResol
     corpusDir,
     corpusLabel: env.VERTER_CORPUS_GATE_LABEL?.trim() || "Corpus A",
     routes: parseRoutes(env.VERTER_CORPUS_GATE_ROUTES),
+    topology: parseTopology(env.VERTER_CORPUS_GATE_TOPOLOGY),
+    executor: parseExecutor(env.VERTER_CORPUS_GATE_EXECUTOR),
+    requireIsolatedLatency: env.VERTER_CORPUS_GATE_REQUIRE_ISOLATION === "1",
+    gateBudgetMs: positiveInt(env, "VERTER_CORPUS_GATE_BUDGET_MS", DEFAULT_GATE_BUDGET_MS),
+    gateBudgetFatal: env.VERTER_CORPUS_GATE_BUDGET_FATAL === "1",
+    fastMode: env.VERTER_CORPUS_GATE_FAST === "1",
     sampleSize: positiveInt(env, "VERTER_CORPUS_GATE_SAMPLE", 40),
     maxProbesPerFile: positiveInt(env, "VERTER_CORPUS_GATE_MAX_PROBES_PER_FILE", 24),
     requestTimeoutMs: positiveInt(env, "VERTER_CORPUS_GATE_REQUEST_TIMEOUT_MS", 15_000),

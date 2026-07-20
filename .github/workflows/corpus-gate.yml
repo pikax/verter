@@ -1,0 +1,216 @@
+name: Corpus Gate
+
+# The real-corpus benchmark gate: drives the REAL verter-lsp over an EXTERNAL
+# corpus of Vue SFCs on every type-provider route and emits a machine-readable
+# receipt per route.
+#
+# TOPOLOGY. The binaries are built ONCE and fanned out: one route per runner,
+# each running a SINGLE-ROUTE serial gate on a machine it owns. That is what
+# makes the latency numbers gating — three ~1 GB servers plus their providers
+# sharing one box distort exactly the p95 this gate exists to protect, so the
+# per-route jobs declare `dedicated` executors and REQUIRE isolation. A route
+# job that cannot prove isolation fails rather than publishing a latency
+# verdict it did not earn. Wall clock therefore collapses to the slowest route
+# plus one build, instead of the sum of three routes plus three builds.
+#
+# The corpus itself is never committed and never named here: it arrives via a
+# workflow_dispatch input pointing at a private repository, and without one the
+# gate records an honest explicit skip.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # weekly, Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      corpus_repo:
+        description: "Corpus repo (owner/name) to benchmark; empty ⇒ the gate honest-skips"
+        required: false
+        default: ""
+        type: string
+      corpus_ref:
+        description: "Ref/branch of the corpus repo"
+        required: false
+        default: "main"
+        type: string
+      corpus_subdir:
+        description: "Subdirectory within the corpus holding .vue sources"
+        required: false
+        default: "."
+        type: string
+      sample_size:
+        description: "Sampled SFC count per route (harness default 40)"
+        required: false
+        default: "40"
+        type: string
+      fast_mode:
+        description: "Opt-in early stop once a route's verdict is already decided (trades census detail for speed)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: corpus-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The whole-gate wall-clock target. With the fan-out this is a per-shard
+  # bound, so it is also the gate's end-to-end budget.
+  CORPUS_GATE_BUDGET_MS: "1200000"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build ONCE. Every route job consumes these artifacts; no route re-compiles.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build gate binaries (once)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build verter-lsp
+        run: cargo build -p verter_lsp
+      - name: Build verter-relay-shim (shared-tsgo route)
+        run: cargo build -p verter_relay_shim
+      - name: Build TypeScript plugin (tsserver route)
+        run: pnpm --filter "@verter/typescript-plugin..." build
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      - name: Stage the fan-out artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/gate-build"
+          cp target/debug/verter-lsp "${{ runner.temp }}/gate-build/"
+          cp target/debug/verter-relay-shim "${{ runner.temp }}/gate-build/"
+          tar -czf "${{ runner.temp }}/gate-build/ts-dist.tgz" \
+            packages/typescript-plugin/dist \
+            packages/dx-harness/dist \
+            packages/lsp-test-client/dist
+      - name: Upload gate binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: corpus-gate-build
+          path: ${{ runner.temp }}/gate-build
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # One route per machine. Each job is a SINGLE-ROUTE serial gate on a dedicated
+  # executor, so its latency percentiles are a valid gating measurement.
+  # ---------------------------------------------------------------------------
+  route:
+    name: Route ${{ matrix.route }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [tsserver, tsgo, shared-tsgo]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout corpus
+        if: inputs.corpus_repo != ''
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.corpus_repo }}
+          ref: ${{ inputs.corpus_ref }}
+          path: .corpus-gate-corpus
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download gate binaries
+        uses: actions/download-artifact@v6
+        with:
+          name: corpus-gate-build
+          path: ${{ runner.temp }}/gate-build
+      - name: Restore the prebuilt binaries and dists
+        run: |
+          set -euo pipefail
+          mkdir -p target/debug
+          cp "${{ runner.temp }}/gate-build/verter-lsp" target/debug/
+          cp "${{ runner.temp }}/gate-build/verter-relay-shim" target/debug/
+          chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
+          tar -xzf "${{ runner.temp }}/gate-build/ts-dist.tgz"
+          test -f packages/dx-harness/dist/corpus-gate/index.js
+          test -f packages/typescript-plugin/dist/index.js
+      - name: Run the corpus gate for this route
+        env:
+          # Empty ⇒ the lane records an honest explicit skip (never a silent pass).
+          VERTER_CORPUS_GATE_DIR: ${{ inputs.corpus_repo != '' && format('{0}/.corpus-gate-corpus/{1}', github.workspace, inputs.corpus_subdir) || '' }}
+          VERTER_CORPUS_GATE_ROUTES: ${{ matrix.route }}
+          # This job owns its runner: one route, no other gate work on the box.
+          VERTER_CORPUS_GATE_EXECUTOR: dedicated
+          # …and refuses to publish a latency verdict if that turns out untrue.
+          VERTER_CORPUS_GATE_REQUIRE_ISOLATION: "1"
+          VERTER_CORPUS_GATE_SAMPLE: ${{ inputs.sample_size || '40' }}
+          VERTER_CORPUS_GATE_BUDGET_MS: ${{ env.CORPUS_GATE_BUDGET_MS }}
+          VERTER_CORPUS_GATE_FAST: ${{ inputs.fast_mode && '1' || '0' }}
+          VERTER_CORPUS_GATE_RECEIPT: ${{ runner.temp }}/corpus-gate-receipts/${{ matrix.route }}.json
+          VERTER_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          VERTER_RELAY_SHIM_BIN: ${{ github.workspace }}/target/debug/verter-relay-shim
+        run: pnpm --filter @verter/dx-harness test:corpus-gate
+      - name: Upload route receipt
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: corpus-gate-receipt-${{ matrix.route }}
+          path: ${{ runner.temp }}/corpus-gate-receipts
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Recombine the shards. A route that produced no receipt FAILS here — a
+  # missing shard is never a silent skip.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Corpus gate summary
+    needs: route
+    if: always() && inputs.corpus_repo != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      - name: Download every route receipt
+        uses: actions/download-artifact@v6
+        with:
+          pattern: corpus-gate-receipt-*
+          path: ${{ runner.temp }}/corpus-gate-receipts
+      - name: Merge shard receipts and report actual-vs-budget
+        run: |
+          node packages/dx-harness/scripts/corpus-gate-summary.mjs \
+            "${{ runner.temp }}/corpus-gate-receipts" \
+            "tsserver,tsgo,shared-tsgo" \
+            "${{ env.CORPUS_GATE_BUDGET_MS }}"
+      - name: Upload merged receipts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: corpus-gate-receipts
+          path: ${{ runner.temp }}/corpus-gate-receipts
+          if-no-files-found: ignore

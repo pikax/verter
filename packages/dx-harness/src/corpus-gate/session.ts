@@ -15,11 +15,12 @@ import { pathToFileURL } from "node:url";
 
 import { GET_STATISTICS_METHOD } from "../core/startupGate.js";
 import { extractQuiescenceCounters, pollUntilQuiesced } from "../core/quiescence.js";
-import { RssSampler } from "../endurance/rss.js";
-import { downsampleSeries, summarizeKinds } from "./metrics.js";
+import { summarizeKinds } from "./metrics.js";
 import { mineCorpusProbes, type CorpusProbe } from "./probes.js";
+import { ProcessTreeSampler } from "./processTree.js";
 import { sampleManifestHash } from "./sample.js";
 import { spawnCorpusGateLsp, type CorpusGateLspHandle } from "./spawn.js";
+import { UNPROVEN_ISOLATION } from "./topology.js";
 import {
   completionIsEmpty,
   definitionIsEmpty,
@@ -29,14 +30,12 @@ import {
 import type {
   CorpusGateConfig,
   CorpusGateRoute,
-  CorpusProcessMemoryTrend,
   CorpusRequestKind,
   CorpusRequestObservation,
+  CorpusRouteEarlyStop,
   CorpusRouteReport,
   CorpusRouteStartup,
 } from "./types.js";
-
-const MEMORY_SERIES_MAX_POINTS = 60;
 
 /** The sentinel a promise-race resolves to when the raced promise never settled. */
 const NEVER_SETTLED = Symbol("corpus-gate-never-settled");
@@ -69,26 +68,6 @@ async function raceSettlement<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-interface ProcessSamplerSlot {
-  readonly label: string;
-  pid: number | null;
-  sampler: RssSampler | null;
-}
-
-function trendOf(slot: ProcessSamplerSlot): CorpusProcessMemoryTrend {
-  const history = slot.sampler?.history ?? [];
-  return {
-    label: slot.label,
-    pid: slot.pid,
-    supported: slot.sampler !== null && slot.sampler.supported && history.length > 0,
-    sampleCount: history.length,
-    firstRssBytes: history.length > 0 ? history[0].rssBytes : null,
-    lastRssBytes: history.length > 0 ? history[history.length - 1].rssBytes : null,
-    maxRssBytes: slot.sampler?.maxRssBytes ?? null,
-    samples: downsampleSeries(history, MEMORY_SERIES_MAX_POINTS),
-  };
 }
 
 interface MutableAccounting {
@@ -154,10 +133,14 @@ export async function runCorpusRoute(
   let fatalError: string | null = null;
   let startup = emptyStartup();
   const allowedEmpty = new Set(config.thresholds.allowedEmptyCategories);
-  const samplers: ProcessSamplerSlot[] = [
-    { label: "verter-lsp", pid: null, sampler: null },
-    { label: "provider", pid: null, sampler: null },
-  ];
+  // ONE sampler over the WHOLE spawned tree: sampling a single advertised pid
+  // let a multi-GB child sit outside the per-process ceiling entirely.
+  const treeSampler = new ProcessTreeSampler(config.rssSampleIntervalMs);
+  const earlyStop: { enabled: boolean; stopped: boolean; reason: string | null } = {
+    enabled: config.fastMode,
+    stopped: false,
+    reason: null,
+  };
 
   let handle: CorpusGateLspHandle | null = null;
   try {
@@ -175,21 +158,16 @@ export async function runCorpusRoute(
     startup = handle.startup;
     const client = handle.client;
     const lspPid = client.process.pid;
-    if (lspPid !== undefined) {
-      samplers[0].pid = lspPid;
-      samplers[0].sampler = new RssSampler(lspPid, config.rssSampleIntervalMs);
-      samplers[0].sampler.start();
-    }
-    const refreshProviderSampler = (): void => {
-      const pid = handle?.providerPid() ?? null;
-      if (pid !== null && samplers[1].pid !== pid) {
-        samplers[1].sampler?.stop();
-        samplers[1].pid = pid;
-        samplers[1].sampler = new RssSampler(pid, config.rssSampleIntervalMs);
-        samplers[1].sampler.start();
-      }
+    const relayPid = handle.relay?.process.pid ?? null;
+    const refreshTreeRoots = (): void => {
+      treeSampler.setRoots({
+        serverPid: lspPid ?? null,
+        relayPid,
+        providerPid: handle?.providerPid() ?? null,
+      });
     };
-    refreshProviderSampler();
+    refreshTreeRoots();
+    treeSampler.start();
 
     /** Bounded liveness check; a dark server flips the route to wedged. */
     const checkLiveness = async (context: string): Promise<boolean> => {
@@ -210,6 +188,26 @@ export async function runCorpusRoute(
         return false;
       }
       return true;
+    };
+
+    /**
+     * Opt-in early stop (never the default). It fires ONLY on already-recorded
+     * MONOTONE failures — an unexpected empty result or a breached per-process
+     * RSS ceiling cannot be un-failed by measuring more requests — so the
+     * verdict is already decided and the remaining census only costs time. A
+     * passing route is never cut short.
+     */
+    const earlyStopReason = (): string | null => {
+      if (!config.fastMode) return null;
+      const empty = observations.find((observation) => observation.unexpectedEmpty);
+      if (empty !== undefined) {
+        return `unexpected empty ${empty.kind} result (${empty.category}) already failed this route`;
+      }
+      const maxRss = treeSampler.maxObservedRssBytes();
+      if (maxRss !== null && maxRss > config.thresholds.rssMaxBytes) {
+        return `per-process RSS ceiling already breached (${maxRss} > ${config.thresholds.rssMaxBytes})`;
+      }
+      return null;
     };
 
     try {
@@ -348,18 +346,29 @@ export async function runCorpusRoute(
               verdict,
               unexpectedEmpty: verdict === "empty" && !allowedEmpty.has(probe.category),
             });
+            const stopReason = earlyStopReason();
+            if (stopReason !== null) {
+              earlyStop.stopped = true;
+              earlyStop.reason = stopReason;
+              log(`[corpus-gate:${route}] early stop (fast mode) — ${stopReason}`);
+              break fileLoop;
+            }
           }
         }
-        refreshProviderSampler();
+        refreshTreeRoots();
         if (!wedged && !(await checkLiveness(`after file ${accounting.filesOpened}`))) break;
         log(
           `[corpus-gate:${route}] ${accounting.filesOpened}/${sampleRelativePaths.length} files, ` +
             `${accounting.requestsSent} requests`,
         );
       }
-      completed = !wedged && fatalError === null && Date.now() <= deadline;
+      completed = !wedged && fatalError === null && !earlyStop.stopped && Date.now() <= deadline;
     } finally {
-      for (const slot of samplers) slot.sampler?.stop();
+      // One last topology pass so a provider that only appeared late is still
+      // attributed, then freeze the samplers.
+      refreshTreeRoots();
+      await treeSampler.refreshTopology().catch(() => undefined);
+      treeSampler.stop();
       // Disposal is itself raced: teardown of a wedged server must not hang the gate.
       const disposal = await raceSettlement(handle.dispose(), 30_000);
       if (!disposal.settled) log(`[corpus-gate:${route}] dispose never settled (ignored)`);
@@ -367,6 +376,7 @@ export async function runCorpusRoute(
   }
 
   const elapsedMs = Date.now() - startedAt;
+  const finalEarlyStop: CorpusRouteEarlyStop = { ...earlyStop };
   return {
     route,
     completed,
@@ -376,7 +386,12 @@ export async function runCorpusRoute(
     startup,
     accounting: { ...accounting },
     kinds: summarizeKinds(observations),
-    memory: samplers.map(trendOf),
+    memory: treeSampler.trends(),
+    providerAttribution: treeSampler.attribution(),
+    earlyStop: finalEarlyStop,
+    // Fail-closed: the ORCHESTRATOR observes and stamps isolation. A route
+    // runner never declares its own measurement valid.
+    isolation: UNPROVEN_ISOLATION,
     liveness: { checks: livenessChecks, failures: livenessFailures },
     wallClock: {
       budgetMs: config.routeBudgetMs,
