@@ -318,18 +318,23 @@ pub(super) fn collect_invalid_options_scope_diagnostics(
                         continue;
                     };
                     check_macro_call(call, &binding_types, content_str, &mut diagnostics);
-                    // A DIRECT `defineProps` destructure declaration
-                    // (`const { x = <default> } = defineProps(...)`) hoists its
-                    // default expressions with the props runtime decl (the
-                    // `mergeDefaults` merge), so a default referencing a
+                    // A DIRECT `defineProps` reactive-destructure declaration over
+                    // an OBJECT pattern (`const { x = <default> } = defineProps(...)`)
+                    // hoists its default expressions with the props runtime decl
+                    // (the `mergeDefaults` merge), so a default referencing a
                     // setup-local is rejected under `defineProps()` — official
                     // `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`.
                     // Official records `ctx.propsDestructureDecl` ONLY in
-                    // `processDefineProps` when `!isWithDefaults`: under
-                    // `withDefaults(...)` reactive destructure is disabled and the
-                    // defaults stay in setup scope, so they are not scope-checked.
+                    // `processDefineProps` when `!isWithDefaults` AND
+                    // `declId.type === "ObjectPattern"`. Two forms are therefore
+                    // NOT props destructures and must not be scope-checked: under
+                    // `withDefaults(...)` reactive destructure is disabled (defaults
+                    // stay in setup scope), and a top-level ARRAY pattern is never a
+                    // props destructure.
                     if let Expression::Identifier(callee) = &call.callee {
-                        if callee.name.as_str() == "defineProps" {
+                        if callee.name.as_str() == "defineProps"
+                            && matches!(&declarator.id, BindingPattern::ObjectPattern(_))
+                        {
                             check_destructure_pattern_defaults(
                                 &declarator.id,
                                 &binding_types,
@@ -406,8 +411,13 @@ fn check_macro_call(
     }
 }
 
-/// Scope-check the default expressions of a `defineProps` / `withDefaults`
-/// destructure pattern.
+/// Scope-check the default expressions of a `defineProps` reactive-destructure
+/// pattern.
+///
+/// The caller enters here ONLY for a direct `defineProps(...)` declaration whose
+/// declaration id is an `ObjectPattern` — official's `processPropsDestructure`
+/// precondition (`!isWithDefaults && declId.type === "ObjectPattern"`), the sole
+/// case that records `ctx.propsDestructureDecl`.
 ///
 /// A destructure declaration's defaults (`const { x = <default>, y: z = <default> }
 /// = defineProps(...)`) are hoisted with the props runtime decl (the
