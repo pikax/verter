@@ -1251,6 +1251,17 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionR
     fact_tracer_tls::observe_fan_out_borrowed(sig);
 }
 
+/// Whether any fact tracer is installed on the current thread's stack.
+///
+/// A cheap early-out for observation producers whose FACT DERIVATION has a
+/// non-trivial cost (a predicate check, a hash derivation, an owned
+/// canonical clone): with no active tracer the observation would be a
+/// no-op, so the producer skips the derivation entirely.
+#[inline]
+pub(crate) fn fact_tracer_installed() -> bool {
+    fact_tracer_tls::current_tracer().is_some()
+}
+
 /// A typed reason a read was NON-CACHEABLE — the discriminant a marking
 /// site passes to [`note_non_cacheable_read_fan_out`].
 ///

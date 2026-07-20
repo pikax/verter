@@ -2038,6 +2038,40 @@ impl VerterHost {
             }
             return None;
         }
+        // Demand-time ROUTE-fact observation: a traced compute that consumes
+        // this canonical's indexed route surface depends on it — record the
+        // `DerivedFactHash{Route}` fact into every active tracer so the
+        // consuming cache entry's read-set (a component-meta proof, a
+        // semantic-memo build, a compile-tier signature) revalidates when
+        // the file's export route surface moves. Observed ONLY when the
+        // serve mirrors the store-view snapshot's publish predicate —
+        // store-published + edge-current + resolvable surface — with the
+        // artifact's own `route_hash` (== `hash_route_surface` over the
+        // served shallow state, the SAME derivation `HostStoreView::build`
+        // publishes), so warm validation round-trips: the view sources the
+        // identical hash from the identical artifact. A fenced serve
+        // observes nothing (its compute is already refused admission), and
+        // a tracer-less call skips the derivation entirely.
+        if crate::resolver_core::resolver_context::fact_tracer_installed() {
+            if let Some(serve) = serve.as_ref() {
+                if serve.store_published {
+                    if let Some(route_hash) = serve.indexed.route_hash {
+                        let normalized = self.normalized_analysis_canonical(canonical_id);
+                        if serve.indexed.shallow_state.has_resolvable_surface()
+                            && self.indexed_surface_is_current(normalized.as_ref(), &serve.indexed)
+                        {
+                            crate::resolver_core::resolver_context::observe_fan_out(
+                                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                                    canonical_id: normalized.as_ref().to_string(),
+                                    kind: crate::resolver_core::DerivedFactKind::Route,
+                                    hash: route_hash,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
         serve
     }
 
