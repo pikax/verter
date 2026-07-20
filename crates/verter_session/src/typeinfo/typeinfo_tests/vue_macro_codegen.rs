@@ -1603,7 +1603,7 @@ defineProps<WrongProps>()
 }
 
 #[test]
-fn slots_are_typed_unsupported_without_runtime_classification() {
+fn type_only_slots_stay_out_of_runtime_bundle_without_losing_meta_surface() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert(
         &host,
@@ -1615,12 +1615,28 @@ defineSlots<{ default(props: { deep: { value: string } }): unknown }>()
 
     let output = produce(&host, "/src/Slots.vue", VueMacroCodegenDemand::Runtime);
     let runtime = output.runtime.expect("runtime bundle");
-    assert!(matches!(
-        runtime.entries[0].outcome,
-        MacroRuntimeOutcome::Unsupported(_)
-    ));
+    assert!(
+        runtime.entries.is_empty(),
+        "defineSlots has no runtime semantic output and must not enter the runtime join: {runtime:?}"
+    );
     assert_eq!(output.counters.root_shallow_demands, 0);
     assert_eq!(output.counters.runtime_classifier_calls, 0);
+
+    let meta = host
+        .get_component_meta("/src/Slots.vue")
+        .expect("defineSlots component-meta surface");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("the type-only slot remains published outside runtime codegen");
+    assert!(
+        default_slot
+            .bindings
+            .iter()
+            .any(|binding| binding.name == "deep"),
+        "the defineSlots binding surface remains available: {default_slot:?}"
+    );
 }
 
 #[test]

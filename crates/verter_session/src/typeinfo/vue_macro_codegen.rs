@@ -369,7 +369,7 @@ fn terminal_partial_vue_macro_codegen_output(
             let syntax_index = top_level_syntax_index(macros, effective_index);
             let macro_index = macro_index(effective_index);
 
-            if demand.wants_runtime() {
+            if demand.wants_runtime() && is_codegen_macro(mac.kind) {
                 runtime_entries.push(MacroRuntimeEntry {
                     syntax_index,
                     macro_index,
@@ -572,14 +572,6 @@ impl VerterHost {
             let macro_index = macro_index(effective_index);
 
             if !is_codegen_macro(mac.kind) {
-                if demand.wants_runtime() {
-                    state.runtime_entries.push(MacroRuntimeEntry {
-                        syntax_index,
-                        macro_index,
-                        outcome: ProjectionFailure::Unsupported(UnsupportedReason::MacroKind)
-                            .runtime(),
-                    });
-                }
                 continue;
             }
 
