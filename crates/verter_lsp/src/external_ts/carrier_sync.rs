@@ -330,21 +330,17 @@ pub(crate) fn project_ownership_diagnostic(
              types are unavailable. Add it to a tsconfig `include`/`files` entry."
                 .to_string()
         }
-        CarrierOwnershipResolution::Ambiguous { candidates, .. } if candidates.is_empty() => {
+        // A resolution now produces `Ambiguous` ONLY for a disk-layout carrier-path
+        // conflict (a real file or same-stem module occupies the generated companion
+        // path) — always with EMPTY candidates. The multiply-owned case resolves to the
+        // single tsgo default owner (`Bound`), so `Ambiguous` never carries candidate
+        // configs and the former multi-config candidate-listing branch is unreachable.
+        CarrierOwnershipResolution::Ambiguous { .. } => {
             "verter: this carrier's owning TypeScript project is ambiguous (a real file or a \
              same-stem module occupies its generated companion path), so its cross-file types \
              are unavailable."
                 .to_string()
         }
-        CarrierOwnershipResolution::Ambiguous { candidates, .. } => format!(
-            "verter: multiple configured TypeScript projects claim this carrier, so its owner \
-             is ambiguous and its cross-file types are unavailable. Candidate configs: {}",
-            candidates
-                .iter()
-                .map(|c| c.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
         CarrierOwnershipResolution::Bound(_) | CarrierOwnershipResolution::NotReady => {
             return None;
         }
