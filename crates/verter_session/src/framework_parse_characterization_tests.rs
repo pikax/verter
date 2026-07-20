@@ -300,14 +300,10 @@ fn ide_virtual_output_for_fixture_sfc_is_byte_stable() {
     assert!(!content.is_empty(), "main virtual output must be non-empty");
     // Byte-identity pin: the full output hash of the runtime (`Main`) module.
     //
-    // Updated when the Vue macro runtime path cut over from the pre-DTO
-    // parser-owned surface to the authoritative `MacroRuntimeBundle` DTO.
-    // The DTO path emits the OFFICIAL Vue dev shape for an OPTIONAL prop —
-    // `count: { type: Number, required: false }` — where the superseded
-    // pre-cutover surface omitted `required: false` entirely
-    // (`count: { type: Number }`), a parity gap. This is the sole byte
-    // difference from the old pin (`11ff99…`), and the new shape is the
-    // ratified one: it matches official `@vue/compiler-sfc` and the
+    // The authoritative `MacroRuntimeBundle` DTO emits the OFFICIAL Vue dev
+    // shape for an OPTIONAL prop — `count: { type: Number, required: false }`
+    // (never a bare `count: { type: Number }`, which would silently drop the
+    // required-ness fact) — matching official `@vue/compiler-sfc` and the
     // compiler's own `optional_boolean_prop_emits_no_default` /
     // `optional non-Boolean prop keeps the official dev shape` assertions
     // in `crates/verter_compiler/src/script/tests.rs`.

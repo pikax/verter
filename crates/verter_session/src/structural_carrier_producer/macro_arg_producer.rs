@@ -1280,7 +1280,27 @@ struct MacroSlot {
     build_lock: parking_lot::Mutex<()>,
 }
 
-mod hot_mirror_impls;
+impl std::fmt::Debug for MacroHotMirror {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let demanded = self.cells.get().map_or(0, |cells| {
+            cells.iter().filter(|c| c.committed.get().is_some()).count()
+        });
+        f.debug_struct("MacroHotMirror")
+            .field("demanded", &demanded)
+            .finish()
+    }
+}
+
+/// A clone is a distinct artifact instance, so it starts with an EMPTY
+/// per-artifact demand mirror; re-demand repopulates it (interned nodes are
+/// content-addressed, so a re-lower hits the same node ids).
+impl Clone for MacroHotMirror {
+    fn clone(&self) -> Self {
+        Self {
+            cells: OnceLock::new(),
+        }
+    }
+}
 
 /// Resolve (lowering once on first demand) the mode-NEUTRAL
 /// [`HotTypeRef`] for the macro at `macro_index` in `owner_canonical`.

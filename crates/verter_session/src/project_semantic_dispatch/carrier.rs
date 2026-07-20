@@ -127,16 +127,13 @@ impl AuthoredResolutionDebtFrame {
             match context.merge_role() {
                 // A reference inside an object member's value does not remove
                 // any member from the authoritative root surface, and the
-                // lowered value stays an honest unresolved carrier (`BareRef`)
-                // the demand points retry: authored-partial preparation is
-                // declaration-wide, while Instantiate completeness is
-                // demand-local — the member consumer that actually DEMANDS
-                // the value (runtime classification, expansion, a DTO
-                // normalizer) observes the miss on its OWN query and degrades
-                // member-locally. The consuming cache entries stay honest via
-                // the demand-time `ImportRoute` recovery rail recorded at the
-                // unresolved-head site (see `resolve_carrier_head_plan`), so
-                // the appearance of the missing dependency invalidates them.
+                // lowered value stays an honest unresolved carrier the demand
+                // points retry: authored-partial preparation is
+                // declaration-wide, Instantiate completeness is demand-local —
+                // the member consumer that actually DEMANDS the value degrades
+                // it member-locally, and the demand-time `ImportRoute`
+                // recovery rail (recorded at the unresolved-head site)
+                // invalidates consuming entries when the dependency appears.
                 crate::semantic_query::MemberMergeRole::OwnBody => {}
                 // Root aliases, authored intersection/union arms, and real
                 // interface/class heritage arms contribute to the root
@@ -610,21 +607,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         if !resolves_to_file && self.unresolved_head_is_authored_import(scope, name.as_ref()) {
             ctx.observe_unresolved_authored_import();
-            // Demand-time recovery rail: the head names an AUTHORED IMPORT
-            // whose route is currently unresolvable, so the lowered value
-            // stays an honest `BareRef` carrier. Observe the owner's
-            // `ImportRoute` derived fact into the active tracer so every
-            // consuming cache entry (the enclosing Instantiate / ProjectPath
-            // memo, a published surface, a component-meta proof)
-            // re-validates when the specifier resolves:
-            // `generation_current_import_route_hash` re-resolves known-miss
-            // specifiers against the live workspace, so the recorded hash
-            // moves the moment the dependency appears and the warm read
-            // misses to a cold recompute that resolves the head. This is the
-            // same rail as the `build_typeof` import-miss arm, and it is
-            // what lets a carrier-bearing surface stay COMPLETE + cacheable
-            // instead of poisoning root completeness with member-level
-            // partiality.
+            // Demand-time recovery rail (same as `build_typeof`'s import-miss
+            // arm): the head names an AUTHORED IMPORT whose route is
+            // currently unresolvable, so the lowered value stays an honest
+            // `BareRef` carrier. Observe the owner's `ImportRoute` derived
+            // fact into the active tracer — `generation_current_import_route_hash`
+            // re-resolves known-miss specifiers per generation, so every
+            // consuming warm entry misses to a cold recompute the moment the
+            // dependency appears. This is what lets a carrier-bearing surface
+            // stay COMPLETE + cacheable instead of poisoning root
+            // completeness with member-level partiality.
             if let NodeScopeId::File { canonical_id, .. } = scope {
                 if let Some(route_hash) = self
                     .ctx
