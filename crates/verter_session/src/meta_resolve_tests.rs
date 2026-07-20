@@ -6422,9 +6422,11 @@ defineProps<Wrapper<Inner>>()
 // These tests bypass `materialize_component_meta_type_expr_until_stable_full`
 // (which currently runs both the legacy walker and dispatch and falls back
 // to the legacy result for the three fixtures below). Each test calls
-// dispatch's `lower_type_expr_in_scope_with_mode` + `raise_and_reduce` (or
-// `execute(ProjectPath)` + `raise_node_to_type_expr`) directly so the
-// failure isolates the dispatch substitution gap.
+// dispatch's lowering + `raise_and_reduce` (or `execute(ProjectPath)` +
+// `raise_node_to_type_expr`) directly so the failure isolates the dispatch
+// substitution gap. SFC script-setup fixtures lower through the owner-exact
+// entry with `Instance(0)`; the owner-agnostic entry intentionally selects
+// the ordinary-file `Module(0)` scope and cannot see setup-local imports.
 //
 // Pre-Step-1.5: each of these three tests fails — dispatch's reduction
 // surface returns `IndexedAccess { object: Opaque(Miss), … }` for Pick
@@ -6654,7 +6656,12 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     };
 
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &macro_shell,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
@@ -6857,7 +6864,12 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     };
 
     let lowered = dispatch
-        .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
+        .lower_type_expr_in_owner_scope_with_mode(
+            "/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            &macro_shell,
+            ProjectionMode::Expanded,
+        )
         .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
 
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
