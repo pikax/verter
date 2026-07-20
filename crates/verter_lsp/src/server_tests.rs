@@ -25480,3 +25480,178 @@ fn e2e_fixture_unused_declarations_matches_boundary_semantics() {
     assert_eq!(count("verter/no-unused-emit-declarations"), 1, "emits");
     assert_eq!(count("verter/no-unused-slots"), 1, "slots");
 }
+
+// =====================================================================
+// B4: workspace-wide GLOBAL css class references / definition
+// =====================================================================
+
+/// A class declared in a NON-scoped block is global: find-all-references from
+/// its style declaration spans the workspace (declarations + usages).
+#[tokio::test]
+async fn global_css_class_references_span_workspace() {
+    let a_source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style>\n.btn { color: red; }\n</style>\n";
+    let b_source = "<template>\n  <button class=\"btn\"></button>\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/A.vue", "vue", a_source),
+        ("src/B.vue", "vue", b_source),
+    ])
+    .await;
+
+    let a_uri = workspace_uri(&workspace_id, "src/A.vue");
+    let b_uri = workspace_uri(&workspace_id, "src/B.vue");
+    let server = service.inner();
+    // Cursor on "btn" in the style selector `.btn`.
+    let position = find_document_position(server, &a_uri, ".btn { color", 1);
+
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: a_uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed")
+        .expect("global class must have references");
+
+    assert!(
+        response.iter().any(|l| l.uri == a_uri),
+        "same-file references present: {response:?}"
+    );
+    let b_ref = response
+        .iter()
+        .find(|l| l.uri == b_uri)
+        .expect("global class references must reach B.vue's template usage");
+    assert_eq!(
+        b_ref.range.start.line,
+        line_for_snippet(b_source, "class=\"btn\""),
+        "B.vue reference must be the exact class token line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// NEGATIVE: a class declared only in a SCOPED block never produces
+/// cross-file references — B.vue's same-named usage is untouched.
+#[tokio::test]
+async fn scoped_css_class_references_stay_same_file() {
+    let a_source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style scoped>\n.btn { color: red; }\n</style>\n";
+    let b_source = "<template>\n  <button class=\"btn\"></button>\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/A.vue", "vue", a_source),
+        ("src/B.vue", "vue", b_source),
+    ])
+    .await;
+
+    let a_uri = workspace_uri(&workspace_id, "src/A.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &a_uri, ".btn { color", 1);
+
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: a_uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed");
+
+    let locations = response.unwrap_or_default();
+    assert!(
+        locations.iter().all(|l| l.uri == a_uri),
+        "a SCOPED class must never cross the file boundary: {locations:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Definition on a global class usage includes global declarations from
+/// OTHER files.
+#[tokio::test]
+async fn global_css_class_definition_reaches_other_files_declarations() {
+    let a_source = "<template>\n  <div class=\"shared\"></div>\n</template>\n<style>\n.shared { color: red; }\n</style>\n";
+    let b_source =
+        "<template>\n  <p></p>\n</template>\n<style>\n.shared { margin: 0; }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/A.vue", "vue", a_source),
+        ("src/B.vue", "vue", b_source),
+    ])
+    .await;
+
+    let a_uri = workspace_uri(&workspace_id, "src/A.vue");
+    let b_uri = workspace_uri(&workspace_id, "src/B.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &a_uri, "class=\"shared\"", 8);
+
+    let response = server
+        .goto_definition(goto_definition_params(&a_uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("global class must resolve");
+    let locations = definition_locations(response);
+    assert!(
+        locations.iter().any(|l| l.uri == a_uri),
+        "own declaration present: {locations:?}"
+    );
+    let b_decl = locations
+        .iter()
+        .find(|l| l.uri == b_uri)
+        .expect("global class definition must include B.vue's declaration");
+    assert_eq!(
+        b_decl.range.start.line,
+        line_for_snippet(b_source, ".shared { margin"),
+        "B.vue target must be the declaration token line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// NEGATIVE interference guard: a TS identifier position is untouched by the
+/// css leg — references on a script binding still resolve normally.
+#[tokio::test]
+async fn global_css_leg_does_not_shadow_script_references() {
+    let a_source = "<script setup lang=\"ts\">\nconst count = 1\nconsole.log(count)\n</script>\n<style>\n.btn { color: red; }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/A.vue", "vue", a_source)]).await;
+
+    let a_uri = workspace_uri(&workspace_id, "src/A.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &a_uri, "const count", 6);
+
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: a_uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed")
+        .expect("script binding references resolve");
+    assert!(
+        response.len() >= 2,
+        "declaration + usage of `count` expected: {response:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
