@@ -5784,7 +5784,6 @@ defineEmits<Emits>()
         host,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
-        &fallthrough.resolved_macros,
     );
     let resolved_type_registry =
         crate::resolver_core::component_meta_type_registry(&fallthrough.resolved_type_registry);
@@ -5890,7 +5889,6 @@ defineEmits<Emits>()
         host,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
-        &fallthrough.resolved_macros,
     );
     let resolved_type_registry =
         crate::resolver_core::component_meta_type_registry(&fallthrough.resolved_type_registry);
@@ -5917,6 +5915,154 @@ defineEmits<Emits>()
         base_meta.events.iter().any(|event| event.name == "open"),
         "fallthrough-expanded extraction must still preserve declared events from the local defineEmits wrapper",
     );
+}
+
+// @ai-generated - Pins normalized macro DTO publication when declaration metadata is absent.
+#[test]
+fn component_meta_resolved_macros_reads_local_wrapper_dto_without_declaration_metadata() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"
+export interface BaseProps {
+  /** Inherited description. */
+  inherited?: string
+  undecorated?: number
+  /** Feature switch.
+   * @defaultValue true
+   */
+  enabled?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { BaseProps } from './base'
+
+export interface Props extends BaseProps {
+  /** Local description. */
+  local?: string
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let whole_hash = host
+        .current_or_read_whole_hash("/src/App.vue")
+        .expect("owner whole hash");
+    let state = host
+        .compute_component_meta_state("/src/App.vue", ProjectionMode::Expanded, whole_hash)
+        .expect("component-meta state");
+    assert!(
+        state.resolved_macros.is_empty(),
+        "the regression requires the optional declaration metadata sidecar to be absent"
+    );
+
+    // Declaration metadata is optional enrichment. Exact lexical ownership can
+    // legitimately leave this sidecar empty for a module-script declaration
+    // consumed by a setup-script macro; the snapshot macro index still owns one
+    // normalized typeinfo DTO.
+    let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        crate::resolver_core::component_meta_resolved_macros(
+            ctx,
+            "/src/App.vue",
+            state.snapshot.macros.as_ref(),
+        )
+    });
+
+    assert_eq!(inputs.len(), 1, "one snapshot macro owns one DTO input");
+    assert_eq!(inputs[0].macro_index, 0);
+    let prop = |name: &str| {
+        inputs[0]
+            .props
+            .iter()
+            .find(|prop| prop.field.name == name)
+            .unwrap_or_else(|| panic!("missing prop {name}"))
+    };
+    assert_eq!(
+        prop("inherited").field.description.as_deref(),
+        Some("Inherited description.")
+    );
+    assert_eq!(
+        prop("local").field.description.as_deref(),
+        Some("Local description.")
+    );
+    assert_eq!(prop("undecorated").field.description, None);
+    assert!(prop("undecorated").field.tags.is_empty());
+    assert_eq!(prop("enabled").field.tags.len(), 1);
+    assert_eq!(prop("enabled").field.tags[0].name, "defaultValue");
+    assert_eq!(prop("enabled").field.tags[0].text.as_deref(), Some("true"));
+}
+
+// @ai-generated - Pins deterministic one-row-per-index publication across multiple macros.
+#[test]
+fn component_meta_resolved_macros_preserves_snapshot_order_and_one_input_per_index() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface Props {
+  /** Prop description. */
+  label?: string
+}
+
+export interface Slots {
+  /** Slot description. */
+  default?: (props: { value: string }) => any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props, Slots } from './types'
+
+defineProps<Props>()
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let whole_hash = host
+        .current_or_read_whole_hash("/src/App.vue")
+        .expect("owner whole hash");
+    let state = host
+        .compute_component_meta_state("/src/App.vue", ProjectionMode::Expanded, whole_hash)
+        .expect("component-meta state");
+    let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        crate::resolver_core::component_meta_resolved_macros(
+            ctx,
+            "/src/App.vue",
+            state.snapshot.macros.as_ref(),
+        )
+    });
+
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|input| input.macro_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "snapshot order and one DTO input per macro index must be stable"
+    );
+    assert_eq!(inputs[0].props.len(), 1);
+    assert!(inputs[0].slots.is_empty());
+    assert_eq!(inputs[1].slots.len(), 1);
+    assert!(inputs[1].props.is_empty());
 }
 
 #[test]

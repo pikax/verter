@@ -348,7 +348,6 @@ pub(crate) fn extract_component_meta_from_resolved(
         ctx,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
-        &resolved.resolved_macros,
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);
@@ -432,7 +431,6 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         ctx,
         canonical.as_str(),
         resolved.snapshot.macros.as_ref(),
-        &resolved.resolved_macros,
     );
     let resolved_type_registry =
         resolver_component_meta_type_registry(&resolved.resolved_type_registry);

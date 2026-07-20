@@ -144,15 +144,18 @@ pub enum ComponentMetaResolutionPurpose {
 /// props/emits/slots/exposed from the SOLE typeinfo macro-surface authority
 /// (`vue_macro_dtos`, reached through the resolver-context seam).
 ///
-/// `resolved_macros` is consulted ONLY for gating + provenance: an entry
-/// contributes iff its macro index survives the `raw_macro_surface_is_authoritative`
-/// filter (an object-literal-only `defineExpose` with fields stays
-/// authoritative and is excluded; every other macro kind passes). The field DATA comes from `vue_macro_dtos`,
-/// keyed on `(owner, macro_index, kind)` — the same key the materialiser's
-/// `synthesize_*_from_known_surface` path already uses. Because `vue_macro_dtos`
-/// returns ONE bundle per macro index, admitted indices are DEDUPLICATED here:
-/// multiple `ResolvedMacroMeta` entries per index (imported + owner-local) are
-/// gating/provenance facts, not distinct field authorities.
+/// The snapshot macro inventory is the sole index/order/cardinality authority.
+/// An object-literal-only `defineExpose` with fields stays analyzer-owned and is
+/// excluded by `raw_macro_surface_is_authoritative`; every other snapshot macro
+/// contributes exactly one input in source order. Field DATA comes from
+/// `vue_macro_dtos`, keyed on `(owner, macro_index, kind)` — the same key the
+/// materialiser's `synthesize_*_from_known_surface` path already uses.
+///
+/// `ResolvedMacroMeta` is intentionally absent from this API. Those rows carry
+/// optional declaration identity/JSDoc enrichment for registry publication;
+/// exact lexical ownership can legitimately produce no row for a module-script
+/// declaration consumed by a setup-script macro. Optional metadata must never
+/// gate the normalized DTO field authority.
 ///
 /// Host state is reached through `&dyn ResolverContext` (the resolver-tier
 /// seal): `vue_macro_dtos_with_ctx(ctx, …)` resolves the macro surface through
@@ -168,28 +171,17 @@ pub(crate) fn component_meta_resolved_macros(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
-    resolved_macros: &[ResolvedMacroMeta],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
-    let mut seen_indices = FxHashSet::default();
     let mut inputs = Vec::new();
-    for resolved in resolved_macros {
-        let admitted = snapshot_macros
-            .get(resolved.macro_index)
-            .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac));
-        if !admitted {
+    for (macro_index, mac) in snapshot_macros.iter().enumerate() {
+        if raw_macro_surface_is_authoritative(mac) {
             continue;
         }
-        if !seen_indices.insert(resolved.macro_index) {
-            continue;
-        }
-        let Some(mac) = snapshot_macros.get(resolved.macro_index) else {
-            continue;
-        };
         let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
             ctx,
             &crate::typeinfo::types::VueMacroSurfaceRequest {
                 owner_canonical: std::sync::Arc::from(owner_canonical),
-                macro_index: resolved.macro_index,
+                macro_index,
                 macro_kind: mac.kind,
                 root_identity: ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
@@ -206,7 +198,7 @@ pub(crate) fn component_meta_resolved_macros(
         // contribute metadata only).
         inputs.push(
             verter_semantic::analysis::component_meta::ResolvedMacroInput {
-                macro_index: resolved.macro_index,
+                macro_index,
                 props: dtos
                     .prop_fields()
                     .iter()
