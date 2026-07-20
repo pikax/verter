@@ -17567,7 +17567,20 @@ mod single_resolution_engine_guards {
         // surfaces to every compile consumer — pass-through of
         // already-resolved data, NOT a new engine path.
         ("crates/verter_compiler/src/script/prepared.rs", 9),
-        ("crates/verter_compiler/src/tsc/script.rs", 35),
+        // Re-derived (was 35): the D9 quoted-key carrier fix removed the
+        // `render_member_key` "already quoted?" byte check, whose `b'"'` char
+        // literal contained the ONLY bare `"` that `preprocess`'s
+        // `strip_comments` (which tracks string state on `"` but is blind to
+        // char literals — see the sibling `skip_literal`) used to keep in
+        // parity through this file. Dropping it flips `in_string` parity so two
+        // `RuntimeType`-mentioning DOC COMMENTS (e.g. `/// Map RuntimeType to a
+        // JavaScript constructor …`) are no longer stripped and get tallied as
+        // bare symbol uses. The GENUINE `type_surface` engine-use count is
+        // unchanged — every raw needle count (`ResolvedProp`, `RuntimeType`, …)
+        // is byte-identical base-vs-fix; only comment leakage moved. The
+        // underlying `strip_comments` char-literal blind spot is tracked
+        // separately; accurate re-derivation would LOWER this entry.
+        ("crates/verter_compiler/src/tsc/script.rs", 37),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",
