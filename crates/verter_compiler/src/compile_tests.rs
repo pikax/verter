@@ -17109,17 +17109,21 @@ fn with_defaults_local_ref_default_is_compile_error() {
 }
 
 // =========================================================================
-// R7-2 — defineProps / withDefaults destructure-pattern default scope-check
+// defineProps reactive-destructure default scope-check
 // =========================================================================
 //
-// Official runs `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`:
-// a destructure declaration's default expressions are hoisted with the props
-// runtime decl (the `mergeDefaults` merge), so a default referencing a
-// setup-local breaks at runtime and is rejected under `defineProps()`. The
-// destructured binding NAMES are NOT registered as setup-locals for a props
-// destructure (official's `walkDeclaration` skips them), so only the default
-// `right` expressions can trigger the error — never the destructure targets /
-// aliases. DIAGNOSTIC ONLY: the reactive-destructure `_mergeDefaults`/`__props`
+// Official sets `ctx.propsDestructureDecl` (the node
+// `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)` walks)
+// ONLY in `processDefineProps` when the call is a DIRECT `defineProps` (NOT
+// `withDefaults`, i.e. `isWithDefaults === false`). In that reactive-destructure
+// form the default expressions are hoisted with the props runtime decl (the
+// `mergeDefaults` merge), so a default referencing a setup-local breaks at
+// runtime and is rejected under `defineProps()`. The destructured binding NAMES
+// are NOT registered as setup-locals (official's `walkDeclaration` skips them),
+// so only the default `right` expressions can trigger the error — never the
+// destructure targets / aliases. Under `withDefaults(...)` reactive destructure
+// is DISABLED (the declId is never recorded, defaults are not hoisted) so it
+// stays valid. DIAGNOSTIC ONLY: the reactive-destructure `_mergeDefaults`/`__props`
 // runtime transform is a separate concern and is intentionally NOT implemented
 // here.
 
@@ -17161,19 +17165,23 @@ fn define_props_destructure_alias_default_setup_local_is_compile_error() {
 }
 
 #[test]
-fn with_defaults_destructure_default_setup_local_is_compile_error() {
-    // The same rule applies to a destructure over `withDefaults(...)` — official
-    // still records the destructure decl and reports under `defineProps()`.
+fn with_defaults_destructure_default_setup_local_stays_valid() {
+    // Under `withDefaults(...)` reactive props destructure is DISABLED
+    // (`processDefineProps(..., isWithDefaults=true)` never calls
+    // `processPropsDestructure`, so `propsDestructureDecl` is never set). The
+    // destructure then runs as a plain in-setup destructure and its defaults are
+    // NOT hoisted out of setup() — a setup-local default is therefore VALID
+    // (official emits only a warning, never the scope error). Only the direct
+    // `defineProps` reactive-destructure form hoists the defaults.
     let result = compile_sfc(
         "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x = dft } = withDefaults(defineProps<{ x?: string }>(), {})\n</script>\n<template><div>{{ x }}</div></template>",
     );
     assert!(
-        result.errors.iter().any(|d| d.severity
-            == crate::compile::CompileDiagnosticSeverity::Error
-            && d.message.contains(
-                "`defineProps()` in <script setup> cannot reference locally declared variables"
-            )),
-        "withDefaults destructure default referencing a setup-local must be rejected, got: {:?}",
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "withDefaults destructure default referencing a setup-local must stay valid (official disables reactive destructure under withDefaults; only warns), got: {:?}",
         result.errors
     );
 }

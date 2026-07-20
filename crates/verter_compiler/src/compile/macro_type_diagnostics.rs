@@ -318,14 +318,18 @@ pub(super) fn collect_invalid_options_scope_diagnostics(
                         continue;
                     };
                     check_macro_call(call, &binding_types, content_str, &mut diagnostics);
-                    // A `defineProps` / `withDefaults` destructure declaration
+                    // A DIRECT `defineProps` destructure declaration
                     // (`const { x = <default> } = defineProps(...)`) hoists its
-                    // default expressions with the props runtime decl, so a
-                    // default referencing a setup-local is rejected under
-                    // `defineProps()` — official
+                    // default expressions with the props runtime decl (the
+                    // `mergeDefaults` merge), so a default referencing a
+                    // setup-local is rejected under `defineProps()` — official
                     // `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`.
+                    // Official records `ctx.propsDestructureDecl` ONLY in
+                    // `processDefineProps` when `!isWithDefaults`: under
+                    // `withDefaults(...)` reactive destructure is disabled and the
+                    // defaults stay in setup scope, so they are not scope-checked.
                     if let Expression::Identifier(callee) = &call.callee {
-                        if matches!(callee.name.as_str(), "defineProps" | "withDefaults") {
+                        if callee.name.as_str() == "defineProps" {
                             check_destructure_pattern_defaults(
                                 &declarator.id,
                                 &binding_types,
