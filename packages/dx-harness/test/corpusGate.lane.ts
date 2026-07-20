@@ -51,7 +51,20 @@ describe("corpus gate (all-route benchmark)", () => {
             `answered=${report?.accounting.requestsAnswered ?? "-"} ` +
             `timedOut=${report?.accounting.requestsTimedOut ?? "-"} ` +
             `abandoned=${report?.accounting.requestsAbandoned ?? "-"} ` +
-            `wedged=${report?.wedged ?? "-"}`,
+            `wedged=${report?.wedged ?? "-"} ` +
+            `latency=${report?.isolation?.latencyGating === true ? "GATING" : "ADVISORY"} ` +
+            `(${report?.isolation?.mode ?? "unrecorded"}) ` +
+            `provider=${report?.providerAttribution?.status ?? "unrecorded"}`,
+        );
+      }
+      // Advisories are recorded observations that DO NOT gate — printed apart
+      // from the failure list so the two can never be confused.
+      for (const advisory of outcome.advisories) console.log(`[corpus-gate] ${advisory}`);
+      const budget = outcome.receipt.budget;
+      if (budget) {
+        console.log(
+          `[corpus-gate] wall clock ${budget.actualMs}ms vs ${budget.targetMs}ms budget ` +
+            `(${budget.exceeded ? "OVER BUDGET" : "within budget"})`,
         );
       }
       console.log(`[corpus-gate] receipt: ${outcome.receiptPath}`);
