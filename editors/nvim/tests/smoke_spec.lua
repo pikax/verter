@@ -120,11 +120,20 @@ describe("verter real Neovim client contract", function()
     local ready_generations = {}
     local sync_generations = {}
     local started_providers = {}
+    local shown_messages = {}
     local old_ready = vim.lsp.handlers["$/verter/ready"]
     local old_sync = vim.lsp.handlers["$/verter/typeProviderSyncComplete"]
     local old_provider_started = vim.lsp.handlers["$/verter/typeProviderStarted"]
     local old_publish_diagnostics = vim.lsp.handlers["textDocument/publishDiagnostics"]
+    local old_show_message = vim.lsp.handlers["window/showMessage"]
     local published_diagnostics = diagnostic_publications.new()
+    -- Record every server-shown message for the crash-absence contract below.
+    vim.lsp.handlers["window/showMessage"] = function(err, params, ctx, config)
+      if params and type(params.message) == "string" then
+        shown_messages[#shown_messages + 1] = params.message
+      end
+      if old_show_message then return old_show_message(err, params, ctx, config) end
+    end
     vim.lsp.handlers["$/verter/ready"] = function(_, params)
       if params and params.gen ~= nil then ready_generations[params.gen] = true end
     end
@@ -262,6 +271,24 @@ describe("verter real Neovim client contract", function()
     vim.lsp.handlers["$/verter/typeProviderStarted"] = old_provider_started
     vim.lsp.handlers["textDocument/publishDiagnostics"] = old_publish_diagnostics
     stop_clients()
+    vim.lsp.handlers["window/showMessage"] = old_show_message
     if not ok then error(failure) end
+
+    -- CRASH-ABSENCE CONTRACT: the engine must survive the ENTIRE scenario —
+    -- every hover (including the Svelte-JS carrier) AND the clean client
+    -- shutdown — without the resilient monitor ever reporting a crash. A
+    -- "crashed. Restarting" notification here means either the generated
+    -- carrier payload killed the engine or a deliberate teardown was
+    -- misreported as a crash; both are release-blocking defects.
+    for _, message in ipairs(shown_messages) do
+      assert.is_nil(
+        message:find("crashed. Restarting", 1, true),
+        "the tsgo engine must never crash or be misreported as crashed: " .. message
+      )
+      assert.is_nil(
+        message:find("verter-only mode", 1, true),
+        "the engine must never degrade to verter-only mode: " .. message
+      )
+    end
   end)
 end)
