@@ -330,21 +330,17 @@ pub(crate) fn project_ownership_diagnostic(
              types are unavailable. Add it to a tsconfig `include`/`files` entry."
                 .to_string()
         }
-        CarrierOwnershipResolution::Ambiguous { candidates, .. } if candidates.is_empty() => {
+        // A resolution now produces `Ambiguous` ONLY for a disk-layout carrier-path
+        // conflict (a real file or same-stem module occupies the generated companion
+        // path) — always with EMPTY candidates. The multiply-owned case resolves to the
+        // single tsgo default owner (`Bound`), so `Ambiguous` never carries candidate
+        // configs and the former multi-config candidate-listing branch is unreachable.
+        CarrierOwnershipResolution::Ambiguous { .. } => {
             "verter: this carrier's owning TypeScript project is ambiguous (a real file or a \
              same-stem module occupies its generated companion path), so its cross-file types \
              are unavailable."
                 .to_string()
         }
-        CarrierOwnershipResolution::Ambiguous { candidates, .. } => format!(
-            "verter: multiple configured TypeScript projects claim this carrier, so its owner \
-             is ambiguous and its cross-file types are unavailable. Candidate configs: {}",
-            candidates
-                .iter()
-                .map(|c| c.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
         CarrierOwnershipResolution::Bound(_) | CarrierOwnershipResolution::NotReady => {
             return None;
         }
@@ -356,6 +352,39 @@ pub(crate) fn project_ownership_diagnostic(
         message,
         ..Default::default()
     })
+}
+
+/// The `verter(project)` ownership diagnostics for a carrier `canonical_id`,
+/// resolved from the ONE shared carrier-ownership authority. Empty for a
+/// non-carrier document, and — via `ObservePublishedReadiness` — for a `Bound`
+/// (now including a resolved multi-claimant carrier) or `NotReady` carrier: only
+/// a genuine terminal `NoProject` or a disk-layout carrier-path conflict
+/// surfaces a warning.
+///
+/// Shared by BOTH the full-diagnostics path
+/// ([`crate::server::Server::compute_full_diagnostics`]) and the debounced
+/// coordinator publish path ([`crate::sync_coordinator`]), so an unresolved
+/// carrier is explained on `did_open` / `did_change`, not only on a
+/// full-diagnostics request. Driven from the typed [`CarrierOwnershipResolution`]
+/// — never a path-shape heuristic.
+pub(crate) fn project_ownership_diagnostics_for(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
+    if !verter_workspace::resolver::path_is_carrier(canonical_id) {
+        return Vec::new();
+    }
+    let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
+        host,
+        canonical_id,
+        std::sync::Arc::from(""),
+        crate::tsgo::project_binding::OwnershipReadinessMode::ObservePublishedReadiness,
+    ) else {
+        return Vec::new();
+    };
+    project_ownership_diagnostic(&resolution)
+        .into_iter()
+        .collect()
 }
 
 /// Resolve the carrier's ownership EXACTLY ONCE for a sync pass — the single captured

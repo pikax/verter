@@ -178,20 +178,7 @@ impl VerterLanguageServer {
     fn project_ownership_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
         let host = self.documents.host();
         let canonical = crate::audit_harness::canonical_id_for_uri(host, uri);
-        if !verter_workspace::resolver::path_is_carrier(&canonical) {
-            return Vec::new();
-        }
-        let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
-            host,
-            &canonical,
-            std::sync::Arc::from(""),
-            crate::tsgo::project_binding::OwnershipReadinessMode::ObservePublishedReadiness,
-        ) else {
-            return Vec::new();
-        };
-        crate::external_ts::project_ownership_diagnostic(&resolution)
-            .into_iter()
-            .collect()
+        crate::external_ts::project_ownership_diagnostics_for(host, &canonical)
     }
 
     /// Audit-aware wrapper for [`Self::publish_full_diagnostics`].

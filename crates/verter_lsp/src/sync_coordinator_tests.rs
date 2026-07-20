@@ -384,6 +384,231 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn merged_diagnostics_surface_verter_project_warning_on_unowned_carrier() {
+    // The debounced coordinator path (`did_open` / `did_change` route here, NOT
+    // through the request-only `compute_full_diagnostics`) must surface the
+    // `verter(project)` ownership diagnostic for a genuinely-unowned carrier. This
+    // is the wiring fix: pre-fix the diagnostic lived ONLY in
+    // `compute_full_diagnostics`, so an orphaned carrier was silently typeless on
+    // open AND edit.
+    //
+    // DISCRIMINATING: without the `project_ownership_diagnostics_for` wiring in
+    // `compute_merged_diagnostics`, the returned set carries NO `verter(project)`
+    // diagnostic for the unowned carrier and this assertion fails.
+    // A ready (authoritative) published root whose only configured project lives
+    // at `/other`; the `/workspace` carrier is under no configured project ⇒
+    // terminal `NoProject`. `with_ext` publishes `ownership_ready = true`, so the
+    // diagnostic path's `ObservePublishedReadiness` resolves authoritatively.
+    let vfs = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+    let ws = vfs.read().clone().expect("published workspace");
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let diagnostics = compute_merged_diagnostics(&deps, "/workspace/src/App.vue", &uri).await;
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.source.as_deref() == Some("verter(project)")),
+        "an unowned carrier must surface a verter(project) ownership diagnostic on the \
+         debounced (did_open/did_change) publish path, got {diagnostics:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
+    // The debounced coordinator path must emit ZERO `verter(project)` diagnostics for a
+    // RESOLVED multi-claimant carrier: a carrier claimed by multiple sibling tsconfigs
+    // resolves to the single tsgo default owner (`Bound`), and a `Bound` carrier is not
+    // the user's problem. Silence is by construction
+    // (`project_ownership_diagnostic(Bound) -> None`) but was untested on this path.
+    //
+    // DISCRIMINATING: a regression that re-terminals a multi-claimant carrier as
+    // `Ambiguous(MultipleOwners)` while still serving `Bound` would surface a
+    // `verter(project)` warning here and fail this assertion.
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.app.json".to_string()),
+        ),
+    ]);
+    let vfs = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
+        resolver,
+        &[
+            ("/workspace", "/workspace", Some("/workspace/tsconfig.json")),
+            (
+                "/workspace",
+                "/workspace",
+                Some("/workspace/tsconfig.app.json"),
+            ),
+        ],
+    );
+    let ws = vfs.read().clone().expect("published workspace");
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+
+    // Meaningfulness gate: the carrier is GENUINELY multi-claimant (the raw resolution
+    // is `Ambiguous`) yet resolves to a single default owner — so the silence proves the
+    // Bound-serving path, not an accidentally-unique carrier.
+    {
+        let published = host
+            .workspace_read()
+            .published_root()
+            .expect("published root");
+        assert!(
+            matches!(
+                published
+                    .snapshot
+                    .configured_owner_resolution_for_file("/workspace/src/App.vue"),
+                verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Ambiguous(_)
+            ),
+            "the carrier must be genuinely multi-claimant for this test to be meaningful"
+        );
+        assert!(
+            published
+                .snapshot
+                .default_configured_owner_for_file("/workspace/src/App.vue")
+                .is_some(),
+            "the multi-claimant carrier must resolve to a single default owner"
+        );
+    }
+
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let diagnostics = compute_merged_diagnostics(&deps, "/workspace/src/App.vue", &uri).await;
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.source.as_deref() == Some("verter(project)")),
+        "a RESOLVED multi-claimant carrier must emit NO verter(project) diagnostic on the \
+         debounced (did_open/did_change) path, got {diagnostics:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn merged_diagnostics_surface_verter_project_warning_on_carrier_path_conflict() {
+    // The debounced coordinator path must ALSO surface the `verter(project)` ownership
+    // diagnostic for a terminal DISK-LAYOUT carrier-path conflict (a real user file
+    // occupying the generated companion path). Pre-fix the coordinator path only tested
+    // `NoProject`; this pins the OTHER terminal cause on the same route.
+    //
+    // DISCRIMINATING: without the conflict pass downgrading to `Ambiguous`, or without
+    // the diagnostic wiring, the returned set carries NO verter(project) diagnostic here.
+    let vfs = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    );
+    let ws = vfs.read().clone().expect("published workspace");
+    // A REAL user file occupies the carrier's generated IDE companion path — Verter must
+    // never overlay-shadow it ⇒ terminal `Ambiguous(CarrierPathOccupiedByRealFile)`.
+    ws.inject_file(
+        "/workspace/src/App.vue.tsx".to_string(),
+        std::sync::Arc::from("export const real = 1;\n"),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let diagnostics = compute_merged_diagnostics(&deps, "/workspace/src/App.vue", &uri).await;
+    let conflict = diagnostics
+        .iter()
+        .find(|d| d.source.as_deref() == Some("verter(project)"))
+        .unwrap_or_else(|| {
+            panic!(
+                "a terminal carrier-path conflict must surface a verter(project) diagnostic on \
+                 the debounced path, got {diagnostics:?}"
+            )
+        });
+    // The disk-layout cause (companion-path occupancy) — distinct from the NoProject
+    // message — so a mis-classification as NoProject would fail here too.
+    assert!(
+        conflict.message.contains("companion path"),
+        "the conflict diagnostic must explain the disk-layout (companion-path) cause, got {}",
+        conflict.message
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
     // AUDIT (sync_coordinator, invariant a): the debounced sync processes
     // OPEN documents (signalled from did_change). When a READY ownership

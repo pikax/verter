@@ -421,6 +421,16 @@ fn load_compiler_options_inner(
         compiler_options.check_js = check_js;
     }
 
+    // `disableSolutionSearching` stops default-project selection from climbing a
+    // solution to its ancestor solution. An explicit `false` overrides an
+    // inherited `true` (TS last-wins through the `extends` chain).
+    if let Some(disable_solution_searching) = raw_compiler_options
+        .get("disableSolutionSearching")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.disable_solution_searching = disable_solution_searching;
+    }
+
     if let Some(paths) = raw_compiler_options
         .get("paths")
         .and_then(|value| value.as_object())
