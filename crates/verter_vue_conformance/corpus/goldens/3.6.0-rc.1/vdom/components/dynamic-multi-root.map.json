@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/components/dynamic-multi-root.vue"
+  ],
+  "names": [
+    "current"
+  ],
+  "mappings": ";;;;mBACE,aAEY,yBAFIA,YAAO,KAAE,KAAK,EAAC,SAAS;wBACtC,CAAa;QAAb,YAAa;;;;8BAEf,oBAAyB,WAAlB,IAAI,EAAC,UAAU",
+  "sourcesContent": [
+    "\n  <component :is=\"current\" class=\"control\">\n    <slot></slot>\n  </component>\n  <input type=\"checkbox\" />\n"
+  ]
+}

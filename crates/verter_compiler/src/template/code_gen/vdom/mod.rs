@@ -975,17 +975,26 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
         };
         let native_memo = memo_deps.is_some() && !el.tag_type.is_component();
 
+        // Dynamic `<component :is>` is ALWAYS a block root in official Vue —
+        // `(_openBlock(), _createBlock(_resolveDynamicComponent(...)))` at any
+        // nesting depth, including multi-root fragment children without
+        // v-if/v-for (reka-ui CheckboxRoot pattern): the resolved target can
+        // be any shape, so the runtime needs the block boundary.
+        let is_dynamic_component = component::is_dynamic_component_tag(el, source);
         let is_block_root = el.v_condition.is_some()
             || el.v_for.is_some()
             || is_single_template_root
             || raw_children_builtin
-            || native_memo;
+            || native_memo
+            || is_dynamic_component;
         // Local `_openBlock()`: v-if/v-for branches always; a raw-children
-        // built-in whenever it is NOT the sole single template root (the
-        // single-root open block is provided once by leave_template); a v-memo
-        // block owns its own openBlock inside the memo factory.
+        // built-in or a dynamic component whenever it is NOT the sole single
+        // template root (the single-root open block is provided once by
+        // leave_template); a v-memo block owns its own openBlock inside the
+        // memo factory.
         let force_open_block = (raw_children_builtin && !is_single_template_root)
-            || (memo_deps.is_some() && is_block_root);
+            || (memo_deps.is_some() && is_block_root)
+            || (is_dynamic_component && !is_single_template_root);
 
         // Emit the `_withMemo([deps], () => ` prefix and `, _cache, N)` suffix
         // around the whole vnode expression. Applied before dispatch so the

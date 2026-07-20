@@ -118,6 +118,24 @@
       }
     },
     {
+      "id": "components/dynamic-multi-root",
+      "sfc": "cases/components/dynamic-multi-root.vue",
+      "backends": {
+        "vdom": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vdom/components/dynamic-multi-root.js",
+          "map": "goldens/3.6.0-rc.1/vdom/components/dynamic-multi-root.map.json",
+          "meta": "goldens/3.6.0-rc.1/vdom/components/dynamic-multi-root.meta.json"
+        },
+        "vapor": {
+          "disposition": "compiled",
+          "golden": "goldens/3.6.0-rc.1/vapor/components/dynamic-multi-root.js",
+          "map": "goldens/3.6.0-rc.1/vapor/components/dynamic-multi-root.map.json",
+          "meta": "goldens/3.6.0-rc.1/vapor/components/dynamic-multi-root.meta.json"
+        }
+      }
+    },
+    {
       "id": "components/parent-props-events",
       "sfc": "cases/components/parent-props-events.vue",
       "backends": {
