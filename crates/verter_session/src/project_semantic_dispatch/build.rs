@@ -495,13 +495,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // rune module's ambient `$state`/`$derived`/… value (and the rune
         // namespace types) is seen as locally declared at the `typeof`-rooted
         // dispatch surface. Plain `.ts` is unaffected (rune-module-gated).
-        let has_value = shallow
-            .effective_value_header_present_in(value_root.scope.owner, value_root.name.as_ref());
-        let has_import_local = shallow
-            .import_target_in(value_root.scope.owner, value_root.name.as_ref())
-            .is_some();
+        let visible_value =
+            shallow.visible_value_binding(value_root.scope.owner, value_root.name.as_ref());
+        let has_value = matches!(
+            visible_value,
+            Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
+        );
+        let has_import_local = matches!(
+            visible_value,
+            Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(_))
+        );
         let has_type_symbol = shallow
-            .effective_type_header_present_in(value_root.scope.owner, value_root.name.as_ref());
+            .visible_local_type_owner(value_root.scope.owner, value_root.name.as_ref())
+            .is_some();
         // Namespace-qualified root: `Ns.Member` where `Ns` is an import
         // alias (`import * as Ns from './m'`). The shallow state indexes
         // only the top-level alias; the dotted name itself never appears
@@ -509,9 +515,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // which handles the namespace-member case via
         // `resolve_namespace_member_from_facts`.
         let has_namespace_prefix = value_root.name.split_once('.').is_some_and(|(prefix, _)| {
-            shallow
-                .import_target_in(value_root.scope.owner, prefix)
-                .is_some()
+            matches!(
+                shallow.visible_value_binding(value_root.scope.owner, prefix),
+                Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(_))
+            )
         });
 
         if !(has_value || has_import_local || has_type_symbol || has_namespace_prefix) {

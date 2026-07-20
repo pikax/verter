@@ -879,19 +879,39 @@ impl VerterHost {
     /// through the prepared surface, by name).
     fn component_meta_binding_type_entries(
         &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical: &str,
-        requested_binding_names: &rustc_hash::FxHashSet<String>,
-    ) -> Vec<String> {
-        if requested_binding_names.is_empty() {
+        requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclKey>,
+    ) -> Vec<verter_semantic::analysis::type_eval_build::BindingExpansionEntry> {
+        if requested_bindings.is_empty() {
             return Vec::new();
         }
 
-        let _ = self.shallow_file_state(canonical);
+        let Some(indexed) = ctx
+            .ensure_indexed_ready_serve(canonical)
+            .map(|serve| serve.indexed)
+        else {
+            return Vec::new();
+        };
+        let mut admitted = std::collections::BTreeSet::new();
+        for demand in requested_bindings {
+            let Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(owner)) =
+                indexed
+                    .shallow_state
+                    .visible_value_binding(demand.owner, demand.name.as_ref())
+            else {
+                continue;
+            };
+            admitted.insert(verter_type_expr::DeclKey::new(
+                owner,
+                Arc::clone(&demand.name),
+            ));
+        }
 
-        requested_binding_names
+        admitted
             .iter()
-            .filter(|name| {
-                self.prepared_value_decl(canonical, name)
+            .filter(|binding| {
+                ctx.prepared_value_decl(canonical, binding.owner, binding.name.as_ref())
                     .is_some_and(|decl| {
                         !matches!(
                             decl.type_annotation.classification,
@@ -899,7 +919,12 @@ impl VerterHost {
                         )
                     })
             })
-            .cloned()
+            .map(
+                |binding| verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
+                    name: binding.name.to_string(),
+                    owner: binding.owner,
+                },
+            )
             .collect()
     }
 
@@ -922,11 +947,11 @@ impl VerterHost {
             );
             let _ = ctx.ensure_indexed_ready_serve(canonical);
         }
-        let requested_binding_names =
+        let requested_bindings =
             if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Full {
-                crate::resolver_core::collect_requested_binding_names(snapshot.macros.as_ref())
+                crate::resolver_core::collect_requested_binding_demands(snapshot.macros.as_ref())
             } else {
-                rustc_hash::FxHashSet::default()
+                std::collections::BTreeSet::new()
             };
         let binding_entries = {
             component_meta_trace_custom!(
@@ -934,11 +959,11 @@ impl VerterHost {
                 format!(
                     "owner={} requested_bindings={} store_view={}",
                     canonical,
-                    requested_binding_names.len(),
+                    requested_bindings.len(),
                     false,
                 ),
             );
-            self.component_meta_binding_type_entries(canonical, &requested_binding_names)
+            self.component_meta_binding_type_entries(ctx, canonical, &requested_bindings)
         };
         // the retired `external_engine` branch is
         // gone; there is only one `expand_macro_types` entry point left.
@@ -1051,7 +1076,7 @@ impl VerterHost {
                                         verter_type_expr::locators::TypeBodySlot {
                                             anchor: verter_type_expr::locators::AuthoredAnchor {
                                                 canonical_id: std::sync::Arc::from(canonical),
-                                                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                                                owner: ctx.scope_owner,
                                                 symbol: std::sync::Arc::clone(name),
                                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                             },

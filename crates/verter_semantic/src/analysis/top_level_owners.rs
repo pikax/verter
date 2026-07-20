@@ -357,6 +357,21 @@ impl TopLevelOwnerTable {
         unique
     }
 
+    /// Return the sole validated lexical parent visible from `owner`.
+    ///
+    /// Carrier instance/setup scope sees one unique module owner. Module and
+    /// frontmatter scopes never inherit another top-level owner, and multiple
+    /// module owners are ambiguous and therefore fail closed.
+    #[must_use]
+    pub fn validated_lexical_parent_owner(
+        &self,
+        owner: TopLevelOwnerId,
+    ) -> Option<TopLevelOwnerId> {
+        (owner.kind() == TopLevelOwnerKind::Instance)
+            .then(|| self.unique_owner_of_kind(TopLevelOwnerKind::Module))
+            .flatten()
+    }
+
     #[must_use]
     pub fn regions(&self) -> &[TopLevelOwnerRegion] {
         &self.regions
@@ -515,6 +530,13 @@ mod tests {
             ambiguous.unique_owner_of_kind(TopLevelOwnerKind::Module),
             None
         );
+
+        assert_eq!(
+            unique.validated_lexical_parent_owner(instance),
+            Some(module)
+        );
+        assert_eq!(unique.validated_lexical_parent_owner(module), None);
+        assert_eq!(ambiguous.validated_lexical_parent_owner(instance), None);
     }
 
     #[test]

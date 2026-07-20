@@ -248,7 +248,6 @@ pub(crate) fn classify_macro_type_reference_roles_with_owners(
     owners: &TopLevelOwnerTable,
 ) -> Vec<Vec<(String, MacroTypeDepUsage)>> {
     let registries = build_local_type_registries(program, owners);
-    let empty_registry = FxHashMap::default();
     macros
         .iter()
         .map(|mac| {
@@ -261,7 +260,7 @@ pub(crate) fn classify_macro_type_reference_roles_with_owners(
             else {
                 return Vec::new();
             };
-            let registry = registries.get(&mac.owner).unwrap_or(&empty_registry);
+            let registry = LocalTypeRegistryView::new(&registries, owners, mac.owner);
             let mut walk = RoleWalk {
                 registry,
                 roles: Vec::new(),
@@ -276,17 +275,17 @@ pub(crate) fn classify_macro_type_reference_roles_with_owners(
 
 /// Role-classifying walker over a macro type argument (see
 /// [`classify_macro_type_reference_roles_with_owners`]).
-struct RoleWalk<'a, 'r> {
-    registry: &'r FxHashMap<String, LocalTypeDecl<'a>>,
+struct RoleWalk<'program, 'registry> {
+    registry: LocalTypeRegistryView<'program, 'registry>,
     /// First-occurrence-ordered `(name, strongest role)` results.
     roles: Vec<(String, MacroTypeDepUsage)>,
     role_index: FxHashMap<String, usize>,
     /// Local-chain cycle guard, keyed per role so a name reached first
     /// through a member chain still gets its surface chain walked.
-    visited: FxHashSet<(String, MacroTypeDepUsage)>,
+    visited: FxHashSet<(TopLevelOwnerId, String, MacroTypeDepUsage)>,
 }
 
-impl<'a> RoleWalk<'a, '_> {
+impl<'program> RoleWalk<'program, '_> {
     fn record(&mut self, name: String, role: MacroTypeDepUsage) {
         if let Some(&at) = self.role_index.get(&name) {
             let existing = self.roles[at].1;
@@ -308,7 +307,11 @@ impl<'a> RoleWalk<'a, '_> {
     /// Conservative flat collection: every reference inside `ts_type` is
     /// recorded as SURFACE and its local chain followed — used for argument
     /// shapes whose surface cannot be enumerated syntactically.
-    fn surface_flat(&mut self, ts_type: &TSType<'a>) {
+    fn surface_flat_in(
+        &mut self,
+        registry: LocalTypeRegistryView<'program, '_>,
+        ts_type: &TSType<'program>,
+    ) {
         if let TSType::TSTypeQuery(query) = ts_type {
             if let Some(root) = type_query_root_name(&query.expr_name) {
                 self.record(root, MacroTypeDepUsage::ValueQuerySurface);
@@ -317,13 +320,21 @@ impl<'a> RoleWalk<'a, '_> {
         }
         for name in collect_type_references(ts_type) {
             self.record(name.clone(), MacroTypeDepUsage::Surface);
-            self.follow_local_surface(&name);
+            self.follow_local_surface_in(registry, &name);
         }
     }
 
     /// Walk a type in a SURFACE position (the argument root or a
     /// composition arm of it).
-    fn surface_type(&mut self, ts_type: &TSType<'a>) {
+    fn surface_type(&mut self, ts_type: &TSType<'program>) {
+        self.surface_type_in(self.registry, ts_type);
+    }
+
+    fn surface_type_in(
+        &mut self,
+        registry: LocalTypeRegistryView<'program, '_>,
+        ts_type: &TSType<'program>,
+    ) {
         match ts_type {
             TSType::TSTypeReference(type_ref) => {
                 let Some(name) = type_ref_root_name(&type_ref.type_name) else {
@@ -336,23 +347,25 @@ impl<'a> RoleWalk<'a, '_> {
                 // `Partial<T>` / `Pick<T, K>`, local generic aliases).
                 if let Some(args) = &type_ref.type_arguments {
                     for param in &args.params {
-                        self.surface_type(param);
+                        self.surface_type_in(registry, param);
                     }
                 }
-                self.follow_local_surface(&name);
+                self.follow_local_surface_in(registry, &name);
             }
             TSType::TSIntersectionType(intersection) => {
                 for arm in &intersection.types {
-                    self.surface_type(arm);
+                    self.surface_type_in(registry, arm);
                 }
             }
             TSType::TSUnionType(union) => {
                 for arm in &union.types {
-                    self.surface_type(arm);
+                    self.surface_type_in(registry, arm);
                 }
             }
-            TSType::TSParenthesizedType(paren) => self.surface_type(&paren.type_annotation),
-            TSType::TSTypeLiteral(literal) => self.literal_members(&literal.members),
+            TSType::TSParenthesizedType(paren) => {
+                self.surface_type_in(registry, &paren.type_annotation)
+            }
+            TSType::TSTypeLiteral(literal) => self.literal_members_in(registry, &literal.members),
             TSType::TSTypeQuery(query) => {
                 if let Some(root) = type_query_root_name(&query.expr_name) {
                     self.record(root, MacroTypeDepUsage::ValueQuerySurface);
@@ -361,15 +374,15 @@ impl<'a> RoleWalk<'a, '_> {
             TSType::TSMappedType(mapped) => {
                 // The key domain enumerates the surface; the value is a
                 // per-member annotation.
-                self.surface_type(&mapped.constraint);
+                self.surface_type_in(registry, &mapped.constraint);
                 if let Some(value) = &mapped.type_annotation {
-                    self.member_type(value);
+                    self.member_type_in(registry, value);
                 }
             }
             // Indexed access, conditionals, `keyof`, template literals, …:
             // the surface cannot be enumerated syntactically — every inner
             // reference is required — the conservative fatal tier.
-            other => self.surface_flat(other),
+            other => self.surface_flat_in(registry, other),
         }
     }
 
@@ -377,47 +390,59 @@ impl<'a> RoleWalk<'a, '_> {
     /// SURFACE (an unresolvable parent hides members), alias bodies re-enter
     /// the surface walk, and the declaration's own literal members classify
     /// as member annotations.
-    fn follow_local_surface(&mut self, name: &str) {
-        if !self
-            .visited
-            .insert((name.to_string(), MacroTypeDepUsage::Surface))
-        {
+    fn follow_local_surface_in(
+        &mut self,
+        registry: LocalTypeRegistryView<'program, '_>,
+        name: &str,
+    ) {
+        let Some((declaration_registry, declaration)) = registry.resolve(name) else {
+            return;
+        };
+        if !self.visited.insert((
+            declaration_registry.scope_owner,
+            name.to_string(),
+            MacroTypeDepUsage::Surface,
+        )) {
             return;
         }
-        match self.registry.get(name) {
-            Some(LocalTypeDecl::Interface { body, extends }) => {
+        match declaration {
+            LocalTypeDecl::Interface { body, extends } => {
                 for heritage in extends.iter() {
                     if let Some(parent) = heritage_name(&heritage.expression) {
                         self.record(parent.clone(), MacroTypeDepUsage::Surface);
-                        self.follow_local_surface(&parent);
+                        self.follow_local_surface_in(declaration_registry, &parent);
                     }
                     // Heritage type arguments (`extends Base<X>`,
                     // `extends Pick<X, K>`) stay SURFACE — conservative:
                     // they can shape the inherited member set.
                     if let Some(args) = &heritage.type_arguments {
                         for param in &args.params {
-                            self.surface_type(param);
+                            self.surface_type_in(declaration_registry, param);
                         }
                     }
                 }
-                self.literal_members(&body.body);
+                self.literal_members_in(declaration_registry, &body.body);
             }
-            Some(LocalTypeDecl::Alias(aliased)) => {
+            LocalTypeDecl::Alias(aliased) => {
                 let aliased = *aliased;
-                self.surface_type(aliased);
+                self.surface_type_in(declaration_registry, aliased);
             }
-            Some(LocalTypeDecl::Class) | None => {}
+            LocalTypeDecl::Class => {}
         }
     }
 
     /// Classify the member annotations of a type-literal / interface body in
     /// a surface position.
-    fn literal_members(&mut self, members: &[TSSignature<'a>]) {
+    fn literal_members_in(
+        &mut self,
+        registry: LocalTypeRegistryView<'program, '_>,
+        members: &[TSSignature<'program>],
+    ) {
         for member in members {
             match member {
                 TSSignature::TSPropertySignature(prop) => {
                     if let Some(annotation) = &prop.type_annotation {
-                        self.member_type(&annotation.type_annotation);
+                        self.member_type_in(registry, &annotation.type_annotation);
                     }
                 }
                 TSSignature::TSCallSignatureDeclaration(call_sig) => {
@@ -426,7 +451,7 @@ impl<'a> RoleWalk<'a, '_> {
                     // payload, which runtime codegen never reads.
                     if let Some(first) = call_sig.params.items.first() {
                         if let Some(annotation) = &first.type_annotation {
-                            self.surface_flat(&annotation.type_annotation);
+                            self.surface_flat_in(registry, &annotation.type_annotation);
                         }
                     }
                 }
@@ -441,7 +466,11 @@ impl<'a> RoleWalk<'a, '_> {
     /// Walk a top-level member's value annotation: its root references are
     /// MEMBER tier (constructor inference), local alias chains stay
     /// transparent, and anything deeper is nested (not collected).
-    fn member_type(&mut self, ts_type: &TSType<'a>) {
+    fn member_type_in(
+        &mut self,
+        registry: LocalTypeRegistryView<'program, '_>,
+        ts_type: &TSType<'program>,
+    ) {
         match ts_type {
             TSType::TSTypeReference(type_ref) => {
                 let Some(name) = type_ref_root_name(&type_ref.type_name) else {
@@ -450,19 +479,21 @@ impl<'a> RoleWalk<'a, '_> {
                 self.record(name.clone(), MacroTypeDepUsage::Member);
                 // Type arguments are nested (`foo: Array<X>` — the
                 // constructor derives from the head).
-                self.follow_local_member(&name);
+                self.follow_local_member_in(registry, &name);
             }
             TSType::TSUnionType(union) => {
                 for arm in &union.types {
-                    self.member_type(arm);
+                    self.member_type_in(registry, arm);
                 }
             }
             TSType::TSIntersectionType(intersection) => {
                 for arm in &intersection.types {
-                    self.member_type(arm);
+                    self.member_type_in(registry, arm);
                 }
             }
-            TSType::TSParenthesizedType(paren) => self.member_type(&paren.type_annotation),
+            TSType::TSParenthesizedType(paren) => {
+                self.member_type_in(registry, &paren.type_annotation)
+            }
             TSType::TSTypeQuery(query) => {
                 if let Some(root) = type_query_root_name(&query.expr_name) {
                     self.record(root, MacroTypeDepUsage::ValueQueryMember);
@@ -477,16 +508,24 @@ impl<'a> RoleWalk<'a, '_> {
 
     /// A local ALIAS is transparent for constructor inference; a local
     /// interface / class is an `Object` constructor regardless of its body.
-    fn follow_local_member(&mut self, name: &str) {
-        if !self
-            .visited
-            .insert((name.to_string(), MacroTypeDepUsage::Member))
-        {
+    fn follow_local_member_in(
+        &mut self,
+        registry: LocalTypeRegistryView<'program, '_>,
+        name: &str,
+    ) {
+        let Some((declaration_registry, declaration)) = registry.resolve(name) else {
+            return;
+        };
+        if !self.visited.insert((
+            declaration_registry.scope_owner,
+            name.to_string(),
+            MacroTypeDepUsage::Member,
+        )) {
             return;
         }
-        if let Some(LocalTypeDecl::Alias(aliased)) = self.registry.get(name) {
+        if let LocalTypeDecl::Alias(aliased) = declaration {
             let aliased = *aliased;
-            self.member_type(aliased);
+            self.member_type_in(declaration_registry, aliased);
         }
     }
 }
@@ -810,15 +849,13 @@ fn field_payload_member_lists<'a>(
             }
         }
     }
-    let mut registries = build_local_type_registries(program, owners);
-    let registry = registries.remove(&mac.owner).unwrap_or_default();
-    for decl in registry.into_values() {
-        match decl {
-            LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
-            LocalTypeDecl::Alias(ts_type) => collect_from_type(ts_type, &mut lists),
-            LocalTypeDecl::Class => {}
-        }
-    }
+    let registries = build_local_type_registries(program, owners);
+    let registry = LocalTypeRegistryView::new(&registries, owners, mac.owner);
+    registry.for_each_visible(|decl| match decl {
+        LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
+        LocalTypeDecl::Alias(ts_type) => collect_from_type(ts_type, &mut lists),
+        LocalTypeDecl::Class => {}
+    });
     lists
 }
 
@@ -1168,6 +1205,81 @@ enum LocalTypeDecl<'a> {
     Class,
 }
 
+/// Read-only lexical view over exact-owner local type registries.
+///
+/// The owner maps remain disjoint. Lookup checks the exact owner first, then
+/// the sole validated module parent for an instance owner. An ambiguous parent
+/// produces no second layer, and module/frontmatter owners never see instance
+/// declarations.
+#[derive(Clone, Copy)]
+struct LocalTypeRegistryView<'program, 'registry> {
+    registries: &'registry FxHashMap<TopLevelOwnerId, FxHashMap<String, LocalTypeDecl<'program>>>,
+    owners: &'registry TopLevelOwnerTable,
+    scope_owner: TopLevelOwnerId,
+}
+
+impl<'program, 'registry> LocalTypeRegistryView<'program, 'registry> {
+    fn new(
+        registries: &'registry FxHashMap<
+            TopLevelOwnerId,
+            FxHashMap<String, LocalTypeDecl<'program>>,
+        >,
+        owners: &'registry TopLevelOwnerTable,
+        owner: TopLevelOwnerId,
+    ) -> Self {
+        Self {
+            registries,
+            owners,
+            scope_owner: owner,
+        }
+    }
+
+    fn resolve(self, name: &str) -> Option<(Self, &'registry LocalTypeDecl<'program>)> {
+        for owner in std::iter::once(self.scope_owner)
+            .chain(self.owners.validated_lexical_parent_owner(self.scope_owner))
+        {
+            if let Some(declaration) = self
+                .registries
+                .get(&owner)
+                .and_then(|registry| registry.get(name))
+            {
+                return Some((Self::new(self.registries, self.owners, owner), declaration));
+            }
+        }
+        None
+    }
+
+    fn contains_key(&self, name: &str) -> bool {
+        self.resolve(name).is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        std::iter::once(self.scope_owner)
+            .chain(self.owners.validated_lexical_parent_owner(self.scope_owner))
+            .all(|owner| self.registries.get(&owner).is_none_or(FxHashMap::is_empty))
+    }
+
+    fn for_each_visible(self, mut visit: impl FnMut(&LocalTypeDecl<'program>)) {
+        let local = self.registries.get(&self.scope_owner);
+        if let Some(local) = local {
+            for declaration in local.values() {
+                visit(declaration);
+            }
+        }
+        let parent = self
+            .owners
+            .validated_lexical_parent_owner(self.scope_owner)
+            .and_then(|owner| self.registries.get(&owner));
+        if let Some(parent) = parent {
+            for (name, declaration) in parent {
+                if local.is_none_or(|local| !local.contains_key(name)) {
+                    visit(declaration);
+                }
+            }
+        }
+    }
+}
+
 fn insert_local_type_decl_from_declaration<'a>(
     registry: &mut FxHashMap<String, LocalTypeDecl<'a>>,
     decl: &'a Declaration<'a>,
@@ -1276,7 +1388,7 @@ fn extract_fields_from_interface_body(
 /// declared shape, even if via a local-alias chain).
 fn resolve_type_to_prop_fields(
     ts_type: &TSType<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -1356,8 +1468,8 @@ fn resolve_type_to_prop_fields(
 
             // Look up in local registry
             visited.insert(name.clone());
-            let result = match registry.get(&name) {
-                Some(LocalTypeDecl::Interface { body, extends }) => {
+            let result = match registry.resolve(&name) {
+                Some((declaration_registry, LocalTypeDecl::Interface { body, extends })) => {
                     // Resolve extends chain via direct registry lookup.
                     // Skip unresolvable heritage clauses rather than aborting,
                     // so that successfully-resolved parents and own fields
@@ -1369,13 +1481,15 @@ fn resolve_type_to_prop_fields(
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
                             continue;
                         };
-                        let Some(parent_decl) = registry.get(&parent_name) else {
+                        let Some((parent_registry, parent_decl)) =
+                            declaration_registry.resolve(&parent_name)
+                        else {
                             continue;
                         };
                         let Some(parent_fields) = resolve_interface_decl(
                             &parent_name,
                             parent_decl,
-                            registry,
+                            parent_registry,
                             source,
                             comments,
                             visited,
@@ -1406,16 +1520,18 @@ fn resolve_type_to_prop_fields(
                     }
                     Some(all_fields)
                 }
-                Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_prop_fields(
-                    aliased_type,
-                    registry,
-                    source,
-                    comments,
-                    visited,
-                    declared_in_macro_type_arg,
-                ),
-                Some(LocalTypeDecl::Class) => None, // Unresolvable
-                None => None,                       // Not found locally
+                Some((declaration_registry, LocalTypeDecl::Alias(aliased_type))) => {
+                    resolve_type_to_prop_fields(
+                        aliased_type,
+                        declaration_registry,
+                        source,
+                        comments,
+                        visited,
+                        declared_in_macro_type_arg,
+                    )
+                }
+                Some((_, LocalTypeDecl::Class)) => None, // Unresolvable
+                None => None,                            // Not found locally
             };
             visited.remove(&name);
             result
@@ -1570,9 +1686,10 @@ pub(crate) fn resolve_macro_type_references_with_owners(
         if !mac.is_type_based || mac.type_references.is_empty() {
             continue;
         }
-        let Some(registry) = registries.get(&mac.owner) else {
+        let registry = LocalTypeRegistryView::new(&registries, owners, mac.owner);
+        if registry.is_empty() {
             continue;
-        };
+        }
 
         // Check if any type references are in our registry (need resolution)
         let has_local_refs = mac
@@ -1588,7 +1705,7 @@ pub(crate) fn resolve_macro_type_references_with_owners(
                 resolve_local_define_props(
                     mac,
                     &props_type_params,
-                    &registry,
+                    registry,
                     source,
                     &program.comments,
                 );
@@ -1597,7 +1714,7 @@ pub(crate) fn resolve_macro_type_references_with_owners(
                 resolve_local_define_emits(
                     mac,
                     &emits_type_params,
-                    &registry,
+                    registry,
                     source,
                     &program.comments,
                 );
@@ -1606,7 +1723,7 @@ pub(crate) fn resolve_macro_type_references_with_owners(
                 resolve_local_define_slots(
                     mac,
                     &slots_type_params,
-                    &registry,
+                    registry,
                     source,
                     &program.comments,
                 );
@@ -1620,7 +1737,7 @@ pub(crate) fn resolve_macro_type_references_with_owners(
 fn resolve_local_define_props(
     mac: &mut AnalyzedMacro,
     type_params: &[(u32, &TSType<'_>)],
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
 ) {
@@ -1639,12 +1756,12 @@ fn resolve_local_define_props(
             true,
         ) {
             for type_ref in &direct_local_root_names {
-                if let Some(decl) = registry.get(type_ref.as_str()) {
+                if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
                     visited.clear();
                     if let Some(ref_fields) = resolve_interface_decl(
                         type_ref,
                         decl,
-                        registry,
+                        declaration_registry,
                         source,
                         comments,
                         &mut visited,
@@ -1658,9 +1775,9 @@ fn resolve_local_define_props(
                         };
                         resolved_types.push(ResolvedLocalType {
                             name: type_ref.clone(),
-                            owner: mac.owner,
+                            owner: declaration_registry.scope_owner,
                             expanded,
-                            shape: local_type_ref_shape(type_ref, mac.owner),
+                            shape: local_type_ref_shape(type_ref, declaration_registry.scope_owner),
                             span,
                         });
                     }
@@ -1685,11 +1802,11 @@ fn resolve_local_define_props(
         visited.clear();
         if mac.type_references.len() == 1 {
             let type_ref = &mac.type_references[0];
-            if let Some(decl) = registry.get(type_ref.as_str()) {
+            if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
                 if let Some(fields) = resolve_interface_decl(
                     type_ref,
                     decl,
-                    registry,
+                    declaration_registry,
                     source,
                     comments,
                     &mut visited,
@@ -1703,9 +1820,9 @@ fn resolve_local_define_props(
                     };
                     resolved_types.push(ResolvedLocalType {
                         name: type_ref.clone(),
-                        owner: mac.owner,
+                        owner: declaration_registry.scope_owner,
                         expanded,
-                        shape: local_type_ref_shape(type_ref, mac.owner),
+                        shape: local_type_ref_shape(type_ref, declaration_registry.scope_owner),
                         span,
                     });
                     mac.prop_fields = fields;
@@ -1713,7 +1830,7 @@ fn resolve_local_define_props(
                     visited.clear();
                     if let Some(fields) = resolve_local_decl_own_prop_fields(
                         decl,
-                        registry,
+                        declaration_registry,
                         source,
                         comments,
                         &mut visited,
@@ -1774,7 +1891,7 @@ fn collect_direct_local_macro_root_names(ts_type: &TSType<'_>) -> Vec<String> {
 
 fn resolve_local_decl_own_prop_fields(
     decl: &LocalTypeDecl<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -1801,7 +1918,7 @@ fn resolve_local_decl_own_prop_fields(
 
 fn resolve_type_to_local_own_prop_fields(
     ts_type: &TSType<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -1827,8 +1944,8 @@ fn resolve_type_to_local_own_prop_fields(
             if name.is_empty() || !visited.insert(name.clone()) {
                 return None;
             }
-            let result = match registry.get(&name) {
-                Some(LocalTypeDecl::Interface { body, .. }) => {
+            let result = match registry.resolve(&name) {
+                Some((_, LocalTypeDecl::Interface { body, .. })) => {
                     Some(extract_fields_from_interface_body(
                         body,
                         source,
@@ -1836,15 +1953,17 @@ fn resolve_type_to_local_own_prop_fields(
                         declared_in_macro_type_arg,
                     ))
                 }
-                Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_local_own_prop_fields(
-                    aliased_type,
-                    registry,
-                    source,
-                    comments,
-                    visited,
-                    declared_in_macro_type_arg,
-                ),
-                Some(LocalTypeDecl::Class) | None => None,
+                Some((declaration_registry, LocalTypeDecl::Alias(aliased_type))) => {
+                    resolve_type_to_local_own_prop_fields(
+                        aliased_type,
+                        declaration_registry,
+                        source,
+                        comments,
+                        visited,
+                        declared_in_macro_type_arg,
+                    )
+                }
+                Some((_, LocalTypeDecl::Class)) | None => None,
             };
             visited.remove(&name);
             result
@@ -1878,7 +1997,7 @@ fn resolve_type_to_local_own_prop_fields(
 fn resolve_local_define_emits(
     mac: &mut AnalyzedMacro,
     type_params: &[(u32, &TSType<'_>)],
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
 ) {
@@ -1893,11 +2012,11 @@ fn resolve_local_define_emits(
         }
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
-        if let Some(decl) = registry.get(type_ref.as_str()) {
+        if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
-                registry,
+                declaration_registry,
                 source,
                 comments,
                 &mut visited,
@@ -1913,7 +2032,7 @@ fn resolve_local_define_emits(
 fn resolve_local_define_slots(
     mac: &mut AnalyzedMacro,
     type_params: &[(u32, &TSType<'_>)],
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
 ) {
@@ -1928,11 +2047,11 @@ fn resolve_local_define_slots(
         }
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
-        if let Some(decl) = registry.get(type_ref.as_str()) {
+        if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
-                registry,
+                declaration_registry,
                 source,
                 comments,
                 &mut visited,
@@ -2011,7 +2130,7 @@ fn collect_macro_call_from_expr<'a>(
 fn resolve_interface_decl(
     name: &str,
     decl: &LocalTypeDecl<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -2033,11 +2152,11 @@ fn resolve_interface_decl(
             // unresolvable heritage to preserve own fields.)
             for heritage in *extends {
                 let parent_name = heritage_name(&heritage.expression)?;
-                let parent_decl = registry.get(&parent_name)?;
+                let (parent_registry, parent_decl) = registry.resolve(&parent_name)?;
                 let parent_fields = resolve_interface_decl(
                     &parent_name,
                     parent_decl,
-                    registry,
+                    parent_registry,
                     source,
                     comments,
                     visited,
@@ -2106,7 +2225,7 @@ impl NamedField for AnalyzedSlotField {
 #[allow(clippy::type_complexity)]
 fn resolve_type_to_fields<T: NamedField + Clone>(
     ts_type: &TSType<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -2132,8 +2251,8 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                 }
             }
             visited.insert(name.clone());
-            let result = match registry.get(&name) {
-                Some(LocalTypeDecl::Interface { body, extends }) => {
+            let result = match registry.resolve(&name) {
+                Some((declaration_registry, LocalTypeDecl::Interface { body, extends })) => {
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
                     let own_fields = extract_from_members(&body.body, source, comments);
@@ -2146,13 +2265,15 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
                             continue;
                         };
-                        let Some(parent_decl) = registry.get(&parent_name) else {
+                        let Some((parent_registry, parent_decl)) =
+                            declaration_registry.resolve(&parent_name)
+                        else {
                             continue;
                         };
                         let Some(parent_fields) = resolve_interface_decl_generic(
                             &parent_name,
                             parent_decl,
-                            registry,
+                            parent_registry,
                             source,
                             comments,
                             visited,
@@ -2168,15 +2289,17 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                     }
                     Some(all_fields)
                 }
-                Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_fields(
-                    aliased_type,
-                    registry,
-                    source,
-                    comments,
-                    visited,
-                    extract_from_members,
-                ),
-                Some(LocalTypeDecl::Class) | None => None,
+                Some((declaration_registry, LocalTypeDecl::Alias(aliased_type))) => {
+                    resolve_type_to_fields(
+                        aliased_type,
+                        declaration_registry,
+                        source,
+                        comments,
+                        visited,
+                        extract_from_members,
+                    )
+                }
+                Some((_, LocalTypeDecl::Class)) | None => None,
             };
             visited.remove(&name);
             result
@@ -2211,7 +2334,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
 fn resolve_interface_decl_generic<T: NamedField + Clone>(
     name: &str,
     decl: &LocalTypeDecl<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -2235,13 +2358,13 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
                 let Some(parent_name) = heritage_name(&heritage.expression) else {
                     continue;
                 };
-                let Some(parent_decl) = registry.get(&parent_name) else {
+                let Some((parent_registry, parent_decl)) = registry.resolve(&parent_name) else {
                     continue;
                 };
                 let Some(parent_fields) = resolve_interface_decl_generic(
                     &parent_name,
                     parent_decl,
-                    registry,
+                    parent_registry,
                     source,
                     comments,
                     visited,
@@ -2274,7 +2397,7 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
 /// Resolve emit fields from a TSType using the shared generic resolver.
 fn resolve_type_to_emit_fields(
     ts_type: &TSType<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
@@ -2292,7 +2415,7 @@ fn resolve_type_to_emit_fields(
 /// Resolve slot fields from a TSType using the shared generic resolver.
 fn resolve_type_to_slot_fields(
     ts_type: &TSType<'_>,
-    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,

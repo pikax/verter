@@ -292,7 +292,8 @@ pub(crate) struct ClassifiedDependencyPaths {
     pub(crate) unroutable_imports: Vec<String>,
 }
 
-enum LexicalValueBinding<'a> {
+#[derive(Clone, Copy)]
+pub(crate) enum LexicalValueBinding<'a> {
     Import(&'a ImportTarget),
     Local(TopLevelOwnerId),
 }
@@ -1271,20 +1272,16 @@ impl ShallowFileState {
         &self,
         owner: TopLevelOwnerId,
     ) -> Option<TopLevelOwnerId> {
-        (owner.kind() == verter_type_expr::TopLevelOwnerKind::Instance)
-            .then(|| {
-                self.decl_bodies
-                    .owner_table()
-                    .unique_owner_of_kind(verter_type_expr::TopLevelOwnerKind::Module)
-            })
-            .flatten()
+        self.decl_bodies
+            .owner_table()
+            .validated_lexical_parent_owner(owner)
     }
 
     fn lexical_owner_chain(&self, owner: TopLevelOwnerId) -> impl Iterator<Item = TopLevelOwnerId> {
         std::iter::once(owner).chain(self.validated_lexical_parent_owner(owner))
     }
 
-    fn visible_value_binding(
+    pub(crate) fn visible_value_binding(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -1296,8 +1293,32 @@ impl ShallowFileState {
             {
                 return Some(LexicalValueBinding::Import(target));
             }
-            if self.has_value_symbol_in(candidate, name) {
+            if self.effective_value_header_present_in(candidate, name) {
                 return Some(LexicalValueBinding::Local(candidate));
+            }
+        }
+        None
+    }
+
+    /// Exact declaration owner of the first visible local TYPE binding.
+    ///
+    /// Imports shadow parent declarations in the same lexical lookup, while
+    /// instance-to-module visibility is admitted only by the validated
+    /// one-way parent relation.
+    pub(crate) fn visible_local_type_owner(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<TopLevelOwnerId> {
+        for candidate in self.lexical_owner_chain(owner) {
+            if self
+                .owner_import_targets
+                .contains_key(&DeclKey::new(candidate, name))
+            {
+                return None;
+            }
+            if self.effective_type_header_present_in(candidate, name) {
+                return Some(candidate);
             }
         }
         None

@@ -8707,7 +8707,11 @@ export const defaults: Props = { label: 'ok' }
     );
 
     let prepared_value = host
-        .prepared_value_decl("/src/types.ts", "defaults")
+        .prepared_value_decl_in(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "defaults",
+        )
         .expect("prepared value decl should materialize on demand");
     let annotation_source = prepared_value
         .type_annotation
@@ -8738,8 +8742,12 @@ export const defaults: Props = { label: 'ok' }
         "on-demand prepared type materialization should be available through the bundle cache",
     );
     assert!(
-        host.prepared_value_decl("/src/types.ts", "defaults")
-            .is_some(),
+        host.prepared_value_decl_in(
+            "/src/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "defaults",
+        )
+        .is_some(),
         "on-demand prepared value materialization should be available through the bundle cache",
     );
 

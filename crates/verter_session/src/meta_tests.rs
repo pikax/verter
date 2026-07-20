@@ -5416,6 +5416,55 @@ defineExpose({ shown })
 }
 
 #[test]
+fn evaluate_types_expose_bindings_follow_validated_owner_visibility() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OwnerBindings.vue",
+            r#"<script lang="ts">
+const shared: string = 'module'
+const moduleOnly: boolean = true
+</script>
+
+<script setup lang="ts">
+const shared: number = 1
+defineExpose({ shared, moduleOnly })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let evaluated = project
+        .host()
+        .evaluate_types("/OwnerBindings.vue")
+        .expect("evaluated types should exist");
+    let binding_type = |name: &str| {
+        let field = evaluated
+            .bindings
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("missing exposed binding {name}"));
+        crate::test_only::semantic_source_probe::demand_type_expr(
+            project.host(),
+            "/OwnerBindings.vue",
+            field.r#type.present().expect("present binding source"),
+        )
+        .unwrap_or_else(|| panic!("binding {name} must demand-materialize"))
+    };
+
+    assert_eq!(
+        binding_type("shared"),
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the setup-local binding shadows the same-name module binding"
+    );
+    assert_eq!(
+        binding_type("moduleOnly"),
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "an instance exposure may see its sole validated module parent"
+    );
+}
+
+#[test]
 fn get_component_meta_resolves_workspace_only_barrel_dependencies_for_define_props() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -16613,7 +16662,11 @@ defineSlots<ButtonSlots>()
 
     let theme = project
         .host()
-        .prepared_value_decl("/src/theme.ts", "theme")
+        .prepared_value_decl_in(
+            "/src/theme.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "theme",
+        )
         .expect("theme should have a prepared value declaration");
     assert!(
         theme.type_annotation.classification

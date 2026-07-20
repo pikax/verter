@@ -4751,6 +4751,15 @@ pub enum FieldKind {
     Binding,
 }
 
+/// Exact local value declaration selected for a requested `defineExpose`
+/// binding. The declaration owner is carried separately from the published
+/// name so same-name module/setup bindings cannot alias during expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingExpansionEntry {
+    pub name: String,
+    pub owner: TopLevelOwnerId,
+}
+
 /// Path segment for [`FieldExpansionContext::output_path`] — a path from
 /// the parent macro shell (e.g. `Props<T>`) to the specific field the
 /// closure is being invoked for. The session-side closure converts this
@@ -4791,13 +4800,14 @@ pub enum PathSegment {
 pub struct FieldExpansionContext {
     pub kind: FieldKind,
     pub macro_index: usize,
+    pub scope_owner: TopLevelOwnerId,
     pub output_path: std::sync::Arc<[PathSegment]>,
 }
 
 pub fn expand_macro_types_impl_with_expander<F>(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
-    binding_entries: &[String],
+    binding_entries: &[BindingExpansionEntry],
     debug_env: Option<&mut EvalEnv>,
     scope: MacroExpansionScope,
     mut expand_field_expr: F,
@@ -4849,6 +4859,7 @@ where
                     let ctx = FieldExpansionContext {
                         kind: FieldKind::Prop,
                         macro_index,
+                        scope_owner: m.owner,
                         output_path: std::sync::Arc::from(vec![PathSegment::Member(
                             std::sync::Arc::from(field.name.as_str()),
                         )]),
@@ -4904,6 +4915,7 @@ where
                     let ctx = FieldExpansionContext {
                         kind: FieldKind::Emit,
                         macro_index,
+                        scope_owner: m.owner,
                         output_path: std::sync::Arc::from(vec![PathSegment::Member(
                             std::sync::Arc::from(field.name.as_str()),
                         )]),
@@ -4969,6 +4981,7 @@ where
                             let ctx = FieldExpansionContext {
                                 kind: FieldKind::SlotBinding,
                                 macro_index,
+                                scope_owner: m.owner,
                                 output_path: std::sync::Arc::from(vec![
                                     PathSegment::Member(std::sync::Arc::from(slot.name.as_str())),
                                     PathSegment::Member(std::sync::Arc::from(
@@ -5018,7 +5031,8 @@ where
 
     // Expose/value binding expansion is not needed for fallthrough-only meta.
     if scope == MacroExpansionScope::Full {
-        for name in binding_entries {
+        for entry in binding_entries {
+            let name = &entry.name;
             let item_started = Instant::now();
             let stage_log = ExpandStageLog {
                 macro_index: usize::MAX,
@@ -5039,6 +5053,7 @@ where
             let ctx = FieldExpansionContext {
                 kind: FieldKind::Binding,
                 macro_index: usize::MAX,
+                scope_owner: entry.owner,
                 output_path: std::sync::Arc::from(vec![PathSegment::Member(std::sync::Arc::from(
                     name.as_str(),
                 ))]),

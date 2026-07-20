@@ -2581,6 +2581,68 @@ const instanceProps = defineProps<Props>();
 }
 
 #[test]
+fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let analyze = |source: &str, statement_owners: &[TopLevelOwnerId]| {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(!parsed.panicked, "fixture must parse");
+        let owners = TopLevelOwnerTable::try_from_statement_owners(
+            parsed.program.body.len(),
+            statement_owners.iter().copied(),
+        )
+        .expect("validated owner table");
+        build_script_analysis_with_scope_from_program_with_owners(
+            source,
+            SourceType::ts(),
+            &parsed.program,
+            AnalysisScope::all(),
+            &owners,
+        )
+    };
+
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let inherited = analyze(
+        "interface Shared { moduleNested: string }\ninterface Props extends Shared { moduleOnly: string }\ninterface Shared { instanceNested: number }\nconst props = defineProps<Props>();",
+        &[module, module, instance, instance],
+    );
+    assert_eq!(
+        inherited.macros[0]
+            .prop_fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["moduleNested", "moduleOnly"],
+        "an instance macro sees its sole validated module parent, while the module declaration's own dependencies stay in module scope"
+    );
+    assert_eq!(inherited.macros[0].resolved_local_types[0].owner, module);
+
+    let reverse = analyze(
+        "const props = defineProps<Props>();\ninterface Props { instanceOnly: number }",
+        &[module, instance],
+    );
+    assert!(
+        reverse.macros[0].prop_fields.is_empty(),
+        "module scope must never see an instance declaration"
+    );
+
+    let ambiguous = analyze(
+        "interface Props { first: string }\ntype Other = number;\nconst props = defineProps<Props>();",
+        &[module, TopLevelOwnerId::module(1), instance],
+    );
+    assert!(
+        ambiguous.macros[0].prop_fields.is_empty(),
+        "an instance with multiple module owners has no inferred parent"
+    );
+}
+
+#[test]
 fn stable_declaration_id_discriminates_top_level_owner() {
     use verter_type_expr::TopLevelOwnerId;
 

@@ -1281,18 +1281,6 @@ impl VerterHost {
         bundle.prepared_type_decls.get_in(owner, symbol_name)
     }
 
-    pub(crate) fn prepared_value_decl(
-        &self,
-        canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        self.prepared_value_decl_in(
-            canonical_id,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol_name,
-        )
-    }
-
     pub(crate) fn prepared_value_decl_in(
         &self,
         canonical_id: &str,

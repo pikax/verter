@@ -26,13 +26,19 @@ pub use native_props::{NativePropProjectionCache, ResolvedNativeProp, ResolvedNa
 pub use cold_resolver::resolve_component_meta_parts;
 pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
 
-/// Collect the set of binding names exposed by macros (e.g., `defineExpose` fields).
-/// Used as a filter for which `env.value_symbols` entries to expand as bindings
-/// during `expand_macro_types`.
-pub fn collect_requested_binding_names(macros: &[AnalyzedMacro]) -> FxHashSet<String> {
+/// Collect owner-qualified lexical demands for bindings exposed by macros.
+/// The owner is the `defineExpose` use scope; admission resolves it to the
+/// exact visible declaration owner before expansion.
+pub fn collect_requested_binding_demands(
+    macros: &[AnalyzedMacro],
+) -> BTreeSet<verter_type_expr::DeclKey> {
     macros
         .iter()
-        .flat_map(|mac| mac.expose_fields.iter().map(|field| field.name.clone()))
+        .flat_map(|mac| {
+            mac.expose_fields
+                .iter()
+                .map(|field| verter_type_expr::DeclKey::new(mac.owner, field.name.as_str()))
+        })
         .collect()
 }
 
