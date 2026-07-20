@@ -228,7 +228,7 @@ pub(super) fn collect_invalid_macro_type_diagnostics(prepared: &PreparedScript) 
 
 // ── Macro scope-reference validation ──────────────────────────────────────
 
-use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey, Statement};
+use oxc_ast::ast::{BindingPattern, Expression, ObjectPropertyKind, PropertyKey, Statement};
 use rustc_hash::FxHashMap;
 
 use crate::template::code_gen::binding::BindingType;
@@ -304,6 +304,22 @@ pub(super) fn collect_invalid_options_scope_diagnostics(
                 for declarator in &decl.declarations {
                     if let Some(Expression::CallExpression(call)) = &declarator.init {
                         check_macro_call(call, &binding_types, content_str, &mut diagnostics);
+                        // A `defineProps` / `withDefaults` destructure declaration
+                        // (`const { x = <default> } = defineProps(...)`) hoists its
+                        // default expressions with the props runtime decl, so a
+                        // default referencing a setup-local is rejected under
+                        // `defineProps()` — official
+                        // `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`.
+                        if let Expression::Identifier(callee) = &call.callee {
+                            if matches!(callee.name.as_str(), "defineProps" | "withDefaults") {
+                                check_destructure_pattern_defaults(
+                                    &declarator.id,
+                                    &binding_types,
+                                    content_str,
+                                    &mut diagnostics,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -370,6 +386,80 @@ fn check_macro_call(
             }
         }
         _ => {}
+    }
+}
+
+/// Scope-check the default expressions of a `defineProps` / `withDefaults`
+/// destructure pattern.
+///
+/// A destructure declaration's defaults (`const { x = <default>, y: z = <default> }
+/// = defineProps(...)`) are hoisted with the props runtime decl (the
+/// `mergeDefaults` merge), so a default that references a setup-local breaks at
+/// runtime. Official records the whole destructure declaration
+/// (`ctx.propsDestructureDecl`) and runs
+/// `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`;
+/// `walkIdentifiers` flags only the REFERENCED identifiers — the `right` side of
+/// each `AssignmentPattern` default — never the destructured binding targets /
+/// aliases (`walkDeclaration` does not register a props destructure's names in
+/// `setupBindings`). This mirrors that exactly: every default `right` expression
+/// is scope-checked under `defineProps`, while binding targets are only recursed
+/// through to reach further nested defaults. DIAGNOSTIC ONLY — the
+/// reactive-destructure `_mergeDefaults` / `__props` runtime transform is a
+/// separate concern and is intentionally NOT implemented here.
+fn check_destructure_pattern_defaults(
+    pattern: &BindingPattern,
+    binding_types: &FxHashMap<&str, BindingType>,
+    content_str: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match pattern {
+        BindingPattern::BindingIdentifier(_) => {}
+        BindingPattern::AssignmentPattern(assign) => {
+            check_scope_references(
+                &assign.right,
+                "defineProps",
+                binding_types,
+                content_str,
+                diagnostics,
+            );
+            check_destructure_pattern_defaults(
+                &assign.left,
+                binding_types,
+                content_str,
+                diagnostics,
+            );
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                check_destructure_pattern_defaults(
+                    &prop.value,
+                    binding_types,
+                    content_str,
+                    diagnostics,
+                );
+            }
+            if let Some(rest) = &obj.rest {
+                check_destructure_pattern_defaults(
+                    &rest.argument,
+                    binding_types,
+                    content_str,
+                    diagnostics,
+                );
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                check_destructure_pattern_defaults(elem, binding_types, content_str, diagnostics);
+            }
+            if let Some(rest) = &arr.rest {
+                check_destructure_pattern_defaults(
+                    &rest.argument,
+                    binding_types,
+                    content_str,
+                    diagnostics,
+                );
+            }
+        }
     }
 }
 

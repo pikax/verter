@@ -17109,6 +17109,125 @@ fn with_defaults_local_ref_default_is_compile_error() {
 }
 
 // =========================================================================
+// R7-2 — defineProps / withDefaults destructure-pattern default scope-check
+// =========================================================================
+//
+// Official runs `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`:
+// a destructure declaration's default expressions are hoisted with the props
+// runtime decl (the `mergeDefaults` merge), so a default referencing a
+// setup-local breaks at runtime and is rejected under `defineProps()`. The
+// destructured binding NAMES are NOT registered as setup-locals for a props
+// destructure (official's `walkDeclaration` skips them), so only the default
+// `right` expressions can trigger the error — never the destructure targets /
+// aliases. DIAGNOSTIC ONLY: the reactive-destructure `_mergeDefaults`/`__props`
+// runtime transform is a separate concern and is intentionally NOT implemented
+// here.
+
+#[test]
+fn define_props_destructure_default_setup_local_is_compile_error() {
+    // R7-2 defect: `const { x = dft }` where `dft` is a setup-local. The default
+    // is hoisted → official rejects; Verter accepted (never walked the pattern).
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x = dft } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "defineProps destructure default referencing a setup-local must be rejected (official), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_alias_default_setup_local_is_compile_error() {
+    // Aliased form `{ x: y = dft }` — the default `dft` is still hoisted; the
+    // alias local `y` is a binding target (never flagged), `dft` is the
+    // setup-local that must be rejected.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x: y = dft } = defineProps({ x: Number })\n</script>\n<template><div>{{ y }}</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "aliased defineProps destructure default referencing a setup-local must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn with_defaults_destructure_default_setup_local_is_compile_error() {
+    // The same rule applies to a destructure over `withDefaults(...)` — official
+    // still records the destructure decl and reports under `defineProps()`.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst dft = ref('x')\nconst { x = dft } = withDefaults(defineProps<{ x?: string }>(), {})\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "withDefaults destructure default referencing a setup-local must be rejected, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_default_import_stays_valid() {
+    // An imported default is module-scope — valid (never hoisted out of reach).
+    let result = compile_sfc(
+        "<script setup>\nimport { someImport } from './defs'\nconst { x = someImport } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineProps destructure default referencing an import must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_default_literal_stays_valid() {
+    // A literal default carries no free reference — valid.
+    let result = compile_sfc(
+        "<script setup>\nconst { x = 1 } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineProps destructure literal default must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn define_props_destructure_default_function_scope_local_stays_valid() {
+    // A local declared INSIDE a default factory function body is function-scope,
+    // not a setup-local — valid, exactly as for the runtime-object default path.
+    let result = compile_sfc(
+        "<script setup>\nconst { x = () => { const a = 1; return a } } = defineProps({ x: Number })\n</script>\n<template><div>{{ x }}</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "defineProps destructure default factory with only a function-scope local must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
 // FIX4 — inline setup destructure order: expose, emit, attrs, slots
 // =========================================================================
 
