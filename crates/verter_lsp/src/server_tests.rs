@@ -26199,3 +26199,84 @@ async fn t3_get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
         arrived.duration_since(stats_sent)
     );
 }
+
+// ===========================================================================
+// B12 (former B13) — definition-latency freshness gate.
+//
+// Every go-to-definition re-pushed byte-identical carrier companions
+// (`.vue.tsx` + `.vue.ts`) as full-text didChange, bumping the LSP version and
+// invalidating the engine's whole program → a project-scale re-check on the
+// next query. The byte-equality no-op gate in ProjectSync makes the steady-state
+// definition path emit ZERO redundant sync.
+// ===========================================================================
+
+/// The SECOND identical go-to-definition on an unchanged document must perform
+/// ZERO carrier-companion `update_file` / `open_file` / `load_file` — the
+/// byte-equality gate skips the redundant didChange. Fails pre-fix (it re-synced
+/// every imported carrier on every request). Uses Tsgo so the DirectOpen arm
+/// actually delivers companion content (tsserver suppresses it entirely).
+#[tokio::test]
+async fn definition_second_identical_request_performs_zero_carrier_resync() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+    // Warm request: opens + syncs the carrier companions into the provider.
+    let first = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("first goto definition succeeds")
+        .expect("component event resolves on the first request");
+    assert!(
+        !definition_locations(first).is_empty(),
+        "the warm request must resolve to the child defineEmits"
+    );
+
+    // Count carrier-sync verbs performed by the SECOND identical request only.
+    let is_sync_verb = |c: &MockCall| {
+        matches!(
+            c,
+            MockCall::OpenFile { .. } | MockCall::UpdateFile { .. } | MockCall::LoadFile { .. }
+        )
+    };
+    let before = provider.calls().iter().filter(|c| is_sync_verb(c)).count();
+
+    let second = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("second goto definition succeeds")
+        .expect("component event still resolves on the repeat request");
+    assert!(
+        !definition_locations(second).is_empty(),
+        "the freshness gate must not change the answer"
+    );
+
+    let after = provider.calls().iter().filter(|c| is_sync_verb(c)).count();
+    let new_syncs: Vec<_> = provider
+        .calls()
+        .into_iter()
+        .filter(|c| is_sync_verb(c))
+        .skip(before)
+        .collect();
+    assert_eq!(
+        after - before,
+        0,
+        "the second identical definition must re-push ZERO carrier companions \
+         (byte-identical didChange invalidates the engine program); got: {new_syncs:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}

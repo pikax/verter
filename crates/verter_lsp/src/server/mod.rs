@@ -407,6 +407,19 @@ pub struct VerterLanguageServer {
     /// document instance that initiated stale work.
     ide_sync_open_generations: Arc<DashMap<String, u64>>,
     ide_sync_next_generation: std::sync::atomic::AtomicU64,
+    /// Per-document import-set sync memo (former B13). Records the workspace
+    /// `(content_generation, resolver_snapshot_generation)` after a successful
+    /// imported-carrier + barrel preamble, so a go-to-definition storm on an
+    /// unchanged document skips the per-request import-graph BFS re-walk +
+    /// carrier gateway reconcile entirely. Both generations are safe superset
+    /// signals: ANY content edit (this doc OR a dependency) bumps
+    /// `content_generation`, and any resolver re-publish bumps the snapshot
+    /// generation, so a stale skip is impossible.
+    import_sync_memo: Arc<DashMap<String, (u64, u64)>>,
+    /// Per-document singleflight for the import-set preamble: concurrent
+    /// definition/completion requests on one document coalesce onto ONE pass
+    /// instead of stampeding duplicate syncs of shared UI-kit carriers.
+    import_sync_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     #[cfg(test)]
     ide_sync_before_lease_pause: parking_lot::Mutex<Option<IdeSyncPausePoint>>,
     #[cfg(test)]
@@ -978,6 +991,8 @@ impl VerterLanguageServer {
             ide_sync_repair_locks,
             ide_sync_open_generations,
             ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
+            import_sync_memo: Arc::new(DashMap::new()),
+            import_sync_locks: Arc::new(DashMap::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]

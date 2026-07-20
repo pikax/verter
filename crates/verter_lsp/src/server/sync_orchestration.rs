@@ -1404,8 +1404,70 @@ impl VerterLanguageServer {
     /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
     pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
         self.ensure_current_file_synced(uri).await;
+        self.ensure_imported_carriers_synced_memoized(uri).await;
+    }
+
+    /// The current-file leg's imported-carrier + barrel preamble, wrapped in a
+    /// per-document singleflight + freshness memo (former B13). A go-to-definition
+    /// storm on an UNCHANGED document paid a full import-graph BFS re-walk + carrier
+    /// gateway reconcile on EVERY request; this skips both entirely when nothing
+    /// that could change the resolved import set has advanced since the last pass.
+    ///
+    /// The memo key is the workspace `(content_generation, snapshot_generation)`:
+    /// ANY content edit (this document OR a dependency carrier) bumps
+    /// `content_generation`, and any resolver re-publish (ownership/route change)
+    /// bumps the snapshot generation. Both are supersets of "the import set could
+    /// have changed", so a warm skip can never strand a stale carrier — a real edit
+    /// always misses the memo and re-runs the preamble (whose byte-equality gate
+    /// then re-syncs exactly the changed companions).
+    pub(super) async fn ensure_imported_carriers_synced_memoized(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            self.ensure_imported_carrier_apis_synced(uri).await;
+            self.ensure_barrel_imports_synced(uri).await;
+            return;
+        };
+
+        // Singleflight: coalesce a concurrent request storm on this document onto
+        // ONE import-set pass. A tokio `Mutex` is fair (FIFO) and cancel-safe, so a
+        // storm cannot starve or wedge; a follower that acquires it after the leader
+        // finished sees a fresh memo and returns without re-walking.
+        let lock = self
+            .import_sync_locks
+            .entry(canonical_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        let key = self.import_sync_freshness_key();
+        if let Some(key) = key {
+            if self.import_sync_memo.get(&canonical_id).map(|entry| *entry) == Some(key) {
+                return; // The import set was already synced at this generation.
+            }
+        }
+
         self.ensure_imported_carrier_apis_synced(uri).await;
         self.ensure_barrel_imports_synced(uri).await;
+
+        // Publish the memo only when the whole preamble ran under a stable key —
+        // never warm a torn generation.
+        if let Some(key) = key {
+            if self.import_sync_freshness_key() == Some(key) {
+                self.import_sync_memo.insert(canonical_id, key);
+            }
+        }
+    }
+
+    /// The workspace `(content_generation, resolver_snapshot_generation)` pair that
+    /// keys the import-set freshness memo. `None` when no published resolver exists
+    /// yet (bootstrap) — the caller then never memoizes and always runs the preamble.
+    fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
+        let content_generation = self.documents.host().workspace_read().content_generation();
+        let snapshot_generation = {
+            let ws = self.vfs_workspace.read();
+            let ws = ws.as_ref()?;
+            ws.load_published()?.snapshot.generation.0
+        };
+        Some((content_generation, snapshot_generation))
     }
 
     pub(super) async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) {
