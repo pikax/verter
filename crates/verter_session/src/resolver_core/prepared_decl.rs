@@ -688,6 +688,20 @@ fn insert_file_symbol_resolutions(
             ResolvedRootIdentity::new_in_owner(Arc::clone(canonical_id), owner, name),
         );
     }
+    // Eager framework-synthesised values (the Vue public-instance `default`)
+    // are not parser headers, but they are exact owner-qualified local value
+    // declarations. Admit their recorded keys into the same local namespace;
+    // never remap them to the ordinary owner or recover them by name.
+    for (key, _) in state.synthesised_value_bodies() {
+        if key.owner != owner {
+            continue;
+        }
+        let name = interner.intern(key.name.as_ref());
+        table.insert(
+            Arc::clone(&name),
+            ResolvedRootIdentity::new_in_owner(Arc::clone(canonical_id), owner, name),
+        );
+    }
 }
 
 /// Insert only import identities whose exact owner was canonicalized.
@@ -816,8 +830,17 @@ fn insert_value_space_import_resolutions(
     import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
 ) -> Result<(), PreparationFailure> {
-    for (local, _target) in state.owner_import_targets.iter() {
+    for (local, target) in state.owner_import_targets.iter() {
         if local.owner != owner {
+            continue;
+        }
+        // A bare namespace import is not a declaration identity: only an
+        // exact qualified member (`Ns.Member`) can be routed to a defining
+        // owner. Qualified resolution is owned by the namespace-member facts
+        // path, so the shared value-name base must neither invent a `*`
+        // declaration nor let this unrelated non-canonicalizable binding make
+        // every local value declaration in the owner unavailable.
+        if target.is_namespace {
             continue;
         }
         let local_name = local.name.as_ref();
@@ -1671,14 +1694,16 @@ pub fn build_prepared_decl_bundle(
             .scope_value_names
             .insert(key.name.to_string());
     }
-    // Synthesised value declarations are ordinary-file declarations and do
-    // not live in the parser header table.
-    for name in state.value_symbol_names() {
+    // Synthesised value declarations do not live in the parser header table.
+    // Preserve the exact producer-owned key: a Vue public-instance `default`
+    // belongs to Instance(0), while an ordinary synthesized declaration may
+    // legitimately belong to Module(0).
+    for (key, _) in state.synthesised_value_bodies() {
         owner_scopes
-            .entry(TopLevelOwnerId::ordinary_file())
+            .entry(key.owner)
             .or_default()
             .scope_value_names
-            .insert(name.to_string());
+            .insert(key.name.to_string());
     }
 
     // Build import bindings from the authoritative owner-qualified import
@@ -1805,6 +1830,7 @@ pub fn build_prepared_value_decl_cache(
         .keys()
         .filter(|key| !state.is_import_local_in(key.owner, key.name.as_ref()))
         .cloned()
+        .chain(state.synthesised_value_bodies().map(|(key, _)| key.clone()))
         .map(|key| (key, Arc::new(PreparedDeclSlot::new())))
         .collect();
     let name_resolution_bases = slots

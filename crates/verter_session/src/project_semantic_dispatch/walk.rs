@@ -2857,14 +2857,42 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     .intern_preserving_scope(value, SemanticNodeData::DeclRef { identity })
             }
             MemberShape::InstanceTypeOf(value_root) => {
-                let Some((dep_canonical, exported)) =
-                    self.dispatch.ctx.resolve_owner_direct_import(
-                        value_root.scope.canonical_id.as_ref(),
-                        value_root.name.as_ref(),
-                    )
+                // `typeof` preserves the exact declaration owner that authored
+                // the value root. Resolve the matching import from that owner's
+                // authoritative shallow table; the compatibility
+                // `resolve_owner_direct_import` surface is name-only and can
+                // select a sibling script/setup binding with the same local
+                // spelling. An absent exact binding is a fail-closed carrier,
+                // never permission to scan another owner.
+                let Some(owner_serve) = self
+                    .dispatch
+                    .ctx
+                    .ensure_indexed_ready_serve(value_root.scope.canonical_id.as_ref())
                 else {
                     return value;
                 };
+                let Some(import_target) = owner_serve
+                    .indexed
+                    .shallow_state
+                    .import_target_in(value_root.scope.owner, value_root.name.as_ref())
+                else {
+                    return value;
+                };
+                if import_target.is_namespace {
+                    return value;
+                }
+                let dep_canonical = if import_target.canonical_id.is_empty() {
+                    let Some(canonical) = self.dispatch.ctx.resolve_type_dependency_canonical(
+                        value_root.scope.canonical_id.as_ref(),
+                        &import_target.source_specifier,
+                    ) else {
+                        return value;
+                    };
+                    canonical
+                } else {
+                    import_target.canonical_id.clone()
+                };
+                let exported = import_target.imported_name.clone();
                 let Some(serve) = self
                     .dispatch
                     .ctx

@@ -1066,6 +1066,19 @@ impl ShallowFileState {
             .then_some(key)
     }
 
+    /// Exact top-level owner used by compatibility queries that cannot carry
+    /// an owner coordinate themselves.
+    ///
+    /// A framework component's synthesized `default` export is the producer
+    /// fact naming its semantic instance owner. Ordinary files (and component
+    /// files without that synthesized route) retain the historical Module(0)
+    /// owner. This chooses an owner before declaration lookup; it never scans
+    /// same-name declarations in another owner.
+    pub(crate) fn default_semantic_owner(&self) -> TopLevelOwnerId {
+        self.synthesised_export_decl_key("default")
+            .map_or_else(TopLevelOwnerId::ordinary_file, |key| key.owner)
+    }
+
     /// The lazy declaration-body memo this state reads from (the body
     /// authority for this content generation).
     pub fn decl_bodies(&self) -> &Arc<crate::decl_body_memo::DeclBodyMemo> {

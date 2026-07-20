@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -31,6 +32,12 @@ impl VerterHost {
     /// Thin wrapper over [`Self::resolve_shallow_surface_for`] — the historical
     /// `(canonical, name)` accessor preserved for the many existing callers
     /// that always want full metadata.
+    ///
+    /// Because this compatibility request has no owner coordinate, framework
+    /// component files use their synthesized `default` export fact to select
+    /// the exact semantic instance owner before resolving `name`; ordinary
+    /// files retain the ordinary module owner. Resolution never retries a
+    /// same-name declaration in another owner.
     ///
     /// Runs the empty-path `Shallow` projection on the declaration carrier and
     /// projects the resulting object surface. Returns `None` when the symbol
@@ -67,6 +74,11 @@ impl VerterHost {
     /// instance surface (`$props`/`$emit`/`$slots`), resolved via
     /// [`crate::VerterHost::resolve_vue_public_type`], not a user-named
     /// declaration reached through this path.
+    ///
+    /// [`ShallowSurfaceRequest`] does not carry an owner coordinate. Its
+    /// declaration scope is therefore selected from the file's exact
+    /// synthesized-default owner fact for framework components, or the
+    /// ordinary module owner otherwise; there is no cross-owner name fallback.
     #[must_use]
     pub fn resolve_shallow_surface_for(
         &self,
@@ -82,6 +94,9 @@ impl VerterHost {
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let default_owner = host_ctx
+            .shallow_file_state(request.canonical_id.as_ref())?
+            .default_semantic_owner();
 
         // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a
         // pre-instantiated body. The empty-path Shallow synthesiser's decl-root
@@ -90,7 +105,7 @@ impl VerterHost {
         let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::clone(&request.canonical_id),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner: default_owner,
                 local_scope: None,
             },
             name: Arc::clone(&request.name),
