@@ -957,6 +957,47 @@ fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
 }
 
 /// When hovering on a template element tag name, show matching CSS rules with specificity.
+/// CSS-ONLY hover: class-token rule hover (template attr entries + markup
+/// class tokens) and the native style-block hover. Served even when the
+/// editor owns carrier-source TS features — CSS-native results have no TS
+/// correlate, so the editor's TS plugin can never own them.
+pub fn css_only_hover_at_position(
+    position: &Position,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    line_index: &LineIndex,
+) -> Option<Hover> {
+    let analysis = analysis?;
+    let offset = line_index.position_to_offset(position)? as usize;
+
+    let in_style = blocks.iter().any(|b| {
+        b.tag_name == "style" && {
+            let (cs, ce) = b.content_range();
+            offset >= cs as usize && offset < ce as usize
+        }
+    });
+    if in_style {
+        return crate::css::css_hover(position, source, blocks, Some(analysis), line_index);
+    }
+
+    if let Some(template) = analysis.template.as_deref() {
+        if let Some((crate::features::references::CssRefTarget::Class(name), element_idx)) =
+            crate::features::references::find_css_target_in_template_refs_with_element(
+                offset, source, template,
+            )
+        {
+            return class_css_rule_hover(&name, Some((element_idx, template)), source, analysis);
+        }
+    }
+
+    if let Some(token) = crate::features::references::markup_class_token_at(offset, analysis) {
+        return class_css_rule_hover(&token.name.clone(), None, source, analysis);
+    }
+
+    None
+}
+
 /// Hover for a markup class token: render every CSS rule declaring the class
 /// (Volar-style `selector { declarations }` blocks), hierarchy-ranked against
 /// the origin element. Returns `None` when no rule declares the class.

@@ -214,6 +214,19 @@ fn css_references_at_position(
     }
 }
 
+/// CSS-ONLY references entry (same-file): exactly the css class/id leg.
+/// Served even when the editor owns carrier-source TS features — CSS-native
+/// results have no TS correlate.
+pub(crate) fn css_only_references_at_position(
+    offset: usize,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: &FileAnalysisSnapshot,
+    line_index: &LineIndex,
+) -> Option<Vec<Location>> {
+    css_references_at_position(offset, source, blocks, analysis, line_index)
+}
+
 /// The markup class token at `offset`, for carriers WITHOUT a template
 /// element IR (Svelte `class="x"` entries and `class:x` directives).
 pub(crate) fn markup_class_token_at(

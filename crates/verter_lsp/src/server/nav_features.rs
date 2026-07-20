@@ -141,7 +141,21 @@ pub(super) async fn handle_hover(
         .timer("hover", Some(uri.as_str().to_string()));
 
     if server.editor_owns_carrier_source_features() {
-        return Ok(None);
+        // CSS-native results have no TS correlate — the editor's TS plugin can
+        // never own them, so the server still serves EXACTLY the css leg.
+        let css_hover = (|| {
+            let doc = server.documents.get(uri)?;
+            let analysis = server.documents.get_analysis(uri);
+            let blocks = scan_sfc_blocks(&doc.source);
+            hover::css_only_hover_at_position(
+                position,
+                &doc.source,
+                &blocks,
+                analysis.as_ref(),
+                &doc.line_index,
+            )
+        })();
+        return Ok(css_hover);
     }
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
