@@ -25936,20 +25936,20 @@ async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
 }
 
 // ===========================================================================
-// B12 — always-on production request deadline (handler wedge acceptance).
+// Always-on production request deadline.
 //
-// Before B12 the per-method timeout lived ONLY in the audit harness, so with
-// audit disabled (the production default) every handler body ran UNBOUNDED: a
-// wedged type provider parked the handler forever. These prove the handler now
-// fails closed on the production deadline instead of wedging.
+// The per-method timeout must apply on the production path, not only inside the
+// audit harness: with audit disabled (the production default) a handler body that
+// ran unbounded let a wedged type provider park the handler forever. These prove
+// the handler fails closed on the production deadline, and that an unrelated
+// request is still dispatched while wedged handlers are outstanding.
 // ===========================================================================
 
-/// T2 — a wedged provider must not park the production definition handler.
-/// Audit is OFF (production default); the mock's `get_definition` hangs forever;
-/// the handler must return `request_cancelled` within the production deadline.
-/// Pre-B12 this WEDGES (no deadline on the audit-off path).
+/// A wedged provider must not park the production definition handler. Audit is OFF
+/// (production default); the mock's `get_definition` hangs forever; the handler
+/// must return `request_cancelled` within the production deadline.
 #[tokio::test]
-async fn t2_production_definition_handler_fails_closed_when_provider_wedges() {
+async fn production_definition_handler_fails_closed_when_the_provider_wedges() {
     let mut config = HostConfig::default();
     assert!(
         !config.audit_enabled,
@@ -25992,9 +25992,8 @@ async fn t2_production_definition_handler_fails_closed_when_provider_wedges() {
     )
     .await;
 
-    let result = outcome.expect(
-        "the definition handler must return within its production deadline, never wedge (pre-B12: WEDGE)",
-    );
+    let result = outcome
+        .expect("the definition handler must return within its production deadline, never wedge");
     let err = result.expect_err("a wedged provider must fail the request closed");
     assert_eq!(
         err.code,
@@ -26023,13 +26022,13 @@ where
     guard.flush().await.unwrap();
 }
 
-/// T3 — control requests (`$/verter/getStatistics`) must stay responsive while a
-/// burst of wedged semantic handlers is in flight. Drives the REAL tower-lsp
-/// serve loop over duplex pipes. Pre-B12 (default concurrency 4 + no per-request
-/// deadline) four wedged definition handlers exhausted every slot and the server
-/// stopped reading client stdin, so getStatistics never dispatched.
+/// Control requests (`$/verter/getStatistics`) must stay responsive while a burst
+/// of wedged semantic handlers is in flight. Drives the REAL tower-lsp serve loop
+/// over duplex pipes: with a low serve concurrency and no per-request deadline, a
+/// handful of wedged definition handlers exhausted every slot, the server stopped
+/// reading client stdin, and getStatistics never dispatched at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn t3_get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
+async fn get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
     use tokio::io::AsyncReadExt;
 
     // Production audit-off path, but a 2s deadline so the wedged definitions hold
@@ -26191,7 +26190,7 @@ async fn t3_get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
     })
     .await;
     let arrived = stats
-        .expect("getStatistics must not be starved by wedged definition handlers (pre-B12: never dispatched)")
+        .expect("getStatistics must not be starved by wedged definition handlers")
         .expect("response stream closed before getStatistics answered");
     assert!(
         arrived.duration_since(stats_sent) < std::time::Duration::from_secs(1),

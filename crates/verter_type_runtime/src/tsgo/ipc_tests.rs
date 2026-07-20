@@ -4537,22 +4537,23 @@ fn jsonrpc_body_omits_null_params_and_keeps_real_params() {
 }
 
 // ===========================================================================
-// B12 — bidirectional stdio-pipe deadlock repro (wedge acceptance evidence).
+// Bidirectional stdio-pipe deadlock: every request stays bounded, and a child
+// that stops reading its stdin is detected.
 //
 // These build an `LspTransport` over a duplex whose "child" side NEVER reads,
-// with a tiny lane capacity, so the writer's `write_all` stalls exactly as a
-// busy managed tsgo does. Pre-B12 these WEDGE (the interactive request parked
-// on the full lane BEFORE its response timeout, and the writer parked silently
-// with no watchdog); post-B12 every request resolves within its deadline and
-// the stalled writer fires `crash_notify`.
+// with a tiny lane capacity, so the writer's stdin write stalls exactly as it
+// does against a busy managed tsgo. The invariants: a request behind a full lane
+// resolves within its own deadline instead of parking ahead of it, and a writer
+// that cannot hand over a single byte fires `crash_notify` instead of parking
+// silently.
 // ===========================================================================
 
-/// T1 — an interactive request must be bounded even when the stdin writer is
-/// stalled on a busy child and the interactive lane is full. Pre-fix the lane
-/// send was unbounded and parked ahead of the response timeout, so the overflow
-/// requests never resolved and this join timed out.
+/// An interactive request must stay bounded even when the stdin writer is stalled
+/// on a busy child and the interactive lane is full: the lane send and the
+/// response wait share ONE deadline, so a full lane can no longer park a request
+/// before its response timeout has even started.
 #[tokio::test]
-async fn t1_interactive_request_is_bounded_when_writer_stalled_on_full_lane() {
+async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_full_lane() {
     // 16-byte duplex + a child that never reads → the writer's first `write_all`
     // parks immediately; the interactive lane (capacity 2) then fills.
     let (provider_side, child_side) = tokio::io::duplex(16);
@@ -4608,7 +4609,9 @@ async fn t1_interactive_request_is_bounded_when_writer_stalled_on_full_lane() {
     .await;
 
     let results =
-        joined.expect("every interactive request must resolve within its deadline even when the writer is stalled behind a full lane (pre-B12: WEDGE)");
+        joined.expect(
+            "every interactive request must resolve within its deadline even when the writer is stalled behind a full lane",
+        );
     assert_eq!(results.len(), 8);
     for r in results {
         assert!(
@@ -4634,11 +4637,11 @@ async fn t1_interactive_request_is_bounded_when_writer_stalled_on_full_lane() {
     );
 }
 
-/// T6 — the writer-stall watchdog fires `crash_notify` when the child stops
-/// reading its stdin. Pre-fix the writer parked in `write_all` silently and the
-/// resilient restart never triggered.
+/// The writer-stall watchdog fires `crash_notify` when the child stops reading
+/// its stdin, so the resilient restart machinery recovers the session instead of
+/// the writer parking silently in its stdin write forever.
 #[tokio::test]
-async fn t6_writer_stall_watchdog_fires_crash_notify_when_child_stops_reading() {
+async fn writer_stall_watchdog_fires_crash_notify_when_the_child_stops_reading_stdin() {
     let (provider_side, child_side) = tokio::io::duplex(16);
     let (provider_read, provider_write) = tokio::io::split(provider_side);
     let _child_side = child_side; // held open, never read → stdin fills, writer stalls
@@ -4667,7 +4670,7 @@ async fn t6_writer_stall_watchdog_fires_crash_notify_when_child_stops_reading() 
     let fired = tokio::time::timeout(std::time::Duration::from_secs(3), crash).await;
     assert!(
         fired.is_ok(),
-        "the writer-stall watchdog must fire crash_notify when the child stops reading stdin (pre-B12: silent park)"
+        "the writer-stall watchdog must fire crash_notify when the child stops reading stdin"
     );
 }
 
