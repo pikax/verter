@@ -26557,6 +26557,10 @@ async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
 
 /// Build a language server over a mock provider, with `configure` applied to the
 /// host config first.
+/// A minimal SFC with one template interpolation, used by the deadline tests to
+/// give a definition/hover a real position to resolve.
+const DEADLINE_TEST_SOURCE: &str = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+
 fn wedged_provider_server(
     provider: Arc<MockTypeProvider>,
     configure: impl FnOnce(&mut HostConfig),
@@ -26911,5 +26915,138 @@ async fn waiting_for_a_document_that_never_arrives_gives_up_on_its_budget() {
     assert!(
         elapsed < budget * 4,
         "the wait must give up ON its budget, not well past it; took {elapsed:?}"
+    );
+}
+
+// ===========================================================================
+// Wall-clock effect of the shortened deadlines (hermetic).
+//
+// The corpus definition bench needs the external 731-SFC corpus and the
+// dx-harness orchestrator, neither available in a hermetic worktree. These
+// stand in for the acceptance signal directly on the real handler + deadline
+// path with a mock provider: shortening the deadline must cut the dead-tail
+// wait WITHOUT dropping the answered count or adding latency to a healthy
+// request. The mock's two cohorts are the two modes the corpus distribution is
+// bimodal between — a fast healthy body and a never-returning tail.
+// ===========================================================================
+
+/// A healthy definition (mock answers immediately) is answered just as fast
+/// under the shortened per-kind budget as under the old flat 15s. The deadline
+/// is a bound, not a barrier: it adds nothing to a request that already
+/// succeeded, so p50/p95 on the healthy path cannot regress from the change.
+#[tokio::test]
+async fn a_healthy_definition_is_no_slower_under_the_shortened_budget() {
+    async fn healthy_latency(deadline: std::time::Duration) -> std::time::Duration {
+        let provider = Arc::new(MockTypeProvider::new());
+        let (service, _host) = wedged_provider_server(Arc::clone(&provider), |config| {
+            config.lsp_method_timeouts.request_deadlines.goto_definition = deadline;
+        });
+        let server = service.inner();
+        let uri = open_test_vue(server, "/workspace/src/App.vue", DEADLINE_TEST_SOURCE);
+        let position = find_document_position(server, &uri, "{{ count", 3);
+        // Mock returns an (empty) definition immediately — the healthy body.
+        let started = std::time::Instant::now();
+        let result = super::nav_features_audit::handle_goto_definition_with_audit(
+            server,
+            goto_definition_params(&uri, position),
+        )
+        .await;
+        result.expect("a healthy definition is answered, not cancelled");
+        started.elapsed()
+    }
+
+    let under_new = healthy_latency(std::time::Duration::from_millis(2500)).await;
+    let under_old = healthy_latency(std::time::Duration::from_secs(15)).await;
+
+    // Both are near-instant; neither waits on its deadline. The shortened budget
+    // must not make the healthy path even marginally slower.
+    assert!(
+        under_new < std::time::Duration::from_millis(500),
+        "a healthy definition took {under_new:?} under the shortened budget — it is \
+         waiting on the deadline instead of returning on its answer"
+    );
+    assert!(
+        under_old < std::time::Duration::from_millis(500),
+        "a healthy definition took {under_old:?} under the old budget"
+    );
+}
+
+/// The acceptance signal: over a mixed batch of healthy and wedged definitions,
+/// the shortened budget answers every healthy request (the answered count does
+/// not drop) and fails every wedged one closed at its budget rather than at 15s
+/// — the dead-tail wait cut ~6x with no loss of answered work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shortened_budget_cuts_the_dead_tail_without_dropping_answered_requests() {
+    const HEALTHY: usize = 12;
+    let budget = std::time::Duration::from_millis(2500);
+
+    // Healthy cohort: a provider that answers definition immediately.
+    let healthy_provider = Arc::new(MockTypeProvider::new());
+    let (healthy_service, _h) = wedged_provider_server(Arc::clone(&healthy_provider), |config| {
+        config.lsp_method_timeouts.request_deadlines.goto_definition = budget;
+    });
+    let healthy_server = healthy_service.inner();
+    let healthy_uri = open_test_vue(
+        healthy_server,
+        "/workspace/src/App.vue",
+        DEADLINE_TEST_SOURCE,
+    );
+    let healthy_pos = find_document_position(healthy_server, &healthy_uri, "{{ count", 3);
+
+    let mut answered = 0usize;
+    for _ in 0..HEALTHY {
+        let r = super::nav_features_audit::handle_goto_definition_with_audit(
+            healthy_server,
+            goto_definition_params(&healthy_uri, healthy_pos),
+        )
+        .await;
+        if r.is_ok() {
+            answered += 1;
+        }
+    }
+    assert_eq!(
+        answered, HEALTHY,
+        "every healthy definition must still be answered — the answered count must not drop"
+    );
+
+    // Wedged cohort: a provider whose definition never returns. Each must fail
+    // closed at the budget, far below the old 15s.
+    let wedged_provider = Arc::new(MockTypeProvider::new());
+    wedged_provider.hang_definition();
+    let (wedged_service, _w) = wedged_provider_server(Arc::clone(&wedged_provider), |config| {
+        config.lsp_method_timeouts.request_deadlines.goto_definition = budget;
+    });
+    let wedged_server = wedged_service.inner();
+    let wedged_uri = open_test_vue(
+        wedged_server,
+        "/workspace/src/App.vue",
+        DEADLINE_TEST_SOURCE,
+    );
+    let wedged_pos = find_document_position(wedged_server, &wedged_uri, "{{ count", 3);
+
+    let started = std::time::Instant::now();
+    let wedged = super::nav_features_audit::handle_goto_definition_with_audit(
+        wedged_server,
+        goto_definition_params(&wedged_uri, wedged_pos),
+    )
+    .await;
+    let wedged_elapsed = started.elapsed();
+
+    let err = wedged.expect_err("a wedged definition must fail closed");
+    assert_eq!(
+        err.code,
+        tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled,
+        "the wedged request must fail closed as request_cancelled, got {err:?}"
+    );
+    assert!(
+        wedged_elapsed < std::time::Duration::from_secs(4),
+        "the wedged request must fail closed near its {budget:?} budget, took {wedged_elapsed:?}"
+    );
+    // The dead-tail wait is cut from the old flat 15s to the budget: prove the
+    // margin is real, not a rounding coincidence.
+    assert!(
+        wedged_elapsed < std::time::Duration::from_secs(15) / 3,
+        "the shortened budget must cut the dead-tail wait to well under a third of \
+         the old 15s, took {wedged_elapsed:?}"
     );
 }
