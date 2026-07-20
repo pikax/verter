@@ -181,6 +181,24 @@ pub(crate) struct CompileServe {
     pub(crate) runtime_surface_refused: bool,
 }
 
+/// BY-VALUE observation of what
+/// [`VerterHost::prefetch_compile_tier_observation_targets`] consumed.
+///
+/// The prefetch runs OUTSIDE the compile fact tracer (deliberately — load /
+/// index mutations must not fold into the consumer's observed read set), so
+/// its fenced-serve consumption can never reach the tracer's
+/// `note_non_cacheable_read_fan_out` chokepoint on its own. The Session
+/// cold-compile branch replays this value INTO its tracer scope so the
+/// session-slot admission consults ONE rail (`non_cacheable_read_observed`)
+/// for both the in-scope and the prefetch-consumed fenced serves.
+#[derive(Debug, Clone, Copy, Default)]
+struct CompileTierPrefetchObservation {
+    /// Whether ANY `IndexedReady` serve the prefetch consumed was FENCED
+    /// (ReturnOnly, `store_published == false`) — a payload basis the
+    /// read-side fact rail cannot reject.
+    fenced_serve_observed: bool,
+}
+
 impl VerterHost {
     /// Resolve a raw import identifier (bundler query string or LSP `._VERTER_.` format)
     /// to its canonical ID, virtual node kind, and rendered bundler/LSP IDs.
@@ -367,7 +385,7 @@ impl VerterHost {
         script_imports: &[verter_semantic::analysis::AnalyzedImport],
         macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
         external_requests: &[ExternalSourceRequest],
-    ) {
+    ) -> CompileTierPrefetchObservation {
         // Test/debug-only invocation count. The cold-compute path gates
         // this prefetch to `Session`; the per-host counter lets a routing
         // test observe that gate without a fact-rail side channel.
@@ -375,11 +393,29 @@ impl VerterHost {
         self.compile_tier_prefetch_invocations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Fenced-serve consumption, collected BY VALUE across every
+        // `IndexedReady` serve this prefetch consumes. The prefetch runs
+        // OUTSIDE the compile fact tracer (so load/index mutations are not
+        // folded into the observed read set), which means a FENCED
+        // (ReturnOnly, `store_published == false`) serve consumed here can
+        // never reach the tracer's `note_non_cacheable_read_fan_out`
+        // chokepoint — yet the compile's payload is derived from the
+        // prefetch-populated state. The caller replays this flag INTO the
+        // Session tracer scope so the session-slot admission declines
+        // (ReturnOnly never publishes).
+        let mut fenced_serve_observed = false;
+        let mut note_serve =
+            |serve: &Option<crate::host_manage::prepared_decl::IndexedReadyServe>| {
+                if let Some(serve) = serve {
+                    fenced_serve_observed |= !serve.store_published;
+                }
+            };
+
         // Owner's indexed-ready must be present so the tracer can
         // resolve owner-relative import surfaces; the owner's own
         // FileArtifactStore entry is also a producer-side dependency
         // of route observation (R26).
-        let _ = self.ensure_indexed_ready_serve(owner_canonical);
+        note_serve(&self.ensure_indexed_ready_serve(owner_canonical));
 
         let workspace = self.workspace();
         let mut resolved_deps = std::collections::BTreeSet::<String>::new();
@@ -547,7 +583,11 @@ impl VerterHost {
         // is published before the tracer queries fact hashes. Calls
         // are idempotent / cache-hit on warm reads.
         for dep_canonical in resolved_deps {
-            let _ = self.ensure_indexed_ready_serve(&dep_canonical);
+            note_serve(&self.ensure_indexed_ready_serve(&dep_canonical));
+        }
+
+        CompileTierPrefetchObservation {
+            fenced_serve_observed,
         }
     }
 
@@ -1549,14 +1589,16 @@ impl VerterHost {
         // macro-type collection, dep sync) is produced independently by
         // `compile_entry`, so running the prefetch for those modes would
         // be load + index work nobody records.
-        if actual_mode == CompileCacheMode::Session {
+        let prefetch_observation = if actual_mode == CompileCacheMode::Session {
             self.prefetch_compile_tier_observation_targets(
                 &canonical_id,
                 &compile_input.script_imports,
                 &compile_input.macro_type_deps,
                 &compile_input.external_requests,
-            );
-        }
+            )
+        } else {
+            CompileTierPrefetchObservation::default()
+        };
 
         // Compile, routed by the actual cache mode.
         //
@@ -1570,6 +1612,17 @@ impl VerterHost {
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
             let (result, fact_read_set) = self.with_fact_tracer(|| {
+                // Replay the prefetch's BY-VALUE fenced-serve consumption
+                // into THIS tracer scope: the compile's payload derives from
+                // the prefetch-populated state, so a fenced serve consumed
+                // there taints this compile exactly as an in-scope fenced
+                // serve would — one admission rail
+                // (`non_cacheable_read_observed`), consulted below.
+                if prefetch_observation.fenced_serve_observed {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    );
+                }
                 crate::compile_fact_emission::observe_compile_tier_dependencies(
                     self,
                     &canonical_id,
