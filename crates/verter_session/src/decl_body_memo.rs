@@ -1353,6 +1353,10 @@ impl DeclBodyMemo {
                 (AugmentationScopeKind, DeclBindingKey),
                 RetainedValueTransients,
             > = FxHashMap::default();
+            let mut aug_dep_records: FxHashMap<
+                (AugmentationScopeKind, DeclBindingKey),
+                DeclDependencyFacts,
+            > = FxHashMap::default();
             let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> =
                 FxHashMap::default();
             for contributor in &contributors {
@@ -1429,6 +1433,7 @@ impl DeclBodyMemo {
                         .or_default()
                         .extend(deps);
                 }
+                collect_augmentation_statement_dependencies(stmt, owner, &mut aug_dep_records);
             }
             if let Some(jsdoc_typedef) = jsdoc_typedef {
                 if let Some(typedef) = lower_jsdoc_typedef_at_comment(
@@ -1509,12 +1514,16 @@ impl DeclBodyMemo {
                     .unwrap_or(&empty_retained);
                 let owned_lens = lens.for_owner(decl_key.owner);
                 let owned_route_lens = route_lens.for_owner(decl_key.owner);
+                let dependencies = aug_dep_records
+                    .get(&(scope.clone(), decl_key.clone()))
+                    .cloned()
+                    .unwrap_or_default();
                 batch.aug_types.push((
                     scope.clone(),
                     decl_key.clone(),
                     lowered_type_decl_from_group(
                         group,
-                        &DeclDependencyFacts::default(),
+                        &dependencies,
                         None,
                         retained,
                         header_index
@@ -2796,3 +2805,48 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
 #[cfg(test)]
 #[path = "decl_body_memo_tests.rs"]
 mod decl_body_memo_tests;
+
+/// Collect the dependency-name records of AUGMENTATION-scoped inner
+/// declarations (`declare global { … }` / `declare module "spec" { … }`),
+/// keyed by `(scope, DeclBindingKey)`. The file-scope collector deliberately
+/// skips ambient scopes; without this, an augmentation contributor body
+/// lowers with EMPTY dependency paths and its unresolvable referenced
+/// imports can never fail preparation with `MissingExternalOwner` — a
+/// silently-Complete surface. Inner statements classify with the SAME
+/// per-statement collector as file scope (the augmentation body shares the
+/// containing file's import namespace).
+fn collect_augmentation_statement_dependencies(
+    stmt: &oxc_ast::ast::Statement<'_>,
+    owner: TopLevelOwnerId,
+    out: &mut FxHashMap<(AugmentationScopeKind, DeclBindingKey), DeclDependencyFacts>,
+) {
+    use oxc_ast::ast::{Statement, TSModuleDeclarationBody, TSModuleDeclarationName};
+    let (scope, body): (AugmentationScopeKind, &[oxc_ast::ast::Statement<'_>]) = match stmt {
+        // `declare global { … }` is its own statement variant.
+        Statement::TSGlobalDeclaration(global) => {
+            (AugmentationScopeKind::Global, &global.body.body)
+        }
+        Statement::TSModuleDeclaration(module) => {
+            let scope = match &module.id {
+                TSModuleDeclarationName::StringLiteral(spec) => {
+                    AugmentationScopeKind::Module(spec.value.to_string())
+                }
+                // An identifier namespace is NOT an augmentation scope — its
+                // inner decls key under qualified `Ns.Name` file-scope records.
+                TSModuleDeclarationName::Identifier(_) => return,
+            };
+            let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref() else {
+                return;
+            };
+            (scope, &block.body)
+        }
+        _ => return,
+    };
+    for inner in body {
+        for (declaration, deps) in collect_statement_dependency_names(inner, owner) {
+            out.entry((scope.clone(), declaration.qualified_key()))
+                .or_default()
+                .extend(deps);
+        }
+    }
+}

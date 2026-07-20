@@ -337,7 +337,17 @@ fn prepare_local_type_decl_outcome_with_base(
             match state.augmentation_type_decl_outcome_in(&global_scope, owner, symbol_name) {
                 DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
                 DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
-                DemandOutcome::Ready(Some(lowered)) => (lowered, None, Some(&global_scope)),
+                DemandOutcome::Ready(Some(lowered)) => {
+                    // A `declare global` contributor body references the
+                    // CONTAINING file's import namespace, so its external
+                    // deps classify through the shared classification core —
+                    // an unresolvable referenced import must fail preparation
+                    // with `MissingExternalOwner`, never prepare a silently
+                    // Complete surface.
+                    let deps =
+                        state.classify_lowered_type_deps(owner, symbol_name, lowered.as_ref());
+                    (lowered, Some(deps), Some(&global_scope))
+                }
             }
         };
     // Type-space declarations win over a same-named import binding. This is
@@ -446,14 +456,34 @@ pub(crate) fn prepare_augmentation_type_decl_outcome_in(
     // Augmentation bodies share the containing file's exact import namespace.
     // The canonicalization must therefore be the one built with the containing
     // prepared bundle under the active StoreView; an empty/default map would
-    // discard an imported base symbol's authoritative target owner.
+    // discard an imported base symbol's authoritative target owner. The
+    // body's dependency edges classify through the SAME shared core as
+    // file-scope declarations, so a referenced import without an
+    // owner-exact canonicalization entry fails preparation with
+    // `MissingExternalOwner` instead of silently preparing Complete.
+    //
+    // The AUGMENTED BASE is itself an implicit dependency: when the
+    // containing file IMPORTS the augmented name, the contributor stitches
+    // onto that imported base, so preparation requires the canonicalization
+    // to carry the base's OWNER-EXACT `(owner, name)` entry — an entry
+    // recorded under a different lexical owner never satisfies it.
+    if state.is_import_local_in(owner, symbol_name)
+        && !import_canonicalization
+            .final_resolution
+            .contains_key(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))
+    {
+        return PreparedDeclOutcome::Failed(PreparationFailure::MissingExternalOwner {
+            local_name: symbol_name.to_string(),
+        });
+    }
+    let deps = state.classify_lowered_type_deps(owner, symbol_name, lowered.as_ref());
     match prepare_type_decl_from_lowered(
         canonical_id,
         state,
         owner,
         symbol_name,
         lowered.as_ref(),
-        None,
+        Some(deps.as_ref()),
         dep_edges,
         Some(scope),
         import_canonicalization,

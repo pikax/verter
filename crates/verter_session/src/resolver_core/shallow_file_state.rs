@@ -2043,7 +2043,27 @@ impl ShallowFileState {
             DemandOutcome::Ready(None) => return DemandOutcome::Ready(None),
             DemandOutcome::Ready(Some(lowered)) => lowered,
         };
+        DemandOutcome::Ready(Some(self.classify_lowered_type_deps(
+            owner,
+            name,
+            lowered.as_ref(),
+        )))
+    }
 
+    /// Classify an ALREADY-LOWERED declaration body's dependency edges. The
+    /// shared classification core behind [`Self::classify_type_deps_in`]
+    /// (file-scope symbols) AND the augmentation-scope prepare path: a
+    /// `declare global` / `declare module` contributor body references the
+    /// SAME import namespace as the containing file, so its external deps
+    /// classify identically — an unresolvable referenced import must fail
+    /// preparation with `MissingExternalOwner` instead of silently preparing
+    /// a Complete surface.
+    pub(crate) fn classify_lowered_type_deps(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        lowered: &LoweredTypeDecl,
+    ) -> Arc<ClassifiedTypeDeps> {
         let legacy = self.classify_dependency_paths(owner, name, &lowered.dependency_paths);
         let declaration = self.classify_declaration_dependency_paths(
             owner,
@@ -2190,7 +2210,7 @@ impl ShallowFileState {
             .collect::<Vec<_>>();
         external_value_positions.sort();
 
-        DemandOutcome::Ready(Some(Arc::new(ClassifiedTypeDeps {
+        Arc::new(ClassifiedTypeDeps {
             local_deps,
             owner_value_deps,
             retained_value_carrier_deps,
@@ -2201,7 +2221,7 @@ impl ShallowFileState {
             has_unroutable_value_position: lowered.has_unroutable_value_position,
             external_value_queries,
             external_value_positions,
-        })))
+        })
     }
 
     /// The transitive required-import closure of one local type — the

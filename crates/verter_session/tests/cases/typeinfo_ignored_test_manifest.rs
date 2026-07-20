@@ -1918,6 +1918,7 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // strictly-unsubstituted authored-body shape `Instantiate`
         // composes; no manifest row consumes it).
         (LowerLocator, U2QueryValueDomain),
+        (ClassifyBroadRuntime, U14MacroAdapter),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.
