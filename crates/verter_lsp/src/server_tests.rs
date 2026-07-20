@@ -3110,6 +3110,97 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     }
 }
 
+// Positive control for the multi-claimant fail-closed rename gate: a UNIQUE
+// (single-claimant) carrier must STILL rename normally — a real `WorkspaceEdit`,
+// never the fail-closed error. This guards against an over-broad regression where
+// the `carrier_is_multi_claimant` gate fires on a normally-owned carrier and breaks
+// rename everywhere. Rename behavior itself is UNTOUCHED — this is a guard test.
+//
+// DISCRIMINATING: widen the gate to fire on a unique carrier and `prepare` becomes
+// `Err` / `rename` becomes the fail-closed `Err`, failing the assertions below.
+#[tokio::test(flavor = "multi_thread")]
+async fn unique_carrier_still_renames_normally_not_fail_closed() {
+    let app_source = "<script setup lang=\"ts\">\nconst vueTsTitle: string = \"x\"\n</script>\n<template><section>{{ vueTsTitle }}</section></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", app_source)]).await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    // The carrier has a SINGLE configured owner — the multi-claimant fail-closed gate
+    // must NOT apply.
+    assert!(
+        !server.carrier_is_multi_claimant(&app_uri),
+        "a normally-owned carrier must not be classified multi-claimant"
+    );
+
+    let position = find_document_position(server, &app_uri, "{{ vueTsTitle }}", 3);
+    server.ensure_provider_synced(&app_uri).await;
+    let ctx = synced_type_provider_context(server, &app_uri);
+    let usage_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("usage position should map into TSX");
+    // The provider answers over the PROVIDER-side token in the IDE surface.
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        usage_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: usage_offset,
+            end: usage_offset + "vueTsTitle".len() as u32,
+        }],
+    );
+
+    // Prepare-rename must NOT fail closed (it returns Ok — a real prepare, never the
+    // multi-claimant Err).
+    let prepare = super::nav_features_navigation::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: app_uri.clone(),
+            },
+            position,
+        },
+    )
+    .await;
+    assert!(
+        prepare.is_ok(),
+        "prepare-rename on a unique carrier must NOT fail closed, got {prepare:?}"
+    );
+
+    // Rename must return a REAL WorkspaceEdit (never the fail-closed Err).
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+                position,
+            },
+            new_name: "renamedTitle".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename on a unique carrier must succeed, not fail closed")
+    .expect("a unique carrier must return a real WorkspaceEdit");
+
+    let triples = workspace_edit_triples(&edit);
+    assert!(
+        triples
+            .iter()
+            .any(|(_, _, new_text)| new_text == "renamedTitle"),
+        "the unique-carrier rename must edit the symbol to the new name, got {triples:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 /// The editor-owned tsserver route has no local provider buffers: its only
 /// content authority is the durable carrier store consumed by the editor
 /// plugin. A live source edit must therefore take the same membership/publish
