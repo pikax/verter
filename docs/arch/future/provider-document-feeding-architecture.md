@@ -1,12 +1,30 @@
 # Provider document-feeding architecture — design (PROVISIONAL, post-release review)
 
-> **Status: PROVISIONAL — not approved for implementation.** The root cause below is a strongly-
-> supported HYPOTHESIS, not yet empirically proven against the real failing corpus. Gate before any
-> implementation: a real-world before/after proof (reproduce on the real corpus + a throwaway dirty
-> fix that actually restores intellisense). If the dirty fix does not fix the real corpus, this
-> design is void and the cause is re-investigated. After that proof, the design is RE-SENT to the
-> architect to rescope with the empirical findings, then the decision to implement (or not) is the
-> product owner's. Saved here for post-release review and possible rescope.
+> **Status: PROVISIONAL — RESCOPE IN PROGRESS after the empirical proof.** The CAUSE is now
+> EMPIRICALLY CONFIRMED (see §1a), but the empirical proof also REFUTED this design's central premise:
+> de-flooding ALONE regresses the real corpus. The architect is rescoping (§1a). Not approved for
+> implementation; the decision to implement (or not) is the product owner's, after the rescope.
+> Saved here for post-release review and possible rescope.
+>
+> ## 1a. Empirical proof (real binary, real providers, real corpus, both routes) — 2026-07-20
+> - **CAUSE CONFIRMED.** The gate-C active-document starvation reproduces on BOTH managed tsgo AND
+>   tsserver under an aggressive carrier flood; trace shows gate C (`has_sync_state=false`) — the
+>   companion never reached a committed capturable surface. Right bug.
+> - **DE-FLOOD ALONE REGRESSES (refutes §2's "de-flood is correctness-required").** Dirty-toggle
+>   matrix, tsserver aggressive flood, identical probe: baseline 13 gate-C failures → de-flood the
+>   sweep 27 (WORSE) → retain the active open 60s 24 (WORSE) → both 30 (WORST). ROOT REASON: the
+>   sweep's provider-sync currently acts as an ACCIDENTAL SAFETY NET, re-committing the companions the
+>   abandoned 1s interactive open dropped. Removing it loses the net → more starvation.
+> - **The `_background`/`Lane::Background` verbs are DORMANT** — they default to plain `open_file`
+>   aliases on the real providers (`verter_type_runtime/src/traits.rs:247-261`); no real
+>   foreground-before-background scheduler exists. It must be BUILT, not re-wired.
+> - **Consequence for this design:** the load-bearing fix is a genuine ACTIVE-vs-SWEEP PRIORITY
+>   SCHEDULER that re-drives the active doc with priority while PRESERVING/REPLACING the sweep's
+>   coverage; de-flooding is demoted from "the fix" to a SECONDARY optimization GATED ON the scheduler
+>   already covering the active doc (removing the sweep feed before that regresses — measured).
+>   Migration ORDER is now correctness-critical. The rest of the design (desired-state ledger, retained
+>   obligation, closure-precise P2, three provider models, no-heartbeat, structural confinement) stands;
+>   §2–§6 below are the pre-rescope design and are being updated.
 >
 > Confidentiality: the motivating project is a private third-party monorepo — never named here;
 > referred to structurally ("a real Vue monorepo"). Committed tests must be hermetic + synthetic;
