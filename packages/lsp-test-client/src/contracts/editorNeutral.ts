@@ -32,7 +32,13 @@ export type EditorNeutralContractFeature =
   | "plain-control-completion"
   | "consumer-diagnostics"
   | "provider-attestation"
-  | "shared-provider-topology";
+  | "shared-provider-topology"
+  /**
+   * Fail-closed CSS class boundary: a markup class token with NO declaring
+   * rule must produce an EMPTY hover and an EMPTY definition — never a
+   * mis-mapped affordance (e.g. a same-named script binding).
+   */
+  | "css-class-silent";
 
 export interface LspRange {
   readonly start: LspPosition;
@@ -656,6 +662,120 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         anchor: carrier.barrelDefinitionAnchor,
         expectedDefinitionDocument: carrier.document,
         expectedDefinitionRange: FILE_START_RANGE,
+      },
+    );
+  }
+
+  // CSS class intelligence: markup class ↔ component style navigation
+  // (Vue scoped styles + Svelte scoped-by-default styles), typed v-bind()
+  // hover, and the fail-closed no-rule boundary. Verter-native results —
+  // asserted identically on every provider route (no provider shadowing).
+  {
+    const vueCss = {
+      framework: "vue" as const,
+      language: "ts" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+      document: "src/vue/CssIntel.vue",
+    };
+    const svelteCss = {
+      framework: "svelte" as const,
+      language: "ts" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+      document: "src/svelte/CssIntel.svelte",
+    };
+    cases.push(
+      {
+        ...vueCss,
+        id: "vue-css.class.hover",
+        feature: "hover",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        requiredHoverFragments: ["```css", ".chip-live"],
+      },
+      {
+        ...vueCss,
+        id: "vue-css.class.definition",
+        feature: "definition",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        expectedDefinitionDocument: "src/vue/CssIntel.vue",
+        expectedDefinitionAnchor: {
+          text: ".chip-live {",
+          occurrence: 0,
+          token: "chip-live",
+        },
+      },
+      {
+        ...vueCss,
+        id: "vue-css.class.no-rule.silent",
+        feature: "css-class-silent",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "ghost-none",
+        },
+      },
+      {
+        ...vueCss,
+        id: "vue-css.vbind.hover",
+        feature: "hover",
+        anchor: {
+          text: "width: v-bind(chipWidth);",
+          occurrence: 0,
+          token: "chipWidth",
+        },
+        requiredHoverFragments: ["v-bind(chipWidth)", "chipWidth: 12"],
+      },
+      {
+        ...svelteCss,
+        id: "svelte-css.class.hover",
+        feature: "hover",
+        anchor: {
+          text: '<div class="chip-live" class:on>',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        requiredHoverFragments: ["```css", ".chip-live"],
+      },
+      {
+        ...svelteCss,
+        id: "svelte-css.class.definition",
+        feature: "definition",
+        anchor: {
+          text: '<div class="chip-live" class:on>',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        expectedDefinitionDocument: "src/svelte/CssIntel.svelte",
+        expectedDefinitionAnchor: {
+          text: ".chip-live {",
+          occurrence: 0,
+          token: "chip-live",
+        },
+      },
+      {
+        ...svelteCss,
+        id: "svelte-css.class-directive.definition",
+        feature: "definition",
+        anchor: {
+          text: "class:on>",
+          occurrence: 0,
+          token: "on",
+        },
+        expectedDefinitionDocument: "src/svelte/CssIntel.svelte",
+        expectedDefinitionAnchor: {
+          text: ".on {",
+          occurrence: 0,
+          token: "on",
+        },
       },
     );
   }
@@ -1338,6 +1458,24 @@ export async function executeEditorNeutralContractCase(
       if (!labels.includes(testCase.expectedCompletion!)) {
         throw new Error(
           `${testCase.id}: completion lacks ${testCase.expectedCompletion}; got ${labels.join(", ")}`,
+        );
+      }
+      return;
+    }
+    case "css-class-silent": {
+      const position = positionFor(testCase, driver, sources);
+      const hover = await driver.hover(testCase.document, position);
+      const text = hoverText(hover);
+      if (text.trim().length > 0) {
+        throw new Error(
+          `${testCase.id}: a rule-less class token must produce NO hover, got: ${text}`,
+        );
+      }
+      const definition = await driver.definition(testCase.document, position);
+      const locations = definitionLocations(definition);
+      if (locations.length > 0) {
+        throw new Error(
+          `${testCase.id}: a rule-less class token must produce NO definition, got ${locations.length} location(s)`,
         );
       }
       return;

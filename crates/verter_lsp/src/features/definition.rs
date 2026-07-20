@@ -491,9 +491,10 @@ pub fn definition_at_position(
     }
 
     // Carrier markup class tokens (Svelte `class="x"` / `class:x`) — carriers
-    // without a template element IR. Fail-closed: a token with no declaring
-    // rule yields NO definition.
-    if analysis.template.is_none() {
+    // without a template element IR (an empty synthesized template analysis
+    // may still be present, so the token inventory itself is the gate).
+    // Fail-closed: a token with no declaring rule yields NO definition.
+    if !analysis.markup_class_tokens.is_empty() {
         if let Some(token) = crate::features::references::markup_class_token_at(offset, analysis) {
             return css_rule_definition(
                 &CssRefTarget::Class(token.name.clone()),

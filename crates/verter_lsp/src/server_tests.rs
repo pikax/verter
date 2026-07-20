@@ -25804,3 +25804,50 @@ async fn v_bind_completion_offers_typed_setup_bindings() {
     drain_handle.abort();
     drop(service);
 }
+
+/// Real-pipeline probe: a svelte carrier's class token navigates to its
+/// component style rule through the REAL host analysis (markup tokens +
+/// scanned styles must survive the served snapshot).
+#[tokio::test]
+async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
+    let source = "<script lang=\"ts\">\n  let on = true;\n</script>\n\n<div class=\"chip-live\" class:on>chip</div>\n\n<style>\n  .chip-live {\n    color: red;\n  }\n  .on {\n    font-weight: bold;\n  }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/CssIntel.svelte", "svelte", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/CssIntel.svelte");
+    let server = service.inner();
+
+    let analysis = server
+        .documents
+        .get_analysis(&uri)
+        .expect("svelte analysis must serve");
+    assert!(
+        !analysis.styles.is_empty(),
+        "served svelte snapshot must carry style analyses"
+    );
+    assert!(
+        !analysis.markup_class_tokens.is_empty(),
+        "served svelte snapshot must carry markup class tokens"
+    );
+
+    let position = find_document_position(server, &uri, "class=\"chip-live\"", 8);
+    let response = server
+        .goto_definition(goto_definition_params(&uri, position))
+        .await
+        .expect("goto definition should succeed")
+        .expect("svelte class token must navigate to its rule");
+    let locations = definition_locations(response);
+    assert!(
+        locations.iter().any(|l| l.uri == uri),
+        "definition targets the component style rule: {locations:?}"
+    );
+    let target = &locations[0];
+    assert_eq!(
+        target.range.start.line,
+        line_for_snippet(source, ".chip-live {"),
+        "definition lands on the .chip-live rule line"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}

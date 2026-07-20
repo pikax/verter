@@ -313,8 +313,11 @@ afterAll(() => {
   );
   console.log(`editor-neutral LSP receipt: ${receiptPath}`);
 
-  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(73);
-  expect(EXPECTED_EXECUTIONS, "71 standard + custom on each route, plus shared topology").toBe(217);
+  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(89);
+  expect(
+    EXPECTED_EXECUTIONS,
+    "standard + custom on each applicable route, plus shared topology",
+  ).toBe(265);
   expect(
     counters.setupFailures,
     "every provider route must start; no route may be skipped",
@@ -331,7 +334,7 @@ afterAll(() => {
   ).toBe(EXPECTED_EXECUTIONS);
   expect(outcomes.filter((outcome) => outcome.status === "passed")).toHaveLength(counters.passed);
   expect(outcomes.filter((outcome) => outcome.status === "failed")).toHaveLength(counters.failed);
-  expect(inventoryGroups.byRoute).toEqual({ tsserver: 72, tsgo: 72, "shared-tsgo": 73 });
+  expect(inventoryGroups.byRoute).toEqual({ tsserver: 88, tsgo: 88, "shared-tsgo": 89 });
   expect(
     typeScriptCliControls,
     "both TypeScript >=7 authority controls must execute",

@@ -49,15 +49,15 @@ function fixtureSource(document: string): string {
 }
 
 describe("editor-neutral LSP contract inventory", () => {
-  it("is a non-vacuous, exact 82-case cross-framework inventory", () => {
+  it("is a non-vacuous, exact 89-case cross-framework inventory", () => {
     const inventory = createEditorNeutralContractInventory();
-    expect(inventory).toHaveLength(82);
-    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(82);
+    expect(inventory).toHaveLength(89);
+    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(89);
 
     const standard = inventory.filter((testCase) => testCase.surface === "standard-lsp");
     const custom = inventory.filter((testCase) => testCase.surface === "verter-custom-protocol");
     const topology = inventory.filter((testCase) => testCase.surface === "provider-topology");
-    expect(standard).toHaveLength(80);
+    expect(standard).toHaveLength(87);
     expect(custom).toHaveLength(1);
     expect(topology).toHaveLength(1);
 
