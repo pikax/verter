@@ -35,11 +35,13 @@
 //! awaited. The crate denies `clippy::await_holding_lock` to keep this enforced.
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, Notify, RwLock};
 
@@ -210,6 +212,202 @@ where
     backend: B,
     restart_count: AtomicU32,
     max_restarts: u32,
+    /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the inner provider
+    /// is torn down, so the crash monitor recognizes the resulting crash-notify
+    /// wake as the requested teardown: no user-facing "crashed. Restarting"
+    /// notification, no respawn into a dying session.
+    torn_down: AtomicBool,
+    /// Crash-quarantine bookkeeping for read-only queries. See [`QueryWatch`].
+    query_watch: Arc<StdMutex<QueryWatch>>,
+}
+
+/// How long an errored query fingerprint stays eligible for crash attribution.
+/// A child's death surfaces to in-flight callers as transport errors that can
+/// race the crash monitor's wake by a scheduler tick; anything that errored
+/// within this narrow window of the crash is treated as having been in flight
+/// at the death. Deliberately SHORT: a wide window would implicate every
+/// bystander that failed while the engine was down.
+const QUARANTINE_RECENT_ERROR_TTL: Duration = Duration::from_millis(500);
+
+/// Bound on the recently-errored ring (memory fuse; oldest entries drop first).
+const QUARANTINE_RECENT_ERROR_CAP: usize = 64;
+
+/// Crash implications before a fingerprint is quarantined.
+///
+/// Attribution is ambiguous at a single crash: the in-flight set holds the
+/// killer AND innocent bystanders (diagnostics pulls, concurrent hovers), and a
+/// bystander that merely failed during the crash must be servable after
+/// recovery (the real-provider recovery regression pins that contract). A
+/// GENUINE killer distinguishes itself by RECURRENCE: replayed after the
+/// restart, it is in flight at the next death too. Two consecutive
+/// implications quarantine it — breaking the crash-restart loop on the second
+/// cycle, well inside the restart budget — while a bystander's strike is
+/// erased by its first successful completion.
+const QUARANTINE_STRIKE_THRESHOLD: u32 = 2;
+
+/// Identity of a read-only provider query, precise enough that quarantining it
+/// blocks exactly the request shape that killed the engine and nothing else.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct QueryFingerprint {
+    method: &'static str,
+    path: String,
+    offset: u64,
+    extra: u64,
+}
+
+impl QueryFingerprint {
+    fn new(method: &'static str, path: &str, offset: u64, extra: u64) -> Self {
+        Self {
+            method,
+            path: path.to_string(),
+            offset,
+            extra,
+        }
+    }
+}
+
+/// Hash auxiliary request payload (trigger characters, resolve data) into the
+/// fingerprint's `extra` dimension.
+fn hash_extra(payload: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    payload.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Crash-quarantine bookkeeping.
+///
+/// Every crash implicates the requests in flight at the death (plus those that
+/// errored within [`QUARANTINE_RECENT_ERROR_TTL`] of it — the transport-error
+/// vs monitor-wake race). An implication is a STRIKE; at
+/// [`QUARANTINE_STRIKE_THRESHOLD`] consecutive strikes the fingerprint is
+/// QUARANTINED: never again replayed verbatim into the restarted engine — the
+/// identical request killed the engine repeatedly and would burn the restart
+/// budget in an infinite crash-restart loop. A quarantined request fails
+/// closed (empty result) while the restarted engine keeps serving everything
+/// else. A fingerprint's strikes are erased by its first successful
+/// completion (bystanders self-heal), and a path's whole attribution clears
+/// when its content changes (the same position against new content is a NEW
+/// request).
+#[derive(Default)]
+struct QueryWatch {
+    /// Fingerprints currently in flight against the live provider (multiset).
+    in_flight: HashMap<QueryFingerprint, u32>,
+    /// Fingerprints that recently completed with an error, with their
+    /// completion instant (crash attribution window).
+    recent_errors: Vec<(QueryFingerprint, Instant)>,
+    /// Consecutive crash implications per fingerprint (no successful
+    /// completion in between).
+    strikes: HashMap<QueryFingerprint, u32>,
+    /// Fingerprints attributed to repeated engine crashes: never replayed.
+    quarantined: HashSet<QueryFingerprint>,
+}
+
+impl QueryWatch {
+    fn begin(&mut self, fp: &QueryFingerprint) {
+        *self.in_flight.entry(fp.clone()).or_insert(0) += 1;
+    }
+
+    fn end(&mut self, fp: &QueryFingerprint, ok: bool) {
+        if let Some(count) = self.in_flight.get_mut(fp) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                self.in_flight.remove(fp);
+            }
+        }
+        if ok {
+            // A successful completion proves the request does not kill the
+            // engine — erase its crash strikes (bystander self-heal).
+            self.strikes.remove(fp);
+        } else {
+            let now = Instant::now();
+            self.recent_errors
+                .retain(|(_, at)| now.duration_since(*at) < QUARANTINE_RECENT_ERROR_TTL);
+            if self.recent_errors.len() >= QUARANTINE_RECENT_ERROR_CAP {
+                self.recent_errors.remove(0);
+            }
+            self.recent_errors.push((fp.clone(), now));
+        }
+    }
+
+    fn is_quarantined(&self, fp: &QueryFingerprint) -> bool {
+        self.quarantined.contains(fp)
+    }
+
+    /// Attribute a crash: strike everything in flight now plus everything that
+    /// errored within the race window; quarantine repeat offenders.
+    fn record_crash_implications(&mut self) {
+        let now = Instant::now();
+        let mut implicated: HashSet<QueryFingerprint> = self.in_flight.keys().cloned().collect();
+        for (fp, at) in self.recent_errors.drain(..) {
+            if now.duration_since(at) < QUARANTINE_RECENT_ERROR_TTL {
+                implicated.insert(fp);
+            }
+        }
+        for fp in implicated {
+            let strikes = self.strikes.entry(fp.clone()).or_insert(0);
+            *strikes += 1;
+            if *strikes >= QUARANTINE_STRIKE_THRESHOLD {
+                tracing::warn!(
+                    "query {} {}@{} was in flight at {} consecutive engine crashes — \
+                     quarantined (fails closed until the file changes)",
+                    fp.method,
+                    fp.path,
+                    fp.offset,
+                    strikes,
+                );
+                self.quarantined.insert(fp);
+            }
+        }
+    }
+
+    /// A content change for `path` invalidates its crash attribution.
+    fn clear_path(&mut self, path: &str) {
+        self.quarantined.retain(|fp| fp.path != path);
+        self.strikes.retain(|fp, _| fp.path != path);
+        self.recent_errors.retain(|(fp, _)| fp.path != path);
+    }
+}
+
+/// RAII in-flight registration: completes as ok/err, or — when dropped without
+/// completing (caller cancellation racing the engine's death) — conservatively
+/// as an error so the crash window still sees it.
+struct InFlightGuard {
+    watch: Arc<StdMutex<QueryWatch>>,
+    fp: Option<QueryFingerprint>,
+}
+
+impl InFlightGuard {
+    fn begin(watch: Arc<StdMutex<QueryWatch>>, fp: QueryFingerprint) -> Self {
+        watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .begin(&fp);
+        Self {
+            watch,
+            fp: Some(fp),
+        }
+    }
+
+    fn complete(mut self, ok: bool) {
+        if let Some(fp) = self.fp.take() {
+            self.watch
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .end(&fp, ok);
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Some(fp) = self.fp.take() {
+            self.watch
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .end(&fp, false);
+        }
+    }
 }
 
 pub struct ResilientProvider<P, B>
@@ -243,6 +441,8 @@ where
             backend,
             restart_count: AtomicU32::new(0),
             max_restarts,
+            torn_down: AtomicBool::new(false),
+            query_watch: Arc::new(StdMutex::new(QueryWatch::default())),
         });
 
         tokio::spawn(run_actor(command_rx, inner, log_name));
@@ -272,6 +472,18 @@ where
         mutation: DesiredMutation,
         lane: Lane,
     ) -> Result<(), TypeProviderError> {
+        // A content mutation invalidates the mutated path's crash attribution:
+        // the same position against NEW content is a new request, so it must be
+        // released from quarantine once the mutation has been applied.
+        let quarantine_clear = match &mutation {
+            DesiredMutation::Open { path, .. }
+            | DesiredMutation::Load { path, .. }
+            | DesiredMutation::Update { path, .. }
+            | DesiredMutation::Close { path } => Some(path.clone()),
+            DesiredMutation::RegisterCarrier { companion_path, .. } => Some(companion_path.clone()),
+            DesiredMutation::ConfigurePaths { .. }
+            | DesiredMutation::UpdateWorkspaceFolders { .. } => None,
+        };
         let (ack, ack_rx) = oneshot::channel();
         self.state
             .commands
@@ -281,9 +493,62 @@ where
                 ack,
             })
             .map_err(|_| TypeProviderError::new(self.state.backend.restarting_error()))?;
-        ack_rx
+        let result = ack_rx
             .await
-            .map_err(|_| TypeProviderError::new(self.state.backend.restarting_error()))?
+            .map_err(|_| TypeProviderError::new(self.state.backend.restarting_error()))?;
+        if result.is_ok() {
+            if let Some(path) = quarantine_clear {
+                self.state
+                    .query_watch
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear_path(&path);
+            }
+        }
+        result
+    }
+
+    /// Run a read-only provider query under crash quarantine.
+    ///
+    /// A fingerprint attributed to an engine crash is NEVER replayed into the
+    /// (restarted) engine: it fails closed with `fail_closed()` instead —
+    /// preventing the identical killer request from re-crashing the fresh
+    /// process in an infinite crash-restart loop. Everything else registers as
+    /// in-flight for the crash monitor's attribution window.
+    async fn run_guarded<T, F, Fut>(
+        &self,
+        fp: QueryFingerprint,
+        fail_closed: impl FnOnce() -> T,
+        run: F,
+    ) -> Result<T, TypeProviderError>
+    where
+        F: FnOnce(Arc<P>) -> Fut,
+        Fut: Future<Output = Result<T, TypeProviderError>>,
+    {
+        let provider = self.get_inner().await?;
+        let quarantined = {
+            let watch = self
+                .state
+                .query_watch
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            watch.is_quarantined(&fp)
+        };
+        if quarantined {
+            tracing::warn!(
+                "{} query {} {}@{} is quarantined after an engine crash — failing closed \
+                 (a content change to the file lifts the quarantine)",
+                self.state.backend.log_name(),
+                fp.method,
+                fp.path,
+                fp.offset,
+            );
+            return Ok(fail_closed());
+        }
+        let guard = InFlightGuard::begin(Arc::clone(&self.state.query_watch), fp);
+        let result = run(provider).await;
+        guard.complete(result.is_ok());
+        result
     }
 }
 
@@ -587,10 +852,33 @@ where
     tokio::spawn(async move {
         crash_notify.notified().await;
 
+        // TEARDOWN DISCRIMINATION: a deliberate `shutdown()` produces the same
+        // crash-notify wake as a real death (the torn-down child's stdout EOF).
+        // That is the REQUESTED teardown — reporting it as a crash would mint a
+        // spurious user-facing "crashed. Restarting" notification on every
+        // clean editor shutdown and respawn an engine into a dying session.
+        if state.torn_down.load(Ordering::SeqCst) {
+            tracing::debug!(
+                "{} exit during deliberate teardown — not a crash",
+                state.backend.log_name()
+            );
+            return;
+        }
+
         tracing::warn!(
             "{} crash detected - initiating restart sequence",
             state.backend.log_name()
         );
+
+        // CRASH QUARANTINE: strike the requests in flight at (or erroring
+        // moments before) the death. Whatever killed the engine is in that
+        // set; a repeat offender is quarantined and never replayed into the
+        // restarted engine again.
+        state
+            .query_watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_crash_implications();
 
         // Drop the live provider through the actor so queries fail closed while
         // we respawn — the actor is the sole writer of the live cell.
@@ -622,6 +910,15 @@ where
         // crash events, so a persistently failing backend still fails closed —
         // bounded, never a hot respawn loop.
         loop {
+            // A teardown that lands mid-restart aborts the sequence: never
+            // respawn an engine into a session that is shutting down.
+            if state.torn_down.load(Ordering::SeqCst) {
+                tracing::debug!(
+                    "{} teardown during restart sequence — abandoning respawn",
+                    state.backend.log_name()
+                );
+                return;
+            }
             let attempt = state.restart_count.fetch_add(1, Ordering::Relaxed) + 1;
 
             if attempt > state.max_restarts {
@@ -810,35 +1107,61 @@ where
     ) -> ProviderFuture<'_, CompletionResult> {
         let path_owned = path.to_string();
         let trigger_owned = trigger_character.map(|s| s.to_string());
+        let fp = QueryFingerprint::new(
+            "completions",
+            path,
+            u64::from(offset),
+            hash_extra(trigger_character.unwrap_or_default()),
+        );
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider
-                .get_completions(&path_owned, offset, trigger_owned.as_deref())
-                .await
+            self.run_guarded(
+                fp,
+                || CompletionResult {
+                    items: Vec::new(),
+                    is_incomplete: false,
+                },
+                move |provider| async move {
+                    provider
+                        .get_completions(&path_owned, offset, trigger_owned.as_deref())
+                        .await
+                },
+            )
+            .await
         })
     }
 
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("hover", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_hover(&path_owned, offset).await
+            self.run_guarded(
+                fp,
+                || None,
+                move |provider| async move { provider.get_hover(&path_owned, offset).await },
+            )
+            .await
         })
     }
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("diagnostics", path, 0, 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_diagnostics(&path_owned).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_diagnostics(&path_owned).await
+            })
+            .await
         })
     }
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("definition", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_definition(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_definition(&path_owned, offset).await
+            })
+            .await
         })
     }
 
@@ -848,17 +1171,23 @@ where
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("type_definition", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_type_definition(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_type_definition(&path_owned, offset).await
+            })
+            .await
         })
     }
 
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("references", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_references(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_references(&path_owned, offset).await
+            })
+            .await
         })
     }
 
@@ -868,9 +1197,12 @@ where
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("rename_locations", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_rename_locations(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_rename_locations(&path_owned, offset).await
+            })
+            .await
         })
     }
 
@@ -880,9 +1212,12 @@ where
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("signature_help", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_signature_help(&path_owned, offset).await
+            self.run_guarded(fp, || None, move |provider| async move {
+                provider.get_signature_help(&path_owned, offset).await
+            })
+            .await
         })
     }
 
@@ -895,19 +1230,30 @@ where
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let path_owned = path.to_string();
         let diagnostics = diagnostics.to_vec();
+        let fp = QueryFingerprint::new(
+            "code_actions",
+            path,
+            u64::from(start_offset) | (u64::from(end_offset) << 32),
+            0,
+        );
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider
-                .get_code_actions(&path_owned, start_offset, end_offset, &diagnostics)
-                .await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider
+                    .get_code_actions(&path_owned, start_offset, end_offset, &diagnostics)
+                    .await
+            })
+            .await
         })
     }
 
     fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("semantic_tokens", path, 0, 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_semantic_tokens(&path_owned).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_semantic_tokens(&path_owned).await
+            })
+            .await
         })
     }
 
@@ -917,9 +1263,12 @@ where
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("document_highlights", path, u64::from(offset), 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_document_highlights(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_document_highlights(&path_owned, offset).await
+            })
+            .await
         })
     }
 
@@ -930,11 +1279,19 @@ where
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new(
+            "inlay_hints",
+            path,
+            u64::from(start_offset) | (u64::from(end_offset) << 32),
+            0,
+        );
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider
-                .get_inlay_hints(&path_owned, start_offset, end_offset)
-                .await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider
+                    .get_inlay_hints(&path_owned, start_offset, end_offset)
+                    .await
+            })
+            .await
         })
     }
 
@@ -944,14 +1301,28 @@ where
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new(
+            "resolve_completion",
+            path,
+            0,
+            hash_extra(&format!("{data:?}")),
+        );
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.resolve_completion(&path_owned, data).await
+            self.run_guarded(
+                fp,
+                || None,
+                move |provider| async move { provider.resolve_completion(&path_owned, data).await },
+            )
+            .await
         })
     }
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         Box::pin(async {
+            // Declare teardown intent BEFORE tearing the inner provider down:
+            // the resulting crash-notify wake (child exit EOF) is the requested
+            // teardown, never a crash to report/restart from.
+            self.state.torn_down.store(true, Ordering::SeqCst);
             if let Ok(provider) = self.get_inner().await {
                 let _ = provider.shutdown().await;
             }
@@ -1044,9 +1415,12 @@ where
 
     fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let path_owned = path.to_string();
+        let fp = QueryFingerprint::new("diagnostics", path, 0, 0);
         Box::pin(async move {
-            let provider = self.get_inner().await?;
-            provider.get_diagnostics_background(&path_owned).await
+            self.run_guarded(fp, Vec::new, move |provider| async move {
+                provider.get_diagnostics_background(&path_owned).await
+            })
+            .await
         })
     }
 

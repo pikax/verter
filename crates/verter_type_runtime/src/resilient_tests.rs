@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, Notify, Semaphore};
 
-use super::{ResilientBackend, ResilientProvider, TracingNotifier};
+use super::{
+    NotifySeverity, ProviderNotifier, ResilientBackend, ResilientProvider, TracingNotifier,
+};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
 use crate::tsserver::TsserverTypeProvider;
@@ -48,6 +50,10 @@ enum MockCall {
     CloseFile {
         path: String,
     },
+    Hover {
+        path: String,
+        offset: u32,
+    },
     ConfigurePaths {
         base_url: String,
         paths: serde_json::Value,
@@ -69,7 +75,8 @@ fn call_path(call: &MockCall) -> &str {
         MockCall::OpenFile { path, .. }
         | MockCall::LoadFile { path, .. }
         | MockCall::UpdateFile { path, .. }
-        | MockCall::CloseFile { path } => path,
+        | MockCall::CloseFile { path }
+        | MockCall::Hover { path, .. } => path,
         MockCall::ConfigurePaths { base_url, .. } => base_url,
         MockCall::UpdateWorkspaceFolders { .. } => "",
         MockCall::RegisterCarrierMember { companion_path, .. } => companion_path,
@@ -82,6 +89,12 @@ struct MockInner {
     /// Optional event tap: every recorded call is also forwarded here so a test
     /// can await replay deterministically (no polling).
     tap: parking_lot::Mutex<Option<mpsc::UnboundedSender<MockCall>>>,
+    /// When set for a path, `get_hover` on THAT path BLOCKS on the gate and
+    /// then fails with a transport-shaped error — simulating a request in
+    /// flight against a child that dies mid-request (the killer-request shape
+    /// crash quarantine covers). Hovers on other paths stay instant so the
+    /// liveness probes (`await_down`/`await_live`) never park on the gate.
+    hover_gate: parking_lot::Mutex<Option<(String, Arc<Semaphore>)>>,
 }
 
 /// A recording `TypeProvider` mock. Cloning shares the recorded state (so the
@@ -98,8 +111,21 @@ impl MockProvider {
                 id,
                 calls: parking_lot::Mutex::new(Vec::new()),
                 tap: parking_lot::Mutex::new(None),
+                hover_gate: parking_lot::Mutex::new(None),
             }),
         }
+    }
+
+    /// Make every subsequent `get_hover` ON `path` BLOCK on `gate` and then
+    /// fail with a transport-shaped error (the in-flight-when-the-child-died
+    /// shape). Other paths keep the instant default.
+    fn set_blocking_failing_hover(&self, path: &str, gate: Arc<Semaphore>) {
+        *self.inner.hover_gate.lock() = Some((path.to_string(), gate));
+    }
+
+    /// Restore the instant hover default (lifts a killer gate).
+    fn clear_blocking_failing_hover(&self) {
+        *self.inner.hover_gate.lock() = None;
     }
 
     /// Install an event tap and return its receiver. Calls recorded after this
@@ -189,8 +215,22 @@ impl TypeProvider for MockProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        Box::pin(async { Ok(None) })
+    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        self.record(MockCall::Hover {
+            path: path.to_string(),
+            offset,
+        });
+        let gate = match &*self.inner.hover_gate.lock() {
+            Some((gated_path, gate)) if gated_path == path => Some(Arc::clone(gate)),
+            _ => None,
+        };
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await;
+                return Err(TypeProviderError::new("connection closed"));
+            }
+            Ok(None)
+        })
     }
 
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
@@ -283,6 +323,9 @@ impl TypeProvider for MockProvider {
 struct TestBackend {
     replacement: MockProvider,
     spawn_gate: Arc<Semaphore>,
+    /// The crash-notify handle minted for the MOST RECENT respawn, so a test
+    /// can crash the respawned generation too (multi-cycle crash scenarios).
+    respawned_crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>>,
 }
 
 impl ResilientBackend<MockProvider> for TestBackend {
@@ -300,18 +343,20 @@ impl ResilientBackend<MockProvider> for TestBackend {
 
     fn spawn<'a>(
         &'a self,
-        _crash_notify: Arc<Notify>,
+        crash_notify: Arc<Notify>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<MockProvider, TypeProviderError>> + Send + 'a>,
     > {
         let provider = self.replacement.clone();
         let gate = Arc::clone(&self.spawn_gate);
+        let respawned = Arc::clone(&self.respawned_crash_notify);
         Box::pin(async move {
             let permit = gate
                 .acquire()
                 .await
                 .map_err(|_| TypeProviderError::new("test spawn gate closed"))?;
             permit.forget();
+            *respawned.lock() = Some(crash_notify);
             Ok(provider)
         })
     }
@@ -325,19 +370,99 @@ fn make_resilient(
     Arc<Notify>,
     Arc<Semaphore>,
 ) {
+    let (provider, crash_notify, spawn_gate, _notifier) =
+        make_resilient_with_notifier(initial, replacement);
+    (provider, crash_notify, spawn_gate)
+}
+
+/// A [`ProviderNotifier`] that records every user-facing notification so tests
+/// can assert what the user was (and was NOT) told.
+#[derive(Default)]
+struct RecordingNotifier {
+    messages: parking_lot::Mutex<Vec<(NotifySeverity, String)>>,
+}
+
+impl RecordingNotifier {
+    fn messages(&self) -> Vec<(NotifySeverity, String)> {
+        self.messages.lock().clone()
+    }
+}
+
+impl ProviderNotifier for RecordingNotifier {
+    fn notify(&self, severity: NotifySeverity, message: String) {
+        self.messages.lock().push((severity, message));
+    }
+}
+
+struct ResilientHarness {
+    provider: Arc<ResilientProvider<MockProvider, TestBackend>>,
+    crash_notify: Arc<Notify>,
+    spawn_gate: Arc<Semaphore>,
+    notifier: Arc<RecordingNotifier>,
+    /// The crash-notify handle of the most recently respawned generation.
+    respawned_crash_notify: Arc<parking_lot::Mutex<Option<Arc<Notify>>>>,
+}
+
+impl ResilientHarness {
+    /// Fire the crash signal of the CURRENT (most recently respawned)
+    /// generation, falling back to the initial generation's handle.
+    fn crash_current_generation(&self) {
+        match self.respawned_crash_notify.lock().as_ref() {
+            Some(notify) => notify.notify_one(),
+            None => self.crash_notify.notify_one(),
+        }
+    }
+}
+
+fn make_resilient_with_notifier(
+    initial: MockProvider,
+    replacement: MockProvider,
+) -> (
+    ResilientProvider<MockProvider, TestBackend>,
+    Arc<Notify>,
+    Arc<Semaphore>,
+    Arc<RecordingNotifier>,
+) {
     let crash_notify = Arc::new(Notify::new());
     let spawn_gate = Arc::new(Semaphore::new(0));
+    let notifier = Arc::new(RecordingNotifier::default());
     let provider = ResilientProvider::new(
         initial,
         Arc::clone(&crash_notify),
         TestBackend {
             replacement,
             spawn_gate: Arc::clone(&spawn_gate),
+            respawned_crash_notify: Arc::new(parking_lot::Mutex::new(None)),
         },
-        Arc::new(TracingNotifier),
+        Arc::clone(&notifier) as Arc<dyn ProviderNotifier>,
         3,
     );
-    (provider, crash_notify, spawn_gate)
+    (provider, crash_notify, spawn_gate, notifier)
+}
+
+fn make_harness(initial: MockProvider, replacement: MockProvider) -> ResilientHarness {
+    let crash_notify = Arc::new(Notify::new());
+    let spawn_gate = Arc::new(Semaphore::new(0));
+    let notifier = Arc::new(RecordingNotifier::default());
+    let respawned_crash_notify = Arc::new(parking_lot::Mutex::new(None));
+    let provider = Arc::new(ResilientProvider::new(
+        initial,
+        Arc::clone(&crash_notify),
+        TestBackend {
+            replacement,
+            spawn_gate: Arc::clone(&spawn_gate),
+            respawned_crash_notify: Arc::clone(&respawned_crash_notify),
+        },
+        Arc::clone(&notifier) as Arc<dyn ProviderNotifier>,
+        3,
+    ));
+    ResilientHarness {
+        provider,
+        crash_notify,
+        spawn_gate,
+        notifier,
+        respawned_crash_notify,
+    }
 }
 
 /// Spin until the wrapper reports its inner provider is down (a query returns the
@@ -1541,5 +1666,293 @@ async fn persistently_failing_respawn_exhausts_budget_and_stays_down() {
                     .any(|fixture| fixture.companion_path == companion_path)
         )),
         "a provider that never spawned successfully must receive no carrier replay"
+    );
+}
+
+// ─── Deliberate-teardown vs crash discrimination + killer-request quarantine ───
+
+/// Spin (cooperatively) until `cond` holds, failing loudly instead of hanging.
+async fn await_cond(mut cond: impl FnMut() -> bool, what: &str) {
+    for _ in 0..100_000 {
+        if cond() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("condition never held: {what}");
+}
+
+/// Spin until the wrapper serves queries again (restart completed). Uses a
+/// VIRTUAL-clock sleep (not a busy yield) so the paused test clock advances
+/// through the monitor's restart backoff.
+async fn await_live(provider: &ResilientProvider<MockProvider, TestBackend>) {
+    for _ in 0..1_000 {
+        if provider.get_hover("/probe-live.vue.tsx", 0).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("wrapper never went live again after respawn was permitted");
+}
+
+/// Drive the recurrence that identifies a genuine killer request: the hover
+/// `(companion, offset)` is IN FLIGHT at TWO consecutive engine deaths —
+/// cycle 1 against `initial`, then (replayed, exactly as an editor retry
+/// would) cycle 2 against the respawned `replacement`. Returns with the
+/// killer quarantined and the engine live again.
+async fn drive_killer_to_quarantine(
+    harness: &ResilientHarness,
+    provider: &Arc<ResilientProvider<MockProvider, TestBackend>>,
+    initial: &MockProvider,
+    replacement: &MockProvider,
+    companion: &'static str,
+    offset: u32,
+) {
+    // Cycle 1: the killer reaches the engine and is in flight when it dies.
+    let gate_one = Arc::new(Semaphore::new(0));
+    initial.set_blocking_failing_hover(companion, Arc::clone(&gate_one));
+    let killer_one = tokio::spawn({
+        let provider = Arc::clone(provider);
+        async move { provider.get_hover(companion, offset).await }
+    });
+    await_cond(
+        || {
+            initial.calls().iter().any(|c| {
+                matches!(c, MockCall::Hover { path, offset: o } if path == companion && *o == offset)
+            })
+        },
+        "cycle-1 killer hover reached the initial provider",
+    )
+    .await;
+    harness.crash_notify.notify_one();
+    await_down(provider).await;
+    gate_one.add_permits(1);
+    let killed_one = killer_one.await.unwrap();
+    assert!(
+        killed_one.is_err(),
+        "the cycle-1 in-flight killer surfaces its transport failure, got {killed_one:?}"
+    );
+    harness.spawn_gate.add_permits(1);
+    await_live(provider).await;
+
+    // Replay: the identical request goes back in (an editor/retry layer would
+    // do exactly this) and kills the respawned engine too.
+    let gate_two = Arc::new(Semaphore::new(0));
+    replacement.set_blocking_failing_hover(companion, Arc::clone(&gate_two));
+    let killer_two = tokio::spawn({
+        let provider = Arc::clone(provider);
+        async move { provider.get_hover(companion, offset).await }
+    });
+    await_cond(
+        || {
+            replacement.calls().iter().any(|c| {
+                matches!(c, MockCall::Hover { path, offset: o } if path == companion && *o == offset)
+            })
+        },
+        "cycle-2 killer hover reached the respawned provider",
+    )
+    .await;
+    harness.crash_current_generation();
+    await_down(provider).await;
+    gate_two.add_permits(1);
+    let killed_two = killer_two.await.unwrap();
+    assert!(
+        killed_two.is_err(),
+        "the cycle-2 in-flight killer surfaces its transport failure, got {killed_two:?}"
+    );
+    harness.spawn_gate.add_permits(1);
+    await_live(provider).await;
+    // Lift the gate so any FUTURE (buggy) replay would complete instantly
+    // instead of hanging the test.
+    replacement.clear_blocking_failing_hover();
+}
+
+fn hover_count(provider: &MockProvider, companion: &str, offset: u32) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|c| {
+            matches!(c, MockCall::Hover { path, offset: o } if path == companion && *o == offset)
+        })
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn deliberate_shutdown_is_not_reported_as_a_crash_and_never_respawns() {
+    // DISCRIMINATION: without teardown intent on the wrapper, the torn-down
+    // child's exit EOF (surfaced on the SAME crash-notify handle a real death
+    // uses) drives the monitor through the crash path — the user sees
+    // "crashed. Restarting" on every clean editor shutdown and a zombie engine
+    // is respawned into the dying session. This is exactly the spurious
+    // notification the Neovim real-client smoke observed at client stop.
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let mut replay_rx = replacement.attach_tap();
+    let (provider, crash_notify, spawn_gate, notifier) =
+        make_resilient_with_notifier(initial, replacement);
+
+    provider
+        .open_file("/p/App.vue.tsx", "const a = 1;")
+        .await
+        .unwrap();
+
+    provider.shutdown().await.unwrap();
+    // The torn-down child's stdout EOF fires the crash-notify handle.
+    crash_notify.notify_one();
+
+    // Give a (wrongly armed) monitor its full notification + backoff horizon,
+    // WITH spawn permits available so a respawn attempt would be observable.
+    spawn_gate.add_permits(4);
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+    assert!(
+        notifier.messages().is_empty(),
+        "a deliberate shutdown must produce NO user-facing crash/restart \
+         notification, got {:?}",
+        notifier.messages()
+    );
+    let replayed = drain_replay(&mut replay_rx).await;
+    assert!(
+        replayed.is_empty(),
+        "a deliberate shutdown must never respawn/replay into a fresh engine, \
+         got {replayed:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn killer_request_is_quarantined_and_never_replayed_into_restarted_engine() {
+    // DISCRIMINATION: without quarantine, the identical (method, path, offset)
+    // request keeps going back into every restarted engine; against a real
+    // engine whose death that exact request causes, that is the infinite
+    // crash-restart loop that burns the restart budget to verter-only mode.
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone());
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/SvelteJs.svelte.jsx";
+    provider
+        .open_file(companion, "let title = $state(1);")
+        .await
+        .unwrap();
+
+    drive_killer_to_quarantine(&harness, &provider, &initial, &replacement, companion, 42).await;
+
+    // The killer fingerprint now fails closed WITHOUT touching the engine.
+    let replays_before = hover_count(&replacement, companion, 42);
+    let quarantined = provider.get_hover(companion, 42).await;
+    assert!(
+        matches!(quarantined, Ok(None)),
+        "the quarantined killer request must fail closed (empty result), got {quarantined:?}"
+    );
+    assert_eq!(
+        hover_count(&replacement, companion, 42),
+        replays_before,
+        "the quarantined killer request must NEVER be replayed into the restarted engine"
+    );
+
+    // Everything else on the same file is served by the restarted engine.
+    let neighbor = provider.get_hover(companion, 43).await;
+    assert!(neighbor.is_ok(), "a non-killer request must be served");
+    assert!(
+        hover_count(&replacement, companion, 43) > 0,
+        "a different position on the same file must reach the restarted engine"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn quarantine_clears_when_the_file_content_changes() {
+    // A quarantined fingerprint is tied to the content that killed the engine:
+    // once the file changes, the same position is a NEW request and must be
+    // served again (otherwise a position is blackholed forever).
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone());
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/SvelteJs.svelte.jsx";
+    provider
+        .open_file(companion, "let title = $state(1);")
+        .await
+        .unwrap();
+
+    drive_killer_to_quarantine(&harness, &provider, &initial, &replacement, companion, 42).await;
+    let replays_before = hover_count(&replacement, companion, 42);
+    assert!(
+        matches!(provider.get_hover(companion, 42).await, Ok(None)),
+        "killer stays quarantined while the content is unchanged"
+    );
+    assert_eq!(
+        hover_count(&replacement, companion, 42),
+        replays_before,
+        "quarantined killer must not reach the engine before the content changes"
+    );
+
+    provider
+        .update_file(companion, "let title = $state(2);")
+        .await
+        .unwrap();
+
+    let served = provider.get_hover(companion, 42).await;
+    assert!(
+        served.is_ok(),
+        "after a content change the request is served"
+    );
+    assert!(
+        hover_count(&replacement, companion, 42) > replays_before,
+        "after a content change the same position must reach the engine again"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_killer_request_does_not_burn_the_restart_budget() {
+    // ENDURANCE: an editor (or retry layer) that re-issues the killer request
+    // in a loop must not drive unbounded crash/restart cycles. The recurrence
+    // that identifies the killer costs exactly TWO crash cycles; from then on
+    // every replay fails closed against the quarantine while the engine keeps
+    // serving everything else — never a third cycle, never verter-only mode.
+    let initial = MockProvider::new("tsgo");
+    let replacement = MockProvider::new("tsgo");
+    let harness = make_harness(initial.clone(), replacement.clone());
+    let provider = Arc::clone(&harness.provider);
+    let companion = "/p/SvelteJs.svelte.jsx";
+    provider
+        .open_file(companion, "let title = $state(1);")
+        .await
+        .unwrap();
+
+    drive_killer_to_quarantine(&harness, &provider, &initial, &replacement, companion, 42).await;
+
+    // Leave the gate generously provisioned: a buggy re-crash loop would
+    // consume additional permits and mint additional notifications.
+    harness.spawn_gate.add_permits(8);
+    let replays_before = hover_count(&replacement, companion, 42);
+    for _ in 0..25 {
+        let replayed = provider.get_hover(companion, 42).await;
+        assert!(
+            matches!(replayed, Ok(None)),
+            "every replayed killer fails closed, got {replayed:?}"
+        );
+    }
+    assert_eq!(
+        hover_count(&replacement, companion, 42),
+        replays_before,
+        "no replayed killer may reach the restarted engine"
+    );
+    let crash_notices = harness
+        .notifier
+        .messages()
+        .iter()
+        .filter(|(_, message)| message.contains("crashed. Restarting"))
+        .count();
+    assert_eq!(
+        crash_notices,
+        2,
+        "exactly TWO crash notifications (the identification cost) — replayed \
+         killers must not mint further crash/restart cycles, got {:?}",
+        harness.notifier.messages()
+    );
+    // The engine is still live for everything else — never verter-only mode.
+    assert!(
+        provider.get_hover(companion, 43).await.is_ok(),
+        "the restarted engine keeps serving non-quarantined requests"
     );
 }

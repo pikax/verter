@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::UNIX_EPOCH;
 
@@ -245,6 +245,13 @@ struct LspTransport {
     consecutive_failures: AtomicU32,
     /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
+    /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the `shutdown`/`exit`
+    /// pair is sent, so the child's resulting exit (stdout EOF) and any in-flight
+    /// request timeouts are recognized as the teardown they are — NEVER surfaced on
+    /// `crash_notify` as an engine crash (which would mint a spurious
+    /// "crashed. Restarting" notification and respawn an engine into a dying
+    /// session).
+    teardown_intent: Arc<AtomicBool>,
 }
 
 /// Default timeout for LSP requests (10 seconds).
@@ -281,6 +288,23 @@ const INITIALIZE_TIMEOUT_SECS: u64 = 30;
 const HANG_THRESHOLD: u32 = 3;
 
 use crate::traits::ProviderPriority;
+
+/// Build a JSON-RPC message body, OMITTING the `params` key entirely when the
+/// caller has none (`Value::Null`). LSP methods like `shutdown`/`exit` declare
+/// NO params; sending `"params": null` makes strict engines (tsgo) log
+/// `InvalidParams: expected no params, got null` while handling every teardown.
+fn jsonrpc_body(id: Option<i64>, method: &str, params: &serde_json::Value) -> serde_json::Value {
+    let mut msg = serde_json::Map::new();
+    msg.insert("jsonrpc".into(), serde_json::Value::from("2.0"));
+    if let Some(id) = id {
+        msg.insert("id".into(), serde_json::Value::from(id));
+    }
+    msg.insert("method".into(), serde_json::Value::from(method));
+    if !params.is_null() {
+        msg.insert("params".into(), params.clone());
+    }
+    serde_json::Value::Object(msg)
+}
 
 impl LspTransport {
     /// Get the sender for a given priority lane.
@@ -326,12 +350,7 @@ impl LspTransport {
             async {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "method": method,
-                    "params": params,
-                });
+                let msg = jsonrpc_body(Some(id), method, &params);
                 let body = serde_json::to_string(&msg)
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
@@ -400,11 +419,17 @@ impl LspTransport {
                         self.pending.lock().await.remove(&id);
                         let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
                         if count >= HANG_THRESHOLD {
-                            tracing::error!(
-                                "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
-                            );
-                            if let Some(notify) = &self.crash_notify {
-                                notify.notify_waiters();
+                            if self.teardown_intent.load(Ordering::SeqCst) {
+                                tracing::debug!(
+                                    "TSGO request timeouts during deliberate teardown — not a hang"
+                                );
+                            } else {
+                                tracing::error!(
+                                    "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
+                                );
+                                if let Some(notify) = &self.crash_notify {
+                                    notify.notify_waiters();
+                                }
                             }
                         }
                         crate::type_runtime_trace_event!(
@@ -438,11 +463,7 @@ impl LspTransport {
                 summarize_lsp_params(&params),
             ),
             async {
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": method,
-                    "params": params,
-                });
+                let msg = jsonrpc_body(None, method, &params);
                 let body = serde_json::to_string(&msg)
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
@@ -510,6 +531,11 @@ async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::
 ///
 /// When `crash_notify` is provided, it is signaled on any exit (EOF, I/O error,
 /// read failure) so that the `ResilientTypeProvider` can detect the crash and restart.
+///
+/// `teardown_intent` disarms that signal: a deliberate `shutdown()` sets it BEFORE
+/// sending `shutdown`/`exit`, so the child's resulting EOF is recognized as the
+/// requested teardown — never surfaced as a crash (which would mint a spurious
+/// "crashed. Restarting" notification and respawn an engine into a dying session).
 async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
@@ -517,7 +543,17 @@ async fn read_loop(
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     interactive_tx: mpsc::Sender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
+    teardown_intent: Arc<AtomicBool>,
 ) {
+    let signal_crash = |crash_notify: &Option<Arc<Notify>>| {
+        if teardown_intent.load(Ordering::SeqCst) {
+            tracing::debug!("TSGO stdout closed during deliberate teardown — not a crash");
+            return;
+        }
+        if let Some(notify) = crash_notify {
+            notify.notify_waiters();
+        }
+    };
     let mut reader = BufReader::new(stdout);
     let mut header_buf = String::new();
 
@@ -532,9 +568,7 @@ async fn read_loop(
                 Ok(0) => {
                     // EOF — child process exited
                     drain_pending(&pending).await;
-                    if let Some(notify) = &crash_notify {
-                        notify.notify_waiters();
-                    }
+                    signal_crash(&crash_notify);
                     return;
                 }
                 Ok(_) => {
@@ -551,9 +585,7 @@ async fn read_loop(
                 Err(_) => {
                     // I/O error — child likely crashed
                     drain_pending(&pending).await;
-                    if let Some(notify) = &crash_notify {
-                        notify.notify_waiters();
-                    }
+                    signal_crash(&crash_notify);
                     return;
                 }
             }
@@ -571,9 +603,7 @@ async fn read_loop(
             .is_err()
         {
             drain_pending(&pending).await;
-            if let Some(notify) = &crash_notify {
-                notify.notify_waiters();
-            }
+            signal_crash(&crash_notify);
             return;
         }
 
@@ -1361,6 +1391,9 @@ pub struct TsgoTypeProvider {
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    /// Deliberate-teardown intent, shared with the transport + read loop. See
+    /// [`LspTransport::teardown_intent`].
+    teardown_intent: Arc<AtomicBool>,
 }
 
 impl Drop for TsgoTypeProvider {
@@ -1530,6 +1563,7 @@ impl TsgoTypeProvider {
             background_rx,
         ));
 
+        let teardown_intent = Arc::new(AtomicBool::new(false));
         let transport = Arc::new(LspTransport {
             interactive_tx: interactive_tx.clone(),
             normal_tx,
@@ -1538,6 +1572,7 @@ impl TsgoTypeProvider {
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
             crash_notify: crash_notify.as_ref().map(Arc::clone),
+            teardown_intent: Arc::clone(&teardown_intent),
         });
         let diagnostics_cache = Arc::new(Mutex::new(HashMap::new()));
         let contents = Arc::new(Mutex::new(HashMap::new()));
@@ -1548,6 +1583,7 @@ impl TsgoTypeProvider {
             Arc::clone(&contents),
             interactive_tx,
             crash_notify,
+            Arc::clone(&teardown_intent),
         ));
 
         Self {
@@ -1556,6 +1592,7 @@ impl TsgoTypeProvider {
             versions: Arc::new(Mutex::new(HashMap::new())),
             contents,
             diagnostics_cache,
+            teardown_intent,
         }
     }
 
@@ -2233,7 +2270,18 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
                     }
-                    None => (0, offset, None),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_completions: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(CompletionResult {
+                            items: Vec::new(),
+                            is_incomplete: false,
+                        });
+                    }
                 }
             };
 
@@ -2452,21 +2500,27 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, cache_hit) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let (line, character) = offset_to_position(c, offset);
-                        (line, character, true)
+                    Some(c) => offset_to_position(c, offset),
+                    None => {
+                        // FAIL CLOSED: without the synced content there is no
+                        // valid position to convert to. A fabricated
+                        // `(0, byte-offset)` coordinate is a malformed request
+                        // the engine may not survive — never send one.
+                        tracing::warn!(
+                            "TSGO get_hover: no cached contents for {path_owned} — \n                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(None);
                     }
-                    None => (0, offset, false),
                 }
             };
             crate::type_runtime_trace_scope_async!(
                 "tsgo_get_hover",
                 format!(
-                    "path={} uri={} offset={} line={} character={} content_cache_hit={}",
-                    path_owned, uri, offset, line, character, cache_hit,
+                    "path={} uri={} offset={} line={} character={} content_cache_hit=true",
+                    path_owned, uri, offset, line, character,
                 ),
                 async {
                     let result = transport
@@ -2604,7 +2658,15 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
                     }
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_definition: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2666,7 +2728,15 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
                     }
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_type_definition: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2721,7 +2791,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_references: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2762,7 +2840,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_rename_locations: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2815,7 +2901,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_signature_help: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(None);
+                    }
                 }
             };
             let result = transport
@@ -2982,7 +3076,15 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
                     }
-                    None => (0, offset, None),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_document_highlights: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -3131,6 +3233,10 @@ impl TypeProvider for TsgoTypeProvider {
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
         let child = self.child.as_ref();
+        // Declare teardown intent BEFORE any teardown traffic: the child's exit
+        // (stdout EOF) and any in-flight request timeouts are the REQUESTED
+        // teardown, never a crash to report/restart from.
+        self.teardown_intent.store(true, Ordering::SeqCst);
         Box::pin(async move {
             let Some(child) = child else {
                 // Non-owning editor attach: close only this local feature bridge.
