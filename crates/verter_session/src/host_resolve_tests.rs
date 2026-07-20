@@ -11,6 +11,10 @@ use crate::{
     UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 use verter_compiler::compile::CompileTarget;
+use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
+use verter_macro_dto::{
+    MacroAnchor, MacroTscBundle, MacroTscOutcome, MacroTscProjection, TscPublicPropsProjection,
+};
 
 fn strict_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -45,24 +49,6 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
         })
         .unwrap();
 }
-
-#[test]
-fn frontier_forbid_guard_is_thread_local() {
-    let _frontier_guard = crate::host_resolve::forbid_route_frontier_for_tests();
-
-    assert!(crate::host_resolve::route_frontier_forbidden_for_current_thread());
-
-    let frontier_forbidden =
-        std::thread::spawn(crate::host_resolve::route_frontier_forbidden_for_current_thread)
-            .join()
-            .expect("thread-local guard probe should join cleanly");
-
-    assert!(
-        !frontier_forbidden,
-        "route-frontier forbid guard should not leak across test threads",
-    );
-}
-
 /// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
 /// Home.vue) is a valid empty component. The host must serve a Main virtual
 /// node exporting `defineComponent({ __name })` with an empty public surface
@@ -155,6 +141,7 @@ fn compile_main_error(host: &VerterHost, canonical_id: &str) -> crate::Diagnosti
 
 fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
     host.get_public_api(canonical_id)
+        .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -162,6 +149,7 @@ fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
 
 fn public_api_code_with_mode(host: &VerterHost, canonical_id: &str, mode: PublicApiMode) -> String {
     host.get_public_api_with_mode(canonical_id, mode, None)
+        .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -174,6 +162,7 @@ fn public_api_code_with_profile(
     profile: &CompileProfile,
 ) -> String {
     host.get_public_api_with_mode(canonical_id, mode, Some(profile))
+        .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
         .code
         .to_string()
@@ -374,6 +363,24 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
     assert!(
         host.get_ide("/src/Comp.vue", &profile()).is_none(),
         "failed macro type dep compile must not expose IDE output"
+    );
+}
+
+#[test]
+fn missing_aliased_macro_type_dependency_anchors_to_owning_import() {
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nimport type { RemoteProps as Props } from './types'\ndefineProps<Props>()\n</script>";
+    upsert_vue(&host, "/src/Alias.vue", source);
+
+    let diagnostics = compile_main_error(&host, "/src/Alias.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    let import_start = source.find("import type").unwrap() as u32;
+    let import_end =
+        import_start + "import type { RemoteProps as Props } from './types'".len() as u32;
+    assert_eq!(
+        missing.span,
+        Some(Span::new(import_start, import_end)),
+        "an aliased macro root must anchor by its local binding name"
     );
 }
 
@@ -1589,6 +1596,65 @@ fn public_api_with_profile_uses_override_script_state() {
     );
 }
 
+/// Mutation recipe: remove the `!has_content_override` guard around the
+/// `cached_tsc_extract` write in the Vue projector. The profile render then
+/// occupies the raw-derived cache slot before the raw projection control runs.
+#[test]
+fn public_api_profile_override_does_not_populate_raw_extract_cache() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/CacheOwner.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ raw: string }>()\n</script>\n<template><div/></template>",
+    );
+
+    let profile = CompileProfile::default();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "/src/CacheOwner.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Script,
+                index: 0,
+                code: Arc::from("defineProps<{ overrideProp: number }>()"),
+                source_map: None,
+            }],
+        })
+        .expect("script override should succeed");
+
+    let overridden = public_api_code_with_profile(
+        &host,
+        "/src/CacheOwner.vue",
+        PublicApiMode::Public,
+        &profile,
+    );
+    assert!(
+        overridden.contains("overrideProp"),
+        "profile projection must use override syntax: {overridden}"
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.derived_raw_cache()
+            .get("/src/CacheOwner.vue")
+            .is_none_or(|state| state.cached_tsc_extract.is_none()),
+        "an override extraction must not occupy the raw-derived cache slot"
+    );
+
+    let raw = public_api_code(&host, "/src/CacheOwner.vue");
+    assert!(
+        raw.contains("raw") && !raw.contains("overrideProp"),
+        "the unprofiled control must still project raw syntax: {raw}"
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.derived_raw_cache()
+            .get("/src/CacheOwner.vue")
+            .is_some_and(|state| state.cached_tsc_extract.is_some()),
+        "the raw projection control should populate its owning cache slot"
+    );
+}
+
 // ── TSC extract cache tests ──────────────────────────────────────────────
 
 #[test]
@@ -1660,7 +1726,9 @@ defineProps<{ msg: string }>()
     );
 
     // First call should populate the cache
-    let api = host.get_public_api("/test/Cached.vue");
+    let api = host
+        .get_public_api("/test/Cached.vue")
+        .expect("public API projection");
     assert!(api.is_some(), "should produce public API output");
 
     // Verify cache is populated. cached_tsc_extract lives on
@@ -1700,8 +1768,14 @@ defineEmits<{ (e: 'click'): void }>()
 <template><div /></template>"#,
     );
 
-    let api1 = host.get_public_api("/test/Reuse.vue").expect("first call");
-    let api2 = host.get_public_api("/test/Reuse.vue").expect("second call");
+    let api1 = host
+        .get_public_api("/test/Reuse.vue")
+        .expect("first projection")
+        .expect("first call");
+    let api2 = host
+        .get_public_api("/test/Reuse.vue")
+        .expect("second projection")
+        .expect("second call");
     assert_eq!(
         api1.code, api2.code,
         "two consecutive calls must produce identical code"
@@ -1721,7 +1795,9 @@ defineProps<{ a: string }>()
     );
 
     // Populate cache
-    let _api = host.get_public_api("/test/Clear.vue");
+    let _api = host
+        .get_public_api("/test/Clear.vue")
+        .expect("public API projection");
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -1788,7 +1864,9 @@ defineProps<{ msg: string }>()
     );
 
     // Populate cache
-    let _api = host.get_public_api("/test/TplChange.vue");
+    let _api = host
+        .get_public_api("/test/TplChange.vue")
+        .expect("public API projection");
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -1900,7 +1978,9 @@ defineProps<{ x: T }>()
     );
 
     // Populate cache
-    let _api = host.get_public_api("/test/DescChange.vue");
+    let _api = host
+        .get_public_api("/test/DescChange.vue")
+        .expect("public API projection");
     #[cfg(not(target_arch = "wasm32"))]
     {
         // cached_tsc_extract lives on DerivedRawState (D48 split).
@@ -2646,79 +2726,6 @@ export interface Imported {
         response.code
     );
 }
-
-#[test]
-fn imported_type_binding_is_not_treated_as_reexported_macro_type() {
-    let host = strict_host();
-
-    let consumer_source = r#"<script setup lang="ts">
-import type { Props } from './wrapper'
-defineProps<Props>()
-</script>
-<template><div>consumer</div></template>"#;
-    upsert_vue(&host, "/src/Consumer.vue", consumer_source);
-
-    upsert_non_sfc(
-        &host,
-        "/src/wrapper.ts",
-        "import type { Props } from './Base.vue'\nexport interface Wrapper { nested: Props }\n",
-    );
-
-    upsert_vue(
-        &host,
-        "/src/Base.vue",
-        r#"<script lang="ts">
-export interface Props {
-  id: string
-}
-</script>
-<template><div>base</div></template>"#,
-    );
-
-    host.set_import_dependencies(
-        "/src/Consumer.vue",
-        vec![crate::DependencyResolution {
-            specifier: "./wrapper".to_string(),
-            resolved_canonical_id: Some("/src/wrapper.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    host.set_import_dependencies(
-        "/src/wrapper.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./Base.vue".to_string(),
-            resolved_canonical_id: Some("/src/Base.vue".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let mut tracked_deps = std::collections::BTreeSet::new();
-    let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
-    let resolved = host
-        .resolve_external_type_from_loaded_files(
-            "/src/Consumer.vue",
-            "./wrapper",
-            "Props",
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-        )
-        .expect("external type resolution should complete without crashing");
-
-    assert!(
-        resolved.is_none(),
-        "plain imported type bindings must not masquerade as re-exported macro types"
-    );
-}
-
 #[test]
 fn negative_import_route_cache_invalidates_when_imported_module_changes() {
     let host = strict_host();
@@ -2749,8 +2756,8 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let first = host.resolve_component_meta_macro_elements(
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
+    let first = host.resolve_component_meta_native_props(
         "/src/Consumer.vue",
         "./types",
         "DynamicProps",
@@ -2771,9 +2778,9 @@ defineProps<DynamicProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "DynamicProps",
@@ -2785,17 +2792,13 @@ defineProps<DynamicProps>()
 
     assert!(
         second
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.as_deref())
+            .map(|prop| prop.name.as_str())
             .any(|name| name == "added"),
         "resolved props should come from the updated dependency: {:?}",
         second
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.clone())
+            .map(|prop| prop.name.clone())
             .collect::<Vec<_>>()
     );
 }
@@ -2830,9 +2833,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let first = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "Props",
@@ -2842,13 +2845,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the first request");
     assert!(
-        first
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        first.iter().any(|prop| prop.name == "label"),
         "first resolution should surface the `label` member, got: {:?}",
-        first.elements.props
+        first
     );
 
     // The retired `ResolvedTypeCacheDb` hit counter has no successor on the
@@ -2858,9 +2857,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "Props",
@@ -2870,13 +2869,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the second request");
     assert!(
-        second
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        second.iter().any(|prop| prop.name == "label"),
         "second resolution should surface the `label` member, got: {:?}",
-        second.elements.props
+        second
     );
 
     let warm_after = host.project_type_store().imported_roots().warm_hit_count();
@@ -2886,343 +2881,6 @@ defineProps<Props>()
          (warm hits before={warm_before}, after={warm_after})"
     );
 }
-
-#[test]
-fn frontier_companion_seeds_preserve_narrow_routes_through_alias_targets() {
-    let host = strict_host();
-
-    upsert_non_sfc(
-        &host,
-        "/src/alpha.ts",
-        "export interface AlphaProps { alpha?: string }\n",
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/beta.ts",
-        "export interface BetaProps { beta?: string }\n",
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/types.ts",
-        r#"
-import type { AlphaProps } from './alpha'
-import type { BetaProps } from './beta'
-
-export interface Props {
-  primary?: AlphaProps
-  secondary?: BetaProps
-}
-"#,
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/barrel.ts",
-        "export { Props as PublicProps } from './types'\n",
-    );
-
-    host.set_import_dependencies(
-        "/src/types.ts",
-        vec![
-            crate::DependencyResolution {
-                specifier: "./alpha".to_string(),
-                resolved_canonical_id: Some("/src/alpha.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-            crate::DependencyResolution {
-                specifier: "./beta".to_string(),
-                resolved_canonical_id: Some("/src/beta.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-        ],
-    );
-    host.set_import_dependencies(
-        "/src/barrel.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let _view = host.resolver_store_view_read().into_owned_view();
-    let mut requested_routes = super::FrontierRequestedRoutes::default();
-    requested_routes.insert(
-        ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
-        crate::resolver_core::RouteDemand::member_path(vec!["primary".to_string()]),
-    );
-    let mut companion_plans = super::FrontierCompanionPlans::default();
-
-    let (frontier, target, _had_route_cycle) = host
-        .run_external_type_frontier_closure(
-            "/src/barrel.ts",
-            "PublicProps",
-            &mut requested_routes,
-            &mut companion_plans,
-        )
-        .expect("frontier closure should complete");
-    assert_eq!(
-        target,
-        Some(("/src/types.ts".to_string(), "Props".to_string())),
-        "barrel alias should resolve to the defining symbol",
-    );
-    assert_eq!(
-        requested_routes.get(&("/src/types.ts".to_string(), "Props".to_string())),
-        Some(&crate::resolver_core::RouteDemand::member_path(vec![
-            "primary".to_string()
-        ])),
-        "the active member route should be transferred onto the defining target",
-    );
-
-    let view_for_ctx = host.resolver_store_view_read().into_owned_view();
-    let overlay_for_ctx =
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx_for_adapter =
-        crate::resolver_core::HostResolverContext::new(&host, &view_for_ctx, overlay_for_ctx);
-    let adapter = super::HostFrontierAdapter {
-        host: &host,
-        materialize_symbols: false,
-        route_exports_only: true,
-        view: None,
-        ctx: &host_ctx_for_adapter,
-        route_shallow_cache: std::cell::RefCell::new(Default::default()),
-    };
-    let mut inspected_symbols = rustc_hash::FxHashSet::default();
-    let seeds = host.collect_frontier_companion_seeds(
-        &frontier,
-        &adapter,
-        &mut inspected_symbols,
-        &mut requested_routes,
-        &mut companion_plans,
-    );
-    assert!(
-        seeds
-            .iter()
-            .all(|seed| { seed.route == Some(crate::resolver_core::RouteDemand::Whole) }),
-        "companion seeds should carry an explicit whole-route demand",
-    );
-    let seeded: std::collections::BTreeSet<_> = seeds
-        .into_iter()
-        .map(|seed| (seed.canonical_id, seed.exported_name))
-        .collect();
-
-    assert!(
-        seeded.contains(&("/src/alpha.ts".to_string(), "AlphaProps".to_string())),
-        "narrow member route should seed the active imported dependency, got {:?}",
-        seeded
-    );
-    assert!(
-        !seeded.contains(&("/src/beta.ts".to_string(), "BetaProps".to_string())),
-        "narrow member route should not widen to sibling imported dependencies, got {:?}",
-        seeded
-    );
-}
-
-#[test]
-fn frontier_closure_preserves_nested_member_tail_for_imported_companions() {
-    let host = strict_host();
-
-    upsert_non_sfc(
-        &host,
-        "/src/leaf.ts",
-        "export interface Leaf { text: string }\n",
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/unused-leaf.ts",
-        "export interface UnusedLeaf { code: string }\n",
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/alpha.ts",
-        r#"
-import type { Leaf } from './leaf'
-import type { UnusedLeaf } from './unused-leaf'
-
-export interface AlphaProps {
-  label: Leaf,
-  other: UnusedLeaf
-}
-"#,
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/beta.ts",
-        "export interface BetaProps { beta?: string }\n",
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/types.ts",
-        r#"
-import type { AlphaProps } from './alpha'
-import type { BetaProps } from './beta'
-
-export interface Props {
-  primary?: AlphaProps
-  secondary?: BetaProps
-}
-"#,
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/barrel.ts",
-        "export { Props as PublicProps } from './types'\n",
-    );
-
-    host.set_import_dependencies(
-        "/src/alpha.ts",
-        vec![
-            crate::DependencyResolution {
-                specifier: "./leaf".to_string(),
-                resolved_canonical_id: Some("/src/leaf.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-            crate::DependencyResolution {
-                specifier: "./unused-leaf".to_string(),
-                resolved_canonical_id: Some("/src/unused-leaf.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-        ],
-    );
-    host.set_import_dependencies(
-        "/src/types.ts",
-        vec![
-            crate::DependencyResolution {
-                specifier: "./alpha".to_string(),
-                resolved_canonical_id: Some("/src/alpha.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-            crate::DependencyResolution {
-                specifier: "./beta".to_string(),
-                resolved_canonical_id: Some("/src/beta.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            },
-        ],
-    );
-    host.set_import_dependencies(
-        "/src/barrel.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let _view = host.resolver_store_view_read().into_owned_view();
-    let mut requested_routes = super::FrontierRequestedRoutes::default();
-    requested_routes.insert(
-        ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
-        crate::resolver_core::RouteDemand::member_path(vec![
-            "primary".to_string(),
-            "label".to_string(),
-        ]),
-    );
-    let mut companion_plans = super::FrontierCompanionPlans::default();
-
-    let (frontier, target, _had_route_cycle) = host
-        .run_external_type_frontier_closure(
-            "/src/barrel.ts",
-            "PublicProps",
-            &mut requested_routes,
-            &mut companion_plans,
-        )
-        .expect("frontier closure should complete");
-
-    assert_eq!(
-        target,
-        Some(("/src/types.ts".to_string(), "Props".to_string())),
-        "barrel alias should resolve to the defining symbol",
-    );
-    assert_eq!(
-        requested_routes.get(&("/src/alpha.ts".to_string(), "AlphaProps".to_string())),
-        Some(&crate::resolver_core::RouteDemand::member_path(vec![
-            "label".to_string()
-        ])),
-        "the imported companion should keep only the remaining member tail",
-    );
-    assert!(
-        requested_routes.contains_key(&("/src/leaf.ts".to_string(), "Leaf".to_string())),
-        "the active nested imported dependency should still be followed",
-    );
-    assert!(
-        !requested_routes
-            .contains_key(&("/src/unused-leaf.ts".to_string(), "UnusedLeaf".to_string())),
-        "the inactive sibling inside the imported type should remain shallow",
-    );
-    assert!(
-        !requested_routes.contains_key(&("/src/beta.ts".to_string(), "BetaProps".to_string())),
-        "the inactive top-level sibling should remain shallow",
-    );
-
-    let touched: std::collections::BTreeSet<_> =
-        frontier.touched_canonical_ids().into_iter().collect();
-    assert!(
-        touched.contains("/src/leaf.ts"),
-        "nested active imported dependency should be touched, got {:?}",
-        touched
-    );
-    assert!(
-        !touched.contains("/src/unused-leaf.ts"),
-        "nested inactive sibling should not be materialized, got {:?}",
-        touched
-    );
-}
-
-#[test]
-fn frontier_companion_plan_cache_reuses_same_route_entry() {
-    let mut cache = super::FrontierCompanionPlans::default();
-    let route = crate::resolver_core::RouteDemand::Whole;
-
-    let first = cache.get_or_compute("/src/button.ts", "ButtonProps", &route, || {
-        vec![super::PlannedFrontierCompanion {
-            alias: "LinkProps".to_string(),
-            resolved_canonical: "/src/link.ts".to_string(),
-            resolved_exported_name: "LinkProps".to_string(),
-            route: crate::resolver_core::RouteDemand::Whole,
-        }]
-    });
-    let second = cache.get_or_compute("/src/button.ts", "ButtonProps", &route, || {
-        panic!("same-route plan should be reused")
-    });
-
-    assert!(
-        std::sync::Arc::ptr_eq(&first, &second),
-        "same requested route should reuse one request-local companion plan entry",
-    );
-    assert_eq!(
-        cache.len(),
-        1,
-        "repeated plan lookup should keep one cache entry",
-    );
-}
-
-#[test]
-fn frontier_companion_plan_cache_keeps_distinct_routes_separate() {
-    let mut cache = super::FrontierCompanionPlans::default();
-
-    let whole = cache.get_or_compute(
-        "/src/button.ts",
-        "ButtonProps",
-        &crate::resolver_core::RouteDemand::Whole,
-        Vec::new,
-    );
-    let member = cache.get_or_compute(
-        "/src/button.ts",
-        "ButtonProps",
-        &crate::resolver_core::RouteDemand::member_path(vec!["icon".to_string()]),
-        Vec::new,
-    );
-
-    assert!(
-        !std::sync::Arc::ptr_eq(&whole, &member),
-        "different routes must not collapse to the same companion plan entry",
-    );
-    assert_eq!(
-        cache.len(),
-        2,
-        "whole and member-path requests should cache separately",
-    );
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn repeat_barrel_request_warm_hits_imported_root_route_slot() {
@@ -3263,9 +2921,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let first = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
@@ -3275,13 +2933,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the first request");
     assert!(
-        first
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        first.iter().any(|prop| prop.name == "label"),
         "the barrel-routed resolution should surface the `label` member, got: {:?}",
-        first.elements.props
+        first
     );
 
     // The barrel hop's imported-root proof is host-owned and fact-validated:
@@ -3291,9 +2945,9 @@ defineProps<Props>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
@@ -3303,13 +2957,9 @@ defineProps<Props>()
         )
         .expect("Props should resolve on the second request");
     assert!(
-        second
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        second.iter().any(|prop| prop.name == "label"),
         "the repeat barrel-routed resolution should surface the `label` member, got: {:?}",
-        second.elements.props
+        second
     );
 
     let warm_after = host.project_type_store().imported_roots().warm_hit_count();
@@ -3319,80 +2969,6 @@ defineProps<Props>()
          (warm hits before={warm_before}, after={warm_after})"
     );
 }
-
-#[test]
-fn external_type_cycles_increment_cycle_detection_counter() {
-    let host = strict_host();
-
-    upsert_vue(
-        &host,
-        "/src/Consumer.vue",
-        r#"<script setup lang="ts">
-import type { Props } from './a'
-defineProps<Props>()
-</script>
-<template><div>consumer</div></template>"#,
-    );
-    upsert_non_sfc(&host, "/src/a.ts", "export { Props } from './b'\n");
-    upsert_non_sfc(&host, "/src/b.ts", "export { Props } from './a'\n");
-
-    host.set_import_dependencies(
-        "/src/Consumer.vue",
-        vec![crate::DependencyResolution {
-            specifier: "./a".to_string(),
-            resolved_canonical_id: Some("/src/a.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    host.set_import_dependencies(
-        "/src/a.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./b".to_string(),
-            resolved_canonical_id: Some("/src/b.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    host.set_import_dependencies(
-        "/src/b.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./a".to_string(),
-            resolved_canonical_id: Some("/src/a.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    host.provenance().reset();
-
-    let mut tracked_deps = std::collections::BTreeSet::new();
-    let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
-    let resolved = host
-        .resolve_external_type_from_loaded_files(
-            "/src/Consumer.vue",
-            "./a",
-            "Props",
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-        )
-        .expect("cycle resolution should complete");
-    assert!(
-        resolved.is_none(),
-        "cyclic re-export should terminate without inventing a payload"
-    );
-    assert!(
-        host.provenance().snapshot().resolver_cycle_detections >= 1,
-        "cycle detection counter should increment for cyclic external type traversal"
-    );
-}
-
 #[test]
 fn nested_barrel_warm_lookup_keeps_following_export_star_chain() {
     let host = strict_host();
@@ -3441,9 +3017,9 @@ defineProps<FirstProps>()
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let first = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel_a",
             "FirstProps",
@@ -3454,19 +3030,17 @@ defineProps<FirstProps>()
         .expect("FirstProps should resolve");
     assert!(
         first
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.as_deref())
+            .map(|prop| prop.name.as_str())
             .any(|name| name == "first"),
         "FirstProps should resolve through the nested barrel chain"
     );
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let second = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./barrel_a",
             "SecondProps",
@@ -3478,202 +3052,12 @@ defineProps<FirstProps>()
 
     assert!(
         second
-            .elements
-            .props
             .iter()
-            .filter_map(|prop| prop.key_name.as_deref())
+            .map(|prop| prop.name.as_str())
             .any(|name| name == "second"),
         "SecondProps should still resolve through the nested barrel chain"
     );
 }
-
-#[test]
-fn external_type_resolution_step_budget_errors_on_wide_import_graph() {
-    // The hard frontier step-limit is the `frontier_symbol_visits` budget.
-    // Production caps it at `MAX_EXTERNAL_TYPE_RESOLVE_STEPS` (2000); this
-    // test injects a small ceiling so a small hermetic fixture straddles it
-    // the same way a 2005-symbol corpus straddled the production default,
-    // without building (and parsing) a 2005-interface file.
-    const INJECTED_STEP_BUDGET: usize = 40;
-
-    // Guard the production default separately and cheaply: a regression that
-    // lowered the constant would otherwise hide behind the injected ceiling.
-    assert_eq!(
-        crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-        2_000,
-        "production external-type step budget must stay 2000"
-    );
-
-    let host = VerterHost::new_standalone(HostConfig {
-        dev_mode: false,
-        compile_error_policy: CompileErrorPolicy::StrictError,
-        external_resolution_step_budget: Some(INJECTED_STEP_BUDGET),
-        ..HostConfig::default()
-    });
-    let import_count = INJECTED_STEP_BUDGET + 5;
-
-    let mut defs_source = String::new();
-    for index in 0..import_count {
-        defs_source.push_str(&format!(
-            "export interface T{index} {{ p{index}: string }}\n"
-        ));
-    }
-
-    let mut types_source = String::from("import type { ");
-    for index in 0..import_count {
-        if index > 0 {
-            types_source.push_str(", ");
-        }
-        types_source.push_str(&format!("T{index}"));
-    }
-    types_source.push_str(" } from './defs'\nexport interface Props extends ");
-    for index in 0..import_count {
-        if index > 0 {
-            types_source.push_str(", ");
-        }
-        types_source.push_str(&format!("T{index}"));
-    }
-    types_source.push_str(" {}\n");
-
-    upsert_vue(
-        &host,
-        "/src/Consumer.vue",
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div>consumer</div></template>"#,
-    );
-    upsert_non_sfc(&host, "/src/types.ts", &types_source);
-    upsert_non_sfc(&host, "/src/defs.ts", &defs_source);
-
-    host.set_import_dependencies(
-        "/src/Consumer.vue",
-        vec![crate::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    host.set_import_dependencies(
-        "/src/types.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./defs".to_string(),
-            resolved_canonical_id: Some("/src/defs.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let mut tracked_deps = std::collections::BTreeSet::new();
-    let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
-    let err = host
-        .resolve_external_type_from_loaded_files(
-            "/src/Consumer.vue",
-            "./types",
-            "Props",
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-        )
-        .expect_err("wide imported graphs should fail with a hard step budget");
-
-    match err {
-        crate::types::ExternalTypeResolveError::StepLimitExceeded {
-            limit,
-            type_name,
-            last_dep,
-        } => {
-            assert_eq!(limit, INJECTED_STEP_BUDGET);
-            assert_eq!(type_name, "Props");
-            assert!(
-                !last_dep.is_empty(),
-                "last dep should explain where the cap tripped"
-            );
-        }
-        other => panic!("expected step-limit error, got {other:?}"),
-    }
-}
-
-#[test]
-fn external_type_trace_status_maps_success_and_error_variants() {
-    assert_eq!(super::external_type_trace_success_status(false), "ok:none");
-    assert_eq!(
-        super::external_type_trace_success_status(true),
-        "ok:resolved"
-    );
-
-    assert_eq!(
-        super::external_type_trace_error_status(
-            &crate::types::ExternalTypeResolveError::MissingRootDependency,
-        ),
-        "err:missing_root"
-    );
-    assert_eq!(
-        super::external_type_trace_error_status(
-            &crate::types::ExternalTypeResolveError::DepthLimitExceeded {
-                limit: crate::types::MAX_RESOLVE_DEPTH,
-                type_name: "Props".to_string(),
-                last_dep: "/src/Consumer.vue".to_string(),
-            },
-        ),
-        "err:depth_limit"
-    );
-    assert_eq!(
-        super::external_type_trace_error_status(
-            &crate::types::ExternalTypeResolveError::StepLimitExceeded {
-                limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
-                type_name: "Props".to_string(),
-                last_dep: "/src/types.ts".to_string(),
-            },
-        ),
-        "err:step_limit"
-    );
-}
-
-#[test]
-fn external_type_trace_deltas_use_request_start_baseline() {
-    let baseline = super::ExternalTypeTraceBaseline {
-        tracked_len: 1,
-        resolution_len: 2,
-        cache_len: 3,
-    };
-
-    assert_eq!(
-        super::external_type_trace_deltas(baseline, 4, 6, 8),
-        (3, 4, 5),
-        "trace deltas should be measured against the request-entry baseline"
-    );
-}
-
-#[test]
-fn external_type_frontier_layer_trace_details_include_bfs_metadata() {
-    assert_eq!(
-        super::external_type_frontier_layer_start_detail("/src/types.ts", "Props", 2, 5, 3),
-        "source=/src/types.ts exported=Props layer=2 pending=5 resolved=3"
-    );
-    assert_eq!(
-        super::external_type_frontier_layer_result_detail(
-            "/src/types.ts",
-            "Props",
-            2,
-            1,
-            7,
-            true,
-            false,
-            false,
-        ),
-        "source=/src/types.ts exported=Props layer=2 pending_next=1 resolved=7 has_more=true target_found=false route_cycle=false"
-    );
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn barrel_scanned_vue_children_store_whole_hash_for_freshness() {
@@ -3723,9 +3107,9 @@ export interface ButtonProps {
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
     let resolved = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/src/Consumer.vue",
             "./types",
             "ButtonProps",
@@ -3735,13 +3119,9 @@ export interface ButtonProps {
         )
         .expect("ButtonProps should resolve through the barrel");
     assert!(
-        resolved
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        resolved.iter().any(|prop| prop.name == "label"),
         "the barrel-scanned Vue child should surface the `label` member, got: {:?}",
-        resolved.elements.props
+        resolved
     );
 
     let whole_hash = host
@@ -3896,10 +3276,10 @@ defineProps<ButtonProps>()
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut cache = crate::resolver_core::component_meta::NativePropProjectionCache::default();
 
     let link_props = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/workspace/components/Button.vue",
             "../types",
             "LinkProps",
@@ -3909,26 +3289,18 @@ defineProps<ButtonProps>()
         )
         .expect("LinkProps should resolve through the cyclic barrel");
     assert!(
-        link_props
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("as")),
+        link_props.iter().any(|prop| prop.name == "as"),
         "LinkProps should keep inherited props through the cyclic barrel, got: {:?}",
-        link_props.elements.props
+        link_props
     );
     assert!(
-        link_props
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("type")),
+        link_props.iter().any(|prop| prop.name == "type"),
         "LinkProps should keep button attribute props through the cyclic barrel, got: {:?}",
-        link_props.elements.props
+        link_props
     );
 
     let use_icons = host
-        .resolve_component_meta_macro_elements(
+        .resolve_component_meta_native_props(
             "/workspace/components/Button.vue",
             "../composables/useComponentIcons",
             "UseComponentIconsProps",
@@ -3938,22 +3310,14 @@ defineProps<ButtonProps>()
         )
         .expect("UseComponentIconsProps should resolve through the cyclic barrel");
     assert!(
-        use_icons
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        use_icons.iter().any(|prop| prop.name == "icon"),
         "UseComponentIconsProps should keep imported IconProps members, got: {:?}",
-        use_icons.elements.props
+        use_icons
     );
     assert!(
-        use_icons
-            .elements
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+        use_icons.iter().any(|prop| prop.name == "avatar"),
         "UseComponentIconsProps should keep imported AvatarProps members, got: {:?}",
-        use_icons.elements.props
+        use_icons
     );
 }
 
@@ -5086,111 +4450,6 @@ defineProps<FancyProps>()
         "store-view lookup should not freeze a stale imported-cache miss for package files that are outside the captured owner view",
     );
 }
-
-#[test]
-fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/workspace/node_modules/fancy/package.json".to_string(),
-        Arc::from(
-            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js", "require": "./dist/index.cjs" } } }"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
-        Arc::from(r#"import { AccordionRootEmits } from "./index3.js"; export type { AccordionRootEmits };"#),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/index3.d.ts".to_string(),
-        Arc::from("export interface AccordionRootEmits { openChange: [boolean] }"),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/index3.js".to_string(),
-        Arc::from("export const runtimeOnly = true"),
-    );
-
-    let host = VerterHost::new(HostConfig::default(), ws.clone());
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-
-    let consumer_source = "<script setup lang=\"ts\">\nimport type { AccordionRootEmits } from 'fancy'\ndefineEmits<AccordionRootEmits>()\n</script>\n<template><div /></template>";
-    upsert_vue(&host, "/workspace/src/Consumer.vue", consumer_source);
-
-    let package_decl = host.resolve_loaded_dependency_canonical(
-        "/workspace/src/Consumer.vue",
-        "fancy",
-        verter_workspace::ResolveRequestKind::TypeImport,
-    );
-    assert_eq!(
-        package_decl.as_deref(),
-        Some("/workspace/node_modules/fancy/dist/index.d.ts"),
-        "package root should resolve to the declaration entrypoint",
-    );
-
-    let companion_decl = host.resolve_loaded_dependency_canonical(
-        "/workspace/node_modules/fancy/dist/index.d.ts",
-        "./index3.js",
-        verter_workspace::ResolveRequestKind::TypeImport,
-    );
-    assert_eq!(
-        companion_decl.as_deref(),
-        Some("/workspace/node_modules/fancy/dist/index3.d.ts"),
-        "type imports from declaration files should prefer the declaration companion",
-    );
-
-    // The imported `defineEmits<AccordionRootEmits>()` type argument resolves
-    // through the collector's kind-aware dispatch-backed normalizer (the
-    // element payload authority for compile positions): the emits surface
-    // must come from the `.d.ts` declaration companion, not the runtime
-    // `.js` sibling.
-    let resolved = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-        crate::typeinfo::framework_surface::vue_exec::imported_emits_resolved_elements(
-            ctx,
-            "/workspace/src/Consumer.vue",
-            0,
-            "AccordionRootEmits",
-            &mut Vec::new(),
-        )
-    })
-    .expect("external type resolution should produce a result");
-
-    assert!(
-        resolved
-            .call_signatures
-            .iter()
-            .any(|emit| emit.name == "openChange"),
-        "emit entries should resolve from the declaration companion: {:?}",
-        resolved
-            .call_signatures
-            .iter()
-            .map(|emit| emit.name.clone())
-            .collect::<Vec<_>>()
-    );
-
-    // In the new IndexedReady DB, ensure_indexed_ready normalizes .js → .d.ts
-    // companion and eagerly materializes. Verify via direct DB lookup that the
-    // .js entry itself was not cached (only the .d.ts companion is).
-    let declaration_entry = host
-        .ensure_indexed_ready("/workspace/node_modules/fancy/dist/index3.d.ts")
-        .expect("external type resolution should cache the declaration companion entry");
-    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
-    assert!(
-        declaration_entry
-            .external_type_analysis
-            .stats()
-            .top_level_statement_count
-            > 0,
-        "the declaration companion should own the cached external-type analysis",
-    );
-}
-
 #[test]
 fn type_import_package_with_node_condition_still_prefers_types_entry() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -5487,8 +4746,24 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
         file_language: crate::FileLanguage::script_ts(),
         aliases: Vec::new(),
     });
+    let wrong_owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    assert!(
+        host.resolve_decl_in_scope_with_reexport_chain(
+            "/src/owner.vue",
+            wrong_owner,
+            "ChildProps",
+        )
+        .is_none(),
+        "an ordinary-script lookup must not see a script-setup import from another owner"
+    );
+
+    let script_setup_owner = verter_type_expr::TopLevelOwnerId::instance(0);
     let identity = host
-        .resolve_decl_in_scope_with_reexport_chain("/src/owner.vue", "ChildProps")
+        .resolve_decl_in_scope_with_reexport_chain(
+            "/src/owner.vue",
+            script_setup_owner,
+            "ChildProps",
+        )
         .expect("scope present must yield Some");
     // The declaring file is `/src/lib.ts`, NOT the owner scope.
     assert_eq!(
@@ -5520,13 +4795,11 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
 // the gate (it would break LSP hover / go-to-def landing).
 // ─────────────────────────────────────────────────────────────────────────
 
+const PUBLIC_API_BYTE_PIN_SOURCE: &str = "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>";
+
 fn public_api_byte_pin_host() -> VerterHost {
     let host = strict_host();
-    upsert_vue(
-        &host,
-        "/src/Cap.vue",
-        "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
-    );
+    upsert_vue(&host, "/src/Cap.vue", PUBLIC_API_BYTE_PIN_SOURCE);
     let _ = host.upsert(crate::UpsertRequest {
         canonical_id: None,
         input_id: "/src/cap-types.ts".to_string(),
@@ -5537,20 +4810,237 @@ fn public_api_byte_pin_host() -> VerterHost {
     host
 }
 
-const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiIifQ==\n";
+fn direct_compiler_public_api(
+    host: &VerterHost,
+    mode: verter_compiler::tsc::TscMode,
+) -> verter_compiler::tsc::TscOutput {
+    direct_compiler_public_api_for(
+        host,
+        "/src/Cap.vue",
+        PUBLIC_API_BYTE_PIN_SOURCE,
+        "Cap",
+        mode,
+    )
+}
 
-const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"\"}";
+fn direct_compiler_public_api_for(
+    host: &VerterHost,
+    canonical_id: &str,
+    source: &str,
+    component_name: &str,
+    mode: verter_compiler::tsc::TscMode,
+) -> verter_compiler::tsc::TscOutput {
+    let macro_output = host.produce_vue_macro_codegen(
+        canonical_id,
+        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+    );
+    let bundle = macro_output.tsc.expect("direct compiler TSC bundle");
+    let extracted = verter_compiler::tsc::extract_tsc_state(
+        source,
+        component_name,
+        &verter_compiler::tsc::TscExtractOptions {
+            filename: Some(canonical_id.to_string()),
+        },
+    )
+    .expect("direct compiler extraction");
+    verter_compiler::tsc::generate_tsc_from_state(
+        &extracted,
+        component_name,
+        mode,
+        verter_compiler::tsc::MacroTscInput::Authoritative(bundle.as_ref()),
+    )
+    .expect("direct compiler projection")
+}
 
-const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: CapProps['label']\ndeclare const n: CapProps['n']\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiI7Ozs7Ozs7Ozs7Ozs7OztjQUdZO2NBQUE7Ozs7Ozs7RUFETiJ9\n";
+const CARRIER_STYLE_V_BIND_SOURCE: &str = "<script setup lang=\"ts\">\nconst accent = 'red'\n</script>\n<template><div /></template>\n<style scoped>.x { color: v-bind(accent); }</style>\n";
+const CARRIER_WITH_DEFAULTS_SOURCE: &str = "<script setup lang=\"ts\">\ninterface Props {\n  count: number\n  label: string\n}\nwithDefaults(defineProps<Props>(), { count: 0, label: 'hi' })\n</script>\n<template><div /></template>\n";
+const CARRIER_SLOTS_SOURCE: &str = "<script setup lang=\"ts\">\ndefineSlots<{\n  default(props: { item: number }): any\n}>()\n</script>\n<template><div /></template>\n";
+const CARRIER_GENERICS_SOURCE: &str = "<script setup lang=\"ts\" generic=\"T\">\ndefineProps<{ items: T[]; selected: T }>()\n</script>\n<template><div /></template>\n";
+const CARRIER_CROSS_FILE_TYPES: &str = "export interface ChildProps {\n  id: number\n  label: string\n}\nexport interface ChildEmits {\n  (e: 'change', value: number): void\n}\n";
+const CARRIER_CROSS_FILE_CHILD_SOURCE: &str = "<script setup lang=\"ts\">\nimport type { ChildProps, ChildEmits } from './types'\ndefineProps<ChildProps>()\ndefineEmits<ChildEmits>()\n</script>\n<template><div /></template>\n";
 
-const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\";;;;;;;;;;;;;;;cAGY;cAAA;;;;;;;EADN\"}";
+fn public_api_tsc_bundle(host: &VerterHost, canonical_id: &str) -> Arc<MacroTscBundle> {
+    host.produce_vue_macro_codegen(
+        canonical_id,
+        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+    )
+    .tsc
+    .expect("public API TSC bundle")
+}
 
+fn assert_authored_props_projection(
+    bundle: &MacroTscBundle,
+    entry_index: usize,
+    entry_macro_index: u32,
+    anchor_macro_index: u32,
+) {
+    let entry = &bundle.entries[entry_index];
+    assert_eq!(entry.macro_index, entry_macro_index);
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) = &entry.outcome else {
+        panic!("entry {entry_index} must be a complete props projection: {entry:?}");
+    };
+    assert_eq!(
+        props.public,
+        TscPublicPropsProjection::AuthoredArgument {
+            anchor: MacroAnchor::MacroArgument {
+                macro_index: anchor_macro_index
+            },
+        },
+    );
+}
+
+/// Mutation recipe: bypass the registry projector, replace its structured TSC
+/// bundle, empty the generated source map, or reintroduce runtime `emits` from a
+/// type-only emits row. Direct producer parity or the exact semantic assertions
+/// below must fail before a carrier golden can be refreshed.
+#[test]
+fn public_api_carrier_goldens_match_direct_structured_projection() {
+    let host = strict_host();
+    for (canonical_id, source) in [
+        ("/proj/Accent.vue", CARRIER_STYLE_V_BIND_SOURCE),
+        ("/proj/WithDefaults.vue", CARRIER_WITH_DEFAULTS_SOURCE),
+        ("/proj/Slots.vue", CARRIER_SLOTS_SOURCE),
+        ("/proj/Generics.vue", CARRIER_GENERICS_SOURCE),
+        ("/proj/Child.vue", CARRIER_CROSS_FILE_CHILD_SOURCE),
+    ] {
+        upsert_vue(&host, canonical_id, source);
+    }
+    upsert_non_sfc(&host, "/proj/types.ts", CARRIER_CROSS_FILE_TYPES);
+
+    let style_bundle = public_api_tsc_bundle(&host, "/proj/Accent.vue");
+    assert!(style_bundle.entries.is_empty());
+    let slots_bundle = public_api_tsc_bundle(&host, "/proj/Slots.vue");
+    assert!(slots_bundle.entries.is_empty());
+
+    let defaults_bundle = public_api_tsc_bundle(&host, "/proj/WithDefaults.vue");
+    assert_eq!(defaults_bundle.entries.len(), 1);
+    assert_authored_props_projection(&defaults_bundle, 0, 1, 0);
+
+    let generics_bundle = public_api_tsc_bundle(&host, "/proj/Generics.vue");
+    assert_eq!(generics_bundle.entries.len(), 1);
+    assert_authored_props_projection(&generics_bundle, 0, 0, 0);
+
+    let child_bundle = public_api_tsc_bundle(&host, "/proj/Child.vue");
+    assert_eq!(child_bundle.entries.len(), 2);
+    assert_authored_props_projection(&child_bundle, 0, 0, 0);
+    let MacroTscOutcome::Complete(MacroTscProjection::Emits(emits)) =
+        &child_bundle.entries[1].outcome
+    else {
+        panic!("Child entry 1 must be the complete emits projection");
+    };
+    assert_eq!(emits.events.len(), 1);
+    assert_eq!(emits.events[0].name, "change");
+    assert_eq!(emits.events[0].emit_parameters.as_str(), "value: number");
+    assert_eq!(emits.events[0].handler_parameters.as_str(), "value: number");
+
+    for (canonical_id, source, component_name) in [
+        ("/proj/Accent.vue", CARRIER_STYLE_V_BIND_SOURCE, "Accent"),
+        (
+            "/proj/WithDefaults.vue",
+            CARRIER_WITH_DEFAULTS_SOURCE,
+            "WithDefaults",
+        ),
+        ("/proj/Slots.vue", CARRIER_SLOTS_SOURCE, "Slots"),
+        ("/proj/Generics.vue", CARRIER_GENERICS_SOURCE, "Generics"),
+        ("/proj/Child.vue", CARRIER_CROSS_FILE_CHILD_SOURCE, "Child"),
+    ] {
+        let projected = host
+            .get_public_api(canonical_id)
+            .unwrap_or_else(|error| {
+                panic!("public API projection failed for {canonical_id}: {error}")
+            })
+            .unwrap_or_else(|| panic!("public API projection absent for {canonical_id}"));
+        let direct = direct_compiler_public_api_for(
+            &host,
+            canonical_id,
+            source,
+            component_name,
+            verter_compiler::tsc::TscMode::Public,
+        );
+        assert_eq!(
+            projected.code.as_ref(),
+            direct.code,
+            "{canonical_id} registry code must equal the direct compiler"
+        );
+        assert_eq!(
+            projected.source_map.as_deref(),
+            Some(direct.source_map.as_str()),
+            "{canonical_id} registry map must equal the direct compiler"
+        );
+        assert!(
+            !direct.source_map.contains(r#""mappings":"""#),
+            "{canonical_id} must carry a non-empty structured source map"
+        );
+
+        match canonical_id {
+            "/proj/Accent.vue" => {
+                assert!(direct
+                    .code
+                    .contains(r#"$props: import("vue").PublicProps & {}"#));
+                assert!(!direct.code.contains("accent:"));
+            }
+            "/proj/WithDefaults.vue" => assert!(direct.code.contains(
+                r#"Omit<Props, "count" | "label"> & Partial<Pick<Props, "count" | "label">>"#
+            )),
+            "/proj/Slots.vue" => assert!(direct
+                .code
+                .contains("default(props: { item: number }): any")),
+            "/proj/Generics.vue" => assert!(direct.code.contains(
+                r#"new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T })"#
+            )),
+            "/proj/Child.vue" => {
+                assert!(direct
+                    .code
+                    .contains("import type { ChildProps } from './types'"));
+                assert!(direct
+                    .code
+                    .contains("import type { ChildEmits } from './types'"));
+                assert!(direct
+                    .code
+                    .contains(r#""onChange"?: (value: number) => void"#));
+                assert!(direct
+                    .code
+                    .contains(r#"((event: "change", value: number) => void)"#));
+                let comp = direct.code.split("declare const Child").next().unwrap();
+                assert!(
+                    !comp.contains("emits: ["),
+                    "type-only TSC rows must not synthesize a runtime emits option"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QSwyQztBO0E7QTs7QTtBLDBDQUdZLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
+
+const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A,2C;A;A;A;;A;A,0CAGY,Q;A,wCAAA,Q;A,W,2C;A;A;A;A;A;A\"}";
+
+const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: string\ndeclare const n: number\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QTtBO0E7Ozs7Ozs7Ozs7O0EsY0FHWSxLLEUsTTtBLGNBQUEsQyxFLE07QTs7OztBO0E7QSxFQUROLEssUyxLO0E7O0E7QTs7QTtBLDBDQUNNLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
+
+const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A;A;A;;;;;;;;;;;A,cAGY,K,E,M;A,cAAA,C,E,M;A;;;;A;A;A,EADN,K,S,K;A;;A;A;;A;A,0CACM,Q;A,wCAAA,Q;A,W,2C;A;A;A;A;A;A\"}";
+
+/// Mutation recipe: bypass the registry projector or alter one compiler-owned
+/// generated byte/map segment. The direct-producer equivalence assertion or
+/// the static byte pin must fail while the other remains an exact oracle.
 #[test]
 fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
     let host = public_api_byte_pin_host();
     let r = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
+        .expect("public-mode projection")
         .expect("public-mode api output");
+    let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Public);
+    assert_eq!(
+        r.code.as_ref(),
+        direct.code,
+        "registry projection must be byte-identical to the direct compiler producer"
+    );
+    assert_eq!(
+        r.source_map.as_ref().map(|map| map.as_ref()),
+        Some(direct.source_map.as_str()),
+        "registry source map must be byte-identical to the direct compiler producer"
+    );
     assert_eq!(
         r.code.as_ref(),
         PUBLIC_API_PUBLIC_CODE_PIN,
@@ -5563,18 +5053,33 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
     );
 }
 
+/// Mutation recipe: bypass the registry projector, stop semantic testing-row
+/// materialization, or alter one mapped generated segment. The direct-producer
+/// equivalence assertion or the non-empty static map pin must fail.
 #[test]
 fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
     let host = public_api_byte_pin_host();
     let r = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Testing, None)
+        .expect("testing-mode projection")
         .expect("testing-mode api output");
+    let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Testing);
+    assert_eq!(
+        r.code.as_ref(),
+        direct.code,
+        "registry projection must be byte-identical to the direct compiler producer"
+    );
+    assert_eq!(
+        r.source_map.as_ref().map(|map| map.as_ref()),
+        Some(direct.source_map.as_str()),
+        "registry source map must be byte-identical to the direct compiler producer"
+    );
     assert_eq!(
         r.code.as_ref(),
         PUBLIC_API_TESTING_CODE_PIN,
         "testing-mode rendered TSX must stay byte-identical through projector dispatch"
     );
-    // The testing-mode map carries NON-EMPTY mappings (`...cAGY;cAAA;...`),
+    // The testing-mode map carries NON-EMPTY mappings (`...A,cAGY...`),
     // so this pin discriminates a shifted source-map position, not just an
     // empty placeholder.
     assert_eq!(
@@ -5583,7 +5088,8 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         "testing-mode source-map bytes must stay identical through projector dispatch"
     );
     assert!(
-        PUBLIC_API_TESTING_MAP_PIN.contains("\"mappings\":\";;"),
+        PUBLIC_API_TESTING_MAP_PIN.contains("\"mappings\":\"A;")
+            && PUBLIC_API_TESTING_MAP_PIN.contains("A,cAGY"),
         "the testing-mode pin must carry real VLQ mappings to be discriminating"
     );
 }
@@ -5598,6 +5104,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
     let host = public_api_byte_pin_host();
     let decl = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Declaration, None)
+        .expect("declaration-mode projection")
         .expect("declaration-mode api output")
         .code
         .to_string();
@@ -5642,6 +5149,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
     // and the two outputs differ.
     let public = host
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
+        .expect("public-mode projection")
         .expect("public-mode api output")
         .code
         .to_string();
@@ -5668,14 +5176,83 @@ fn public_api_non_vue_canonical_returns_none_through_projector_dispatch() {
     );
     assert!(
         host.get_public_api_with_mode("/src/plain.ts", PublicApiMode::Public, None)
+            .expect("plain script projection")
             .is_none(),
         "a non-Vue canonical must project no public-API surface"
     );
     assert!(
         host.get_public_api_with_mode("/src/plain.ts", PublicApiMode::Testing, None)
+            .expect("plain script projection")
             .is_none(),
         "a non-Vue canonical must project no public-API surface in testing mode either"
     );
+}
+
+#[test]
+fn public_api_unsafe_declaration_is_a_typed_error_not_absence() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/UnsafeEnum.vue",
+        r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let error = host
+        .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
+        .expect_err("an unsafe declaration must not collapse to None");
+    assert!(matches!(
+        error,
+        crate::PublicApiProjectionError::TscGeneration(
+            TscGenerationError::UnsupportedDeclarationShape {
+                reason: TscDeclarationShapeReason::UnsupportedEnumShape,
+                ..
+            }
+        )
+    ));
+    assert_eq!(error.code(), "tsc-generation");
+    assert_eq!(error.detail_code(), "unsupported-declaration-shape");
+    assert_eq!(
+        error.subject(),
+        crate::PublicApiProjectionSubject::Macro { syntax_index: 0 }
+    );
+    assert_eq!(error.macro_syntax_index(), Some(0));
+    assert_eq!(
+        error.declaration_shape_reason().map(|reason| reason.code()),
+        Some("unsupported-enum-shape")
+    );
+}
+
+#[test]
+fn public_api_malformed_script_setup_attrs_preserves_exact_subject_range() {
+    let host = strict_host();
+    let source = r#"<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>"#;
+    upsert_vue(&host, "/src/MalformedAttrs.vue", source);
+    let start = source.find("Attrs.").expect("attrs value") as u32;
+    let source_range = Span::new(start, start + "Attrs.".len() as u32);
+
+    let error = host
+        .get_public_api_with_mode("/src/MalformedAttrs.vue", PublicApiMode::Declaration, None)
+        .expect_err("malformed attrs type syntax must fail closed");
+
+    assert_eq!(
+        error.subject(),
+        crate::PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
+    );
+    assert_eq!(error.macro_syntax_index(), None);
+    assert!(matches!(
+        error.unavailable_outcome(),
+        Some(verter_compiler::tsc::TscUnavailableOutcome::Invalid(
+            verter_compiler::tsc::TscInvalidOutcome::AuthoredTypeSyntax(
+                verter_compiler::tsc::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+            )
+        ))
+    ));
 }
 
 #[test]
@@ -5702,9 +5279,11 @@ fn public_api_through_alias_is_byte_identical_to_canonical() {
     for mode in [PublicApiMode::Public, PublicApiMode::Testing] {
         let via_canonical = host
             .get_public_api_with_mode("/src/Aliased.vue", mode, None)
+            .unwrap_or_else(|error| panic!("canonical projection failed for {mode:?}: {error}"))
             .unwrap_or_else(|| panic!("canonical request must render for {mode:?}"));
         let via_alias = host
             .get_public_api_with_mode("/virtual/aliased-handle", mode, None)
+            .unwrap_or_else(|error| panic!("alias projection failed for {mode:?}: {error}"))
             .unwrap_or_else(|| panic!("alias request must render for {mode:?}"));
         assert_eq!(
             via_alias.code.as_ref(),
@@ -5741,6 +5320,7 @@ fn public_api_classification_authority_is_runtime_load_language_not_path() {
         .unwrap();
     assert!(
         host.get_public_api_with_mode("/src/NotReallyVue.vue", PublicApiMode::Public, None)
+            .expect("plain-script projection")
             .is_none(),
         "a `.vue`-path file loaded as a plain script must project no public-API surface"
     );
@@ -5759,6 +5339,7 @@ fn public_api_classification_authority_is_runtime_load_language_not_path() {
         .unwrap();
     assert!(
         host.get_public_api_with_mode("/src/carrier-as-vue", PublicApiMode::Public, None)
+            .expect("Vue carrier projection")
             .is_some(),
         "a file loaded as the Vue carrier must project a public-API surface regardless of path"
     );
@@ -5790,17 +5371,19 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
 
     // Sanity: the carrier language DOES render this loaded SFC through the leg.
     let carrier = FileLanguage::vue();
-    let via_carrier = VueComponentApiProjector.render_api(ComponentApiProjectorCtx {
-        host: &host,
-        resolved_canonical: "/src/RealSfc.vue",
-        file_language: &carrier,
-        mode: PublicApiMode::Public,
-        profile: None,
-        // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
-        // macro-type deps), so the legacy body never reaches the seed-bearing
-        // macro-deps branch — `None` is sufficient for this carrier-gate test.
-        render_seed: None,
-    });
+    let via_carrier = VueComponentApiProjector
+        .render_api(ComponentApiProjectorCtx {
+            host: &host,
+            resolved_canonical: "/src/RealSfc.vue",
+            file_language: &carrier,
+            mode: PublicApiMode::Public,
+            profile: None,
+            // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
+            // macro-type deps), so the legacy body never reaches the seed-bearing
+            // macro-deps branch — `None` is sufficient for this carrier-gate test.
+            render_seed: None,
+        })
+        .expect("Vue carrier projection");
     assert!(
         via_carrier.is_some(),
         "the Vue leg must render a loaded SFC for the carrier language"
@@ -5813,16 +5396,18 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         adapter_id: verter_language::FrameworkAdapterId::vue(),
         language_id: verter_language::LanguageId::new("vue_template"),
     };
-    let rejected = VueComponentApiProjector.render_api(ComponentApiProjectorCtx {
-        host: &host,
-        resolved_canonical: "/src/RealSfc.vue",
-        file_language: &vue_non_carrier,
-        mode: PublicApiMode::Public,
-        profile: None,
-        // Rejected by the carrier-narrowness gate BEFORE the legacy body, so
-        // the seed is never consulted.
-        render_seed: None,
-    });
+    let rejected = VueComponentApiProjector
+        .render_api(ComponentApiProjectorCtx {
+            host: &host,
+            resolved_canonical: "/src/RealSfc.vue",
+            file_language: &vue_non_carrier,
+            mode: PublicApiMode::Public,
+            profile: None,
+            // Rejected by the carrier-narrowness gate BEFORE the legacy body, so
+            // the seed is never consulted.
+            render_seed: None,
+        })
+        .expect("Vue non-carrier projection");
     assert!(
         rejected.is_none(),
         "the Vue leg must reject a Vue-adapter non-carrier language before the legacy body, \
@@ -5999,6 +5584,45 @@ fn found_macro_type_with_ambient_heritage_name_still_compiles() {
     assert_compiles_without_macro_type_dep_diag(&host, "/src/A.vue");
 }
 
+/// A dual-script SFC may bind the same local type name to different imports.
+/// The unresolved-arm fact must retain the exact lexical owner; an owner-blind
+/// lookup would select the setup import first and silence the companion miss.
+#[test]
+fn found_macro_type_surface_arm_uses_exact_dual_script_import_owner() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/present.ts",
+        "export interface Ghost { present?: string }",
+    );
+    upsert_vue(
+        &host,
+        "/src/types.vue",
+        r#"<script setup lang="ts">
+import type { Ghost } from './present'
+interface SetupOnly extends Ghost { setup?: string }
+</script>
+<script lang="ts">
+import type { Ghost } from './missing-setup'
+export interface Props extends Ghost { own?: string }
+</script>
+<template><div/></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/A.vue",
+        &surface_arm_sfc("Props").replace("'./types'", "'./types.vue'"),
+    );
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    let missing = find_diag(&diagnostics, "HOST_MISSING_MACRO_TYPE_DEP");
+    assert!(
+        missing.message.contains("Ghost"),
+        "the companion-owner missing arm must remain fatal despite the setup-owner collision: {}",
+        missing.message
+    );
+}
+
 #[test]
 fn found_macro_type_with_resolvable_heritage_chain_still_compiles() {
     let host = strict_host();
@@ -6040,6 +5664,52 @@ fn found_macro_type_arm_provably_absent_behind_star_barrel_fails_compile() {
             .iter()
             .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
         "a provably-absent star-barrel arm must be fatal and name the arm: {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+/// Sibling export routes receive independent cycle/path state. Both named
+/// routes converge on the same loaded module and prove `Ghost` absent; leaking
+/// the first branch's visited set into the second would make the second route
+/// spuriously unknowable and suppress the fatal diagnostic.
+#[test]
+fn found_macro_type_arm_absent_across_converging_sibling_routes_fails_compile() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/src/empty-mod.ts",
+        "export interface Unrelated { u?: number }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/left.ts",
+        "export type { Ghost } from './empty-mod'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/right.ts",
+        "export type { Ghost } from './empty-mod'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export type { Ghost } from './left'\nexport type { Ghost } from './right'",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "import type { Ghost } from './barrel'\n\
+         export interface FoundGhostHeritage extends Ghost { a?: string }",
+    );
+    upsert_vue(&host, "/src/A.vue", &surface_arm_sfc("FoundGhostHeritage"));
+
+    let diagnostics = ensure_compiled_error(&host, "/src/A.vue");
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP" && d.message.contains("Ghost")),
+        "converging sibling routes that both prove absence must stay fatal: {:?}",
         diagnostics.diagnostics
     );
 }
@@ -6092,8 +5762,13 @@ fn member_position_missing_macro_type_warns_and_degrades_on_host_lane() {
         .diagnostics
         .diagnostics
         .iter()
-        .find(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP")
-        .expect("member-position miss surfaces a HOST_MISSING_MACRO_TYPE_DEP diagnostic");
+        .find(|d| d.code == "XUnresolvedImportedMacroType")
+        .unwrap_or_else(|| {
+            panic!(
+                "member-position miss must surface the compiler's typed row diagnostic: {:?}",
+                response.diagnostics.diagnostics
+            )
+        });
     assert_eq!(
         warning.severity,
         HostSeverity::Warning,
@@ -6249,9 +5924,13 @@ fn found_macro_type_with_heritage_via_bare_parent_dir_import_compiles() {
 
     // The dep's OWN compile enumerates its own-body member — and must not
     // degrade it to a null runtime type under the bare-specifier route.
+    // `modelValue?: string` is OPTIONAL, so the Vue-parity runtime shape is
+    // `{ type: String, required: false }` (the same shape an inline optional
+    // prop emits — see verter_compiler `optional_boolean_prop_emits_no_default_type_based`);
+    // pin the full member, not the retired leaner `{ type: String }` slice.
     let dep_code = main_node_code(&bare, "/src/Listbox/ListboxFilter.vue");
     assert!(
-        dep_code.contains("modelValue: { type: String }"),
+        dep_code.contains("modelValue: { type: String, required: false }"),
         "dep's own-body member must keep its runtime type under a '..' heritage import:\n{dep_code}"
     );
     assert!(
@@ -6295,9 +5974,11 @@ fn found_macro_type_with_heritage_via_backslash_parent_dir_import_compiles() {
 
     // The dep's OWN compile enumerates its own-body member — and must not
     // degrade it to a null runtime type under the backslash-specifier route.
+    // `modelValue?: string` is optional ⇒ Vue-parity `{ type: String,
+    // required: false }` (not the retired leaner `{ type: String }` slice).
     let dep_code = main_node_code(&backslash, "/src/Listbox/ListboxFilter.vue");
     assert!(
-        dep_code.contains("modelValue: { type: String }"),
+        dep_code.contains("modelValue: { type: String, required: false }"),
         "dep's own-body member must keep its runtime type under a '..\\index' heritage import:\n{dep_code}"
     );
     assert!(
@@ -6336,9 +6017,11 @@ fn macro_type_root_import_via_bare_parent_dir_specifier_compiles() {
     // Positive: the imported root type's member materialises with its real
     // runtime type — proving `'..'` loaded the PARENT index (the decoy
     // `/src/Comp/index.ts` has no `RootProps`).
+    // `title?: string` is optional ⇒ Vue-parity `{ type: String,
+    // required: false }` (not the retired leaner `{ type: String }` slice).
     let code = main_node_code(&host, "/src/Comp/Comp.vue");
     assert!(
-        code.contains("title: { type: String }"),
+        code.contains("title: { type: String, required: false }"),
         "the '..'-imported root type's member must enumerate with its runtime type:\n{code}"
     );
     assert!(
@@ -6363,9 +6046,11 @@ fn macro_type_root_import_via_bare_current_dir_specifier_compiles() {
     );
 
     assert_compiles_without_macro_type_dep_diag(&host, "/src/Comp/Comp.vue");
+    // `title?: string` is optional ⇒ Vue-parity `{ type: String,
+    // required: false }` (not the retired leaner `{ type: String }` slice).
     let code = main_node_code(&host, "/src/Comp/Comp.vue");
     assert!(
-        code.contains("title: { type: String }"),
+        code.contains("title: { type: String, required: false }"),
         "the '.'-imported root type's member must enumerate with its runtime type:\n{code}"
     );
 }
@@ -6430,6 +6115,7 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
     // macro-deps branch — `None` for the render seed is sufficient here.
     assert!(
         host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None, None)
+            .expect("canonical legacy projection")
             .is_some(),
         "the legacy body must render the resolved canonical it is given"
     );
@@ -6440,6 +6126,7 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
             None,
             None
         )
+        .expect("alias legacy projection")
         .is_none(),
         "the legacy body must NOT resolve an alias itself — the host resolves once up-front"
     );
@@ -6449,6 +6136,7 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
     // is served end-to-end while the leg stays resolution-free.
     assert!(
         host.get_public_api_with_mode("/virtual/coherent-handle", PublicApiMode::Public, None)
+            .expect("alias public API projection")
             .is_some(),
         "the host entry must still serve the alias end-to-end via one resolution"
     );

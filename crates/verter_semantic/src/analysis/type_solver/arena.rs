@@ -266,10 +266,39 @@ pub enum ConditionalBranch {
 
 /// Declaration identity for applied/instantiated types — used as memoization
 /// key together with applied type arguments.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DeclIdentity {
     pub canonical_id: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub symbol_name: String,
+}
+
+#[cfg(test)]
+mod owner_identity_tests {
+    use super::DeclIdentity;
+    use std::collections::HashSet;
+    use verter_type_expr::TopLevelOwnerId;
+
+    #[test]
+    fn solver_decl_identity_discriminates_owner_in_memo_and_serde() {
+        let make = |owner| DeclIdentity {
+            canonical_id: "/src/App.vue".to_string(),
+            owner,
+            symbol_name: "Shared".to_string(),
+        };
+        let module = make(TopLevelOwnerId::module(0));
+        let instance = make(TopLevelOwnerId::instance(0));
+        assert_ne!(module, instance);
+        assert_eq!(HashSet::from([module.clone(), instance.clone()]).len(), 2);
+        assert_ne!(
+            serde_json::to_string(&module).unwrap(),
+            serde_json::to_string(&instance).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<DeclIdentity>(&serde_json::to_string(&module).unwrap()).unwrap(),
+            module
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

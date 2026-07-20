@@ -116,6 +116,13 @@ pub enum CompilerErrorCode {
     /// code as a soft (warning) diagnostic; every other macro-type
     /// diagnostic stays fatal.
     XUnresolvedImportedMacroType,
+    /// A target requiring authoritative macro semantics was compiled without
+    /// the corresponding runtime/TSC bundle, or the bundle omitted the syntax
+    /// entry for a type-based macro.
+    XMissingMacroSemanticBundle,
+    /// The supplied macro semantic entry was partial, unresolved, unsupported,
+    /// or carried a shape for a different macro role.
+    XUnavailableMacroSemanticResult,
 
     // -- Style errors --
     /// Error parsing or processing CSS in a `<style>` block.
@@ -185,6 +192,10 @@ impl CompilerErrorCode {
             }
             Self::XUnresolvedImportedMacroType => {
                 "Imported macro type argument could not be resolved."
+            }
+            Self::XMissingMacroSemanticBundle => "Required macro semantic bundle is missing.",
+            Self::XUnavailableMacroSemanticResult => {
+                "Macro semantic result is unavailable for code generation."
             }
             Self::XCssParseError => "Error parsing or processing CSS.",
         }

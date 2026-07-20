@@ -82,6 +82,7 @@ fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from(name),
@@ -155,6 +156,7 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
         crate::semantic_query::ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(c),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("val"),
@@ -222,6 +224,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
     let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(c),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Box"),
         ),
         Arc::from(vec![string_arg].into_boxed_slice()),
@@ -292,6 +295,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(c),
+            verter_type_expr::TopLevelOwnerId::instance(0),
             Arc::from("<sfc-script-setup>"),
         ),
         macro_index: 0,
@@ -862,6 +866,7 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
     let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
         ),
         Arc::from(Vec::new().into_boxed_slice()),
@@ -1374,6 +1379,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
     let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(gen),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Box"),
         ),
         Arc::from(vec![arg_node].into_boxed_slice()),
@@ -1495,6 +1501,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(sfc),
+            verter_type_expr::TopLevelOwnerId::instance(0),
             Arc::from("<sfc-script-setup>"),
         ),
         macro_index: 0,

@@ -17,11 +17,6 @@ use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
-}
-
 /// Build an `IndexedReady` from AUTHORED same-name `interface Foo` parts
 /// (each part is a list of `(member, type-text)` pairs), constructed through
 /// the production-shaped service-backed path. The real binder groups the
@@ -44,7 +39,6 @@ fn build_with_merged_foo(parts: Vec<Vec<(&str, &str)>>) -> Arc<IndexedReady> {
         shallow,
         Arc::from(source.as_str()),
         Arc::from(source.as_str()),
-        empty_external(),
     ))
 }
 

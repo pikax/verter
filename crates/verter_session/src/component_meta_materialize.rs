@@ -323,8 +323,11 @@ pub(crate) fn derive_materialization_subject(
     {
         let root = &extraction.root_identity;
         return Some(MaterializationCacheKey {
-            decl: dispatch
-                .type_slot_for(Arc::clone(&root.canonical_id), Arc::clone(&root.decl_name)),
+            decl: dispatch.type_slot_for(
+                Arc::clone(&root.canonical_id),
+                root.owner,
+                Arc::clone(&root.decl_name),
+            ),
             projection_path: extraction.route.clone(),
             scope_axis: runtime_key.scope_axis,
             projection_mode: runtime_key.mode,
@@ -352,6 +355,7 @@ pub(crate) fn derive_materialization_subject(
     Some(MaterializationCacheKey {
         decl: dispatch.type_slot_for(
             Arc::clone(&identity.canonical_id),
+            identity.owner,
             Arc::clone(&identity.decl_name),
         ),
         projection_path: crate::resolver_core::RouteDemand::Whole,
@@ -1221,6 +1225,7 @@ pub(crate) fn materialize_component_meta_structure(
                     // root_args per R8-2).
                     let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(dispatch.type_slot_for(
                             Arc::clone(&extraction.root_identity.canonical_id),
+                            extraction.root_identity.owner,
                             Arc::clone(&extraction.root_identity.decl_name),
                         ), Arc::clone(&extraction.root_args), dispatch.instantiate_context_for(
                             &extraction.root_identity.canonical_id,
@@ -1349,6 +1354,7 @@ pub(crate) fn materialize_component_meta_structure(
             resolve_target.map(|(identity, args)| {
                 let read = dispatch.execute_read(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(dispatch.type_slot_for(
                         Arc::clone(&identity.canonical_id),
+                        identity.owner,
                         Arc::clone(&identity.decl_name),
                     ), args, dispatch.instantiate_context_for(
                         &identity.canonical_id,
@@ -2223,6 +2229,7 @@ mod tests {
         let _ = ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/x.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("Foo"),
@@ -2261,6 +2268,7 @@ mod tests {
             .unwrap_or([0u8; 16]);
         DeclIdentity {
             canonical_id: StdArc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             decl_name: StdArc::from(name),
         }
@@ -2514,6 +2522,7 @@ export type Recur = { kids: Recur[] | null }
         ));
         let pick_builtin = crate::semantic_query::DeclIdentity {
             canonical_id: StdArc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: StdArc::from("Pick"),
         };
@@ -4109,6 +4118,7 @@ export type C<T> = A<T>
         let cache_key = MaterializationCacheKey {
             decl: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 StdArc::from("/gen_peek_owner.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 StdArc::from("Probe"),
             ),
             projection_path: crate::resolver_core::RouteDemand::Whole,

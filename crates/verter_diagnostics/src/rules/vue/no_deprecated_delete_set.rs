@@ -67,6 +67,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "set".to_string(),
@@ -99,6 +100,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "delete".to_string(),
@@ -122,6 +124,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "ref".to_string(),

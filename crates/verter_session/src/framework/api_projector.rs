@@ -15,7 +15,7 @@
 
 use verter_language::FileLanguage;
 
-use crate::types::{CompileProfile, PublicApiMode, TscResponse};
+use crate::types::{CompileProfile, PublicApiMode, PublicApiProjectionError, TscResponse};
 use crate::VerterHost;
 
 /// One resolved public prop exposed to editor/host consumers alongside a
@@ -55,12 +55,18 @@ pub struct ComponentApiProjection {
 ///
 /// The host selects the impl by the canonical's resolved
 /// [`FileLanguage`](verter_language::FileLanguage) adapter id and calls
-/// [`Self::render_api`]; a `None` return is the no-projection answer (exactly
-/// the host's pre-registry non-Vue behavior).
+/// [`Self::render_api`]; `Ok(None)` is the no-projection answer, while a
+/// selected carrier's projection failure remains a typed error.
 pub trait ComponentApiProjector: Send + Sync {
-    /// Render the component's public-API surface for the requested mode, or
-    /// `None` when this component projects no public-API virtual file.
-    fn render_api(&self, cx: ComponentApiProjectorCtx<'_>) -> Option<ComponentApiProjection>;
+    /// Render the component's public-API surface for the requested mode.
+    ///
+    /// `Ok(None)` means the adapter intentionally exposes no public-API
+    /// virtual file for this language/mode. Projection refusals return their
+    /// exact typed failure.
+    fn render_api(
+        &self,
+        cx: ComponentApiProjectorCtx<'_>,
+    ) -> Result<Option<ComponentApiProjection>, PublicApiProjectionError>;
 }
 
 /// The public-API projection context.
@@ -102,17 +108,16 @@ pub struct ComponentApiProjectorCtx<'a> {
 /// Captured ONCE — per scalar call (`N=1`) or per batch — as a
 /// [`crate::resolver_store::BatchFixedView`] and shared across every item: the
 /// O(N²) store-view-cliff collapse. Least authority: the raw `BatchFixedView`
-/// is intentionally NOT exposed (the projector only needs the cold seed to
-/// build its cold-compute resolver context, plus the view to thread the
-/// session-aware collector). The session view is ALWAYS present on this carrier
-/// — never `None` on the render path.
+/// is intentionally NOT exposed; the projector only needs the cold seed to
+/// build its request-bound resolver context.
 pub(crate) struct PublicApiRenderSeed<'a> {
     /// The batch-shared OVERLAID cold-seed for the external-type collection /
     /// extraction resolver context. Reused across every item; the cold compute
     /// seeds from it WITHOUT a fresh per-item `resolver_store_view_read()`.
     pub(crate) cold_seed: &'a crate::resolver_store::ColdSeedHostStoreView,
-    /// The active session view threaded into the macro-type collector's
-    /// view-aware path (NEVER `None`). For the host-level public-API entry this
-    /// is the base [`crate::session_view::HostViewRef`].
-    pub(crate) session_view: &'a dyn crate::session_view::SessionView,
+    /// The exact session/profile view the cold seed was rooted through.
+    /// Profile-owned block overrides ride this view as one immutable source
+    /// overlay, so syntax extraction, semantic macro projection, and revision
+    /// fencing all observe the same bytes.
+    pub(crate) view: &'a dyn crate::session_view::SessionView,
 }

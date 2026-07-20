@@ -176,9 +176,17 @@ fn main() {
             process::exit(2);
         }
     };
+    debug_assert_eq!(
+        result.public_api_outcomes.len(),
+        config.vue_files.len(),
+        "public API projection must retain exactly one outcome per input carrier"
+    );
 
     for diagnostic in &result.diagnostics {
         println!("{diagnostic}");
+    }
+    for failure in &result.public_api_failures {
+        println!("{failure}");
     }
 
     if cli.list_emitted_files {
@@ -187,12 +195,13 @@ fn main() {
         }
     }
 
-    if !result.diagnostics.is_empty() {
+    if !result.diagnostics.is_empty() || !result.public_api_failures.is_empty() {
         let errors = result
             .diagnostics
             .iter()
             .filter(|d| matches!(d.severity, reporter::Severity::Error))
             .count();
+        let errors = errors + result.public_api_failures.len();
         eprintln!(
             "Found {errors} error(s) in {} file(s).",
             config.vue_files.len()

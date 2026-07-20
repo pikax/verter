@@ -29,6 +29,9 @@
 //!   CONTRIBUTOR COUNT changes even when the unioned member set does not)
 //! - adding / removing / renaming an object-literal value member, or
 //!   changing its header flags
+//! - changing an embedded script region's owner kind or source dialect
+//!   (`<script>` ↔ `<script setup>` is therefore shape-significant even
+//!   when the script bytes are identical)
 //!
 //! ## Algorithm (R27 stack-safe)
 //!
@@ -81,19 +84,20 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 
     // ── Section: type symbols (HEADER inventory — no body lowering) ──
     write_section(&mut buf, b"types");
-    let mut type_keys: Vec<&str> = shallow.type_symbol_names().collect();
+    let headers = shallow.decl_bodies().header_index();
+    let mut type_keys: Vec<_> = headers.type_headers.keys().collect();
     type_keys.sort_unstable();
-    for name in type_keys {
-        let Some(kind) = shallow.type_symbol_kind(name) else {
-            continue;
-        };
-        write_decl(&mut buf, kind_str_type(&kind), name);
+    for key in type_keys {
+        let header = &headers.type_headers[key];
+        write_owner(&mut buf, key.owner);
+        write_decl(&mut buf, kind_str_type(&header.kind), key.name.as_ref());
         // Type-parameter SHAPE: arity (count) + per-parameter
         // constraint/default-clause presence, IN DECLARATION ORDER. The
         // parameter IDENTIFIER is deliberately NOT folded so an
         // alpha-rename (`T` ↔ `U`) stays invariant; arity + clause
         // presence are semantic-shape signals that DO move the hash.
-        if let Some(params) = shallow.type_param_headers(name) {
+        {
+            let params = &header.type_params;
             buf.extend_from_slice(b"tp:");
             buf.extend_from_slice(&(params.len() as u32).to_le_bytes());
             for param in params {
@@ -105,7 +109,8 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
         // Contributor count: a same-name decl split / merge changes the
         // number of contributing top-level statements even when the
         // unioned member set is unchanged.
-        if let Some(count) = shallow.type_contributor_count(name) {
+        {
+            let count = header.contributors.len();
             buf.extend_from_slice(b"tc:");
             buf.extend_from_slice(&(count as u32).to_le_bytes());
             buf.push(SEP);
@@ -113,10 +118,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
         // Emit member skeleton: name + header SHAPE (kind, optional,
         // readonly). Member VALUE types are body data, lowered on demand
         // — NOT folded here. Sorted by name so source order is cosmetic.
-        let mut members: Vec<&MemberHeader> = shallow
-            .type_member_headers(name)
-            .map(|headers| headers.iter().collect())
-            .unwrap_or_default();
+        let mut members: Vec<&MemberHeader> = header.member_headers.iter().collect();
         members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         for m in members {
             write_member_header(&mut buf, m);
@@ -125,15 +127,15 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 
     // ── Section: value symbols (HEADER inventory) ──
     write_section(&mut buf, b"values");
-    let mut value_keys: Vec<&str> = shallow.value_symbol_names().collect();
+    let mut value_keys: Vec<_> = headers.value_headers.keys().collect();
     value_keys.sort_unstable();
-    for name in value_keys {
-        let Some(kind) = shallow.value_symbol_kind(name) else {
-            continue;
-        };
-        write_decl(&mut buf, kind_str_value(&kind), name);
+    for key in value_keys {
+        let header = &headers.value_headers[key];
+        write_owner(&mut buf, key.owner);
+        write_decl(&mut buf, kind_str_value(&header.kind), key.name.as_ref());
         // Contributor count (same-name decl split / merge).
-        if let Some(count) = shallow.value_contributor_count(name) {
+        {
+            let count = header.contributors.len();
             buf.extend_from_slice(b"vc:");
             buf.extend_from_slice(&(count as u32).to_le_bytes());
             buf.push(SEP);
@@ -143,10 +145,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
         // about value members, so an object-member add/remove/rename or
         // header-flag change was invisible. Sorted by name (source order
         // cosmetic).
-        let mut members: Vec<&MemberHeader> = shallow
-            .value_object_member_headers(name)
-            .map(|headers| headers.iter().collect())
-            .unwrap_or_default();
+        let mut members: Vec<&MemberHeader> = header.object_member_headers.iter().collect();
         members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         for m in members {
             write_member_header(&mut buf, m);
@@ -164,12 +163,13 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     // data (the value-body fact + `FileWholeHash` rail), deliberately not
     // folded into this skeleton hash.
     write_section(&mut buf, b"enums");
-    let mut enum_keys: Vec<&str> = shallow.enum_symbol_names().collect();
+    let mut enum_keys: Vec<_> = headers.enum_headers.keys().collect();
     enum_keys.sort_unstable();
-    for name in enum_keys {
-        write_decl(&mut buf, "enum", name);
-        let members = shallow.enum_member_names(name).unwrap_or_default();
-        for m in members {
+    for key in enum_keys {
+        let header = &headers.enum_headers[key];
+        write_owner(&mut buf, key.owner);
+        write_decl(&mut buf, "enum", key.name.as_ref());
+        for m in &header.member_names {
             buf.extend_from_slice(b"e:");
             buf.extend_from_slice(m.as_bytes());
             buf.push(SEP);
@@ -189,14 +189,11 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 
     // ── Section: wildcard re-exports ──
     write_section(&mut buf, b"wildcard_reexports");
-    let mut wildcards: Vec<&str> = shallow
-        .wildcard_reexports
-        .iter()
-        .map(|w| w.source_specifier.as_str())
-        .collect();
-    wildcards.sort();
-    for specifier in wildcards {
-        buf.extend_from_slice(specifier.as_bytes());
+    let mut wildcards: Vec<_> = shallow.wildcard_reexports.iter().collect();
+    wildcards.sort_by_key(|wildcard| (wildcard.owner, wildcard.source_specifier.as_str()));
+    for wildcard in wildcards {
+        write_owner(&mut buf, wildcard.owner);
+        buf.extend_from_slice(wildcard.source_specifier.as_bytes());
         buf.push(SEP);
     }
 
@@ -207,20 +204,69 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     // specifier + binding so a resolve-config change (paths edit) does not
     // ripple through this hash.
     write_section(&mut buf, b"import_targets");
-    let mut import_keys: Vec<&String> = shallow.import_targets.keys().collect();
+    let mut import_keys: Vec<_> = shallow.owner_import_targets.keys().collect();
     import_keys.sort();
     for local in import_keys {
-        let target = &shallow.import_targets[local];
-        buf.extend_from_slice(local.as_bytes());
+        let target = &shallow.owner_import_targets[local];
+        write_owner(&mut buf, local.owner);
+        buf.extend_from_slice(local.name.as_bytes());
         buf.push(SEP);
         buf.extend_from_slice(target.source_specifier.as_bytes());
         buf.push(SEP);
         buf.extend_from_slice(target.imported_name.as_bytes());
         buf.push(SEP);
+        buf.push(u8::from(target.is_namespace));
+        buf.push(SEP);
         // Resolved canonical_id is INTENTIONALLY excluded (R12).
     }
 
+    // ── Section: carrier script-region shape ──
+    // A carrier's typed region inventory is the parse authority for owner
+    // identity. In particular, adding/removing Vue's `setup` attribute can
+    // leave the embedded script bytes and every declaration header unchanged
+    // while moving all declarations between Module(0) and Instance(0). Fold
+    // the region KIND and source dialect, but not byte spans: offsets move
+    // under cosmetic carrier edits and are not semantic shape.
+    write_section(&mut buf, b"carrier_script_regions");
+    if let Some(parse) = indexed.framework_parse.as_deref() {
+        for region in &parse.common.script_regions {
+            write_script_region_kind(&mut buf, region.kind);
+            write_script_source_type(&mut buf, region.source_type);
+            buf.push(SEP);
+        }
+    }
+
     xxh3_128(&buf).to_le_bytes()
+}
+
+fn write_script_region_kind(buf: &mut Vec<u8>, kind: verter_language::ScriptRegionKind) {
+    use verter_language::ScriptRegionKind;
+    buf.push(match kind {
+        ScriptRegionKind::Instance => b'I',
+        ScriptRegionKind::Module => b'M',
+        ScriptRegionKind::Frontmatter => b'F',
+    });
+}
+
+fn write_script_source_type(buf: &mut Vec<u8>, source_type: verter_language::ScriptSourceType) {
+    use verter_language::{JsModuleKind, ScriptSourceType};
+
+    let (dialect, module_kind) = match source_type {
+        ScriptSourceType::Ts => (b'T', None),
+        ScriptSourceType::Tsx => (b'X', None),
+        ScriptSourceType::Dts => (b'D', None),
+        ScriptSourceType::Js(kind) => (b'J', Some(kind)),
+        ScriptSourceType::Jsx(kind) => (b'R', Some(kind)),
+    };
+    buf.push(dialect);
+    if let Some(module_kind) = module_kind {
+        buf.push(match module_kind {
+            JsModuleKind::Unambiguous => b'U',
+            JsModuleKind::Module => b'M',
+            JsModuleKind::CommonJs => b'C',
+            JsModuleKind::Script => b'S',
+        });
+    }
 }
 
 fn write_section(buf: &mut Vec<u8>, name: &[u8]) {
@@ -233,6 +279,16 @@ fn write_decl(buf: &mut Vec<u8>, kind: &str, name: &str) {
     buf.extend_from_slice(kind.as_bytes());
     buf.push(b':');
     buf.extend_from_slice(name.as_bytes());
+    buf.push(SEP);
+}
+
+fn write_owner(buf: &mut Vec<u8>, owner: verter_type_expr::TopLevelOwnerId) {
+    buf.push(match owner.kind() {
+        verter_type_expr::TopLevelOwnerKind::Module => b'M',
+        verter_type_expr::TopLevelOwnerKind::Instance => b'I',
+        verter_type_expr::TopLevelOwnerKind::Frontmatter => b'F',
+    });
+    buf.extend_from_slice(&owner.ordinal().to_le_bytes());
     buf.push(SEP);
 }
 
@@ -256,8 +312,9 @@ fn write_export_target(
 ) {
     use crate::resolver_core::shallow_file_state::ExportTarget;
     match target {
-        ExportTarget::Local { symbol_name } => {
+        ExportTarget::Local { owner, symbol_name } => {
             buf.push(b'L');
+            write_owner(buf, *owner);
             buf.extend_from_slice(symbol_name.as_bytes());
             buf.push(SEP);
         }

@@ -42,30 +42,66 @@ fn route_demand_counter_name(route: &RouteDemand) -> &'static str {
     }
 }
 
-/// Work item for the unified registry publication queue.
+/// Exact declaration scope carried by every registry producer and queue item.
 ///
-/// Combines initial entries and transitive references into a single
-/// queue that the resolver-core registry publisher processes uniformly.
-#[derive(Debug, Clone)]
-pub enum RegistryWorkItem {
-    /// Initial registry entry from the component's direct type analysis.
-    InitialEntry {
-        index: usize,
-        declaration_source: String,
-        requested_name: String,
-    },
-    /// Transitive type reference discovered from props/emits/slots surfaces.
-    TransitiveRef {
-        name: String,
-        source_hint: Option<String>,
-        route: crate::resolver_core::RouteDemand,
-    },
+/// The canonical id is always absolute. Producer-local authored anchors are
+/// absolutized against an explicit caller scope exactly once; ownership is
+/// never inferred from a symbol name or substituted with another SFC owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RegistryProducerScope {
+    pub(crate) canonical_id: Arc<str>,
+    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
+}
+
+pub(crate) type RegistryQueuedNames = rustc_hash::FxHashSet<(RegistryProducerScope, String)>;
+
+impl RegistryProducerScope {
+    pub(crate) fn explicit(canonical_id: &str, owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        debug_assert!(!canonical_id.is_empty());
+        Self {
+            canonical_id: Arc::from(canonical_id),
+            owner,
+        }
+    }
+
+    pub(crate) fn from_locator(
+        locator: &verter_type_expr::locators::AuthoredBodyLocator,
+        caller_scope: &Self,
+    ) -> Self {
+        use verter_type_expr::locators::AuthoredBodyLocator;
+
+        let anchor = match locator {
+            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+            AuthoredBodyLocator::AugmentationBody(body) => &body.anchor,
+            AuthoredBodyLocator::JsdocTypedefBody(body) => &body.anchor,
+            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+        };
+        Self {
+            canonical_id: if anchor.canonical_id.is_empty() {
+                Arc::clone(&caller_scope.canonical_id)
+            } else {
+                Arc::clone(&anchor.canonical_id)
+            },
+            owner: anchor.owner,
+        }
+    }
+
+    pub(crate) fn for_field(
+        field: &verter_semantic::analysis::type_expand::ExpandedField,
+        explicit_resolution_scope: &Self,
+    ) -> Self {
+        field
+            .shallow_source
+            .as_ref()
+            .map(|locator| Self::from_locator(locator, explicit_resolution_scope))
+            .unwrap_or_else(|| explicit_resolution_scope.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingComponentMetaRegistryRef {
     pub(crate) name: String,
-    pub(crate) source_hint: Option<String>,
+    pub(crate) producer_scope: RegistryProducerScope,
     pub(crate) exported_name: Option<String>,
     pub(crate) route: RouteDemand,
     /// Authored USE-SITE slots for single-member (`len == 1` `MemberPath`)
@@ -86,13 +122,14 @@ pub(crate) struct PendingComponentMetaRegistryRef {
 /// same-name pending is idempotent for the published surface.
 pub(crate) fn attach_component_meta_registry_member_use_site(
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    producer_scope: &RegistryProducerScope,
     name: &str,
     member: &str,
     slot: &verter_type_expr::locators::TypeBodySlot,
 ) {
     for pending in referenced_names
         .iter_mut()
-        .filter(|pending| pending.name == name)
+        .filter(|pending| pending.name == name && pending.producer_scope == *producer_scope)
     {
         if !pending
             .member_use_sites
@@ -106,6 +143,52 @@ pub(crate) fn attach_component_meta_registry_member_use_site(
     }
 }
 
+fn raise_component_meta_registry_source(
+    ctx: &dyn ResolverContext,
+    producer_scope: &RegistryProducerScope,
+    source: &verter_type_expr::facts::SemanticTypeSource,
+) -> Option<crate::semantic_query::HotTypeRef> {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    dispatch.raise_semantic_type_source_to_hot(
+        source,
+        crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            scope_canonical_id: producer_scope.canonical_id.as_ref(),
+            scope_owner: producer_scope.owner,
+            context:
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            interior_failures: None,
+        },
+    )
+}
+
+/// Observe a registry publication source in its exact producing scope and
+/// enqueue the transitive routes exposed by that graph surface.
+pub(crate) fn observe_component_meta_registry_source(
+    ctx: &dyn ResolverContext,
+    producer_scope: &RegistryProducerScope,
+    source: &verter_type_expr::facts::SemanticTypeSource,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
+    referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    member_ref_policy: RegistryMemberRefPolicy,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
+) -> Option<crate::semantic_query::HotTypeRef> {
+    let hot = raise_component_meta_registry_source(ctx, producer_scope, source)?;
+    collect_component_meta_registry_refs_node(
+        ctx,
+        hot.node(),
+        published_names,
+        queued_names,
+        referenced_names,
+        producer_scope,
+        member_ref_policy,
+        cursor,
+    );
+    Some(hot)
+}
+
 pub(crate) fn upsert_component_meta_registry_entry(
     owner_canonical: &str,
     resolved_type_registry: &mut Vec<
@@ -113,42 +196,27 @@ pub(crate) fn upsert_component_meta_registry_entry(
     >,
     resolved_type_registry_meta: &mut Vec<crate::resolver_core::ResolvedTypeRegistryMeta>,
     published_names: &mut rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     ctx: &dyn ResolverContext,
     name: String,
     type_source: verter_type_expr::facts::SemanticTypeSource,
     declaration: crate::resolver_core::ResolvedTypeDeclaration,
+    producer_scope: &RegistryProducerScope,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
-    let declaration_source_hint =
-        (!declaration.canonical_source.is_empty()).then(|| declaration.canonical_source.clone());
     let collect_nested_refs = should_collect_component_meta_registry_nested_refs(
         owner_canonical,
-        declaration_source_hint.as_deref(),
+        producer_scope.canonical_id.as_ref(),
     );
     // One dispatch for candidate preference and nested-ref discovery: the
     // published content-free source raises ONCE through the shared bridge;
     // preference between an existing and an incoming candidate is decided in
     // NODE DOMAIN (`compare_node_improvement`), and transitive references are
     // discovered by the node-domain walk — no materialised `TypeExpr`.
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    let transit_ctx =
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            crate::semantic_query::ProjectionMode::Navigate,
-        );
-    let raise_scope = declaration_source_hint
-        .as_deref()
-        .unwrap_or(owner_canonical);
+    let type_source = type_source.absolutized_against(producer_scope.canonical_id.as_ref());
     let raise = |source: &verter_type_expr::facts::SemanticTypeSource| {
-        dispatch.raise_semantic_type_source_to_hot(
-            source,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id: raise_scope,
-                context: transit_ctx,
-                interior_failures: None,
-            },
-        )
+        raise_component_meta_registry_source(ctx, producer_scope, source)
     };
     if let Some(index) = resolved_type_registry
         .iter()
@@ -162,6 +230,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
         // `Whole` dominates; otherwise the selected top-level members union
         // deterministically (existing surface order first, then new-only
         // members in candidate order).
+        #[allow(clippy::large_enum_variant)]
         enum RouteCombine {
             /// Both sides are projected surfaces → publish the member union.
             Union(verter_type_expr::facts::SemanticTypeSource),
@@ -220,18 +289,16 @@ pub(crate) fn upsert_component_meta_registry_entry(
                     resolved_type_registry[index].type_source =
                         verter_type_expr::facts::SourcePosition::Present(union_source.clone());
                     if collect_nested_refs {
-                        if let Some(hot) = raise(&union_source) {
-                            collect_component_meta_registry_refs_node(
-                                ctx,
-                                hot.node(),
-                                published_names,
-                                queued_names,
-                                referenced_names,
-                                declaration_source_hint.as_deref(),
-                                RegistryMemberRefPolicy::PublicationBoundary,
-                                cursor,
-                            );
-                        }
+                        observe_component_meta_registry_source(
+                            ctx,
+                            producer_scope,
+                            &union_source,
+                            published_names,
+                            queued_names,
+                            referenced_names,
+                            RegistryMemberRefPolicy::PublicationBoundary,
+                            cursor,
+                        );
                     }
                 }
                 return;
@@ -247,18 +314,16 @@ pub(crate) fn upsert_component_meta_registry_entry(
                     };
                 }
                 if collect_nested_refs {
-                    if let Some(hot) = raise(&type_source) {
-                        collect_component_meta_registry_refs_node(
-                            ctx,
-                            hot.node(),
-                            published_names,
-                            queued_names,
-                            referenced_names,
-                            declaration_source_hint.as_deref(),
-                            RegistryMemberRefPolicy::PublicationBoundary,
-                            cursor,
-                        );
-                    }
+                    observe_component_meta_registry_source(
+                        ctx,
+                        producer_scope,
+                        &type_source,
+                        published_names,
+                        queued_names,
+                        referenced_names,
+                        RegistryMemberRefPolicy::PublicationBoundary,
+                        cursor,
+                    );
                 }
                 return;
             }
@@ -290,36 +355,32 @@ pub(crate) fn upsert_component_meta_registry_entry(
                 };
             }
             if collect_nested_refs {
-                if let Some(hot) = raise(&type_source) {
-                    collect_component_meta_registry_refs_node(
-                        ctx,
-                        hot.node(),
-                        published_names,
-                        queued_names,
-                        referenced_names,
-                        declaration_source_hint.as_deref(),
-                        RegistryMemberRefPolicy::PublicationBoundary,
-                        cursor,
-                    );
-                }
+                observe_component_meta_registry_source(
+                    ctx,
+                    producer_scope,
+                    &type_source,
+                    published_names,
+                    queued_names,
+                    referenced_names,
+                    RegistryMemberRefPolicy::PublicationBoundary,
+                    cursor,
+                );
             }
         }
         return;
     }
 
     if collect_nested_refs {
-        if let Some(hot) = raise(&type_source) {
-            collect_component_meta_registry_refs_node(
-                ctx,
-                hot.node(),
-                published_names,
-                queued_names,
-                referenced_names,
-                declaration_source_hint.as_deref(),
-                RegistryMemberRefPolicy::PublicationBoundary,
-                cursor,
-            );
-        }
+        observe_component_meta_registry_source(
+            ctx,
+            producer_scope,
+            &type_source,
+            published_names,
+            queued_names,
+            referenced_names,
+            RegistryMemberRefPolicy::PublicationBoundary,
+            cursor,
+        );
     }
     resolved_type_registry.push(
         verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
@@ -337,21 +398,32 @@ pub(crate) fn upsert_component_meta_registry_entry(
 
 pub(crate) fn should_collect_component_meta_registry_nested_refs(
     owner_canonical: &str,
-    source_hint: Option<&str>,
+    producer_canonical: &str,
 ) -> bool {
-    match source_hint.filter(|source| !source.is_empty()) {
-        Some(source) => source == owner_canonical,
-        None => true,
-    }
+    producer_canonical == owner_canonical
 }
 
 pub(crate) fn owner_component_meta_registry_import_root(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     _snapshot: &FileAnalysisSnapshot,
     local_name: &str,
-) -> Option<(String, String)> {
-    ctx.resolve_owner_direct_import(owner_canonical, local_name)
+) -> Option<(String, verter_type_expr::TopLevelOwnerId, String)> {
+    let identity = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+        ctx,
+        owner_canonical,
+        owner,
+        None,
+        local_name,
+    )?;
+    (identity.canonical_id.as_ref() != owner_canonical || identity.owner != owner).then(|| {
+        (
+            identity.canonical_id.to_string(),
+            identity.owner,
+            identity.symbol_name.to_string(),
+        )
+    })
 }
 
 /// Issue #7 / true when the named alias's prepared body
@@ -368,14 +440,16 @@ pub(crate) fn owner_component_meta_registry_import_root(
 pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> bool {
     fn body_head(
         ctx: &dyn ResolverContext,
         owner_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<(String, Vec<SemanticNodeId>)> {
-        let prepared = ctx.prepared_type_decl(owner_canonical, name)?;
+        let prepared = ctx.prepared_type_decl_return_only(owner_canonical, owner, name)?;
         let root = prepared_body_root_node(ctx, prepared.as_ref())?;
         if node_root_is_type_parameter(ctx, root) {
             return None;
@@ -383,7 +457,7 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
         component_meta_registry_node_ref_head(ctx, root)
     }
 
-    let Some((ref_name, type_arguments)) = body_head(ctx, owner_canonical, name) else {
+    let Some((ref_name, type_arguments)) = body_head(ctx, owner_canonical, owner, name) else {
         return false;
     };
     if ref_name == "ComponentConfig" && !type_arguments.is_empty() {
@@ -391,7 +465,8 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     }
     // Single alias-of-alias indirection — follow once.
     if type_arguments.is_empty() {
-        if let Some((nested_name, nested_args)) = body_head(ctx, owner_canonical, ref_name.as_str())
+        if let Some((nested_name, nested_args)) =
+            body_head(ctx, owner_canonical, owner, ref_name.as_str())
         {
             return nested_name == "ComponentConfig" && !nested_args.is_empty();
         }
@@ -412,35 +487,38 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
 /// instead of the standard `MemberPath`/`Pick` route.
 pub(crate) fn component_meta_registry_public_route_owner_local_root(
     ctx: &dyn ResolverContext,
-    owner_canonical: &str,
+    producer_scope: &RegistryProducerScope,
     snapshot: &FileAnalysisSnapshot,
     route_root_name: Option<&str>,
-    source_hint: Option<&str>,
 ) -> Option<String> {
-    // Source hint must be either None (component-local) or match the
-    // owner — anything else is from a different owner's scope.
-    if let Some(source) = source_hint.filter(|source| !source.is_empty()) {
-        if source != owner_canonical {
-            return None;
-        }
-    }
-
     // The route's root name (utility or indexed access), extracted by the
     // caller in its own carrier domain.
     let root_name = route_root_name?.to_string();
 
     // Owner-local rule: no import binding on `root_name`. If the
     // resolver routes the name to an external file, it is imported.
-    if owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, root_name.as_str())
-        .is_some()
+    if owner_component_meta_registry_import_root(
+        ctx,
+        producer_scope.canonical_id.as_ref(),
+        producer_scope.owner,
+        snapshot,
+        root_name.as_str(),
+    )
+    .is_some()
     {
         return None;
     }
 
     // ComponentConfig itself must NOT be imported in the owner's
     // scope.
-    if owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, "ComponentConfig")
-        .is_some()
+    if owner_component_meta_registry_import_root(
+        ctx,
+        producer_scope.canonical_id.as_ref(),
+        producer_scope.owner,
+        snapshot,
+        "ComponentConfig",
+    )
+    .is_some()
     {
         return None;
     }
@@ -448,7 +526,8 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     // Alias body must be `ComponentConfig<...>`.
     if !component_meta_registry_owner_local_component_config_alias_name(
         ctx,
-        owner_canonical,
+        producer_scope.canonical_id.as_ref(),
+        producer_scope.owner,
         root_name.as_str(),
     ) {
         return None;
@@ -457,12 +536,60 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     Some(root_name)
 }
 
+/// Recover owner-local utility/indexed routes authored at a macro's type-arg
+/// root before public-field expansion consumes that wrapper. Per-field
+/// collection cannot recover `defineProps<Pick<Foo, K>>()` from the expanded
+/// `Foo` members, while nested field annotations retain their own structural
+/// locators and continue through the existing field collector.
+pub(crate) fn collect_component_meta_registry_public_macro_root_refs(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+) {
+    for (macro_index, macro_call) in snapshot.macros.iter().enumerate() {
+        if !macro_call.is_type_based || macro_call.parsed_type_argument.is_none() {
+            continue;
+        }
+        let Some(hot) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            ctx,
+            owner_canonical,
+            macro_index,
+        ) else {
+            continue;
+        };
+        let route_root_name = component_meta_registry_node_utility_route(ctx, hot.node())
+            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, hot.node()))
+            .map(|(root, _)| root);
+        let producer_scope = RegistryProducerScope::explicit(owner_canonical, macro_call.owner);
+        let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
+            ctx,
+            &producer_scope,
+            snapshot,
+            route_root_name.as_deref(),
+        ) else {
+            continue;
+        };
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            owner_local_root.as_str(),
+            &producer_scope,
+            None,
+            RouteDemand::Whole,
+        );
+    }
+}
+
 pub(crate) fn enqueue_component_meta_registry_ref(
     published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     name: &str,
-    source_hint: Option<&str>,
+    producer_scope: &RegistryProducerScope,
     exported_name: Option<&str>,
     route: RouteDemand,
 ) {
@@ -480,16 +607,13 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     let counter_name = route_demand_counter_name(&route);
     #[cfg(any(test, feature = "test-support"))]
     crate::capture_token::with_active_capture(|t| t.record_counter(counter_name, 1));
-    let source_hint = source_hint
-        .filter(|source| !source.is_empty())
-        .map(str::to_string);
     let exported_name = exported_name
         .filter(|exported| !exported.is_empty())
         .map(str::to_string);
-    if !queued_names.insert(name.to_string()) {
+    if !queued_names.insert((producer_scope.clone(), name.to_string())) {
         if let Some(existing) = referenced_names.iter_mut().find(|pending| {
             pending.name == name
-                && pending.source_hint == source_hint
+                && pending.producer_scope == *producer_scope
                 && pending.exported_name == exported_name
                 && component_meta_registry_can_merge_pending_route(&pending.route, &route)
         }) {
@@ -497,7 +621,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
         } else {
             referenced_names.push_back(PendingComponentMetaRegistryRef {
                 name: name.to_string(),
-                source_hint,
+                producer_scope: producer_scope.clone(),
                 exported_name,
                 route,
                 member_use_sites: Vec::new(),
@@ -507,7 +631,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
     }
     referenced_names.push_back(PendingComponentMetaRegistryRef {
         name: name.to_string(),
-        source_hint,
+        producer_scope: producer_scope.clone(),
         exported_name,
         route,
         member_use_sites: Vec::new(),
@@ -539,13 +663,12 @@ fn route_demand_keeps_exact_deep_member_path(
 
 pub(crate) fn collect_component_meta_registry_public_field_refs(
     ctx: &dyn ResolverContext,
-    owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
+    producer_scope: &RegistryProducerScope,
 ) {
     // One dispatch: the field's published SOURCE and its authored shallow
     // locator raise through the shared bridge; every route decision below
@@ -562,7 +685,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             dispatch.raise_semantic_type_source_to_hot(
                 source,
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: owner_canonical,
+                    scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                    scope_owner: producer_scope.owner,
                     context: transit_ctx,
                     interior_failures: None,
                 },
@@ -614,17 +738,16 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         .map(|(root, _)| root);
     if let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
         ctx,
-        owner_canonical,
+        producer_scope,
         snapshot,
         route_root_name.as_deref(),
-        source_hint,
     ) {
         enqueue_component_meta_registry_ref(
             published_names,
             queued_names,
             output,
             owner_local_root.as_str(),
-            source_hint,
+            producer_scope,
             None,
             RouteDemand::Whole,
         );
@@ -633,34 +756,62 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
 
     // Prepared-body classifications run NODE-DOMAIN off the declaration's
     // lowered body slot (never an embedded body).
-    let prepared_body_root = |canonical_id: &str, symbol_name: &str| {
-        ctx.prepared_type_decl(canonical_id, symbol_name)
+    let prepared_body_root = |canonical_id: &str,
+                              declaration_owner: verter_type_expr::TopLevelOwnerId,
+                              symbol_name: &str| {
+        ctx.prepared_type_decl_return_only(canonical_id, declaration_owner, symbol_name)
             .and_then(|prepared| prepared_body_root_node(ctx, prepared.as_ref()))
     };
     let skip_direct_plain_ref =
         component_meta_registry_node_ref_name(ctx, node).is_some_and(|name| {
             let name = name.as_str();
-            prepared_body_root(owner_canonical, name)
-                .is_some_and(|root| node_root_is_type_parameter(ctx, root))
-                || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                    .and_then(|(canonical_id, exported_name)| {
-                        (!canonical_id.is_empty()
-                            && !ctx.workspace_is_package_backed(canonical_id.as_str()))
-                        .then(|| prepared_body_root(canonical_id.as_str(), exported_name.as_str()))
+            prepared_body_root(
+                producer_scope.canonical_id.as_ref(),
+                producer_scope.owner,
+                name,
+            )
+            .is_some_and(|root| node_root_is_type_parameter(ctx, root))
+                || owner_component_meta_registry_import_root(
+                    ctx,
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
+                    snapshot,
+                    name,
+                )
+                .and_then(|(canonical_id, target_owner, exported_name)| {
+                    (!canonical_id.is_empty()
+                        && !ctx.workspace_is_package_backed(canonical_id.as_str()))
+                    .then(|| {
+                        prepared_body_root(
+                            canonical_id.as_str(),
+                            target_owner,
+                            exported_name.as_str(),
+                        )
                     })
-                    .flatten()
-                    .is_some_and(|root| {
-                        node_root_has_non_object_top_level_surface(ctx, root)
-                            && !node_root_has_explicit_object_surface(ctx, root)
-                    })
-                || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                    .is_some_and(|(canonical_id, _)| {
-                        ctx.workspace_is_package_backed(canonical_id.as_str())
-                    })
+                })
+                .flatten()
+                .is_some_and(|root| {
+                    node_root_has_non_object_top_level_surface(ctx, root)
+                        && !node_root_has_explicit_object_surface(ctx, root)
+                })
+                || owner_component_meta_registry_import_root(
+                    ctx,
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
+                    snapshot,
+                    name,
+                )
+                .is_some_and(|(canonical_id, _, _)| {
+                    ctx.workspace_is_package_backed(canonical_id.as_str())
+                })
                 || ctx.workspace_is_package_backed(
-                    ctx.resolve_type_declaration_for_dep(owner_canonical, name)
-                        .canonical_source
-                        .as_str(),
+                    ctx.resolve_type_declaration_for_dep(
+                        producer_scope.canonical_id.as_ref(),
+                        producer_scope.owner,
+                        name,
+                    )
+                    .canonical_source
+                    .as_str(),
                 )
         });
     let direct_ref = component_meta_registry_node_ref_head(ctx, node);
@@ -669,35 +820,52 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             if type_arguments.is_empty() {
                 return false;
             }
-            let Some((canonical_id, exported_name)) = owner_component_meta_registry_import_root(
-                ctx,
-                owner_canonical,
-                snapshot,
-                name.as_str(),
-            ) else {
+            let Some((canonical_id, target_owner, exported_name)) =
+                owner_component_meta_registry_import_root(
+                    ctx,
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
+                    snapshot,
+                    name.as_str(),
+                )
+            else {
                 return false;
             };
             if canonical_id.is_empty() || ctx.workspace_is_package_backed(canonical_id.as_str()) {
                 return false;
             }
-            prepared_body_root(canonical_id.as_str(), exported_name.as_str()).is_some_and(|root| {
-                node_root_has_non_object_top_level_surface(ctx, root)
-                    && !node_root_has_explicit_object_surface(ctx, root)
-            })
+            prepared_body_root(canonical_id.as_str(), target_owner, exported_name.as_str())
+                .is_some_and(|root| {
+                    node_root_has_non_object_top_level_surface(ctx, root)
+                        && !node_root_has_explicit_object_surface(ctx, root)
+                })
         });
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
         && direct_ref.as_ref().is_some_and(|(name, _)| {
             let name = name.as_str();
-            let local_type_parameter = prepared_body_root(owner_canonical, name)
-                .is_some_and(|root| node_root_is_type_parameter(ctx, root));
-            let import_root =
-                owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name);
-            let package_backed = import_root.as_ref().is_some_and(|(canonical_id, _)| {
+            let local_type_parameter = prepared_body_root(
+                producer_scope.canonical_id.as_ref(),
+                producer_scope.owner,
+                name,
+            )
+            .is_some_and(|root| node_root_is_type_parameter(ctx, root));
+            let import_root = owner_component_meta_registry_import_root(
+                ctx,
+                producer_scope.canonical_id.as_ref(),
+                producer_scope.owner,
+                snapshot,
+                name,
+            );
+            let package_backed = import_root.as_ref().is_some_and(|(canonical_id, _, _)| {
                 ctx.workspace_is_package_backed(canonical_id.as_str())
             }) || ctx.workspace_is_package_backed(
-                ctx.resolve_type_declaration_for_dep(owner_canonical, name)
-                    .canonical_source
-                    .as_str(),
+                ctx.resolve_type_declaration_for_dep(
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
+                    name,
+                )
+                .canonical_source
+                .as_str(),
             );
             !local_type_parameter && !package_backed
         })
@@ -708,7 +876,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 queued_names,
                 output,
                 name.as_str(),
-                source_hint,
+                producer_scope,
                 None,
                 RouteDemand::Whole,
             );
@@ -721,15 +889,19 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             published_names,
             queued_names,
             output,
-            source_hint,
+            producer_scope,
         );
     }
 
     // Indexed-access roots whose owner-local prepared body is not a type
     // parameter enqueue their member-path route.
     if let Some((root_name, route)) = component_meta_registry_node_indexed_access_route(ctx, node) {
-        if prepared_body_root(owner_canonical, root_name.as_str())
-            .is_some_and(|root| !node_root_is_type_parameter(ctx, root))
+        if prepared_body_root(
+            producer_scope.canonical_id.as_ref(),
+            producer_scope.owner,
+            root_name.as_str(),
+        )
+        .is_some_and(|root| !node_root_is_type_parameter(ctx, root))
         {
             // A single-member route records the field's authored annotation
             // slot as the member USE-SITE: when the member's declaring
@@ -752,42 +924,35 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 queued_names,
                 output,
                 root_name.as_str(),
-                source_hint,
+                producer_scope,
                 None,
                 route,
             );
             if let Some((member, slot)) = use_site {
                 attach_component_meta_registry_member_use_site(
                     output,
+                    producer_scope,
                     root_name.as_str(),
                     member.as_str(),
                     &slot,
                 );
             }
         }
-    } else if let Some((head_name, resolved_identity, route)) =
+    } else if let Some((resolved_identity, route)) =
         component_meta_registry_node_instantiated_indexed_access_route(ctx, node)
     {
         // Instantiated-root indexed access (`LocalConfig<string>['slot']`):
-        // enqueue under the AUTHORED owner-scope name — the resolved base
-        // identity reverse-maps through the owner's import bindings to the
-        // renamed local alias; an unresolved bare head already carries the
-        // authored name.
-        let local_name = resolved_identity
-            .as_ref()
-            .and_then(|(canonical, decl_name)| {
-                snapshot.imports.iter().find_map(|import| {
-                    let resolved = import.resolved_canonical_id.as_deref()?;
-                    if resolved != canonical.as_ref() {
-                        return None;
-                    }
-                    import.bindings.iter().find_map(|binding| {
-                        let imported = binding.imported_name.as_deref().unwrap_or(&binding.name);
-                        (imported == decl_name.as_ref()).then(|| binding.name.clone())
-                    })
-                })
-            })
-            .unwrap_or(head_name);
+        // enqueue under the unique AUTHORED name whose exact owner-qualified
+        // import target is the resolved base identity. Missing or ambiguous
+        // reverse identity fails closed; a resolved declaration name is never
+        // treated as an owner-local spelling.
+        let Some(local_name) = component_meta_registry_local_import_for_instantiated_route(
+            ctx,
+            producer_scope,
+            resolved_identity.as_ref(),
+        ) else {
+            return;
+        };
         let use_site = match &route {
             RouteDemand::MemberPath(path) if path.len() == 1 => {
                 match field.shallow_source.as_ref() {
@@ -804,13 +969,14 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             queued_names,
             output,
             local_name.as_str(),
-            source_hint,
+            producer_scope,
             None,
             route,
         );
         if let Some((member, slot)) = use_site {
             attach_component_meta_registry_member_use_site(
                 output,
+                producer_scope,
                 local_name.as_str(),
                 member.as_str(),
                 &slot,
@@ -1126,18 +1292,16 @@ fn member_path_from_rev(mut path_rev: Vec<String>) -> RouteDemand {
 /// Instantiated-root sibling of
 /// [`component_meta_registry_node_indexed_access_route`]: an indexed-access
 /// spine whose root is a GENERIC APPLICATION (`LocalConfig<string>['slot']`)
-/// rather than a bare reference. Returns the root head name (the authored
-/// name for an unresolved bare head, the resolved declaration name for an
-/// `InstantiationRef`), the resolved base identity when available
-/// (`(canonical, decl_name)` — the discovery site reverse-maps it through the
-/// owner's import bindings to recover the authored local alias), and the
-/// member-path route.
+/// rather than a bare reference. Returns the resolved base identity when
+/// available (`(canonical, decl_name)` — the discovery site reverse-maps it
+/// through the exact owner's import table to recover a unique authored local
+/// alias) and the member-path route.
 pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
 ) -> Option<InstantiatedIndexedAccessRoute> {
     let (path_rev, cursor) = indexed_access_string_key_spine(ctx, node)?;
-    let (name, args) = component_meta_registry_node_ref_head(ctx, cursor)?;
+    let (_, args) = component_meta_registry_node_ref_head(ctx, cursor)?;
     if args.is_empty() {
         // A bare root belongs to the plain extractor above.
         return None;
@@ -1149,17 +1313,30 @@ pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
         )),
         _ => None,
     };
-    Some((name, resolved_identity, member_path_from_rev(path_rev)))
+    Some((resolved_identity, member_path_from_rev(path_rev)))
 }
 
-/// The instantiated-root route extraction result: the root head name, the
-/// resolved base identity when available (`(canonical, decl_name)`), and the
-/// member-path route.
+/// The instantiated-root route extraction result: the resolved base identity
+/// when available (`(canonical, decl_name)`) and the member-path route.
 pub(crate) type InstantiatedIndexedAccessRoute = (
-    String,
     Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
     RouteDemand,
 );
+
+fn component_meta_registry_local_import_for_instantiated_route(
+    ctx: &dyn ResolverContext,
+    producer_scope: &RegistryProducerScope,
+    resolved_identity: Option<&(std::sync::Arc<str>, std::sync::Arc<str>)>,
+) -> Option<String> {
+    let (resolved_canonical, resolved_symbol) = resolved_identity?;
+    ctx.shallow_file_state(producer_scope.canonical_id.as_ref())?
+        .unique_local_import_for_resolved_target_in(
+            producer_scope.owner,
+            resolved_canonical.as_ref(),
+            resolved_symbol.as_ref(),
+        )
+        .map(str::to_string)
+}
 
 /// The node-domain sibling of
 /// [`component_meta_registry_field_expr_has_actionable_route`].
@@ -1180,9 +1357,9 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
+    producer_scope: &RegistryProducerScope,
 ) {
     if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
         enqueue_component_meta_registry_ref(
@@ -1190,7 +1367,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
             queued_names,
             output,
             name.as_str(),
-            source_hint,
+            producer_scope,
             None,
             RouteDemand::Whole,
         );
@@ -1267,9 +1444,9 @@ pub(crate) fn collect_component_meta_registry_refs_node(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
+    producer_scope: &RegistryProducerScope,
     member_ref_policy: RegistryMemberRefPolicy,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
@@ -1280,7 +1457,7 @@ pub(crate) fn collect_component_meta_registry_refs_node(
         published_names,
         queued_names,
         output,
-        source_hint,
+        producer_scope,
         member_ref_policy,
         cursor,
         &mut visited,
@@ -1292,9 +1469,9 @@ fn collect_registry_refs_node_inner(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
+    producer_scope: &RegistryProducerScope,
     member_ref_policy: RegistryMemberRefPolicy,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
@@ -1310,7 +1487,7 @@ fn collect_registry_refs_node_inner(
             queued_names,
             output,
             root_name.as_str(),
-            source_hint,
+            producer_scope,
             None,
             route,
         );
@@ -1322,7 +1499,7 @@ fn collect_registry_refs_node_inner(
             queued_names,
             output,
             name.as_str(),
-            source_hint,
+            producer_scope,
             None,
             RouteDemand::Whole,
         );
@@ -1339,7 +1516,7 @@ fn collect_registry_refs_node_inner(
                 published_names,
                 queued_names,
                 output,
-                source_hint,
+                producer_scope,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1352,7 +1529,7 @@ fn collect_registry_refs_node_inner(
                 published_names,
                 queued_names,
                 output,
-                source_hint,
+                producer_scope,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1366,7 +1543,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1384,7 +1561,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1416,7 +1593,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1434,7 +1611,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1455,7 +1632,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     member_ref_policy,
                     visited,
                 );
@@ -1472,7 +1649,7 @@ fn collect_registry_refs_node_inner(
                         published_names,
                         queued_names,
                         output,
-                        source_hint,
+                        producer_scope,
                         member_ref_policy,
                         visited,
                     );
@@ -1484,7 +1661,7 @@ fn collect_registry_refs_node_inner(
                         published_names,
                         queued_names,
                         output,
-                        source_hint,
+                        producer_scope,
                         member_ref_policy,
                         visited,
                     );
@@ -1494,7 +1671,7 @@ fn collect_registry_refs_node_inner(
                         published_names,
                         queued_names,
                         output,
-                        source_hint,
+                        producer_scope,
                         member_ref_policy,
                         visited,
                     );
@@ -1513,7 +1690,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     RegistryMemberRefPolicy::PublicationBoundary,
                     visited,
                 );
@@ -1524,7 +1701,7 @@ fn collect_registry_refs_node_inner(
                 published_names,
                 queued_names,
                 output,
-                source_hint,
+                producer_scope,
                 RegistryMemberRefPolicy::PublicationBoundary,
                 visited,
             );
@@ -1536,7 +1713,7 @@ fn collect_registry_refs_node_inner(
                 published_names,
                 queued_names,
                 output,
-                source_hint,
+                producer_scope,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1549,7 +1726,7 @@ fn collect_registry_refs_node_inner(
                 published_names,
                 queued_names,
                 output,
-                source_hint,
+                producer_scope,
                 member_ref_policy,
                 cursor,
                 visited,
@@ -1561,7 +1738,7 @@ fn collect_registry_refs_node_inner(
                     published_names,
                     queued_names,
                     output,
-                    source_hint,
+                    producer_scope,
                     member_ref_policy,
                     cursor,
                     visited,
@@ -1579,9 +1756,9 @@ fn collect_registry_member_surface_refs_node(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
+    queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
+    producer_scope: &RegistryProducerScope,
     member_ref_policy: RegistryMemberRefPolicy,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
 ) {
@@ -1596,18 +1773,35 @@ fn collect_registry_member_surface_refs_node(
             queued_names,
             output,
             root_name.as_str(),
-            source_hint,
+            producer_scope,
             None,
             route,
         );
         return;
     }
-    if component_meta_registry_node_instantiated_indexed_access_route(ctx, node).is_some() {
-        // Instantiated-root indexed access: the authored-name discovery
-        // (with the owner's import-binding reverse map) happens at the
-        // public-field collector, which has the owner snapshot. Recursing
-        // into the object here would misclassify the RESOLVED base name as
-        // a whole registry dependency of the owner.
+    if let Some((resolved_identity, route)) =
+        component_meta_registry_node_instantiated_indexed_access_route(ctx, node)
+    {
+        // Instantiated-root indexed access: recover the unique authored local
+        // alias from the exact producer owner's import table. Missing or
+        // ambiguous reverse identity fails closed. Recursing into the object
+        // would misclassify the resolved target name as an owner-local whole
+        // registry dependency.
+        if let Some(local_name) = component_meta_registry_local_import_for_instantiated_route(
+            ctx,
+            producer_scope,
+            resolved_identity.as_ref(),
+        ) {
+            enqueue_component_meta_registry_ref(
+                published_names,
+                queued_names,
+                output,
+                local_name.as_str(),
+                producer_scope,
+                None,
+                route,
+            );
+        }
         return;
     }
     if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
@@ -1617,7 +1811,7 @@ fn collect_registry_member_surface_refs_node(
                 queued_names,
                 output,
                 name.as_str(),
-                source_hint,
+                producer_scope,
                 None,
                 RouteDemand::Whole,
             );
@@ -1629,7 +1823,7 @@ fn collect_registry_member_surface_refs_node(
     };
     let recurse = |ctx: &dyn ResolverContext,
                    child: SemanticNodeId,
-                   queued_names: &mut rustc_hash::FxHashSet<String>,
+                   queued_names: &mut RegistryQueuedNames,
                    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
                    policy: RegistryMemberRefPolicy,
                    visited: &mut rustc_hash::FxHashSet<SemanticNodeId>| {
@@ -1639,7 +1833,7 @@ fn collect_registry_member_surface_refs_node(
             published_names,
             queued_names,
             output,
-            source_hint,
+            producer_scope,
             policy,
             visited,
         );
@@ -2044,7 +2238,7 @@ mod tests {
 
     use super::{
         component_meta_registry_public_indexed_access_route, enqueue_component_meta_registry_ref,
-        owner_component_meta_registry_import_root, RouteDemand,
+        owner_component_meta_registry_import_root, RegistryProducerScope, RouteDemand,
     };
     use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
     use crate::VerterHost;
@@ -2069,13 +2263,17 @@ mod tests {
         let published_names = rustc_hash::FxHashSet::default();
         let mut queued_names = rustc_hash::FxHashSet::default();
         let mut output = VecDeque::new();
+        let producer_scope = RegistryProducerScope::explicit(
+            "/src/Button.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+        );
 
         enqueue_component_meta_registry_ref(
             &published_names,
             &mut queued_names,
             &mut output,
             "Button",
-            Some("/src/Button.vue"),
+            &producer_scope,
             None,
             RouteDemand::pick(vec!["slots".to_string()]),
         );
@@ -2084,7 +2282,7 @@ mod tests {
             &mut queued_names,
             &mut output,
             "Button",
-            Some("/src/Button.vue"),
+            &producer_scope,
             None,
             RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
         );
@@ -2190,14 +2388,24 @@ export interface AvatarProps {
         let resolved = owner_component_meta_registry_import_root(
             &host,
             "/src/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             &snapshot,
             "AvatarProps",
         );
 
         assert_eq!(
             resolved,
-            Some(("/src/Avatar.vue".to_string(), "AvatarProps".to_string())),
-            "registry import roots should collapse direct named owner imports to the canonical defining file instead of keeping the barrel canonical",
+            Some((
+                "/src/Avatar.vue".to_string(),
+                verter_type_expr::TopLevelOwnerId::module(0),
+                "AvatarProps".to_string(),
+            )),
+            "registry import roots must preserve the exact module-script owner from the defining Vue file instead of substituting the consumer instance owner",
+        );
+        assert_ne!(
+            resolved.as_ref().map(|(_, owner, _)| *owner),
+            Some(verter_type_expr::TopLevelOwnerId::instance(0)),
+            "the consumer's instance owner is not authoritative for a declaration authored in the dependency's normal script block",
         );
     }
 }

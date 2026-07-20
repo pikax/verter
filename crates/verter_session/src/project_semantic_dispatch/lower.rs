@@ -104,20 +104,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn resolve_enum_member_value(
         &self,
         scope_canonical: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
     ) -> Option<TypeExpr> {
         let (prefix, member) = dotted_name.split_once('.')?;
-        let (canonical, name) = if let Some(direct) = name_resolution.get(prefix) {
-            (
-                Arc::clone(&direct.canonical_id),
-                Arc::clone(&direct.symbol_name),
-            )
+        let identity = if let Some(direct) = name_resolution.get(prefix) {
+            direct.clone()
         } else {
-            let resolved =
-                resolve_bare_name_in_scope(self.ctx, scope_canonical, scope_payload, prefix)?;
-            (resolved.canonical_id, resolved.symbol_name)
+            resolve_bare_name_in_scope(
+                self.ctx,
+                scope_canonical,
+                scope_owner,
+                scope_payload,
+                prefix,
+            )?
         };
         // Resolve the prefix's enum VALUE decl through the SAME export-target
         // chase `typeof Enum` uses ([`Self::effective_prepared_value_decl`]): a
@@ -126,8 +128,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a re-exported enum projects its members exactly like a local one,
         // matching `typeof E`'s cross-file behaviour — one shared chase, no
         // forked resolution path.
-        let (_, _, prepared) =
-            self.effective_prepared_value_decl(canonical.as_ref(), name.as_ref())?;
+        let (_, _, _, prepared) = self.effective_prepared_value_decl(
+            identity.canonical_id.as_ref(),
+            identity.owner,
+            identity.symbol_name.as_ref(),
+        )?;
         if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
             return None;
         }
@@ -356,15 +361,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let decl = match scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: HashValue::default(),
                         decl_name: Arc::from("<script-setup>"),
                     },
                     NodeScopeId::File {
                         canonical_id,
+                        owner,
                         whole_hash,
                         ..
                     } => DeclIdentity {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         whole_hash: *whole_hash,
                         decl_name: Arc::from("<script-setup>"),
                     },
@@ -518,11 +526,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // Object arm of an intersection literal) the
                             // member is author-declared in the macro T.
                             // Otherwise (`Structural`) it is `false`.
-                            // This is the canonical typed-IR producer of
-                            // the bit; the parser-side `ResolvedProp`
-                            // chain and the prepared-surface walker are
-                            // the other producers the shared resolver
-                            // consolidates onto this path.
+                            // This is the canonical typed-IR producer of the
+                            // macro-root provenance bit consumed by terminal
+                            // projections.
                             members.push(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
                                 value,
@@ -861,15 +867,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let mapper_decl = match scope {
                     NodeScopeId::Global => DeclIdentity {
                         canonical_id: Arc::from(""),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: HashValue::default(),
                         decl_name: Arc::from("<mapper-param>"),
                     },
                     NodeScopeId::File {
                         canonical_id,
+                        owner,
                         whole_hash,
                         ..
                     } => DeclIdentity {
                         canonical_id: Arc::clone(canonical_id),
+                        owner: *owner,
                         whole_hash: *whole_hash,
                         decl_name: Arc::from("<mapper-param>"),
                     },
@@ -1296,7 +1305,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let relation_input_context =
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         reduction_context.mode,
-                    );
+                    )
+                    .with_orthogonal_axes_from(reduction_context);
                 let check_id = self.shallow_lower_type_expr_with_context(
                     check,
                     env,
@@ -1404,8 +1414,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if value_ref.path.is_empty() {
                     return self.opaque(QueryError::Miss);
                 }
-                let scope_canonical_id = match scope {
-                    NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
+                let (scope_canonical_id, scope_owner) = match scope {
+                    NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        ..
+                    } => (Arc::clone(canonical_id), *owner),
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
                 // `typeof X.Y` semantic discrimination.
@@ -1448,6 +1462,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ValueRootKey {
                         scope: ScopeId {
                             canonical_id: Arc::clone(&scope_canonical_id),
+                            owner: scope_owner,
                             local_scope: None,
                         },
                         name: Arc::clone(&single_root),
@@ -1470,6 +1485,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             ValueRootKey {
                                 scope: ScopeId {
                                     canonical_id: scope_canonical_id,
+                                    owner: scope_owner,
                                     local_scope: None,
                                 },
                                 name: joined,
@@ -1497,7 +1513,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         path,
                         context: crate::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Navigate,
-                        ),
+                        )
+                        .with_orthogonal_axes_from(reduction_context),
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => return self.opaque(QueryError::Miss),

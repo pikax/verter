@@ -34,6 +34,13 @@ use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
+fn transport_child_hover_result(
+    canonical_id: &str,
+    result: std::result::Result<Option<Hover>, verter_session::PublicApiProjectionError>,
+) -> Result<Option<Hover>> {
+    result.map_err(|error| crate::public_api_projection_jsonrpc_error("hover", canonical_id, error))
+}
+
 pub(super) async fn handle_hover(
     server: &VerterLanguageServer,
     params: HoverParams,
@@ -110,7 +117,10 @@ pub(super) async fn handle_hover(
         hover::child_hover_target_at_offset(carrier_offset, &doc.source, &analysis)
     })();
     if let Some(target) = child_hover_target.as_ref() {
-        if let Some(child_hover) = server.child_hover_for_target(uri, target) {
+        if let Some(child_hover) = transport_child_hover_result(
+            &crate::documents::uri_to_canonical_id(uri),
+            server.child_hover_for_target(uri, target),
+        )? {
             return Ok(Some(child_hover));
         }
     }
@@ -1069,4 +1079,52 @@ pub(super) async fn handle_completion_resolve(
         }
     }
     Ok(item)
+}
+
+#[cfg(test)]
+mod public_api_projection_hover_transport_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use verter_session::{FileLanguage, HostConfig, PublicApiMode, UpsertRequest, VerterHost};
+
+    #[test]
+    fn child_hover_preserves_projection_failure_on_jsonrpc_transport() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _update = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
+                input_id: "/src/UnsafeEnum.vue".to_string(),
+                source: Arc::from(
+                    r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>"#,
+                ),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert unsafe enum");
+        let projection_error = host
+            .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
+            .expect_err("unsafe enum projection");
+
+        let error = transport_child_hover_result("/src/UnsafeEnum.vue", Err(projection_error))
+            .expect_err("hover must preserve projection failure");
+
+        assert_eq!(error.message, "hover: public API projection failed");
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "code": "tsc-generation",
+                "detailCode": "unsupported-declaration-shape",
+                "subject": { "kind": "macro", "syntaxIndex": 0 },
+                "declarationShapeReason": "unsupported-enum-shape",
+                "memberOrdinal": null,
+                "outcomeKind": null,
+                "outcomeReason": null,
+                "outcomeDiagnostic": null,
+            }))
+        );
+    }
 }

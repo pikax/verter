@@ -69,9 +69,9 @@ fn execute_read_cold_build_persists_traced_facts() {
          install the fact tracer"
     );
     assert!(
-        !raise_src.contains("graph.execute_cooperative("),
-        "execute_read must NOT call graph.execute_cooperative directly. A separate \
-         `graph.execute_cooperative(...)` call inside execute_read \
+        !raise_src.contains("graph.execute_cooperative_value("),
+        "execute_read must NOT call graph.execute_cooperative_value directly. A separate \
+         `graph.execute_cooperative_value(...)` call inside execute_read \
          would bypass install_fact_tracer."
     );
 }
@@ -222,6 +222,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/test/scope.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("MemoTarget"),

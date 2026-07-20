@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -31,6 +32,12 @@ impl VerterHost {
     /// Thin wrapper over [`Self::resolve_shallow_surface_for`] — the historical
     /// `(canonical, name)` accessor preserved for the many existing callers
     /// that always want full metadata.
+    ///
+    /// Because this compatibility request has no owner coordinate, framework
+    /// component files use their synthesized `default` export fact to select
+    /// the exact semantic instance owner before resolving `name`; ordinary
+    /// files retain the ordinary module owner. Resolution never retries a
+    /// same-name declaration in another owner.
     ///
     /// Runs the empty-path `Shallow` projection on the declaration carrier and
     /// projects the resulting object surface. Returns `None` when the symbol
@@ -67,6 +74,11 @@ impl VerterHost {
     /// instance surface (`$props`/`$emit`/`$slots`), resolved via
     /// [`crate::VerterHost::resolve_vue_public_type`], not a user-named
     /// declaration reached through this path.
+    ///
+    /// [`ShallowSurfaceRequest`] does not carry an owner coordinate. Its
+    /// declaration scope is therefore selected from the file's exact
+    /// synthesized-default owner fact for framework components, or the
+    /// ordinary module owner otherwise; there is no cross-owner name fallback.
     #[must_use]
     pub fn resolve_shallow_surface_for(
         &self,
@@ -82,6 +94,9 @@ impl VerterHost {
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let default_owner = host_ctx
+            .shallow_file_state(request.canonical_id.as_ref())?
+            .default_semantic_owner();
 
         // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a
         // pre-instantiated body. The empty-path Shallow synthesiser's decl-root
@@ -90,6 +105,7 @@ impl VerterHost {
         let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::clone(&request.canonical_id),
+                owner: default_owner,
                 local_scope: None,
             },
             name: Arc::clone(&request.name),
@@ -150,10 +166,53 @@ impl VerterHost {
             &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
         >,
     ) -> Option<TypeInfoSurface> {
+        let surface = self.project_shallow_surface_graph_only(
+            ctx,
+            dispatch,
+            base,
+            path,
+            context,
+            walker_diagnostics,
+        )?;
+
+        // Enrich each member with its leading-JSDoc spans, sliced from the
+        // member's DECLARATION file's cache-owned RAW source
+        // (`IndexedReady.raw_source`). Member/signature spans are SFC-absolute
+        // (the eval source is position-preserving), so the JSDoc anchor offset
+        // and the slice source share the raw-file coordinate system. `build` is
+        // a pure graph projection that holds no source, so this source-touching
+        // step lives at the host layer. An inherited member's JSDoc is read from
+        // its origin (heritage base) file via the member's `declaration_origin`
+        // — see `TypeInfoSurface::with_member_jsdoc_spans`. The carrier-file
+        // raw source is read through the SAME `ctx` the surface was projected
+        // under, so an overlay session reads its overlay raw source.
+        Some(surface.with_member_jsdoc_spans(|canonical| {
+            ctx.ensure_indexed_ready_serve(canonical)
+                .map(|serve| Arc::clone(&serve.indexed.raw_source))
+        }))
+    }
+
+    /// Project `base` to a pure graph-backed one-level surface.
+    ///
+    /// This is the ownership boundary shared by compile-oriented TypeInfo
+    /// projection and component-meta's native visibility projection. It runs
+    /// exactly one path-precise `Shallow` demand and performs no source reads,
+    /// JSDoc hydration, display rendering, or member-body expansion.
+    pub(crate) fn project_shallow_surface_graph_only(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dispatch: &ProjectSemanticDispatch<'_>,
+        base: SemanticNodeId,
+        path: Arc<[PathSegment]>,
+        context: ProjectionReductionContext,
+        walker_diagnostics: Option<
+            &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
+        >,
+    ) -> Option<TypeInfoSurface> {
         debug_assert_eq!(
             context.mode,
             ProjectionMode::Shallow,
-            "project_shallow_surface_from_base synthesises a one-level surface; mode must be Shallow"
+            "project_shallow_surface_graph_only synthesises a one-level surface; mode must be Shallow"
         );
         // Path-precise `Shallow` projection synthesises the one-level surface
         // (call / construct / index signatures + merged members) without
@@ -184,25 +243,9 @@ impl VerterHost {
         };
 
         let graph = ctx.project_type_store().semantic_graph();
-        let surface = match graph.node_data(terminal).as_deref() {
-            Some(SemanticNodeData::Object(view)) => TypeInfoSurface::build(graph, view),
-            _ => return None,
-        };
-
-        // Enrich each member with its leading-JSDoc spans, sliced from the
-        // member's DECLARATION file's cache-owned RAW source
-        // (`IndexedReady.raw_source`). Member/signature spans are SFC-absolute
-        // (the eval source is position-preserving), so the JSDoc anchor offset
-        // and the slice source share the raw-file coordinate system. `build` is
-        // a pure graph projection that holds no source, so this source-touching
-        // step lives at the host layer. An inherited member's JSDoc is read from
-        // its origin (heritage base) file via the member's `declaration_origin`
-        // — see `TypeInfoSurface::with_member_jsdoc_spans`. The carrier-file
-        // raw source is read through the SAME `ctx` the surface was projected
-        // under, so an overlay session reads its overlay raw source.
-        Some(surface.with_member_jsdoc_spans(|canonical| {
-            ctx.ensure_indexed_ready_serve(canonical)
-                .map(|serve| Arc::clone(&serve.indexed.raw_source))
-        }))
+        match graph.node_data(terminal).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(TypeInfoSurface::build(graph, view)),
+            _ => None,
+        }
     }
 }

@@ -185,19 +185,25 @@ pub(super) fn resolve_dynamic_component<'a>(
             if arg_name != "is" {
                 continue;
             }
-            // Found :is="expr" -- resolve the expression
-            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+            // Found `:is` — resolve its bound expression.
+            let resolved_expr = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                // `:is="expr"` — resolve the explicit value expression.
                 let value = &source[vs as usize..ve as usize];
                 let oxc_exp = find_prop_oxc_exp(oxc_el, i);
-                let resolved_expr = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+                resolve_expr(value, vs, oxc_exp, resolver, force_js)
+            } else {
+                // Value-less `:is` — Vue 3.4 same-name shorthand: `:is` == `:is="is"`.
+                // The bound expression is the arg name itself (`is`), resolved as a
+                // bare identifier through the binding resolver ($setup./ $props. / _ctx.).
+                resolve_expr(arg_name, as_, None, resolver, force_js)
+            };
 
-                out.add_vdom_import(VdomHelper::ResolveDynamicComponent);
-                let mut s = String::with_capacity(resolved_expr.len() + 30);
-                s.push_str("_resolveDynamicComponent(");
-                s.push_str(&resolved_expr);
-                s.push(')');
-                return Some((s, i));
-            }
+            out.add_vdom_import(VdomHelper::ResolveDynamicComponent);
+            let mut s = String::with_capacity(resolved_expr.len() + 30);
+            s.push_str("_resolveDynamicComponent(");
+            s.push_str(&resolved_expr);
+            s.push(')');
+            return Some((s, i));
         }
     }
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
-use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticNodeId};
+use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticQueryValue};
 
 use super::empty_signature;
 use super::prepared::PreparedKeyHandle;
@@ -30,7 +30,7 @@ pub(super) struct InflightEntry {
 #[derive(Default)]
 pub(super) struct InflightState {
     /// `None` while building; `Some` after the winner publishes.
-    pub(super) completed: Option<QueryResult<SemanticNodeId>>,
+    pub(super) completed: Option<QueryResult<SemanticQueryValue>>,
     /// Dispatch-fence dep signature the winner's cold build produced
     /// — the `QueryBuildOutput.dep_signature` value. Used by joiners
     /// purely as the transitive-dependency payload they return on

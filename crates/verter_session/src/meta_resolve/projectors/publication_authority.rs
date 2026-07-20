@@ -517,6 +517,7 @@ mod tests {
     fn synthetic_owner() -> DeclIdentity {
         DeclIdentity {
             canonical_id: Arc::from("/Test.vue"),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             decl_name: Arc::from("Test"),
         }

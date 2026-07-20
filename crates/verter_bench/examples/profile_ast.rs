@@ -26,7 +26,9 @@ use std::path::PathBuf;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
-use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{
+    compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput,
+};
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use verter_compiler::parser::Syntax as NewSyntax;
 use verter_compiler::template::oxc::parse_template_expressions;
@@ -121,7 +123,13 @@ fn run_compile(source: &str) {
     let alloc = Allocator::default();
     let options = CodegenOptions::default();
     let verter_options = VerterCompileOptions::default();
-    let result = compile(source, &options, &verter_options, &alloc);
+    let result = compile(
+        source,
+        &options,
+        &verter_options,
+        &VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     std::hint::black_box(result);
 }
 

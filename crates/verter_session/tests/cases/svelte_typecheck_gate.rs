@@ -376,6 +376,7 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
 
     let declaration = host
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("project Svelte declaration carrier")
         .code;
     let generic_canonical = "/GenericProps.svelte";
@@ -397,6 +398,7 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
         .expect("upsert generic-argument Svelte component");
     let generic_declaration = host
         .get_public_api_with_mode(generic_canonical, PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("project generic-argument Svelte declaration carrier")
         .code;
 
@@ -419,6 +421,7 @@ fn public_carrier_resolves_local_props_interface_through_deep_barrels() {
         .expect("upsert JavaScript/JSDoc Svelte component");
     let js_declaration = host
         .get_public_api_with_mode(js_canonical, PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("project JavaScript/JSDoc Svelte declaration carrier")
         .code;
 
@@ -1116,6 +1119,7 @@ let { items, select }: { items: T[]; select: (item: T) => void } = $props();
         .expect("upsert generic Svelte component");
     let declaration = host
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("generic Svelte declaration carrier")
         .code;
     assert!(
@@ -1199,6 +1203,7 @@ void value; void fixed; void row; void onsave;
         .expect("upsert full native Svelte surface");
     let declaration = host
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("native Svelte declaration")
         .code;
     let consumer = r#"import NativeSurface from './NativeSurface.svelte.verter';
@@ -1269,6 +1274,7 @@ export { publicCount };
         .expect("upsert runes state component");
     let declaration = host
         .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
+        .expect("Svelte declaration projection")
         .expect("runes state declaration")
         .code;
 

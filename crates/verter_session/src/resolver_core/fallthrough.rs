@@ -31,6 +31,10 @@ pub struct IntrinsicSurfaceMember {
 
 /// The type slot of an [`IntrinsicSurfaceMember`].
 #[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+// `Resolved` carries the project-resolved semantic source by value; the
+// static-catalog arm is a content-free id by design. Boxing the resolved arm
+// would indirect the common consuming path for a cold-path size win.
+#[allow(clippy::large_enum_variant)]
 pub enum IntrinsicMemberTypeSource {
     /// A generated static-catalog member: the content-free
     /// [`StaticIntrinsicTypeId`]. The type SHAPE stays table-resident and is
@@ -1053,7 +1057,8 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
 
 /// Structural substitution of bare single-segment `TypeOf(ValueRef)`
 /// references with the CONCRETE graph-free projection of the annotation fact
-/// bound to that value name in a standalone evaluation environment.
+/// bound to that value name in the supplied lexical owner partition of a
+/// standalone evaluation environment.
 ///
 /// Used by the node-domain fallthrough value evaluator
 /// (`evaluate_fallthrough_value_node`) to fold imported runtime-value bindings
@@ -1065,28 +1070,28 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
 /// fallthrough recursion as node carriers and are forwarded in node domain.
 pub fn structural_substitute_typeof_refs(
     expr: &TypeExpr,
+    owner: verter_type_expr::TopLevelOwnerId,
     env: &verter_semantic::analysis::type_eval::EvalEnv,
 ) -> TypeExpr {
     match expr {
         TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => env
-            .value_symbols
-            .get(value_ref.path[0].as_str())
+            .value_group_in(owner, value_ref.path[0].as_str())
             .and_then(|group| concrete_annotation_expr(&group.primary().type_annotation))
             .unwrap_or_else(|| expr.clone()),
         TypeExpr::Union(parts) => TypeExpr::union(
             parts
                 .iter()
-                .map(|part| structural_substitute_typeof_refs(part, env))
+                .map(|part| structural_substitute_typeof_refs(part, owner, env))
                 .collect(),
         ),
         TypeExpr::Intersection(parts) => TypeExpr::intersection(
             parts
                 .iter()
-                .map(|part| structural_substitute_typeof_refs(part, env))
+                .map(|part| structural_substitute_typeof_refs(part, owner, env))
                 .collect(),
         ),
         TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(std::sync::Arc::new(
-            structural_substitute_typeof_refs(inner, env),
+            structural_substitute_typeof_refs(inner, owner, env),
         )),
         other => other.clone(),
     }
@@ -2405,6 +2410,7 @@ mod tests {
     fn collect_dynamic_root_candidates_from_type_maps_typeof_imports() {
         let imports = vec![AnalyzedImport {
             source: "./Child.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Child".to_string(),
@@ -2441,6 +2447,7 @@ mod tests {
     fn collect_dynamic_root_candidates_from_type_preserves_default_binding_kind() {
         let imports = vec![AnalyzedImport {
             source: "./Child.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Child".to_string(),
@@ -2485,6 +2492,7 @@ mod tests {
         };
         verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: name.to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
@@ -2493,6 +2501,38 @@ mod tests {
                 annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
                     LeafTypeFact::StringLiteral(literal.to_string()),
                 ))),
+            },
+            signatures: Vec::new(),
+            object_shape: None,
+            enum_members: None,
+            enum_member_names: None,
+        }
+    }
+
+    fn typeof_alias_const(
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        target_owner: verter_type_expr::TopLevelOwnerId,
+        target: &str,
+    ) -> verter_semantic::analysis::type_eval::ValueDeclInfo {
+        use verter_type_expr::facts::{
+            ValueAnnotationClass, ValueDeclIdentityPart, ValueTypeAnnotationFact,
+        };
+
+        verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: name.to_string(),
+            owner,
+            declaration_id: 0,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: ValueTypeAnnotationFact {
+                typeof_alias_target: Some(ValueDeclIdentityPart {
+                    canonical_id: std::sync::Arc::from("/source"),
+                    owner: target_owner,
+                    symbol: std::sync::Arc::from(target),
+                    member_path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
+                }),
+                classification: ValueAnnotationClass::TypeOfAlias,
+                annotation: None,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2512,7 +2552,11 @@ mod tests {
         });
 
         assert_eq!(
-            structural_substitute_typeof_refs(&lowered, &env),
+            structural_substitute_typeof_refs(
+                &lowered,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &env,
+            ),
             TypeExpr::string_literal("input")
         );
     }
@@ -2526,7 +2570,11 @@ mod tests {
         });
 
         assert_eq!(
-            structural_substitute_typeof_refs(&lowered, &env),
+            structural_substitute_typeof_refs(
+                &lowered,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &env,
+            ),
             lowered,
             "bare refs without an env entry must round-trip unchanged"
         );
@@ -2540,11 +2588,13 @@ mod tests {
         let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
         env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: "alias".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 typeof_alias_target: Some(ValueDeclIdentityPart {
                     canonical_id: std::sync::Arc::from("/App.vue"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: std::sync::Arc::from("target"),
                     member_path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
                 }),
@@ -2563,12 +2613,73 @@ mod tests {
         });
 
         assert_eq!(
-            structural_substitute_typeof_refs(&lowered, &env),
+            structural_substitute_typeof_refs(
+                &lowered,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                &env,
+            ),
             TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec!["target".to_string()],
                 type_args: Vec::new(),
             }),
             "a typeof-alias annotation peels one hop to its precomputed target"
+        );
+    }
+
+    #[test]
+    fn structural_substitute_typeof_refs_selects_same_name_in_exact_owner() {
+        let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+        let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        env.add_value(typeof_alias_const(
+            module_owner,
+            "alias",
+            module_owner,
+            "moduleTarget",
+        ));
+        env.add_value(typeof_alias_const(
+            instance_owner,
+            "alias",
+            instance_owner,
+            "instanceTarget",
+        ));
+        let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            path: vec!["alias".to_string()],
+            type_args: Vec::new(),
+        });
+
+        assert_eq!(
+            structural_substitute_typeof_refs(&lowered, module_owner, &env),
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["moduleTarget".to_string()],
+                type_args: Vec::new(),
+            }),
+        );
+        assert_eq!(
+            structural_substitute_typeof_refs(&lowered, instance_owner, &env),
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["instanceTarget".to_string()],
+                type_args: Vec::new(),
+            }),
+        );
+    }
+
+    #[test]
+    fn structural_substitute_typeof_refs_peels_ordinary_file_alias() {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        env.add_value(typeof_alias_const(owner, "alias", owner, "target"));
+        let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            path: vec!["alias".to_string()],
+            type_args: Vec::new(),
+        });
+
+        assert_eq!(
+            structural_substitute_typeof_refs(&lowered, owner, &env),
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["target".to_string()],
+                type_args: Vec::new(),
+            }),
         );
     }
 
@@ -2583,6 +2694,7 @@ mod tests {
         let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
         env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: "routes".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
@@ -2592,6 +2704,7 @@ mod tests {
                     TypeBodySlot {
                         anchor: AuthoredAnchor {
                             canonical_id: std::sync::Arc::from("/routes.ts"),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             symbol: std::sync::Arc::from("routes"),
                             space: LocatorSymbolSpace::Value,
                         },
@@ -2611,7 +2724,11 @@ mod tests {
         });
 
         assert_eq!(
-            structural_substitute_typeof_refs(&lowered, &env),
+            structural_substitute_typeof_refs(
+                &lowered,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &env,
+            ),
             lowered,
             "an authored-locator annotation is not graph-free — the typeof \
              stays unsubstituted and routes through the shared dispatch"
@@ -2636,7 +2753,11 @@ mod tests {
         ]);
 
         assert_eq!(
-            structural_substitute_typeof_refs(&union, &env),
+            structural_substitute_typeof_refs(
+                &union,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &env,
+            ),
             TypeExpr::union(vec![
                 TypeExpr::string_literal("A"),
                 TypeExpr::string_literal("B"),
@@ -2655,7 +2776,11 @@ mod tests {
         });
 
         assert_eq!(
-            structural_substitute_typeof_refs(&lowered, &env),
+            structural_substitute_typeof_refs(
+                &lowered,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                &env,
+            ),
             lowered,
             "multi-segment ValueRefs must not swap for the length-1 override binding",
         );
@@ -2745,6 +2870,7 @@ mod tests {
             SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(""),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("ChildLocal"),
                     space: LocatorSymbolSpace::Type,
                 },
@@ -2797,6 +2923,7 @@ mod tests {
             SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(""),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("ChildLocal"),
                     space: LocatorSymbolSpace::Type,
                 },
@@ -2950,6 +3077,7 @@ mod tests {
         SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from(canonical),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from(symbol),
                 space: LocatorSymbolSpace::Type,
             },
@@ -3394,6 +3522,7 @@ mod tests {
             SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(""),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("ChildLocal"),
                     space: LocatorSymbolSpace::Type,
                 },

@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use super::surface_projector::*;
+use super::component_meta::ResolvedNativeProp;
 use crate::semantic_query::{MemberMergeRole, SemanticNodeId};
 use crate::typeinfo::surface::{CanonicalSpan, SurfaceMemberOrigin, TypeInfoSurfaceMember};
 use verter_span::Span;

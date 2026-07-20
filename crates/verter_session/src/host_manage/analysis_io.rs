@@ -17,10 +17,11 @@ use crate::instant::Instant;
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
+#[cfg(test)]
+use crate::resolver_core::resolve_named_export_from_graph as resolver_resolve_named_export_from_graph;
 use crate::resolver_core::{
     get_export_span_follow_reexports_from_graph as resolver_get_export_span_follow_reexports_from_graph,
     resolve_exports_from_graph_best_effort as resolver_resolve_exports_from_graph_best_effort,
-    resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
 };
 use crate::shared::write_lock;
 use crate::types::*;
@@ -2408,6 +2409,7 @@ impl VerterHost {
         self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind)
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_named_export(
         &self,
         canonical_or_alias: &str,

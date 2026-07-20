@@ -31,11 +31,6 @@ use verter_session::file_artifact_store::InternedSpecifier;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
-}
-
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -69,7 +64,6 @@ fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
         shallow,
         Arc::from(raw),
         Arc::from(raw),
-        empty_external(),
     ))
 }
 
@@ -155,7 +149,7 @@ fn global_archetype_emits_module_augmentation_fact_via_global_tag() {
 fn augmentation_facts_land_in_fact_registry() {
     // R29: the per-augmentation fact ALSO lands in the parse-domain
     // `FileFacts.registry` under
-    // `FactKey::ModuleAugmentation { specifier, augmented_name, space }`.
+    // `FactKey::ModuleAugmentation { specifier, owner, augmented_name, space }`.
     let raw = fixture("module_augmentation_external.ts");
     let indexed = build_indexed_with_source(&raw);
     let emission = emit_parse_facts(&indexed);
@@ -163,6 +157,7 @@ fn augmentation_facts_land_in_fact_registry() {
     for aug in emission.augmentations.iter() {
         let key = FactKey::ModuleAugmentation {
             specifier: InternedSpecifier::from(aug.specifier.as_ref()),
+            owner: aug.owner,
             augmented_name: aug.augmented_name.clone(),
             space: aug.space,
         };

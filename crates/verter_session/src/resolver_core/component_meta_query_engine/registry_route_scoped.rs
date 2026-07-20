@@ -13,6 +13,44 @@ use super::ComponentMetaQueryEngine;
 use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
 impl ComponentMetaQueryEngine<'_> {
+    /// Select the graph-backed registry surface for both initial observation
+    /// and later queue publication. Whole routes compose lone-heritage
+    /// surfaces and otherwise retain the authored carrier. Non-Whole routes
+    /// publish only their exact selected topology and never widen on failure.
+    /// The substituted-whole exemption is an explicit authored-carrier choice.
+    pub(crate) fn registry_surface_source(
+        &mut self,
+        scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+        route: &crate::resolver_core::RouteDemand,
+        member_use_sites: &[(String, verter_type_expr::locators::TypeBodySlot)],
+        authored_fallback: Option<&verter_type_expr::facts::SemanticTypeSource>,
+        substituted_whole: bool,
+    ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+        use verter_type_expr::facts::{ProjectedTypeFact, SemanticTypeSource};
+
+        let whole = matches!(route, crate::resolver_core::RouteDemand::Whole)
+            || matches!(route, crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty());
+        if substituted_whole {
+            return authored_fallback.cloned();
+        }
+        if whole {
+            return self
+                .heritage_merged_surface_fact(scope_canonical_id, scope_owner, symbol_name)
+                .map(|fact| SemanticTypeSource::Projected(ProjectedTypeFact::Surface(fact)))
+                .or_else(|| authored_fallback.cloned());
+        }
+        self.route_scoped_surface_fact(
+            scope_canonical_id,
+            scope_owner,
+            symbol_name,
+            route,
+            member_use_sites,
+        )
+        .map(|fact| SemanticTypeSource::Projected(ProjectedTypeFact::Surface(fact)))
+    }
+
     /// Route-scoped registry publication encoding: the SELECTED one-level
     /// topology of `symbol_name`'s declaration under the accumulated
     /// [`RouteDemand`], as a [`ProjectedSurfaceFact`] the publication site
@@ -38,13 +76,14 @@ impl ComponentMetaQueryEngine<'_> {
     /// through the one dispatch re-derives navigation + substitution) — never
     /// a serialized post-substitution graph node. Declines (`None`) when the
     /// observed surface carries signatures or a selected member's payload
-    /// slot is unrecoverable; the caller falls back to the whole authored
-    /// publication.
+    /// slot is unrecoverable; the caller skips the non-Whole publication and
+    /// never widens it to the authored body.
     ///
     /// [`RouteDemand`]: crate::resolver_core::RouteDemand
     pub(crate) fn route_scoped_surface_fact(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
         route: &crate::resolver_core::RouteDemand,
         member_use_sites: &[(String, verter_type_expr::locators::TypeBodySlot)],
@@ -75,23 +114,27 @@ impl ComponentMetaQueryEngine<'_> {
         };
         // The declaration's resolved root identity + raised body root — the
         // same resolution the heritage encoder performs.
-        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
-        let (own_canonical, own_name) =
-            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                self.ctx,
-                scope_canonical_id,
-                scope_payload_arc.as_deref(),
-                symbol_name,
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
+        let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.ctx,
+            scope_canonical_id,
+            scope_owner,
+            scope_payload_arc.as_deref(),
+            symbol_name,
+        )
+        .unwrap_or_else(|| {
+            let interner = self.ctx.project_type_store().identity_interner();
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+                interner.intern(scope_canonical_id),
+                scope_owner,
+                interner.intern(symbol_name),
             )
-            .map(|root| (root.canonical_id, root.symbol_name))
-            .unwrap_or_else(|| {
-                let interner = self.ctx.project_type_store().identity_interner();
-                (
-                    interner.intern(scope_canonical_id),
-                    interner.intern(symbol_name),
-                )
-            });
-        let body_locator = self.named_decl_body(own_canonical.as_ref(), own_name.as_ref())?;
+        });
+        let body_locator = self.named_decl_body(
+            own_root.canonical_id.as_ref(),
+            own_root.owner,
+            own_root.symbol_name.as_ref(),
+        )?;
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
@@ -125,8 +168,9 @@ impl ComponentMetaQueryEngine<'_> {
                 continue;
             }
             let (fact, crossed_substitution) = self.route_scoped_member_fact(
-                own_canonical.as_ref(),
-                own_name.as_ref(),
+                own_root.canonical_id.as_ref(),
+                own_root.owner,
+                own_root.symbol_name.as_ref(),
                 member.name.as_ref(),
             )?;
             // A member reached through a generic SUBSTITUTION retains the
@@ -174,6 +218,7 @@ impl ComponentMetaQueryEngine<'_> {
     fn route_scoped_member_fact(
         &mut self,
         canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
         member_name: &str,
     ) -> Option<(verter_type_expr::facts::PreparedMemberFact, bool)> {
@@ -188,14 +233,17 @@ impl ComponentMetaQueryEngine<'_> {
             }
             node
         };
-        let mut current: Vec<(String, String, bool)> =
-            vec![(canonical.to_string(), symbol.to_string(), false)];
+        let mut current: Vec<(String, verter_type_expr::TopLevelOwnerId, String, bool)> =
+            vec![(canonical.to_string(), owner, symbol.to_string(), false)];
         for _ in 0..8 {
-            let mut next: Vec<(String, String, bool)> = Vec::new();
-            for (decl_canonical, decl_name, crossed) in current.drain(..) {
-                let Some(prepared) =
-                    self.prepared_type_decl(decl_canonical.as_str(), decl_name.as_str())
-                else {
+            let mut next: Vec<(String, verter_type_expr::TopLevelOwnerId, String, bool)> =
+                Vec::new();
+            for (decl_canonical, decl_owner, decl_name, crossed) in current.drain(..) {
+                let Some(prepared) = self.prepared_type_decl(
+                    decl_canonical.as_str(),
+                    decl_owner,
+                    decl_name.as_str(),
+                ) else {
                     continue;
                 };
                 if let Some(fact) = prepared.member_index.get(member_name) {
@@ -213,6 +261,7 @@ impl ComponentMetaQueryEngine<'_> {
                     Some(SemanticNodeData::DeclRef { identity }) => {
                         next.push((
                             identity.canonical_id.as_ref().to_string(),
+                            identity.owner,
                             identity.decl_name.as_ref().to_string(),
                             crossed,
                         ));
@@ -231,6 +280,7 @@ impl ComponentMetaQueryEngine<'_> {
                             {
                                 next.push((
                                     identity.canonical_id.as_ref().to_string(),
+                                    identity.owner,
                                     identity.decl_name.as_ref().to_string(),
                                     crossed,
                                 ));
@@ -238,6 +288,7 @@ impl ComponentMetaQueryEngine<'_> {
                         } else if base.canonical_id.as_ref() != "__builtin__" {
                             next.push((
                                 base.canonical_id.as_ref().to_string(),
+                                base.owner,
                                 base.decl_name.as_ref().to_string(),
                                 crossed || !args.is_empty(),
                             ));
@@ -250,6 +301,7 @@ impl ComponentMetaQueryEngine<'_> {
                             {
                                 next.push((
                                     identity.canonical_id.as_ref().to_string(),
+                                    identity.owner,
                                     identity.decl_name.as_ref().to_string(),
                                     crossed,
                                 ));

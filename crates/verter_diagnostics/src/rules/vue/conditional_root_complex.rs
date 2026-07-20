@@ -205,6 +205,7 @@ mod tests {
         ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: Vec::new(),
                 binding_name: None,

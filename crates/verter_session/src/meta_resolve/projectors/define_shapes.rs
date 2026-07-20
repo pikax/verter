@@ -463,6 +463,7 @@ pub(crate) fn slot_field_function_source(
         // The return position has no addressable authored slot on a
         // payload-less slot — the typed miss, recovered on demand.
         return_ty: None,
+        return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }))

@@ -7,6 +7,26 @@ Core Rust library crate that compiles Vue Single File Component (SFC) templates 
 
 `verter_compiler` is a **pure Rust library** with no FFI dependencies. It is consumed by [`verter_napi`](../verter_napi/) (Node.js native bindings) and [`verter_wasm`](../verter_wasm/) (browser WASM bindings).
 
+## Vue typed-macro contract
+
+The compiler owns macro syntax and emission; TypeInfo owns typed
+`defineProps`, `defineEmits`, and `defineModel` resolution. Callers provide the
+requested runtime/TSC bundle through `VueMacroSemanticInput`. Missing,
+incomplete, role-mismatched, or structurally invalid bundles fail closed at the
+authored macro anchor. Only a structurally valid runtime bundle reaches script
+codegen; degraded members retain their typed diagnostic and emit Vue's
+`type: null` fallback.
+
+Parser-owned model names are OXC-decoded semantic values; their authored spans
+remain the source-map/diagnostic anchors. All typed emit and model public names
+are serialized through the canonical JavaScript string escaper.
+
+`CodegenOptions.is_production` and `CodegenOptions.custom_element` select Vue's
+runtime-prop rendering profile. `custom_element` is a script policy and is
+independent of `custom_elements`, which configures template tag recognition.
+Static eligible `withDefaults` objects are embedded per prop; dynamic/spread or
+unsupported objects use one `_mergeDefaults` fallback.
+
 ## Architecture
 
 ### Compilation Pipeline

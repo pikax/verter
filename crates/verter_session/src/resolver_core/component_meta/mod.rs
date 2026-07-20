@@ -7,26 +7,38 @@ use verter_semantic::analysis::types::{
 };
 
 use crate::resolver_core::{
-    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedMacroElements,
-    ResolvedNativeProp, ResolvedTypeDeclaration,
+    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedTypeDeclaration,
 };
 
 mod cold_resolver;
 mod direct_macro;
+mod native_props;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod native_props_rehome_contract_tests;
+
+pub(crate) use native_props::named_native_props_outcome;
+pub use native_props::{NativePropProjectionCache, ResolvedNativeProp, ResolvedNativePropsOutcome};
+
 pub use cold_resolver::resolve_component_meta_parts;
 pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
 
-/// Collect the set of binding names exposed by macros (e.g., `defineExpose` fields).
-/// Used as a filter for which `env.value_symbols` entries to expand as bindings
-/// during `expand_macro_types`.
-pub fn collect_requested_binding_names(macros: &[AnalyzedMacro]) -> FxHashSet<String> {
+/// Collect owner-qualified lexical demands for bindings exposed by macros.
+/// The owner is the `defineExpose` use scope; admission resolves it to the
+/// exact visible declaration owner before expansion.
+pub fn collect_requested_binding_demands(
+    macros: &[AnalyzedMacro],
+) -> BTreeSet<verter_type_expr::DeclBindingKey> {
     macros
         .iter()
-        .flat_map(|mac| mac.expose_fields.iter().map(|field| field.name.clone()))
+        .flat_map(|mac| {
+            mac.expose_fields
+                .iter()
+                .map(|field| verter_type_expr::DeclBindingKey::new(mac.owner, field.name.as_str()))
+        })
         .collect()
 }
 
@@ -76,13 +88,11 @@ pub struct ResolvedMacroMeta {
 }
 
 /// The combined imported-macro resolution: declaration identity plus the
-/// [`ResolvedMacroElements`] payload (the legacy elements DTO AND the
-/// keep-all `native_props` rows, both projected from the same dispatch
-/// surface resolution).
+/// component-meta-owned native visibility rows.
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedMacroSurface {
     pub declaration: ResolvedTypeDeclaration,
-    pub resolution: ResolvedMacroElements,
+    pub native_props: Vec<ResolvedNativeProp>,
 }
 
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
@@ -134,15 +144,18 @@ pub enum ComponentMetaResolutionPurpose {
 /// props/emits/slots/exposed from the SOLE typeinfo macro-surface authority
 /// (`vue_macro_dtos`, reached through the resolver-context seam).
 ///
-/// `resolved_macros` is consulted ONLY for gating + provenance: an entry
-/// contributes iff its macro index survives the `raw_macro_surface_is_authoritative`
-/// filter (an object-literal-only `defineExpose` with fields stays
-/// authoritative and is excluded; every other macro kind passes). The field DATA comes from `vue_macro_dtos`,
-/// keyed on `(owner, macro_index, kind)` — the same key the materialiser's
-/// `synthesize_*_from_known_surface` path already uses. Because `vue_macro_dtos`
-/// returns ONE bundle per macro index, admitted indices are DEDUPLICATED here:
-/// multiple `ResolvedMacroMeta` entries per index (imported + owner-local) are
-/// gating/provenance facts, not distinct field authorities.
+/// The snapshot macro inventory is the sole index/order/cardinality authority.
+/// An object-literal-only `defineExpose` with fields stays analyzer-owned and is
+/// excluded by `raw_macro_surface_is_authoritative`; every other snapshot macro
+/// contributes exactly one input in source order. Field DATA comes from
+/// `vue_macro_dtos`, keyed on `(owner, macro_index, kind)` — the same key the
+/// materialiser's `synthesize_*_from_known_surface` path already uses.
+///
+/// `ResolvedMacroMeta` is intentionally absent from this API. Those rows carry
+/// optional declaration identity/JSDoc enrichment for registry publication;
+/// exact lexical ownership can legitimately produce no row for a module-script
+/// declaration consumed by a setup-script macro. Optional metadata must never
+/// gate the normalized DTO field authority.
 ///
 /// Host state is reached through `&dyn ResolverContext` (the resolver-tier
 /// seal): `vue_macro_dtos_with_ctx(ctx, …)` resolves the macro surface through
@@ -158,28 +171,17 @@ pub(crate) fn component_meta_resolved_macros(
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
-    resolved_macros: &[ResolvedMacroMeta],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
-    let mut seen_indices = FxHashSet::default();
     let mut inputs = Vec::new();
-    for resolved in resolved_macros {
-        let admitted = snapshot_macros
-            .get(resolved.macro_index)
-            .is_none_or(|mac| !raw_macro_surface_is_authoritative(mac));
-        if !admitted {
+    for (macro_index, mac) in snapshot_macros.iter().enumerate() {
+        if raw_macro_surface_is_authoritative(mac) {
             continue;
         }
-        if !seen_indices.insert(resolved.macro_index) {
-            continue;
-        }
-        let Some(mac) = snapshot_macros.get(resolved.macro_index) else {
-            continue;
-        };
         let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
             ctx,
             &crate::typeinfo::types::VueMacroSurfaceRequest {
                 owner_canonical: std::sync::Arc::from(owner_canonical),
-                macro_index: resolved.macro_index,
+                macro_index,
                 macro_kind: mac.kind,
                 root_identity: ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
@@ -196,7 +198,7 @@ pub(crate) fn component_meta_resolved_macros(
         // contribute metadata only).
         inputs.push(
             verter_semantic::analysis::component_meta::ResolvedMacroInput {
-                macro_index: resolved.macro_index,
+                macro_index,
                 props: dtos
                     .prop_fields()
                     .iter()
@@ -256,12 +258,13 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     fn resolve_type_declaration(
         &self,
         dep_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> ResolvedTypeDeclaration
     where
         Self: Sized,
     {
-        resolve_type_declaration(self, dep_canonical, requested_name)
+        resolve_type_declaration(self, dep_canonical, owner, requested_name)
     }
 
     fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport];
@@ -310,8 +313,8 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
             .is_empty()
     }
 
-    /// Whether the owner-local root `root_name` projects to a NON-EMPTY
-    /// prepared macro surface for `macro_kind`.
+    /// Whether the owner-local root `(owner, root_name)` projects to a
+    /// NON-EMPTY prepared macro surface for `macro_kind`.
     ///
     /// This is the authority gate for the cold resolver's owner-local arm: it
     /// pushes an authoritative [`ResolvedMacroMeta`] entry for the root iff
@@ -323,25 +326,23 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
     fn owner_local_macro_root_has_surface(
         &self,
         _owner_canonical: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
         _root_name: &str,
         _macro_kind: AnalyzedMacroKind,
     ) -> bool {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_macro_elements(
+    fn resolve_native_props(
         &self,
         owner_canonical: &str,
         import_source: &str,
         exported_name: &str,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<ResolvedMacroElements>;
+        cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>>;
 
-    #[allow(clippy::too_many_arguments)]
     fn resolve_imported_macro_surface(
         &self,
         owner_canonical: &str,
@@ -349,27 +350,29 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         exported_name: &str,
         tracked_deps: &mut BTreeSet<String>,
         resolution_deps: &mut BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
+        cache: &mut NativePropProjectionCache,
     ) -> Option<ResolvedImportedMacroSurface>
     where
         Self: Sized,
     {
         let dep_canonical =
             self.resolve_type_dependency_canonical(owner_canonical, import_source)?;
-        let declaration = self.resolve_type_declaration(dep_canonical.as_str(), exported_name);
-        let resolution = self.resolve_macro_elements(
+        let declaration = self.resolve_type_declaration(
+            dep_canonical.as_str(),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            exported_name,
+        );
+        let native_props = self.resolve_native_props(
             owner_canonical,
             import_source,
             exported_name,
             tracked_deps,
             resolution_deps,
             cache,
-            visiting,
         )?;
         Some(ResolvedImportedMacroSurface {
             declaration,
-            resolution,
+            native_props,
         })
     }
 
@@ -379,8 +382,6 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         span: verter_span::Span,
         expanded: bool,
         tracked_deps: &mut BTreeSet<String>,
-        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
-        visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedJsdocBlock>;
 
     /// Whether `canonical_id` is package-backed per the workspace's
@@ -426,6 +427,7 @@ fn skip_macro_declaration_metadata_for_purpose(purpose: ComponentMetaResolutionP
 
 fn placeholder_type_declaration(
     requested_name: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
 ) -> ResolvedTypeDeclaration {
     ResolvedTypeDeclaration {
@@ -433,6 +435,7 @@ fn placeholder_type_declaration(
         declaration_id: None,
         resolved_name: resolved_name.to_string(),
         canonical_source: String::new(),
+        owner,
         span: verter_span::Span::default(),
         kind: crate::resolver_core::ResolvedDeclarationKind::Unknown,
         text: None,

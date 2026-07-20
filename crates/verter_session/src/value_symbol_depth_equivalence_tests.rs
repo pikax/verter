@@ -181,7 +181,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
 
         // Graph-native per-symbol reader on the same defining file.
         let graph = host
-            .dependency_value_symbol_graph_native("/dep.ts", name)
+            .dependency_value_symbol_graph_native_for_test("/dep.ts", name)
             .unwrap_or_else(|| panic!("graph-native reader must know `{name}` in /dep.ts"));
 
         assert_eq!(graph.name, oracle.name, "name must match for `{name}`");
@@ -215,7 +215,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     // single-body enum with members and no annotation; `single` is a
     // single-signature function with no object_shape.
     let cfg = host
-        .dependency_value_symbol_graph_native("/dep.ts", "cfg")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "cfg")
         .expect("cfg present");
     assert_eq!(
         cfg.kind,
@@ -237,7 +237,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
 
     let color = host
-        .dependency_value_symbol_graph_native("/dep.ts", "Color")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "Color")
         .expect("Color present");
     assert_eq!(
         color.kind,
@@ -259,7 +259,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
 
     let single = host
-        .dependency_value_symbol_graph_native("/dep.ts", "single")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "single")
         .expect("single present");
     assert_eq!(
         single.kind,
@@ -282,7 +282,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     // Miss case: a non-existent name resolves to `None` on the graph-native
     // reader (the negative).
     assert!(
-        host.dependency_value_symbol_graph_native("/dep.ts", "doesNotExist")
+        host.dependency_value_symbol_graph_native_for_test("/dep.ts", "doesNotExist")
             .is_none(),
         "a non-existent value name must resolve to None on the graph-native reader"
     );
@@ -312,14 +312,21 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
             });
 
         assert_eq!(
-            (oracle_pair.canonical_id.as_str(), oracle_pair.name.as_str()),
-            (graph_pair.canonical_id.as_str(), graph_pair.name.as_str()),
+            &oracle_pair, &graph_pair,
             "C2 cross-file value terminal divergence for `{exported_name}`: \
              oracle={oracle_pair:?} graph_native={graph_pair:?}"
         );
         assert_eq!(
-            (oracle_pair.canonical_id.as_str(), oracle_pair.name.as_str()),
-            ("/dep.ts", source_name),
+            (
+                oracle_pair.canonical_id.as_str(),
+                oracle_pair.owner,
+                oracle_pair.name.as_str()
+            ),
+            (
+                "/dep.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                source_name
+            ),
             "the RENAMED barrel re-export `{exported_name}` must peel to the FINAL defining \
              (/dep.ts, {source_name}) SOURCE pair, not the intermediate barrel binding; \
              got {oracle_pair:?}"
@@ -333,15 +340,14 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         let peeled_canonical = oracle_pair.canonical_id.as_str();
         let peeled_name = oracle_pair.name.as_str();
         let routed_graph = host
-            .dependency_value_symbol_graph_native(peeled_canonical, peeled_name)
+            .dependency_value_symbol_graph_native_for_test(peeled_canonical, peeled_name)
             .unwrap_or_else(|| {
                 panic!("graph-native body reader must know the peeled ({peeled_canonical}, {peeled_name})")
             });
         let routed_oracle = host
             .base_eval_env_arc(peeled_canonical)
             .expect("peeled defining-file env builds")
-            .value_symbols
-            .get(peeled_name)
+            .value_group_in(oracle_pair.owner, peeled_name)
             .map(|g| g.primary().clone())
             .unwrap_or_else(|| {
                 panic!("oracle must know the peeled ({peeled_canonical}, {peeled_name})")
@@ -393,8 +399,9 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     // (i) The direct `typeof`-alias peeler on the source value. This is the
     // API that genuinely exercises the `typeof`-peel branch — it walks the
     // single-segment `typeof base` chain `aliased` → `base`.
-    let oracle_peel = host.peel_value_decl_alias_for_test("/dep.ts", "aliased");
-    let graph_peel = host.peel_value_decl_alias_graph_native_for_test("/dep.ts", "aliased");
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let oracle_peel = host.peel_value_decl_alias_for_test("/dep.ts", owner, "aliased");
+    let graph_peel = host.peel_value_decl_alias_graph_native_for_test("/dep.ts", owner, "aliased");
     assert_eq!(
         oracle_peel, graph_peel,
         "the direct `typeof`-alias peeler must AGREE across rails for `(/dep.ts, aliased)`: \
@@ -402,7 +409,11 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
     assert_eq!(
         oracle_peel,
-        ("/dep.ts".to_string(), "base".to_string()),
+        crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/dep.ts".to_string(),
+            owner,
+            name: "base".to_string(),
+        },
         "the direct `typeof`-alias peeler must HOP through `typeof base` and land on the FINAL \
          underlying `(/dep.ts, base)`, NOT the intermediate `aliased`; got {oracle_peel:?}"
     );
@@ -418,20 +429,17 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         .resolve_value_export_target_graph_native("/barrel.ts", "aliasedExport")
         .expect("graph-native peeler must resolve the renamed `aliasedExport`");
     assert_eq!(
-        (
-            oracle_route.canonical_id.as_str(),
-            oracle_route.name.as_str()
-        ),
-        (graph_route.canonical_id.as_str(), graph_route.name.as_str()),
+        oracle_route, graph_route,
         "the renamed-barrel `typeof`-aliased export must AGREE across rails: \
          oracle={oracle_route:?} graph_native={graph_route:?}"
     );
     assert_eq!(
         (
             oracle_route.canonical_id.as_str(),
+            oracle_route.owner,
             oracle_route.name.as_str()
         ),
-        ("/dep.ts", "base"),
+        ("/dep.ts", owner, "base"),
         "the renamed re-export `aliasedExport` must resolve to the source `aliased` AND THEN peel \
          the `typeof base` chain to the FINAL underlying `(/dep.ts, base)`, NOT the intermediate \
          `aliased` and NOT the barrel binding; got {oracle_route:?}"
@@ -477,7 +485,7 @@ fn cross_file_value_symbol_depth_pins_multi_contributor_divergence() {
 
     // --- Multi-overload `signatures` divergence ---
     let graph_over = host
-        .dependency_value_symbol_graph_native("/dep.ts", "over")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "over")
         .expect("graph-native reader must know `over`");
     let oracle_over = oracle_env
         .value_symbols
@@ -519,7 +527,7 @@ fn cross_file_value_symbol_depth_pins_multi_contributor_divergence() {
 
     // --- Declaration-merged-enum `enum_members` divergence ---
     let graph_merged = host
-        .dependency_value_symbol_graph_native("/dep.ts", "Merged")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "Merged")
         .expect("graph-native reader must know `Merged`");
     let oracle_merged = oracle_env
         .value_symbols

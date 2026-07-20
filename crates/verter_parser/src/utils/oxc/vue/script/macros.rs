@@ -8,7 +8,22 @@
 use oxc_ast::ast::{Argument, Expression, Program, Statement, TSType};
 
 use crate::common::Span;
-use crate::utils::oxc::script::type_surface::{ResolvedElements, RuntimeType};
+use verter_type_expr::facts::TypeDependencyPathFact;
+
+/// Runtime constructors authored in object-form macro syntax.
+///
+/// This is syntax inventory, not semantic type inference. Typed macro
+/// semantics are owned by TypeInfo and cross the compiler boundary as DTOs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeConstructorSyntax {
+    String,
+    Number,
+    Boolean,
+    Object,
+    Array,
+    Function,
+    Symbol,
+}
 
 /// Type parameters info: defineProps<Props>() or defineEmits<{ (e: 'change'): void }>()
 #[derive(Debug)]
@@ -19,13 +34,57 @@ pub struct MacroTypeParams {
     pub type_span: Span,
     /// Span of the `>` token
     pub gt_span: Span,
-    /// Resolved type information from the type parameter (for type literals)
-    pub resolved: ResolvedElements,
-    /// Inferred runtime types for the root type parameter (for simple types like `string`)
-    pub runtime_types: Vec<RuntimeType>,
-    /// Whether the type parameter was a type reference (e.g., `Props` in `defineProps<Props>()`)
-    /// that could not be resolved. Used to emit "Unresolvable type reference" diagnostics.
-    pub unresolved_type_ref: bool,
+    /// Authored property anchors from the first type argument, in the exact
+    /// order used by `AnalyzedMacro::prop_fields`.
+    pub prop_members: Vec<MacroTypePropMember>,
+    /// Authored event anchors from the first type argument, in the exact order
+    /// used by `AnalyzedMacro::emit_fields`.
+    pub emit_member_spans: Vec<Span>,
+    /// Parser-owned dependency paths from the authored first type argument.
+    pub type_dependency_paths: Vec<TypeDependencyPathFact>,
+}
+
+/// Parser-owned geometry for one supported property signature in a macro's
+/// first type argument.
+#[derive(Debug)]
+pub struct MacroTypePropMember {
+    pub name: String,
+    pub key_span: Span,
+    pub type_span: Option<Span>,
+    pub optional: bool,
+}
+
+/// Closed syntax-only eligibility for statically emitting an object macro
+/// argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MacroObjectStaticEligibility {
+    /// Every property has an exact compile-time public name and no spread is
+    /// present.
+    Eligible,
+    /// At least one spread is present; every non-spread key is representable.
+    ContainsSpread,
+    /// At least one property key is not representable as an exact public
+    /// name; no spread is present.
+    ContainsUnsupportedKey,
+    /// Both unsupported property keys and spreads are present.
+    ContainsSpreadAndUnsupportedKey,
+}
+
+impl MacroObjectStaticEligibility {
+    #[must_use]
+    pub const fn from_shape(has_spread: bool, has_unsupported_key: bool) -> Self {
+        match (has_spread, has_unsupported_key) {
+            (false, false) => Self::Eligible,
+            (true, false) => Self::ContainsSpread,
+            (false, true) => Self::ContainsUnsupportedKey,
+            (true, true) => Self::ContainsSpreadAndUnsupportedKey,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_eligible(self) -> bool {
+        matches!(self, Self::Eligible)
+    }
 }
 
 /// Object argument info: defineProps({ foo: String })
@@ -33,7 +92,7 @@ pub struct MacroTypeParams {
 pub struct MacroObjectArg<'a> {
     /// Span of the entire object `{ ... }`
     pub span: Span,
-    /// Property spans (name spans only)
+    /// Supported properties with exact name, value, and full-property spans.
     pub properties: Vec<MacroProperty<'a>>,
     /// Whether the object contains ANY spread (`...expr`, identifier or
     /// not). A withDefaults defaults object with a spread is not
@@ -41,6 +100,10 @@ pub struct MacroObjectArg<'a> {
     /// `_mergeDefaults` at runtime (official plugin-vue shape), which
     /// preserves the user's key precedence via JS spread evaluation.
     pub has_spread: bool,
+    /// Closed parser-owned verdict for static defaults emission. This is
+    /// derived solely from object-property syntax; consumers never rescan
+    /// source text or infer semantic key values.
+    pub static_eligibility: MacroObjectStaticEligibility,
 }
 
 /// A property in a macro object argument.
@@ -53,6 +116,9 @@ pub struct MacroProperty<'a> {
     pub name: &'a str,
     /// Span of the property name
     pub name_span: Span,
+    /// Span of the complete authored `ObjectProperty`, including a computed
+    /// key, method modifiers/prefix, value, and method body.
+    pub property_span: Span,
     /// Span of the value (Some for { foo: String }, None for shorthand)
     pub value_span: Option<Span>,
     /// Whether this property uses method shorthand (e.g., `foo() { ... }`)
@@ -64,16 +130,18 @@ pub struct MacroProperty<'a> {
     /// Extracted from the OXC AST (not string parsing).
     pub has_default: bool,
     /// Runtime constructor types extracted from the AST.
-    /// - `title: String` → `[RuntimeType::String]`
-    /// - `value: [String, Number]` → `[RuntimeType::String, RuntimeType::Number]`
-    /// - `{ type: Number }` → `[RuntimeType::Number]`
-    /// - `{ type: [String, Number] }` → `[RuntimeType::String, RuntimeType::Number]`
-    pub runtime_types: Vec<RuntimeType>,
+    /// - `title: String` → `[RuntimeConstructorSyntax::String]`
+    /// - `value: [String, Number]` → two constructor entries
+    /// - `{ type: Number }` → `[RuntimeConstructorSyntax::Number]`
+    pub runtime_types: Vec<RuntimeConstructorSyntax>,
     /// Span of the TypeScript type annotation from `as PropType<T>`, if present.
     /// Points to `T` inside `PropType<T>`.
     /// - `Array as PropType<string[]>` → span of `string[]`
     /// - `{ type: Object as PropType<{name: string}> }` → span of `{name: string}`
     pub prop_type_annotation: Option<Span>,
+    /// Parser-owned type dependencies in this property's authored value
+    /// syntax (PropType arguments and callable annotations).
+    pub type_dependency_paths: Vec<TypeDependencyPathFact>,
 }
 
 /// One element of a macro array argument (`defineProps(['foo', 'bar'])`).
@@ -165,7 +233,9 @@ pub enum ScriptMacro<'a> {
         span: Span,
         declarator: Option<MacroDeclarator<'a>>,
         type_params: Option<MacroTypeParams>,
-        /// First string arg if present (model name)
+        /// OXC-decoded first string argument, if present.
+        name: Option<&'a str>,
+        /// Exact authored string-literal span, including quotes and escapes.
         name_span: Option<Span>,
         /// Second object arg if present (options)
         options_span: Option<Span>,

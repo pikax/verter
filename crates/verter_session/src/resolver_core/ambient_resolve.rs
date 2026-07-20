@@ -44,7 +44,11 @@ pub(crate) fn resolve_ambient_global(
     // that the previous `&VerterHost` callsite consulted.
     let hit = ctx.lookup_ambient_symbol(consumer_project_stable_key, symbol)?;
     ctx.record_ambient_dependency(consumer_canonical, hit.virtual_id.as_ref());
-    Some(ResolvedRootIdentity::new(hit.virtual_id.as_ref(), symbol))
+    Some(ResolvedRootIdentity::new_in_owner(
+        hit.virtual_id.as_ref(),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        symbol,
+    ))
 }
 
 #[cfg(test)]

@@ -356,7 +356,10 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     let typeof_key = SemanticQueryKey::TypeOf {
         value_root: ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: ScopeId::file(Arc::from("/post-trip-typeof.ts")),
+                scope: ScopeId::file(
+                    Arc::from("/post-trip-typeof.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
                 name: Arc::from("sample"),
             },
             0,
@@ -1478,6 +1481,7 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
     // walk dispatches the nested `Instantiate`.
     let partial_builtin = crate::semantic_query::DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: crate::semantic_query::HashValue::default(),
         decl_name: Arc::from("Partial"),
     };
@@ -1598,7 +1602,11 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
         .expect("upsert lower_chain.ts");
 
     let dispatch = host.semantic_dispatch();
-    let deep_slot = dispatch.type_slot_for(Arc::from("/w/lower_chain.ts"), Arc::from("Deep"));
+    let deep_slot = dispatch.type_slot_for(
+        Arc::from("/w/lower_chain.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Deep"),
+    );
     let resolve_env = dispatch.resolve_env_hash_for("/w/lower_chain.ts");
     let instantiate_key =
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
@@ -1682,6 +1690,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
         let arg = intern_single_member_object(&host, member);
         let partial_builtin = crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: Arc::from("Partial"),
         };

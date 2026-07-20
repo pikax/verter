@@ -92,9 +92,13 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
         ShallowDiagnostic::UnresolvedSurfaceArm {
             name,
             owner_canonical,
+            owner,
         } => ExpansionDiagnostic {
             reason: ExpansionStopReason::UnresolvedReference,
-            context: format!("unresolved-surface-arm::{}::{}", owner_canonical, name),
+            context: format!(
+                "unresolved-surface-arm::{}::{:?}::{}",
+                owner_canonical, owner, name
+            ),
             property_name: Some(name.to_string()),
         },
     }
@@ -247,6 +251,7 @@ mod tests {
         let diag = ShallowDiagnostic::UnresolvedSurfaceArm {
             name: std::sync::Arc::from("NotFoundHeritage"),
             owner_canonical: std::sync::Arc::from("/src/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         };
         let proj = shallow_to_expansion(&diag);
         assert_eq!(proj.reason, ExpansionStopReason::UnresolvedReference);

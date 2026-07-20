@@ -130,6 +130,13 @@ pub trait RequestContextLike: Send + Sync + 'static {
         false
     }
 
+    /// Per-request cancellation token. Session-owned contexts return one
+    /// stable token for their entire lifetime; lightweight adapters may return
+    /// `None` to represent an uncancellable owner.
+    fn cancellation_token(&self) -> Option<crate::cancellation::CancellationToken> {
+        None
+    }
+
     /// Called at the scheduler-dedup join point: this request is a
     /// joiner joining an already-admitted group whose winner is
     /// identified by `winner_request_id` (zero if the winner has no

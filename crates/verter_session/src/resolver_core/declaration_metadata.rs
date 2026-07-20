@@ -4,6 +4,7 @@ use verter_semantic::analysis::type_eval::DeclarationId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedExportTarget {
     pub source_canonical_id: Option<String>,
+    pub source_owner: verter_type_expr::TopLevelOwnerId,
     pub source_name: String,
 }
 
@@ -11,6 +12,7 @@ pub trait DeclarationMetadataResolver {
     fn resolve_export_target(
         &self,
         dep_canonical: &str,
+        dep_owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> Option<ResolvedExportTarget>;
 
@@ -23,6 +25,7 @@ pub trait DeclarationMetadataResolver {
     fn type_declaration_id(
         &self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
     ) -> Option<DeclarationId>;
 
@@ -35,30 +38,34 @@ pub trait DeclarationMetadataResolver {
     fn resolve_direct_type_reexport_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
-    ) -> Option<(String, String)> {
+    ) -> Option<ResolvedExportTarget> {
         None
     }
 
     fn resolve_local_import_symbol_target(
         &self,
         _dep_canonical: &str,
+        _dep_owner: verter_type_expr::TopLevelOwnerId,
         _resolved_name: &str,
-    ) -> Option<(String, String)> {
+    ) -> Option<ResolvedExportTarget> {
         None
     }
 
     fn resolve_local_export_symbol_target(
         &self,
         _canonical_source: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
         _exported_name: &str,
-    ) -> Option<String> {
+    ) -> Option<(verter_type_expr::TopLevelOwnerId, String)> {
         None
     }
 
     fn resolve_local_type_symbol_metadata(
         &self,
         _canonical_source: &str,
+        _owner: verter_type_expr::TopLevelOwnerId,
         _resolved_name: &str,
     ) -> Option<ResolvedLocalTypeSymbolMetadata> {
         None
@@ -85,6 +92,7 @@ pub struct ResolvedTypeDeclaration {
     pub declaration_id: Option<DeclarationId>,
     pub resolved_name: String,
     pub canonical_source: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub span: verter_span::Span,
     pub kind: ResolvedDeclarationKind,
     pub text: Option<String>,
@@ -93,11 +101,12 @@ pub struct ResolvedTypeDeclaration {
 fn resolve_local_symbol_details<R: DeclarationMetadataResolver>(
     resolver: &R,
     canonical_source: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
     fallback_span: verter_span::Span,
 ) -> (ResolvedDeclarationKind, verter_span::Span, Option<String>) {
     if let Some(symbol) =
-        resolver.resolve_local_type_symbol_metadata(canonical_source, resolved_name)
+        resolver.resolve_local_type_symbol_metadata(canonical_source, owner, resolved_name)
     {
         return (symbol.kind, symbol.span, None);
     }
@@ -108,40 +117,71 @@ fn resolve_local_symbol_details<R: DeclarationMetadataResolver>(
 pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     resolver: &R,
     dep_canonical: &str,
+    dep_owner: verter_type_expr::TopLevelOwnerId,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let (canonical_source, resolved_name) =
-        if let Some(export) = resolver.resolve_export_target(dep_canonical, requested_name) {
-            (
-                export
-                    .source_canonical_id
-                    .unwrap_or_else(|| dep_canonical.to_string()),
-                export.source_name,
-            )
-        } else if let Some((followed_canonical, followed_name)) =
-            resolver.resolve_direct_type_reexport_target(dep_canonical, requested_name)
-        {
-            (followed_canonical, followed_name)
-        } else if let Some((followed_canonical, followed_name)) =
-            resolver.resolve_local_import_symbol_target(dep_canonical, requested_name)
-        {
-            (followed_canonical, followed_name)
-        } else {
-            follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
-                .unwrap_or_else(|| (dep_canonical.to_string(), requested_name.to_string()))
-        };
+    let (canonical_source, owner, resolved_name) = if let Some(export) =
+        resolver.resolve_export_target(dep_canonical, dep_owner, requested_name)
+    {
+        (
+            export
+                .source_canonical_id
+                .unwrap_or_else(|| dep_canonical.to_string()),
+            export.source_owner,
+            export.source_name,
+        )
+    } else if let Some(target) =
+        resolver.resolve_direct_type_reexport_target(dep_canonical, dep_owner, requested_name)
+    {
+        (
+            target
+                .source_canonical_id
+                .unwrap_or_else(|| dep_canonical.to_string()),
+            target.source_owner,
+            target.source_name,
+        )
+    } else if let Some(target) =
+        resolver.resolve_local_import_symbol_target(dep_canonical, dep_owner, requested_name)
+    {
+        (
+            target
+                .source_canonical_id
+                .unwrap_or_else(|| dep_canonical.to_string()),
+            target.source_owner,
+            target.source_name,
+        )
+    } else {
+        follow_direct_type_reexport_chain(resolver, dep_canonical, dep_owner, requested_name)
+            .unwrap_or_else(|| {
+                (
+                    dep_canonical.to_string(),
+                    dep_owner,
+                    requested_name.to_string(),
+                )
+            })
+    };
 
-    if canonical_source == dep_canonical {
-        if let Some((followed_canonical, followed_name)) =
-            follow_local_import_symbol_target(resolver, dep_canonical, resolved_name.as_str())
+    if canonical_source == dep_canonical && owner == dep_owner {
+        if let Some((followed_canonical, followed_owner, followed_name)) =
+            follow_local_import_symbol_target(
+                resolver,
+                dep_canonical,
+                dep_owner,
+                resolved_name.as_str(),
+            )
         {
-            if followed_canonical != canonical_source || followed_name != resolved_name {
+            if followed_canonical != canonical_source
+                || followed_owner != owner
+                || followed_name != resolved_name
+            {
                 let followed = resolve_type_declaration(
                     resolver,
                     followed_canonical.as_str(),
+                    followed_owner,
                     followed_name.as_str(),
                 );
                 if followed.canonical_source != canonical_source
+                    || followed.owner != owner
                     || followed.resolved_name != resolved_name
                     || followed.kind != ResolvedDeclarationKind::Unknown
                     || followed.text.is_some()
@@ -151,6 +191,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                         declaration_id: followed.declaration_id,
                         resolved_name: followed.resolved_name,
                         canonical_source: followed.canonical_source,
+                        owner: followed.owner,
                         span: followed.span,
                         kind: followed.kind,
                         text: followed.text,
@@ -169,23 +210,27 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     let (kind, span, text) = resolve_local_symbol_details(
         resolver,
         canonical_source.as_str(),
+        owner,
         resolved_name.as_str(),
         export_span,
     );
     let declaration_id =
-        resolver.type_declaration_id(canonical_source.as_str(), resolved_name.as_str());
+        resolver.type_declaration_id(canonical_source.as_str(), owner, resolved_name.as_str());
 
     if kind == ResolvedDeclarationKind::Unknown {
         // The same-file local_export rerouting (e.g.
         // `export { Foo as Lt }`) stays — it consumes only graph
         // metadata via `resolve_local_export_symbol_target` and
         // `resolve_local_type_symbol_metadata`.
-        if let Some(local_name) = resolver
-            .resolve_local_export_symbol_target(canonical_source.as_str(), resolved_name.as_str())
-        {
+        if let Some((local_owner, local_name)) = resolver.resolve_local_export_symbol_target(
+            canonical_source.as_str(),
+            owner,
+            resolved_name.as_str(),
+        ) {
             let followed_details = resolve_local_symbol_details(
                 resolver,
                 canonical_source.as_str(),
+                local_owner,
                 local_name.as_str(),
                 export_span,
             );
@@ -194,10 +239,14 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
             {
                 return ResolvedTypeDeclaration {
                     requested_name: requested_name.to_string(),
-                    declaration_id: resolver
-                        .type_declaration_id(canonical_source.as_str(), local_name.as_str()),
+                    declaration_id: resolver.type_declaration_id(
+                        canonical_source.as_str(),
+                        local_owner,
+                        local_name.as_str(),
+                    ),
                     resolved_name: local_name,
                     canonical_source,
+                    owner: local_owner,
                     span: followed_details.1,
                     kind: followed_details.0,
                     text: followed_details.2,
@@ -209,17 +258,28 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
     if kind == ResolvedDeclarationKind::Unknown
         && text.is_none()
         && canonical_source == dep_canonical
+        && owner == dep_owner
     {
-        if let Some((followed_canonical, followed_name)) =
-            follow_local_import_symbol_target(resolver, dep_canonical, resolved_name.as_str())
+        if let Some((followed_canonical, followed_owner, followed_name)) =
+            follow_local_import_symbol_target(
+                resolver,
+                dep_canonical,
+                dep_owner,
+                resolved_name.as_str(),
+            )
         {
-            if followed_canonical != canonical_source || followed_name != resolved_name {
+            if followed_canonical != canonical_source
+                || followed_owner != owner
+                || followed_name != resolved_name
+            {
                 let followed = resolve_type_declaration(
                     resolver,
                     followed_canonical.as_str(),
+                    followed_owner,
                     followed_name.as_str(),
                 );
                 if followed.canonical_source != canonical_source
+                    || followed.owner != owner
                     || followed.resolved_name != resolved_name
                     || followed.kind != ResolvedDeclarationKind::Unknown
                     || followed.text.is_some()
@@ -229,6 +289,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                         declaration_id: followed.declaration_id,
                         resolved_name: followed.resolved_name,
                         canonical_source: followed.canonical_source,
+                        owner: followed.owner,
                         span: followed.span,
                         kind: followed.kind,
                         text: followed.text,
@@ -237,10 +298,13 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
             }
         }
 
-        if let Some((followed_canonical, followed_name)) =
-            follow_direct_type_reexport_chain(resolver, dep_canonical, requested_name)
+        if let Some((followed_canonical, followed_owner, followed_name)) =
+            follow_direct_type_reexport_chain(resolver, dep_canonical, dep_owner, requested_name)
         {
-            if followed_canonical != canonical_source || followed_name != resolved_name {
+            if followed_canonical != canonical_source
+                || followed_owner != owner
+                || followed_name != resolved_name
+            {
                 // The leaf graph metadata
                 // (`resolve_local_type_symbol_metadata`) is the
                 // authoritative kind/span carrier when the chain
@@ -248,6 +312,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                 let followed_details = resolve_local_symbol_details(
                     resolver,
                     followed_canonical.as_str(),
+                    followed_owner,
                     followed_name.as_str(),
                     export_span,
                 );
@@ -258,10 +323,12 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
                         requested_name: requested_name.to_string(),
                         declaration_id: resolver.type_declaration_id(
                             followed_canonical.as_str(),
+                            followed_owner,
                             followed_name.as_str(),
                         ),
                         resolved_name: followed_name,
                         canonical_source: followed_canonical,
+                        owner: followed_owner,
                         span: followed_details.1,
                         kind: followed_details.0,
                         text: followed_details.2,
@@ -276,6 +343,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
         declaration_id,
         resolved_name,
         canonical_source,
+        owner,
         span,
         kind,
         text,
@@ -285,6 +353,7 @@ pub fn resolve_type_declaration<R: DeclarationMetadataResolver>(
 pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
     resolver: &R,
     canonical_source: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
     span: verter_span::Span,
 ) -> ResolvedTypeDeclaration {
@@ -294,16 +363,17 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
     // `span` is preserved and `kind` is `Unknown`. Declaration text
     // is not populated by the resolver.
     let (kind, resolved_span) = resolver
-        .resolve_local_type_symbol_metadata(canonical_source, resolved_name)
+        .resolve_local_type_symbol_metadata(canonical_source, owner, resolved_name)
         .map(|metadata| (metadata.kind, metadata.span))
         .unwrap_or((ResolvedDeclarationKind::Unknown, span));
-    let declaration_id = resolver.type_declaration_id(canonical_source, resolved_name);
+    let declaration_id = resolver.type_declaration_id(canonical_source, owner, resolved_name);
 
     ResolvedTypeDeclaration {
         requested_name: resolved_name.to_string(),
         declaration_id,
         resolved_name: resolved_name.to_string(),
         canonical_source: canonical_source.to_string(),
+        owner,
         span: resolved_span,
         kind,
         text: None,
@@ -313,12 +383,15 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
 pub fn resolve_direct_local_type_declaration<R: DeclarationMetadataResolver>(
     resolver: &R,
     canonical_source: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
 ) -> Option<ResolvedTypeDeclaration> {
-    let metadata = resolver.resolve_local_type_symbol_metadata(canonical_source, resolved_name)?;
+    let metadata =
+        resolver.resolve_local_type_symbol_metadata(canonical_source, owner, resolved_name)?;
     Some(resolve_local_type_declaration(
         resolver,
         canonical_source,
+        owner,
         resolved_name,
         metadata.span,
     ))
@@ -327,35 +400,55 @@ pub fn resolve_direct_local_type_declaration<R: DeclarationMetadataResolver>(
 fn follow_direct_type_reexport_chain<R: DeclarationMetadataResolver>(
     resolver: &R,
     dep_canonical: &str,
+    dep_owner: verter_type_expr::TopLevelOwnerId,
     requested_name: &str,
-) -> Option<(String, String)> {
+) -> Option<(String, verter_type_expr::TopLevelOwnerId, String)> {
     let mut current_canonical = dep_canonical.to_string();
+    let mut current_owner = dep_owner;
     let mut current_name = requested_name.to_string();
     let mut visited = FxHashSet::default();
 
     loop {
-        if !visited.insert((current_canonical.clone(), current_name.clone())) {
-            return Some((current_canonical, current_name));
+        if !visited.insert((
+            current_canonical.clone(),
+            current_owner,
+            current_name.clone(),
+        )) {
+            return Some((current_canonical, current_owner, current_name));
         }
 
-        if let Some(next) = resolver
-            .resolve_direct_type_reexport_target(current_canonical.as_str(), current_name.as_str())
-        {
-            current_canonical = next.0;
-            current_name = next.1;
+        if let Some(next) = resolver.resolve_direct_type_reexport_target(
+            current_canonical.as_str(),
+            current_owner,
+            current_name.as_str(),
+        ) {
+            current_canonical = next
+                .source_canonical_id
+                .unwrap_or_else(|| current_canonical.clone());
+            current_owner = next.source_owner;
+            current_name = next.source_name;
             continue;
         }
 
-        return Some((current_canonical, current_name));
+        return Some((current_canonical, current_owner, current_name));
     }
 }
 
 fn follow_local_import_symbol_target<R: DeclarationMetadataResolver>(
     resolver: &R,
     dep_canonical: &str,
+    dep_owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
-) -> Option<(String, String)> {
-    resolver.resolve_local_import_symbol_target(dep_canonical, resolved_name)
+) -> Option<(String, verter_type_expr::TopLevelOwnerId, String)> {
+    let target =
+        resolver.resolve_local_import_symbol_target(dep_canonical, dep_owner, resolved_name)?;
+    Some((
+        target
+            .source_canonical_id
+            .unwrap_or_else(|| dep_canonical.to_string()),
+        target.source_owner,
+        target.source_name,
+    ))
 }
 
 #[cfg(test)]
@@ -379,6 +472,7 @@ mod tests {
         fn resolve_export_target(
             &self,
             dep_canonical: &str,
+            _dep_owner: verter_type_expr::TopLevelOwnerId,
             requested_name: &str,
         ) -> Option<ResolvedExportTarget> {
             self.exports
@@ -399,6 +493,7 @@ mod tests {
         fn type_declaration_id(
             &self,
             canonical_source: &str,
+            _owner: verter_type_expr::TopLevelOwnerId,
             resolved_name: &str,
         ) -> Option<DeclarationId> {
             self.ids
@@ -419,36 +514,51 @@ mod tests {
         fn resolve_direct_type_reexport_target(
             &self,
             dep_canonical: &str,
+            dep_owner: verter_type_expr::TopLevelOwnerId,
             requested_name: &str,
-        ) -> Option<(String, String)> {
+        ) -> Option<ResolvedExportTarget> {
             self.direct_reexports
                 .get(&(dep_canonical.to_string(), requested_name.to_string()))
                 .cloned()
+                .map(|(canonical, name)| ResolvedExportTarget {
+                    source_canonical_id: Some(canonical),
+                    source_owner: dep_owner,
+                    source_name: name,
+                })
         }
 
         fn resolve_local_import_symbol_target(
             &self,
             dep_canonical: &str,
+            dep_owner: verter_type_expr::TopLevelOwnerId,
             resolved_name: &str,
-        ) -> Option<(String, String)> {
+        ) -> Option<ResolvedExportTarget> {
             self.local_import_symbol_targets
                 .get(&(dep_canonical.to_string(), resolved_name.to_string()))
                 .cloned()
+                .map(|(canonical, name)| ResolvedExportTarget {
+                    source_canonical_id: Some(canonical),
+                    source_owner: dep_owner,
+                    source_name: name,
+                })
         }
 
         fn resolve_local_export_symbol_target(
             &self,
             canonical_source: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
             exported_name: &str,
-        ) -> Option<String> {
+        ) -> Option<(verter_type_expr::TopLevelOwnerId, String)> {
             self.local_export_symbol_targets
                 .get(&(canonical_source.to_string(), exported_name.to_string()))
                 .cloned()
+                .map(|name| (owner, name))
         }
 
         fn resolve_local_type_symbol_metadata(
             &self,
             canonical_source: &str,
+            _owner: verter_type_expr::TopLevelOwnerId,
             resolved_name: &str,
         ) -> Option<ResolvedLocalTypeSymbolMetadata> {
             self.local_type_symbol_metadata
@@ -479,7 +589,12 @@ mod tests {
             .ids
             .insert(("/inner.ts".to_string(), "Props".to_string()), 7);
 
-        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+        let resolved = resolve_type_declaration(
+            &resolver,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        );
 
         assert_eq!(resolved.canonical_source, "/inner.ts");
         assert_eq!(resolved.resolved_name, "Props");
@@ -513,7 +628,12 @@ mod tests {
             11,
         );
 
-        let resolved = resolve_type_declaration(&resolver, "/inner.ts", "Lt");
+        let resolved = resolve_type_declaration(
+            &resolver,
+            "/inner.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Lt",
+        );
 
         assert_eq!(resolved.canonical_source, "/inner.ts");
         assert_eq!(resolved.resolved_name, "RouteLocationRaw");
@@ -537,7 +657,12 @@ mod tests {
             },
         );
 
-        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+        let resolved = resolve_type_declaration(
+            &resolver,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        );
 
         assert_eq!(resolved.kind, ResolvedDeclarationKind::TypeAlias);
         assert_eq!(
@@ -547,6 +672,25 @@ mod tests {
         // Graph metadata is the kind/span carrier; declaration text
         // is not populated by the resolver.
         assert_eq!(resolved.text, None);
+    }
+
+    #[test]
+    fn resolved_type_declaration_preserves_top_level_owner() {
+        let mut resolver = FakeResolver::default();
+        resolver.local_type_symbol_metadata.insert(
+            ("/Component.vue".to_string(), "Shared".to_string()),
+            ResolvedLocalTypeSymbolMetadata {
+                kind: ResolvedDeclarationKind::TypeAlias,
+                span: verter_span::Span::new(10, 20),
+            },
+        );
+        let owner = verter_type_expr::TopLevelOwnerId::instance(0);
+
+        let resolved = resolve_type_declaration(&resolver, "/Component.vue", owner, "Shared");
+
+        assert_eq!(resolved.canonical_source, "/Component.vue");
+        assert_eq!(resolved.owner, owner);
+        assert_eq!(resolved.resolved_name, "Shared");
     }
 
     // ----------------------------------------------------------------------
@@ -581,7 +725,12 @@ mod tests {
             .ids
             .insert(("/types.ts".to_string(), "Props".to_string()), 42);
 
-        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+        let resolved = resolve_type_declaration(
+            &resolver,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        );
 
         // Graph fields populated correctly.
         assert_eq!(resolved.canonical_source, "/types.ts");
@@ -627,7 +776,12 @@ mod tests {
             .ids
             .insert(("/inner.ts".to_string(), "Props".to_string()), 7);
 
-        let resolved = resolve_type_declaration(&resolver, "/types.ts", "Props");
+        let resolved = resolve_type_declaration(
+            &resolver,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+        );
 
         // Graph fields point at the leaf (chain followed).
         assert_eq!(resolved.canonical_source, "/inner.ts");
@@ -667,7 +821,13 @@ mod tests {
             .insert(("/types.ts".to_string(), "Props".to_string()), 11);
 
         // Drive the same path resolve_local_type_declaration runs in.
-        let resolved = resolve_local_type_declaration(&resolver, "/types.ts", "Props", graph_span);
+        let resolved = resolve_local_type_declaration(
+            &resolver,
+            "/types.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Props",
+            graph_span,
+        );
 
         assert_eq!(resolved.canonical_source, "/types.ts");
         assert_eq!(resolved.resolved_name, "Props");

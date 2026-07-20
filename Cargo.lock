@@ -3829,6 +3829,7 @@ dependencies = [
  "verter_diagnostics",
  "verter_semantic",
  "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]
@@ -3923,7 +3924,10 @@ dependencies = [
  "verter_language",
  "verter_macro_dto",
  "verter_parser",
+ "verter_semantic",
  "verter_span",
+ "verter_type_expr",
+ "verter_type_expr_oxc",
  "web-time",
 ]
 
@@ -3937,6 +3941,7 @@ dependencies = [
  "serde_json",
  "verter_semantic",
  "verter_span",
+ "verter_type_expr",
  "verter_workspace",
 ]
 
@@ -3968,7 +3973,9 @@ dependencies = [
  "serde",
  "serde_json",
  "verter_actions",
+ "verter_compiler",
  "verter_diagnostics",
+ "verter_macro_dto",
  "verter_protocol",
  "verter_semantic",
  "verter_session",
@@ -4012,14 +4019,17 @@ dependencies = [
  "verter-editor-client",
  "verter_actions",
  "verter_audit",
+ "verter_compiler",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_macro_dto",
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
  "verter_span",
  "verter_tsgo_api",
+ "verter_type_expr",
  "verter_type_runtime",
  "verter_workspace",
 ]
@@ -4051,11 +4061,14 @@ dependencies = [
  "tracing-subscriber",
  "verter_actions",
  "verter_audit",
+ "verter_compiler",
  "verter_diagnostics",
+ "verter_macro_dto",
  "verter_protocol",
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_type_expr",
  "verter_workspace",
  "walkdir",
 ]
@@ -4295,6 +4308,7 @@ dependencies = [
  "verter_audit",
  "verter_compiler",
  "verter_language",
+ "verter_macro_dto",
  "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_parser",
@@ -4367,6 +4381,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "verter_compiler",
+ "verter_macro_dto",
  "verter_session",
  "verter_span",
  "verter_tsc",
@@ -4412,6 +4427,7 @@ dependencies = [
  "oxc_ast",
  "oxc_parser",
  "oxc_span",
+ "serde",
  "verter_span",
  "verter_type_expr",
 ]

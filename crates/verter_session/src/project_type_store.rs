@@ -187,12 +187,10 @@ pub struct IndexedReady {
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
-    /// Cached HEADER-ONLY external-type analysis used by the shared type
-    /// resolver (import/export/reexport tables + symbol name inventory;
-    /// no dependency names, no raw surfaces — body-derived data lives on
-    /// the shallow state's lazy declaration-body memo).
-    pub external_type_analysis:
-        Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
+    /// Parser-authored import/export routes from the retained program.
+    /// Declaration headers and bodies live on the shallow state's memo.
+    pub route_inventory:
+        Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -252,10 +250,8 @@ impl IndexedReady {
         shallow_state: Arc<crate::resolver_core::shallow_file_state::ShallowFileState>,
         raw_source: Arc<str>,
         eval_source: Arc<str>,
-        external_type_analysis: Arc<
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
-        >,
     ) -> Self {
+        let route_inventory = Arc::clone(&shallow_state.route_inventory);
         Self {
             whole_hash,
             shallow_state,
@@ -271,7 +267,7 @@ impl IndexedReady {
             script_analysis: None,
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-            external_type_analysis,
+            route_inventory,
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
         }
@@ -288,13 +284,13 @@ impl IndexedReady {
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::FxHashMap;
-        let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        let route_inventory = Arc::new(
+            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
         );
         let shallow =
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
                 whole_hash,
-                Arc::clone(&analysis),
+                Arc::clone(&route_inventory),
             );
         Self {
             whole_hash,
@@ -311,7 +307,7 @@ impl IndexedReady {
             script_analysis: None,
             export_signatures: None,
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-            external_type_analysis: analysis,
+            route_inventory,
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
         }
@@ -1981,12 +1977,13 @@ mod tests {
         let db = FileArtifactStore::new();
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
-        let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        let route_inventory = Arc::new(
+            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
         );
         let shallow = Arc::new(
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
-                hash_v1, analysis,
+                hash_v1,
+                Arc::clone(&route_inventory),
             ),
         );
         db.insert(
@@ -2006,9 +2003,7 @@ mod tests {
                 script_analysis: None,
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-                external_type_analysis: Arc::new(
-                    verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-                ),
+                route_inventory,
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             }),
@@ -2036,8 +2031,8 @@ mod tests {
     #[test]
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
-        let analysis = Arc::new(
-            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        let route_inventory = Arc::new(
+            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
@@ -2045,7 +2040,7 @@ mod tests {
                 shallow_state: Arc::new(
                     crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
                         hash,
-                        Arc::clone(&analysis),
+                        Arc::clone(&route_inventory),
                     ),
                 ),
                 import_routes: Arc::new(FxHashMap::default()),
@@ -2060,7 +2055,7 @@ mod tests {
                 script_analysis: None,
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
-                external_type_analysis: Arc::clone(&analysis),
+                route_inventory: Arc::clone(&route_inventory),
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             })

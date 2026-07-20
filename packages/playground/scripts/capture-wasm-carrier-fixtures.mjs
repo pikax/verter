@@ -77,6 +77,16 @@ function surface(response) {
   };
 }
 
+function publicApiSurface(result) {
+  if (result.error) {
+    throw Object.assign(
+      new Error(`public API projection failed: ${result.error.code}/${result.error.detailCode}`),
+      result.error,
+    );
+  }
+  return surface(result.value);
+}
+
 function capture({ filename, fileKind, source }) {
   // A fresh host per fixture keeps every entry independent of capture order.
   const host = new wasmModule.VerterHost({
@@ -98,8 +108,8 @@ function capture({ filename, fileKind, source }) {
     // IDE parity fails on the recorded gap instead of a silent null.
     ideUnavailable = String(err?.message ?? err).split("\n")[0];
   }
-  const decl = surface(host.getPublicApi(filename, "declaration"));
-  const api = surface(host.getPublicApi(filename));
+  const decl = publicApiSurface(host.getPublicApi(filename, "declaration"));
+  const api = publicApiSurface(host.getPublicApi(filename));
   // No explicit `host.free()`: if an IDE compile trapped, the host borrow is
   // poisoned and `free` would throw; the short-lived capture process reclaims
   // everything on exit.

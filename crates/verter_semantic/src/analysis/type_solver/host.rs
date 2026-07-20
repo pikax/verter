@@ -20,9 +20,19 @@
 /// hashing remain CONTENT-based (`Arc<str>` derives delegate to `str`) —
 /// allocation sharing is never an identity semantic, and pointer
 /// identity never enters a cache key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
 pub struct ResolvedRootIdentity {
     pub canonical_id: std::sync::Arc<str>,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub symbol_name: std::sync::Arc<str>,
 }
 
@@ -31,8 +41,21 @@ impl ResolvedRootIdentity {
         canonical_id: impl Into<std::sync::Arc<str>>,
         symbol_name: impl Into<std::sync::Arc<str>>,
     ) -> Self {
+        Self::new_in_owner(
+            canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol_name,
+        )
+    }
+
+    pub fn new_in_owner(
+        canonical_id: impl Into<std::sync::Arc<str>>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: impl Into<std::sync::Arc<str>>,
+    ) -> Self {
         Self {
             canonical_id: canonical_id.into(),
+            owner,
             symbol_name: symbol_name.into(),
         }
     }
@@ -40,7 +63,55 @@ impl ResolvedRootIdentity {
 
 impl std::fmt::Display for ResolvedRootIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}::{}", self.canonical_id, self.symbol_name)
+        if self.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+            write!(f, "{}::{}", self.canonical_id, self.symbol_name)
+        } else {
+            write!(
+                f,
+                "{}::{:?}({})::{}",
+                self.canonical_id,
+                self.owner.kind(),
+                self.owner.ordinal(),
+                self.symbol_name
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod owner_identity_tests {
+    use super::ResolvedRootIdentity;
+    use std::collections::HashMap;
+    use verter_type_expr::TopLevelOwnerId;
+
+    #[test]
+    fn resolved_root_identity_discriminates_owner_in_hash_map_and_serde() {
+        let module = ResolvedRootIdentity::new_in_owner(
+            "/src/App.vue",
+            TopLevelOwnerId::module(0),
+            "Shared",
+        );
+        let instance = ResolvedRootIdentity::new_in_owner(
+            "/src/App.vue",
+            TopLevelOwnerId::instance(0),
+            "Shared",
+        );
+        assert_ne!(module, instance);
+        let mut memo = HashMap::new();
+        memo.insert(module.clone(), "module");
+        memo.insert(instance.clone(), "instance");
+        assert_eq!(memo.len(), 2);
+        assert_ne!(
+            serde_json::to_string(&module).unwrap(),
+            serde_json::to_string(&instance).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<ResolvedRootIdentity>(
+                &serde_json::to_string(&instance).unwrap()
+            )
+            .unwrap(),
+            instance
+        );
     }
 }
 

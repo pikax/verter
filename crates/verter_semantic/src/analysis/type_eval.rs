@@ -26,12 +26,16 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use crate::analysis::top_level_owners::DeclMap;
+
 use verter_type_expr::facts::{
     EnumMemberEntry, EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar,
-    FunctionSignatureFact, MemberHeaderFact, ObjectShapeFact, TypeParamDeclFact,
-    ValueTypeAnnotationFact,
+    FunctionSignatureFact, MemberHeaderFact, MemberReturnInferenceFact, ObjectShapeFact,
+    ReturnInferenceCompleteness, TypeParamDeclFact, ValueTypeAnnotationFact,
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
+use verter_type_expr::span_origins::FunctionSpansOrigin;
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 pub type DeclarationId = u64;
 
@@ -51,6 +55,7 @@ pub type FunctionSignature = FunctionSignatureFact;
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct TypeDeclInfo {
     pub name: String,
+    pub owner: TopLevelOwnerId,
     pub declaration_id: DeclarationId,
     pub kind: TypeDeclKind,
     /// Type-parameter header facts: names, ordinals, and (for decl-header
@@ -71,6 +76,45 @@ pub struct TypeDeclInfo {
     /// [`DeclHeaderIndex`](crate::analysis::decl_headers::DeclHeaderIndex)
     /// mirror) read THIS inventory; they never walk a body.
     pub direct_member_headers: Arc<[MemberHeaderFact]>,
+    /// Exact, non-deduplicated return-inference facts for authored methods.
+    /// Detached `FunctionExpr` values are never used as a lookup key.
+    pub direct_member_return_inference: Arc<[MemberReturnInferenceFact]>,
+}
+
+impl TypeDeclInfo {
+    /// Read one method verdict by its declaration contributor and produced
+    /// member path. No name/span/shape rematching is permitted.
+    #[must_use]
+    pub fn return_inference_for_member(
+        &self,
+        origin: &FunctionSpansOrigin,
+    ) -> Option<ReturnInferenceCompleteness> {
+        self.direct_member_return_inference
+            .iter()
+            .find(|fact| &fact.origin == origin)
+            .map(|fact| fact.return_inference)
+    }
+
+    /// Read one method verdict by the produced member path after the caller has
+    /// already selected this exact declaration contributor. This is a
+    /// contributor-local join: it never rematches a member name or searches a
+    /// sibling declaration/symbol space.
+    #[must_use]
+    pub fn return_inference_for_member_path(
+        &self,
+        member_path: &[u32],
+    ) -> Option<ReturnInferenceCompleteness> {
+        self.direct_member_return_inference
+            .iter()
+            .find(|fact| match &fact.origin {
+                FunctionSpansOrigin::Member {
+                    member_path: candidate,
+                    ..
+                } => candidate.as_ref() == member_path,
+                FunctionSpansOrigin::AliasBody { .. } | FunctionSpansOrigin::Synthetic(_) => false,
+            })
+            .map(|fact| fact.return_inference)
+    }
 }
 
 /// An ordered group of same-name type declaration contributors, in
@@ -185,11 +229,13 @@ impl TypeDeclGroup {
                     .contributors
                     .iter()
                     .enumerate()
-                    .map(|(ordinal, decl)| TypeBodySlot {
-                        anchor: decl.body.anchor.clone(),
-                        path: Arc::from([TypeBodyPathStep::MergedContributor {
-                            ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                        }]),
+                    .filter_map(|(ordinal, decl)| {
+                        Some(TypeBodySlot {
+                            anchor: decl.body.anchor.clone(),
+                            path: Arc::from([TypeBodyPathStep::MergedContributor {
+                                ordinal: u32::try_from(ordinal).ok()?,
+                            }]),
+                        })
                     })
                     .collect(),
                 kinds: self.contributors.iter().map(|d| d.kind).collect(),
@@ -343,6 +389,7 @@ impl EnumMemberValue {
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct ValueDeclInfo {
     pub name: String,
+    pub owner: TopLevelOwnerId,
     pub declaration_id: DeclarationId,
     pub kind: ValueDeclKind,
     /// The narrowed annotation FACT: classification ([`Absent`/`Direct`/
@@ -631,28 +678,29 @@ pub enum AugmentationScopeKind {
 pub struct EvalEnv {
     /// Type declarations: interfaces, type aliases. Each name maps to an
     /// ordered group of contributors (append-only, source/binder order).
-    pub type_symbols: FxHashMap<String, TypeDeclGroup>,
+    pub type_symbols: DeclMap<TypeDeclGroup>,
     /// Value declarations: functions, constants, classes. Each name maps to
     /// an ordered group of contributors (append-only, source/binder order).
-    pub value_symbols: FxHashMap<String, ValueDeclGroup>,
+    pub value_symbols: DeclMap<ValueDeclGroup>,
     /// Ambient declaration-augmentation inventory: `(scope, name)` → ordered
     /// contributor group. Holds the retained INDEX entries of declarations
     /// nested in `declare module "X" { ... }` / `declare global { ... }` blocks
     /// so a scoped declaration lookup can address them. Kept separate from
     /// `type_symbols` — these inner declarations never enter the file's
     /// top-level surface.
-    pub augmentation_scopes: FxHashMap<(AugmentationScopeKind, String), TypeDeclGroup>,
+    pub augmentation_scopes: FxHashMap<(AugmentationScopeKind, DeclBindingKey), TypeDeclGroup>,
     /// Value-space counterpart to [`augmentation_scopes`](Self::augmentation_scopes):
     /// the retained INDEX entries of VALUE declarations (`const`/`let`/`var`,
     /// `function`, `class`, `enum`) nested in `declare module "X" { ... }` /
     /// `declare global { ... }` blocks. Kept separate from `value_symbols`
     /// (file scope) — these augment another module's value surface and are the
     /// typed source for value-space module-augmentation facts.
-    pub augmentation_value_scopes: FxHashMap<(AugmentationScopeKind, String), ValueDeclGroup>,
+    pub augmentation_value_scopes:
+        FxHashMap<(AugmentationScopeKind, DeclBindingKey), ValueDeclGroup>,
     /// Stable ids assigned to type declarations inserted into this environment.
-    type_decl_ids: FxHashMap<String, DeclarationId>,
+    type_decl_ids: FxHashMap<DeclBindingKey, DeclarationId>,
     /// Stable ids assigned to value declarations inserted into this environment.
-    value_decl_ids: FxHashMap<String, DeclarationId>,
+    value_decl_ids: FxHashMap<DeclBindingKey, DeclarationId>,
     /// Traversal budgets for consumers that walk this inventory.
     pub limits: EvalLimits,
     /// Total traversal steps consumed (monotonically increasing).
@@ -732,8 +780,8 @@ impl EvalEnv {
     /// Create a new inventory environment with default limits.
     pub fn new() -> Self {
         Self {
-            type_symbols: FxHashMap::default(),
-            value_symbols: FxHashMap::default(),
+            type_symbols: DeclMap::default(),
+            value_symbols: DeclMap::default(),
             augmentation_scopes: FxHashMap::default(),
             augmentation_value_scopes: FxHashMap::default(),
             type_decl_ids: FxHashMap::default(),
@@ -753,16 +801,36 @@ impl EvalEnv {
         }
     }
 
+    #[must_use]
+    pub fn type_group(&self, name: &str) -> Option<&TypeDeclGroup> {
+        self.type_group_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    #[must_use]
+    pub fn type_group_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&TypeDeclGroup> {
+        self.type_symbols.get(&DeclBindingKey::new(owner, name))
+    }
+
+    #[must_use]
+    pub fn value_group(&self, name: &str) -> Option<&ValueDeclGroup> {
+        self.value_group_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    #[must_use]
+    pub fn value_group_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&ValueDeclGroup> {
+        self.value_symbols.get(&DeclBindingKey::new(owner, name))
+    }
+
     /// Register a type declaration, appending it to the named group in
     /// source/binder order (creating the group if absent).
     pub fn add_type(&mut self, mut decl: TypeDeclInfo) {
-        let name = decl.name.clone();
-        let decl_id = self.stabilize_type_declaration_id(&name, decl.declaration_id);
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
+        let decl_id = self.stabilize_type_declaration_id(&key, decl.declaration_id);
         decl.declaration_id = decl_id;
-        match self.type_symbols.get_mut(&name) {
+        match self.type_symbols.get_mut(&key) {
             Some(group) => group.contributors.push(decl),
             None => {
-                self.type_symbols.insert(name, TypeDeclGroup::new(decl));
+                self.type_symbols.insert(key, TypeDeclGroup::new(decl));
             }
         }
     }
@@ -777,21 +845,19 @@ impl EvalEnv {
     /// group's ordinal — deterministic and idempotent under order-preserving
     /// re-registration ([`extend_missing`](Self::extend_missing)).
     pub fn add_value(&mut self, mut decl: ValueDeclInfo) {
-        let name = decl.name.clone();
-        let decl_id = self.stabilize_value_declaration_id(&name, decl.declaration_id);
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
+        let decl_id = self.stabilize_value_declaration_id(&key, decl.declaration_id);
         decl.declaration_id = decl_id;
-        match self.value_symbols.get_mut(&name) {
+        match self.value_symbols.get_mut(&key) {
             Some(group) => {
-                let base: u32 = group
-                    .contributors
-                    .iter()
-                    .map(|c| u32::try_from(c.signatures.len()).unwrap_or(u32::MAX))
-                    .sum();
-                rebase_value_signature_ordinals(&mut decl, base);
+                match checked_signature_base(&group.contributors) {
+                    Some(base) if rebase_value_signature_ordinals(&mut decl, base) => {}
+                    _ => decl.signatures.clear(),
+                }
                 group.contributors.push(decl);
             }
             None => {
-                self.value_symbols.insert(name, ValueDeclGroup::new(decl));
+                self.value_symbols.insert(key, ValueDeclGroup::new(decl));
             }
         }
     }
@@ -802,15 +868,15 @@ impl EvalEnv {
     /// These declarations are retained for cross-file augmentation stitching
     /// and never enter the file-scope `type_symbols`.
     pub fn add_augmentation_type(&mut self, scope: AugmentationScopeKind, decl: TypeDeclInfo) {
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
         match self
             .augmentation_scopes
-            .get_mut(&(scope.clone(), decl.name.clone()))
+            .get_mut(&(scope.clone(), key.clone()))
         {
             Some(group) => group.contributors.push(decl),
             None => {
-                let name = decl.name.clone();
                 self.augmentation_scopes
-                    .insert((scope, name), TypeDeclGroup::new(decl));
+                    .insert((scope, key), TypeDeclGroup::new(decl));
             }
         }
     }
@@ -825,23 +891,21 @@ impl EvalEnv {
         scope: AugmentationScopeKind,
         mut decl: ValueDeclInfo,
     ) {
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
         match self
             .augmentation_value_scopes
-            .get_mut(&(scope.clone(), decl.name.clone()))
+            .get_mut(&(scope.clone(), key.clone()))
         {
             Some(group) => {
-                let base: u32 = group
-                    .contributors
-                    .iter()
-                    .map(|c| u32::try_from(c.signatures.len()).unwrap_or(u32::MAX))
-                    .sum();
-                rebase_value_signature_ordinals(&mut decl, base);
+                match checked_signature_base(&group.contributors) {
+                    Some(base) if rebase_value_signature_ordinals(&mut decl, base) => {}
+                    _ => decl.signatures.clear(),
+                }
                 group.contributors.push(decl);
             }
             None => {
-                let name = decl.name.clone();
                 self.augmentation_value_scopes
-                    .insert((scope, name), ValueDeclGroup::new(decl));
+                    .insert((scope, key), ValueDeclGroup::new(decl));
             }
         }
     }
@@ -865,38 +929,38 @@ impl EvalEnv {
     /// Merge declarations from another environment by reference without
     /// cloning the full environment up front.
     pub fn extend_missing_from_ref(&mut self, other: &EvalEnv) {
-        for (name, group) in &other.type_symbols {
-            if !self.type_symbols.contains_key(name) {
+        for (key, group) in &other.type_symbols {
+            if !self.type_symbols.contains_key(key) {
                 for decl in group.contributors() {
                     self.add_type(decl.clone());
                 }
             }
         }
-        for (name, group) in &other.value_symbols {
-            if !self.value_symbols.contains_key(name) {
+        for (key, group) in &other.value_symbols {
+            if !self.value_symbols.contains_key(key) {
                 for decl in group.contributors() {
                     self.add_value(decl.clone());
                 }
             }
         }
-        for (name, decl_id) in &other.type_decl_ids {
+        for (key, decl_id) in &other.type_decl_ids {
             if *decl_id == 0 {
                 continue;
             }
-            let stable_id = self.stabilize_type_declaration_id(name, *decl_id);
-            if let Some(group) = self.type_symbols.get_mut(name) {
+            let stable_id = self.stabilize_type_declaration_id(key, *decl_id);
+            if let Some(group) = self.type_symbols.get_mut(key) {
                 let decl = group.primary_mut();
                 if decl.declaration_id == 0 {
                     decl.declaration_id = stable_id;
                 }
             }
         }
-        for (name, decl_id) in &other.value_decl_ids {
+        for (key, decl_id) in &other.value_decl_ids {
             if *decl_id == 0 {
                 continue;
             }
-            let stable_id = self.stabilize_value_declaration_id(name, *decl_id);
-            if let Some(group) = self.value_symbols.get_mut(name) {
+            let stable_id = self.stabilize_value_declaration_id(key, *decl_id);
+            if let Some(group) = self.value_symbols.get_mut(key) {
                 let decl = group.primary_mut();
                 if decl.declaration_id == 0 {
                     decl.declaration_id = stable_id;
@@ -907,51 +971,71 @@ impl EvalEnv {
     }
 
     pub fn type_declaration_id(&self, name: &str) -> Option<DeclarationId> {
-        self.type_decl_ids.get(name).copied()
+        self.type_declaration_id_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn type_declaration_id_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<DeclarationId> {
+        self.type_decl_ids
+            .get(&DeclBindingKey::new(owner, name))
+            .copied()
     }
 
     pub fn value_declaration_id(&self, name: &str) -> Option<DeclarationId> {
-        self.value_decl_ids.get(name).copied()
+        self.value_declaration_id_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn value_declaration_id_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<DeclarationId> {
+        self.value_decl_ids
+            .get(&DeclBindingKey::new(owner, name))
+            .copied()
     }
 
     fn stabilize_type_declaration_id(
         &mut self,
-        name: &str,
+        key: &DeclBindingKey,
         declaration_id: DeclarationId,
     ) -> DeclarationId {
         if declaration_id != 0 {
             let stable_id = *self
                 .type_decl_ids
-                .entry(name.to_string())
+                .entry(key.clone())
                 .or_insert(declaration_id);
             self.next_declaration_id = self.next_declaration_id.max(stable_id);
             stable_id
-        } else if let Some(existing) = self.type_decl_ids.get(name).copied() {
+        } else if let Some(existing) = self.type_decl_ids.get(key).copied() {
             existing
         } else {
             let decl_id = self.allocate_declaration_id();
-            self.type_decl_ids.insert(name.to_string(), decl_id);
+            self.type_decl_ids.insert(key.clone(), decl_id);
             decl_id
         }
     }
 
     fn stabilize_value_declaration_id(
         &mut self,
-        name: &str,
+        key: &DeclBindingKey,
         declaration_id: DeclarationId,
     ) -> DeclarationId {
         if declaration_id != 0 {
             let stable_id = *self
                 .value_decl_ids
-                .entry(name.to_string())
+                .entry(key.clone())
                 .or_insert(declaration_id);
             self.next_declaration_id = self.next_declaration_id.max(stable_id);
             stable_id
-        } else if let Some(existing) = self.value_decl_ids.get(name).copied() {
+        } else if let Some(existing) = self.value_decl_ids.get(key).copied() {
             existing
         } else {
             let decl_id = self.allocate_declaration_id();
-            self.value_decl_ids.insert(name.to_string(), decl_id);
+            self.value_decl_ids.insert(key.clone(), decl_id);
             decl_id
         }
     }
@@ -974,9 +1058,29 @@ impl Default for EvalEnv {
 /// declaration takes ordinal `base + j`. The assignment SETS the ordinal from
 /// the fact's position (never adds to the stored value), so re-registering the
 /// same contributors in the same order reproduces identical locators.
-fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) {
+fn checked_signature_base(contributors: &[ValueDeclInfo]) -> Option<u32> {
+    contributors.iter().try_fold(0u32, |total, contributor| {
+        total.checked_add(u32::try_from(contributor.signatures.len()).ok()?)
+    })
+}
+
+fn checked_rebased_ordinal(base: u32, index: usize) -> Option<u32> {
+    base.checked_add(u32::try_from(index).ok()?)
+}
+
+fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) -> bool {
+    if let Some(last) = decl.signatures.len().checked_sub(1) {
+        let Ok(last) = u32::try_from(last) else {
+            return false;
+        };
+        if base.checked_add(last).is_none() {
+            return false;
+        }
+    }
     for (j, signature) in decl.signatures.iter_mut().enumerate() {
-        let ordinal = base.saturating_add(u32::try_from(j).unwrap_or(u32::MAX));
+        let Some(ordinal) = checked_rebased_ordinal(base, j) else {
+            return false;
+        };
         let repoint = |slot: &mut TypeBodySlot| {
             if let Some(TypeBodyPathStep::ValueSignature { .. }) = slot.path.first() {
                 let mut path: Vec<TypeBodyPathStep> = slot.path.to_vec();
@@ -996,5 +1100,20 @@ fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) {
             }
         }
         signature.parameters = parameters.into();
+    }
+    true
+}
+
+#[cfg(test)]
+mod checked_ordinal_tests {
+    use super::checked_rebased_ordinal;
+
+    #[test]
+    fn signature_rebase_rejects_overflow_instead_of_clamping() {
+        assert_eq!(checked_rebased_ordinal(u32::MAX, 0), Some(u32::MAX));
+        assert_eq!(checked_rebased_ordinal(u32::MAX, 1), None);
+        if usize::BITS > u32::BITS {
+            assert_eq!(checked_rebased_ordinal(0, u32::MAX as usize + 1), None);
+        }
     }
 }

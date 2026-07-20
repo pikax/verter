@@ -839,7 +839,13 @@ mod tests {
             force_js: true,
             ..Default::default()
         };
-        let result = compile_sfc(source, &opts, &vopts, &alloc);
+        let result = compile_sfc(
+            source,
+            &opts,
+            &vopts,
+            &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+            &alloc,
+        );
 
         let tpl = result.template.expect("should have template block");
 

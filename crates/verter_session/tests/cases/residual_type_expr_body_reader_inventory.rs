@@ -12,13 +12,10 @@
 //! RESOLVED / GENERATED class — DTOs the resolver PRODUCES at query time
 //! (`type_expand`/`ExpandedField`, the `component_meta.rs *Analysis` carriers,
 //! the `html_intrinsics` catalog, `svelte_default_synth`, the
-//! `mapper_binder_registry` structural fingerprint, etc.). The
-//! below-`verter_semantic` graph-persisted parser DTO class (the former
-//! `verter_parser` `ResolvedProp`/`ResolvedNamedCallSignature.type_expr`
-//! carriers) is DELETED: `ResolvedElements` carries no typed-IR sidecar and no
-//! `SemanticNodeData` carrier persists it. The COMPLETE
-//! semantic-`TypeExpr` terminal-completeness census (≈96 semantic surfaces)
-//! lives in
+//! `mapper_binder_registry` structural fingerprint, etc.). Parser inventories
+//! contain syntax, routing, and dependency facts only; no parser DTO persists
+//! a typed-IR sidecar. The COMPLETE semantic-`TypeExpr`
+//! terminal-completeness census (≈96 semantic surfaces) lives in
 //! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §3.6, and the
 //! `type_expand` three-surface handle-native sub-design is §5.7. That
 //! resolved/generated class is enforced STRUCTURALLY at its owning surfaces
@@ -1338,14 +1335,17 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
     ReaderRow {
         file: "src/resolver_core/prepared_decl.rs",
         impl_path: "",
-        fn_name: "prepare_type_decl_from_lowered",
+        fn_name: "finish_prepared_type_decl",
         class: ReaderClass::ProducerLowering,
         method_chain: true,
         required_hot_route: &[],
-        reason: "the type prepare path the producer backs — reads lowered.body.is_merged() / \
-                 lowered.body.contributors() over the content-free TypeDeclBody slot carrier \
-                 (merge-shape + contributor count only; no embedded TypeExpr) when assembling the \
-                 PreparedTypeDecl; producer-mint class, preserved",
+        reason: "the shared prepared-declaration assembly tail (strict cache preparation AND the \
+                 projection-only authored-partial path both route here) — reads \
+                 lowered.body.is_merged() / lowered.body.contributors() over the content-free \
+                 TypeDeclBody slot carrier (merge-shape + contributor count only; no embedded \
+                 TypeExpr) when assembling the PreparedTypeDecl; producer-mint class, preserved \
+                 (the read moved here from prepare_type_decl_from_lowered when the assembly tail \
+                 was extracted so the two prepare paths cannot drift)",
     },
     ReaderRow {
         file: "src/resolver_core/prepared_decl.rs",
@@ -2178,7 +2178,7 @@ fn nested_fn_body_read_is_attributed_to_the_nested_fn() {
 /// Tripwire RED→GREEN: a NEW un-inventoried fn performing a
 /// `<recv>.body.lookup_object()` read IS flagged; the SAME read at an
 /// inventoried anchor (`prepared_decl.rs :: (free fn) ::
-/// prepare_type_decl_from_lowered`) is NOT.
+/// finish_prepared_type_decl`) is NOT.
 #[test]
 fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     let allowed = method_chain_allowed_anchors();
@@ -2204,7 +2204,7 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     );
 
     // GREEN — the same read shape AT an inventoried anchor is accepted.
-    let at_anchor = "fn prepare_type_decl_from_lowered(lowered: &L) -> bool {\n    \
+    let at_anchor = "fn finish_prepared_type_decl(lowered: &L) -> bool {\n    \
         let _ = lowered.body.lookup_object();\n    \
         true\n\
         }\n";
@@ -2215,7 +2215,7 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     assert!(
         unclassified_method_chain_reads(&anchor_inv, &allowed).is_empty(),
         "self-test (tripwire GREEN): a `<recv>.body.lookup_object()` read at the inventoried anchor \
-         (prepared_decl.rs :: (free fn) :: prepare_type_decl_from_lowered) must NOT be flagged"
+         (prepared_decl.rs :: (free fn) :: finish_prepared_type_decl) must NOT be flagged"
     );
 }
 
@@ -2610,10 +2610,10 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
 #[test]
 fn tripwire_fires_on_moved_inventoried_reader() {
     let allowed = method_chain_allowed_anchors();
-    let moved = "fn prepare_type_decl_from_lowered(lowered: &L) -> bool { \
+    let moved = "fn finish_prepared_type_decl(lowered: &L) -> bool { \
         lowered.body.is_merged() }\n\
         impl SomethingElse {\n    \
-        fn prepare_type_decl_from_lowered(&self, lowered: &L) -> bool { \
+        fn finish_prepared_type_decl(&self, lowered: &L) -> bool { \
         lowered.body.is_merged() }\n}\n";
     let inv = inventory_for(&[(
         "src/resolver_core/prepared_decl.rs".to_string(),
@@ -2621,10 +2621,10 @@ fn tripwire_fires_on_moved_inventoried_reader() {
     )]);
     let hits = unclassified_method_chain_reads(&inv, &allowed);
     assert!(
-        hits.iter()
-            .any(|h| h.fn_name == "prepare_type_decl_from_lowered"
-                && h.impl_path == "impl SomethingElse"),
-        "self-test (tripwire move RED): `prepare_type_decl_from_lowered` moved to \
+        hits.iter().any(
+            |h| h.fn_name == "finish_prepared_type_decl" && h.impl_path == "impl SomethingElse"
+        ),
+        "self-test (tripwire move RED): `finish_prepared_type_decl` moved to \
          `impl SomethingElse` performing the chain read MUST be flagged. Got {:?}",
         hits.iter()
             .map(|h| (h.impl_path.as_str(), h.fn_name.as_str()))
@@ -2633,9 +2633,9 @@ fn tripwire_fires_on_moved_inventoried_reader() {
     assert!(
         !hits
             .iter()
-            .any(|h| h.impl_path.is_empty() && h.fn_name == "prepare_type_decl_from_lowered"),
+            .any(|h| h.impl_path.is_empty() && h.fn_name == "finish_prepared_type_decl"),
         "self-test (tripwire move discrimination): the anchored free-fn \
-         `prepare_type_decl_from_lowered` performing the SAME chain read must NOT be flagged"
+         `finish_prepared_type_decl` performing the SAME chain read must NOT be flagged"
     );
 }
 
@@ -3000,7 +3000,7 @@ fn real_tree_inventory_is_non_vacuous() {
             .count()
             >= 2,
         "self-test: the real tree must still contain production `<recv>.body.<method>` reads \
-         (the two surviving chain readers: prepare_type_decl_from_lowered and \
+         (the two surviving chain readers: finish_prepared_type_decl and \
          transient_body_shape, both over the content-free TypeDeclBody merge-shape carrier) — \
          proving the chain detector is not always-false"
     );
@@ -3029,7 +3029,7 @@ fn real_tree_inventory_is_non_vacuous() {
     assert_eq!(
         residual_chain, 2,
         "self-test: exactly two residual readers perform the `<recv>.body.<method>` chain read \
-         (prepare_type_decl_from_lowered and transient_body_shape)"
+         (finish_prepared_type_decl and transient_body_shape)"
     );
 }
 

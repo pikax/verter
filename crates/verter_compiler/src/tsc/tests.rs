@@ -1,11 +1,1524 @@
-use super::script::{generate_tsc_output_with_options, TscGenOptions, TscMode};
-use crate::utils::oxc::script::type_surface::resolve_external_type;
-use oxc_allocator::Allocator;
+use super::script::{generate_tsc_output_with_options, MacroTscInput, TscGenOptions, TscMode};
 use oxc_sourcemap::SourceMap;
-use rustc_hash::FxHashMap;
+use verter_macro_dto::{
+    AuthoredMemberOrdinal, MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason,
+    MacroTscBundle, MacroTscEntry, MacroTscOutcome, MacroTscProjection, SynthesizedRowKind,
+    TscBindingUsage, TscDeclarationFailureReason, TscDependencyDeclaration, TscEmitRow,
+    TscEmitsProjection, TscInferredClassMember, TscInferredClassTypePosition, TscModelProjection,
+    TscOwnerValueDependency, TscPropRow, TscPropsProjection, TscPublicPropsProjection,
+    TscRetainedBinding, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
+    TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
+};
+
+enum TscFixture<'a> {
+    Props {
+        syntax_index: u32,
+        entry_macro_index: u32,
+        rows: Vec<FixturePropRow<'a>>,
+        imports: &'a [&'a str],
+        declarations: &'a [(&'a str, &'a str)],
+    },
+    Emits {
+        syntax_index: u32,
+        entry_macro_index: u32,
+        events: Vec<FixtureEmitRow<'a>>,
+        imports: &'a [&'a str],
+        declarations: &'a [(&'a str, &'a str)],
+    },
+    Model {
+        syntax_index: u32,
+        entry_macro_index: u32,
+        anchor_macro_index: u32,
+        name: &'a str,
+        optional: bool,
+        value_type: &'a str,
+        imports: &'a [&'a str],
+        declarations: &'a [(&'a str, &'a str)],
+    },
+}
+
+#[derive(Clone, Copy)]
+struct FixturePropRow<'a> {
+    name: &'a str,
+    optional: bool,
+    type_text: &'a str,
+    anchor: MacroAnchor,
+}
+
+#[derive(Clone, Copy)]
+struct FixtureEmitRow<'a> {
+    name: &'a str,
+    emit_parameters: &'a str,
+    handler_parameters: &'a str,
+    anchor: MacroAnchor,
+}
+
+const fn authored_prop<'a>(
+    name: &'a str,
+    optional: bool,
+    type_text: &'a str,
+    macro_index: u32,
+    member_ordinal: u32,
+) -> FixturePropRow<'a> {
+    FixturePropRow {
+        name,
+        optional,
+        type_text,
+        anchor: MacroAnchor::Authored {
+            macro_index,
+            member_ordinal: AuthoredMemberOrdinal::new(member_ordinal),
+        },
+    }
+}
+
+const fn root_prop<'a>(
+    name: &'a str,
+    optional: bool,
+    type_text: &'a str,
+    macro_index: u32,
+) -> FixturePropRow<'a> {
+    FixturePropRow {
+        name,
+        optional,
+        type_text,
+        anchor: MacroAnchor::MacroArgument { macro_index },
+    }
+}
+
+const fn authored_emit<'a>(
+    name: &'a str,
+    emit_parameters: &'a str,
+    handler_parameters: &'a str,
+    macro_index: u32,
+    member_ordinal: u32,
+) -> FixtureEmitRow<'a> {
+    FixtureEmitRow {
+        name,
+        emit_parameters,
+        handler_parameters,
+        anchor: MacroAnchor::Authored {
+            macro_index,
+            member_ordinal: AuthoredMemberOrdinal::new(member_ordinal),
+        },
+    }
+}
+
+const fn root_emit<'a>(
+    name: &'a str,
+    emit_parameters: &'a str,
+    handler_parameters: &'a str,
+    macro_index: u32,
+) -> FixtureEmitRow<'a> {
+    FixtureEmitRow {
+        name,
+        emit_parameters,
+        handler_parameters,
+        anchor: MacroAnchor::MacroArgument { macro_index },
+    }
+}
+
+fn props_fixture<'a>(public_type: &'a str, rows: &[FixturePropRow<'a>]) -> TscFixture<'a> {
+    props_fixture_at(0, public_type, rows, &[], &[])
+}
+
+fn props_fixture_at<'a>(
+    syntax_index: u32,
+    _public_type: &'a str,
+    rows: &[FixturePropRow<'a>],
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    props_fixture_identity(syntax_index, syntax_index, rows, imports, declarations)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn props_fixture_identity<'a>(
+    syntax_index: u32,
+    entry_macro_index: u32,
+    rows: &[FixturePropRow<'a>],
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    TscFixture::Props {
+        syntax_index,
+        entry_macro_index,
+        rows: rows.to_vec(),
+        imports,
+        declarations,
+    }
+}
+
+fn props_root_fixture_at<'a>(
+    syntax_index: u32,
+    _public_type: &'a str,
+    rows: &[FixturePropRow<'a>],
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    props_fixture_identity(syntax_index, syntax_index, rows, imports, declarations)
+}
+
+fn emits_fixture<'a>(events: &[FixtureEmitRow<'a>]) -> TscFixture<'a> {
+    emits_fixture_at(0, events, &[], &[])
+}
+
+fn emits_fixture_at<'a>(
+    syntax_index: u32,
+    events: &[FixtureEmitRow<'a>],
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    emits_fixture_identity(syntax_index, syntax_index, events, imports, declarations)
+}
+
+fn emits_fixture_identity<'a>(
+    syntax_index: u32,
+    entry_macro_index: u32,
+    events: &[FixtureEmitRow<'a>],
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    TscFixture::Emits {
+        syntax_index,
+        entry_macro_index,
+        events: events.to_vec(),
+        imports,
+        declarations,
+    }
+}
+
+fn model_fixture<'a>(name: &'a str, value_type: &'a str) -> TscFixture<'a> {
+    model_fixture_at(0, name, value_type, &[], &[])
+}
+
+fn model_fixture_at<'a>(
+    syntax_index: u32,
+    name: &'a str,
+    value_type: &'a str,
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    model_fixture_identity(
+        syntax_index,
+        syntax_index,
+        syntax_index,
+        name,
+        value_type,
+        imports,
+        declarations,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_fixture_identity<'a>(
+    syntax_index: u32,
+    entry_macro_index: u32,
+    anchor_macro_index: u32,
+    name: &'a str,
+    value_type: &'a str,
+    imports: &'a [&'a str],
+    declarations: &'a [(&'a str, &'a str)],
+) -> TscFixture<'a> {
+    TscFixture::Model {
+        syntax_index,
+        entry_macro_index,
+        anchor_macro_index,
+        name,
+        optional: true,
+        value_type,
+        imports,
+        declarations,
+    }
+}
+
+fn fixture_scope(imports: &[&str], declarations: &[(&str, &str)]) -> TscScopeRequirements {
+    TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: imports
+            .iter()
+            .map(|name| TscRetainedBinding {
+                owner: TscScriptOwner::Setup,
+                local_name: (*name).to_owned(),
+                usage: TscBindingUsage::TypePosition,
+            })
+            .collect(),
+        dependency_declarations: declarations
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _declaration))| TscDependencyDeclaration {
+                owner: TscScriptOwner::Setup,
+                name: (*name).to_owned(),
+                contributor_ordinal: declarations[..index]
+                    .iter()
+                    .filter(|(previous, _)| previous == name)
+                    .count() as u32,
+                owner_value_dependencies: Vec::new(),
+                retained_value_carriers: Vec::new(),
+                declaration_failure: None,
+                inferred_class_members: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn fixture_bundle(fixtures: &[TscFixture<'_>]) -> MacroTscBundle {
+    MacroTscBundle {
+        entries: fixtures
+            .iter()
+            .map(|fixture| match fixture {
+                TscFixture::Props {
+                    syntax_index,
+                    entry_macro_index,
+                    rows,
+                    imports,
+                    declarations,
+                } => MacroTscEntry {
+                    syntax_index: *syntax_index,
+                    macro_index: *entry_macro_index,
+                    outcome: MacroTscOutcome::Complete(MacroTscProjection::Props(
+                        TscPropsProjection {
+                            public: TscPublicPropsProjection::AuthoredArgument {
+                                anchor: MacroAnchor::MacroArgument {
+                                    macro_index: *syntax_index,
+                                },
+                            },
+                            testing_rows: rows
+                                .iter()
+                                .map(|row| TscPropRow {
+                                    name: row.name.to_owned(),
+                                    optional: row.optional,
+                                    type_text: TscSpliceText::new(row.type_text),
+                                    anchor: row.anchor,
+                                })
+                                .collect(),
+                            scope: fixture_scope(imports, declarations),
+                        },
+                    )),
+                },
+                TscFixture::Emits {
+                    syntax_index,
+                    entry_macro_index,
+                    events,
+                    imports,
+                    declarations,
+                } => MacroTscEntry {
+                    syntax_index: *syntax_index,
+                    macro_index: *entry_macro_index,
+                    outcome: MacroTscOutcome::Complete(MacroTscProjection::Emits(
+                        TscEmitsProjection {
+                            events: events
+                                .iter()
+                                .map(|row| TscEmitRow {
+                                    name: row.name.to_owned(),
+                                    emit_parameters: TscSpliceText::new(row.emit_parameters),
+                                    handler_parameters: TscSpliceText::new(row.handler_parameters),
+                                    anchor: row.anchor,
+                                })
+                                .collect(),
+                            scope: fixture_scope(imports, declarations),
+                        },
+                    )),
+                },
+                TscFixture::Model {
+                    syntax_index,
+                    entry_macro_index,
+                    anchor_macro_index,
+                    name,
+                    optional,
+                    value_type,
+                    imports,
+                    declarations,
+                } => MacroTscEntry {
+                    syntax_index: *syntax_index,
+                    macro_index: *entry_macro_index,
+                    outcome: MacroTscOutcome::Complete(MacroTscProjection::Model(
+                        TscModelProjection {
+                            name: (*name).to_owned(),
+                            optional: *optional,
+                            value_type: TscSpliceText::new(*value_type),
+                            anchor: MacroAnchor::Synthesized {
+                                macro_index: *anchor_macro_index,
+                                row: SynthesizedRowKind::ModelProp,
+                            },
+                            scope: fixture_scope(imports, declarations),
+                        },
+                    )),
+                },
+            })
+            .collect(),
+    }
+}
+
+fn props_bundle_with_scope(scope: TscScopeRequirements) -> MacroTscBundle {
+    MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+                public: TscPublicPropsProjection::AuthoredArgument {
+                    anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                },
+                testing_rows: Vec::new(),
+                scope,
+            })),
+        }],
+    }
+}
+
+fn gen_tsc_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> String {
+    gen_tsc_output_with(sfc, fixtures).code
+}
+
+fn gen_tsc_output_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> super::script::TscOutput {
+    gen_tsc_mode_with(sfc, TscMode::Public, fixtures)
+}
+
+fn gen_tsc_mode_with(
+    sfc: &str,
+    mode: TscMode,
+    fixtures: &[TscFixture<'_>],
+) -> super::script::TscOutput {
+    let bundle = fixture_bundle(fixtures);
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+            mode,
+            ..Default::default()
+        },
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect("explicit TSC fixture must match typed macro syntax")
+}
+
+const fn macro_subject(syntax_index: u32) -> super::script::TscFailureSubject {
+    super::script::TscFailureSubject::Macro { syntax_index }
+}
+
+#[test]
+fn direct_tsc_rejects_typed_macro_without_authoritative_semantics() {
+    let error = generate_tsc_output_with_options(
+        r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
+        "TestComp",
+        &TscGenOptions::default(),
+        MacroTscInput::NotRequired,
+    )
+    .expect_err("typed macro must reject NotRequired");
+
+    assert_eq!(
+        error,
+        super::script::TscGenerationError::MissingAuthoritativeSemantics {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+fn generate_with_bundle(
+    source: &str,
+    mode: TscMode,
+    bundle: &MacroTscBundle,
+) -> Result<super::script::TscOutput, super::script::TscGenerationError> {
+    generate_tsc_output_with_options(
+        source,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_owned()),
+            mode,
+            ..Default::default()
+        },
+        MacroTscInput::Authoritative(bundle),
+    )
+}
+
+fn dependency(
+    name: &str,
+    inferred_class_members: Vec<TscInferredClassMember>,
+) -> TscDependencyDeclaration {
+    dependency_for(TscScriptOwner::Setup, name, inferred_class_members)
+}
+
+fn dependency_for(
+    owner: TscScriptOwner,
+    name: &str,
+    inferred_class_members: Vec<TscInferredClassMember>,
+) -> TscDependencyDeclaration {
+    TscDependencyDeclaration {
+        owner,
+        name: name.to_owned(),
+        contributor_ordinal: 0,
+        owner_value_dependencies: Vec::new(),
+        retained_value_carriers: Vec::new(),
+        declaration_failure: None,
+        inferred_class_members,
+    }
+}
+
+fn inferred_class_member(
+    name: &str,
+    occurrence: u32,
+    is_static: bool,
+    position: TscInferredClassTypePosition,
+    type_text: &str,
+) -> TscInferredClassMember {
+    TscInferredClassMember {
+        name: name.to_owned(),
+        occurrence,
+        is_static,
+        position,
+        type_text: TscSpliceText::new(type_text),
+    }
+}
+
+#[test]
+fn authoritative_tsc_bundle_is_a_closed_exact_join() {
+    let source = r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#;
+    let valid = fixture_bundle(&[props_fixture("", &[])]);
+
+    assert_eq!(
+        generate_with_bundle(source, TscMode::Public, &MacroTscBundle::default()).unwrap_err(),
+        super::script::TscGenerationError::MissingEntry {
+            subject: macro_subject(0),
+        }
+    );
+
+    let mut duplicate = valid.clone();
+    duplicate.entries.push(duplicate.entries[0].clone());
+    assert_eq!(
+        generate_with_bundle(source, TscMode::Public, &duplicate).unwrap_err(),
+        super::script::TscGenerationError::DuplicateEntry {
+            subject: macro_subject(0),
+        }
+    );
+
+    let wrong_role = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Emits(TscEmitsProjection {
+                events: Vec::new(),
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+    assert_eq!(
+        generate_with_bundle(source, TscMode::Public, &wrong_role).unwrap_err(),
+        super::script::TscGenerationError::RoleMismatch {
+            subject: macro_subject(0),
+        }
+    );
+
+    let unavailable_cases = [
+        (
+            MacroTscOutcome::Partial(MacroFailure::new(
+                MacroPartialReason::IncompleteTraversal,
+                Some("partial detail".to_owned()),
+            )),
+            super::script::TscUnavailableOutcome::Partial(MacroFailure::new(
+                MacroPartialReason::IncompleteTraversal,
+                Some("partial detail".to_owned()),
+            )),
+        ),
+        (
+            MacroTscOutcome::Unresolved(MacroFailure::new(
+                UnresolvedReason::AmbiguousReference,
+                Some("unresolved detail".to_owned()),
+            )),
+            super::script::TscUnavailableOutcome::Unresolved(MacroFailure::new(
+                UnresolvedReason::AmbiguousReference,
+                Some("unresolved detail".to_owned()),
+            )),
+        ),
+        (
+            MacroTscOutcome::Unsupported(MacroFailure::new(
+                UnsupportedReason::SemanticConstruct,
+                Some("unsupported detail".to_owned()),
+            )),
+            super::script::TscUnavailableOutcome::Unsupported(MacroFailure::new(
+                UnsupportedReason::SemanticConstruct,
+                Some("unsupported detail".to_owned()),
+            )),
+        ),
+        (
+            MacroTscOutcome::Invalid(MacroFailure::new(
+                MacroInvalidReason::NonObjectRoot,
+                Some("invalid detail".to_owned()),
+            )),
+            super::script::TscUnavailableOutcome::Invalid(super::script::TscInvalidOutcome::Macro(
+                MacroFailure::new(
+                    MacroInvalidReason::NonObjectRoot,
+                    Some("invalid detail".to_owned()),
+                ),
+            )),
+        ),
+    ];
+    for (outcome, expected) in unavailable_cases {
+        let unavailable = MacroTscBundle {
+            entries: vec![MacroTscEntry {
+                syntax_index: 0,
+                macro_index: 0,
+                outcome,
+            }],
+        };
+        assert_eq!(
+            generate_with_bundle(source, TscMode::Public, &unavailable).unwrap_err(),
+            super::script::TscGenerationError::UnavailableOutcome {
+                subject: macro_subject(0),
+                outcome: expected,
+            }
+        );
+    }
+
+    let mut extra = valid;
+    extra.entries.push(MacroTscEntry {
+        syntax_index: 9,
+        macro_index: 9,
+        outcome: MacroTscOutcome::Unsupported(MacroFailure::new(
+            UnsupportedReason::MacroKind,
+            None,
+        )),
+    });
+    assert_eq!(
+        generate_with_bundle(source, TscMode::Public, &extra).unwrap_err(),
+        super::script::TscGenerationError::UnexpectedEntry {
+            subject: macro_subject(9),
+        }
+    );
+}
+
+#[test]
+fn macro_entries_and_row_anchors_join_parser_owned_identities_and_roles() {
+    let with_defaults = r#"<script setup lang="ts">
+withDefaults(defineProps<{ value?: string }>(), { value: "x" })
+</script>"#;
+    let valid = fixture_bundle(&[props_fixture_identity(
+        0,
+        1,
+        &[authored_prop("value", true, "string", 0, 0)],
+        &[],
+        &[],
+    )]);
+    generate_with_bundle(with_defaults, TscMode::Testing, &valid)
+        .expect("withDefaults payload and effective identities are intentionally distinct");
+
+    let mut wrong_public_payload = fixture_bundle(&[props_fixture_identity(0, 1, &[], &[], &[])]);
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) =
+        &mut wrong_public_payload.entries[0].outcome
+    else {
+        unreachable!();
+    };
+    props.public = TscPublicPropsProjection::AuthoredArgument {
+        anchor: MacroAnchor::MacroArgument { macro_index: 1 },
+    };
+    assert_eq!(
+        generate_with_bundle(with_defaults, TscMode::Testing, &wrong_public_payload).unwrap_err(),
+        super::script::TscGenerationError::InvalidMacroAnchor {
+            subject: macro_subject(0),
+        },
+        "public authored syntax must retain its exact payload identity even without testing rows"
+    );
+
+    let wrong_entry = fixture_bundle(&[props_fixture_identity(
+        0,
+        0,
+        &[authored_prop("value", true, "string", 0, 0)],
+        &[],
+        &[],
+    )]);
+    assert_eq!(
+        generate_with_bundle(with_defaults, TscMode::Testing, &wrong_entry).unwrap_err(),
+        super::script::TscGenerationError::MacroIdentityMismatch {
+            subject: macro_subject(0),
+        }
+    );
+
+    let wrong_payload_anchor = fixture_bundle(&[props_fixture_identity(
+        0,
+        1,
+        &[authored_prop("value", true, "string", 1, 0)],
+        &[],
+        &[],
+    )]);
+    assert_eq!(
+        generate_with_bundle(with_defaults, TscMode::Testing, &wrong_payload_anchor).unwrap_err(),
+        super::script::TscGenerationError::InvalidMacroAnchor {
+            subject: macro_subject(0),
+        }
+    );
+
+    let forged_props_row = FixturePropRow {
+        name: "value",
+        optional: false,
+        type_text: "string",
+        anchor: MacroAnchor::Synthesized {
+            macro_index: 1,
+            row: SynthesizedRowKind::ModelModifiersProp,
+        },
+    };
+    let wrong_kind = fixture_bundle(&[props_fixture_identity(0, 1, &[forged_props_row], &[], &[])]);
+    assert_eq!(
+        generate_with_bundle(with_defaults, TscMode::Testing, &wrong_kind).unwrap_err(),
+        super::script::TscGenerationError::InvalidMacroAnchor {
+            subject: macro_subject(0),
+        }
+    );
+
+    let model_source = r#"<script setup lang="ts">defineModel<string>('title')</script>"#;
+    let wrong_model_row =
+        fixture_bundle(&[model_fixture_identity(0, 0, 0, "title", "string", &[], &[])]);
+    let mut wrong_model_row = wrong_model_row;
+    let MacroTscOutcome::Complete(MacroTscProjection::Model(model)) =
+        &mut wrong_model_row.entries[0].outcome
+    else {
+        unreachable!()
+    };
+    model.anchor = MacroAnchor::Synthesized {
+        macro_index: 0,
+        row: SynthesizedRowKind::ModelUpdateEvent,
+    };
+    assert_eq!(
+        generate_with_bundle(model_source, TscMode::Public, &wrong_model_row).unwrap_err(),
+        super::script::TscGenerationError::InvalidMacroAnchor {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn no_typed_macro_rejects_every_authoritative_extra_on_all_early_paths() {
+    let extra = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 7,
+            macro_index: 7,
+            outcome: MacroTscOutcome::Unsupported(MacroFailure::new(
+                UnsupportedReason::MacroKind,
+                None,
+            )),
+        }],
+    };
+    for source in [
+        "<template />",
+        "<script setup lang=\"ts\"></script>",
+        "<script>export default {}</script>",
+    ] {
+        assert_eq!(
+            generate_with_bundle(source, TscMode::Public, &extra).unwrap_err(),
+            super::script::TscGenerationError::UnexpectedEntry {
+                subject: macro_subject(7),
+            },
+            "source: {source}"
+        );
+    }
+}
+
+#[test]
+fn local_class_carriers_follow_the_owner_body_mode_matrix() {
+    let source = r#"<script setup lang="ts">
+class Payload { value = 1 }
+defineProps<Payload>()
+</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency(
+            "Payload",
+            vec![inferred_class_member(
+                "value",
+                0,
+                false,
+                TscInferredClassTypePosition::Property,
+                "number",
+            )],
+        )],
+    });
+
+    let testing = generate_with_bundle(source, TscMode::Testing, &bundle).unwrap();
+    assert!(testing.code.contains("class Payload { value = 1 }"));
+    assert!(!testing.code.contains("declare class Payload"));
+
+    for mode in [TscMode::Public, TscMode::Declaration] {
+        let output = generate_with_bundle(source, mode, &bundle).unwrap();
+        assert!(output
+            .code
+            .contains("declare class Payload { value: number }"));
+        assert!(!output.code.contains("value = 1"));
+    }
+
+    let exposed = source.replace(
+        "defineProps<Payload>()",
+        "defineProps<Payload>()\nconst exposed = 1\ndefineExpose({ exposed })",
+    );
+    let public = generate_with_bundle(&exposed, TscMode::Public, &bundle).unwrap();
+    assert!(public.code.contains("class Payload { value = 1 }"));
+    assert!(!public.code.contains("declare class Payload"));
+}
+
+#[test]
+fn companion_class_carrier_is_declaration_safe_in_every_mode() {
+    let source = r#"<script lang="ts">class Companion { value = 1 }</script>
+<script setup lang="ts">defineProps<Companion>()</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency_for(
+            TscScriptOwner::Companion,
+            "Companion",
+            vec![inferred_class_member(
+                "value",
+                0,
+                false,
+                TscInferredClassTypePosition::Property,
+                "number",
+            )],
+        )],
+    });
+
+    for mode in [TscMode::Testing, TscMode::Public, TscMode::Declaration] {
+        let output = generate_with_bundle(source, mode, &bundle).unwrap();
+        assert!(output
+            .code
+            .contains("declare class Companion { value: number }"));
+        assert!(!output.code.contains("value = 1"));
+    }
+}
+
+#[test]
+fn owner_value_dependencies_are_rejected_only_when_the_owner_body_is_omitted() {
+    let source = r#"<script setup lang="ts">
+const seed = { value: "x" }
+type Props = { value: typeof seed }
+defineProps<Props>()
+</script>"#;
+    let mut declaration = dependency("Props", Vec::new());
+    declaration.owner_value_dependencies = vec![TscOwnerValueDependency {
+        owner: TscScriptOwner::Setup,
+        name: "seed".to_owned(),
+    }];
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![declaration],
+    });
+
+    generate_with_bundle(source, TscMode::Testing, &bundle).unwrap();
+    for mode in [TscMode::Public, TscMode::Declaration] {
+        assert_eq!(
+            generate_with_bundle(source, mode, &bundle).unwrap_err(),
+            super::script::TscGenerationError::UnsupportedDeclarationShape {
+                subject: macro_subject(0),
+                reason: super::script::TscDeclarationShapeReason::OwnerValueDependencyUnavailable,
+            }
+        );
+    }
+
+    let exposed = source.replace(
+        "defineProps<Props>()",
+        "defineProps<Props>()\nconst exposed = 1\ndefineExpose({ exposed })",
+    );
+    generate_with_bundle(&exposed, TscMode::Public, &bundle).unwrap();
+}
+
+#[test]
+fn exact_dual_space_value_carriers_are_validated_across_body_modes_and_owners() {
+    let source = r#"<script lang="ts">
+class Base {}
+</script>
+<script setup lang="ts">
+class Base {}
+enum Kind { Ready }
+class Payload { ctor = Base; kind = Kind }
+defineProps<Payload>()
+</script>"#;
+    let mut payload = dependency(
+        "Payload",
+        vec![
+            inferred_class_member(
+                "ctor",
+                0,
+                false,
+                TscInferredClassTypePosition::Property,
+                "typeof Base",
+            ),
+            inferred_class_member(
+                "kind",
+                0,
+                false,
+                TscInferredClassTypePosition::Property,
+                "typeof Kind",
+            ),
+        ],
+    );
+    payload.retained_value_carriers = vec![
+        TscRetainedValueCarrier {
+            owner: TscScriptOwner::Setup,
+            name: "Base".to_owned(),
+            contributor_ordinal: 0,
+        },
+        TscRetainedValueCarrier {
+            owner: TscScriptOwner::Setup,
+            name: "Kind".to_owned(),
+            contributor_ordinal: 0,
+        },
+    ];
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![
+            dependency("Base", Vec::new()),
+            dependency("Kind", Vec::new()),
+            payload.clone(),
+        ],
+    });
+
+    let testing = generate_with_bundle(source, TscMode::Testing, &bundle).unwrap();
+    assert!(testing
+        .code
+        .contains("class Payload { ctor = Base; kind = Kind }"));
+    for mode in [TscMode::Public, TscMode::Declaration] {
+        let output = generate_with_bundle(source, mode, &bundle).unwrap();
+        assert_generated_tsx_parses(&output.code);
+        assert!(
+            output.code.contains("declare class Base"),
+            "{mode:?}: {}",
+            output.code
+        );
+        assert!(
+            output.code.contains("declare enum Kind"),
+            "{mode:?}: {}",
+            output.code
+        );
+        assert!(
+            output.code.contains("ctor: typeof Base"),
+            "{mode:?}: {}",
+            output.code
+        );
+        assert!(
+            output.code.contains("kind: typeof Kind"),
+            "{mode:?}: {}",
+            output.code
+        );
+    }
+
+    let mut wrong_owner = payload;
+    wrong_owner.retained_value_carriers[0].owner = TscScriptOwner::Companion;
+    let wrong_owner = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![
+            dependency("Base", Vec::new()),
+            dependency("Kind", Vec::new()),
+            wrong_owner,
+        ],
+    });
+    assert_eq!(
+        generate_with_bundle(source, TscMode::Public, &wrong_owner).unwrap_err(),
+        super::script::TscGenerationError::MissingScopeDeclaration {
+            subject: macro_subject(0),
+        }
+    );
+}
+
+#[test]
+fn retained_import_join_is_closed_over_script_owner_and_local_name() {
+    let source = r#"<script lang="ts">
+import type { Companion as Shared } from './companion'
+</script>
+<script setup lang="ts">
+import type { Setup as Shared } from './setup'
+defineProps<Shared>()
+</script>"#;
+
+    for (owner, expected) in [
+        (
+            TscScriptOwner::Setup,
+            "import type { Setup as Shared } from './setup'",
+        ),
+        (
+            TscScriptOwner::Companion,
+            "import type { Companion as Shared } from './companion'",
+        ),
+    ] {
+        let bundle = props_bundle_with_scope(TscScopeRequirements {
+            owner_value_dependencies: Vec::new(),
+            retained_bindings: vec![TscRetainedBinding {
+                owner,
+                local_name: "Shared".to_owned(),
+                usage: TscBindingUsage::TypePosition,
+            }],
+            dependency_declarations: Vec::new(),
+        });
+        for mode in [TscMode::Public, TscMode::Testing, TscMode::Declaration] {
+            let output = generate_with_bundle(source, mode, &bundle).unwrap();
+            assert!(
+                output.code.contains(expected),
+                "mode={mode:?}, owner={owner:?}, output:\n{}",
+                output.code
+            );
+        }
+    }
+}
+
+#[test]
+fn retained_declaration_join_uses_owner_local_contributor_ordinals() {
+    let source = r#"<script lang="ts">
+interface Props { companionMarker: string }
+</script>
+<script setup lang="ts">
+interface Props { setupMarker: number }
+defineProps<Props>()
+</script>"#;
+
+    for owner in [TscScriptOwner::Setup, TscScriptOwner::Companion] {
+        let bundle = props_bundle_with_scope(TscScopeRequirements {
+            owner_value_dependencies: Vec::new(),
+            retained_bindings: Vec::new(),
+            dependency_declarations: vec![dependency_for(owner, "Props", Vec::new())],
+        });
+        for mode in [TscMode::Public, TscMode::Testing, TscMode::Declaration] {
+            let output = generate_with_bundle(source, mode, &bundle).unwrap();
+            let selected = match owner {
+                TscScriptOwner::Setup => "setupMarker",
+                TscScriptOwner::Companion => "companionMarker",
+            };
+            assert!(
+                output.code.contains(selected),
+                "mode={mode:?}, owner={owner:?}, output:\n{}",
+                output.code
+            );
+            if owner == TscScriptOwner::Setup {
+                assert!(
+                    !output.code.contains("companionMarker"),
+                    "owner-local ordinal 0 must not select companion ordinal 0: {}",
+                    output.code
+                );
+            }
+        }
+    }
+}
+
+fn assert_generated_tsx_parses(code: &str) {
+    let allocator = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "generated TSC output must parse as TSX: {:?}\n{code}",
+        parsed.errors
+    );
+}
+
+#[test]
+fn enum_carriers_preserve_only_exact_finite_constant_initializers() {
+    let source = r#"<script setup lang="ts">
+enum Base { Zero, Arithmetic = Zero + 2, Shift = Arithmetic << 1, Text = "x" }
+enum Derived { Alias = Base.Shift, Computed = Base["Arithmetic"] + 3 }
+const enum ConstKind { Negative = -1, Next = Negative + 3 }
+export enum ExportedKind { Copy = Derived.Alias }
+enum Merged { First = 1 }
+enum Merged { Second = First + 1 }
+defineProps<{
+  base: Base
+  derived: Derived
+  constKind: ConstKind
+  exported: ExportedKind
+  merged: Merged
+}>()
+</script>"#;
+    let mut merged_second = dependency("Merged", Vec::new());
+    merged_second.contributor_ordinal = 1;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![
+            dependency("Base", Vec::new()),
+            dependency("Derived", Vec::new()),
+            dependency("ConstKind", Vec::new()),
+            dependency("ExportedKind", Vec::new()),
+            dependency("Merged", Vec::new()),
+            merged_second,
+        ],
+    });
+
+    for mode in [TscMode::Public, TscMode::Declaration] {
+        let output = generate_with_bundle(source, mode, &bundle).unwrap();
+        assert_generated_tsx_parses(&output.code);
+        assert!(output.code.contains("declare enum Base"), "{}", output.code);
+        assert!(output.code.contains("Arithmetic = 2"), "{}", output.code);
+        assert!(output.code.contains("Shift = 4"), "{}", output.code);
+        assert!(output.code.contains("Text = \"x\""));
+        assert!(
+            output.code.contains("declare enum Derived"),
+            "{}",
+            output.code
+        );
+        assert!(output.code.contains("Alias = 4"), "{}", output.code);
+        assert!(output.code.contains("Computed = 5"), "{}", output.code);
+        assert!(
+            output.code.contains("declare const enum ConstKind"),
+            "{}",
+            output.code
+        );
+        assert!(output.code.contains("Negative = -1"), "{}", output.code);
+        assert!(output.code.contains("Next = 2"), "{}", output.code);
+        assert!(
+            output.code.contains("export declare enum ExportedKind"),
+            "{}",
+            output.code
+        );
+        assert!(output.code.contains("Copy = 4"), "{}", output.code);
+        assert_eq!(output.code.matches("declare enum Merged").count(), 2);
+        assert!(output.code.contains("First = 1"), "{}", output.code);
+        assert!(output.code.contains("Second = 2"), "{}", output.code);
+    }
+    let testing = generate_with_bundle(source, TscMode::Testing, &bundle).unwrap();
+    assert_generated_tsx_parses(&testing.code);
+    assert!(testing.code.contains("enum Base"));
+    assert!(testing.code.contains("Base.Shift"));
+    assert!(!testing.code.contains("declare enum Base"));
+}
+
+#[test]
+fn enum_carriers_reject_unrepresentable_initializers_in_body_omitting_modes() {
+    use super::script::{TscDeclarationShapeReason as Reason, TscGenerationError as Error};
+
+    let cases = [
+        ("global call", "Math.random()"),
+        ("global date call", "Date.now()"),
+        ("local call", "seed()"),
+        ("imported call", "importedSeed()"),
+        ("non-finite NaN", "NaN"),
+        ("non-finite Infinity", "Infinity"),
+    ];
+
+    for (label, initializer) in cases {
+        let source = format!(
+            r#"<script setup lang="ts">
+import {{ seed as importedSeed }} from "./seed"
+const seed = () => 1
+enum Payload {{ Value = {initializer} }}
+defineProps<Payload>()
+</script>"#
+        );
+        let bundle = props_bundle_with_scope(TscScopeRequirements {
+            owner_value_dependencies: Vec::new(),
+            retained_bindings: Vec::new(),
+            dependency_declarations: vec![dependency("Payload", Vec::new())],
+        });
+
+        for mode in [TscMode::Public, TscMode::Declaration] {
+            assert_eq!(
+                generate_with_bundle(&source, mode, &bundle).unwrap_err(),
+                Error::UnsupportedDeclarationShape {
+                    subject: macro_subject(0),
+                    reason: Reason::UnsupportedEnumShape,
+                },
+                "case={label}, mode={mode:?}"
+            );
+        }
+
+        let testing = generate_with_bundle(&source, TscMode::Testing, &bundle).unwrap();
+        assert_generated_tsx_parses(&testing.code);
+        assert!(
+            testing.code.contains(initializer),
+            "testing mode must preserve the runtime initializer for {label}: {}",
+            testing.code
+        );
+    }
+}
+
+fn declaration_shape_error(class_source: &str) -> super::script::TscGenerationError {
+    let source =
+        format!("<script setup lang=\"ts\">\n{class_source}\ndefineProps<Payload>()\n</script>");
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency("Payload", Vec::new())],
+    });
+    generate_with_bundle(&source, TscMode::Declaration, &bundle).unwrap_err()
+}
+
+#[test]
+fn typeinfo_declaration_failure_codes_are_exact_and_lossless() {
+    use super::script::TscDeclarationShapeReason as Reason;
+
+    let cases = [
+        (
+            TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+            ),
+            "semantic-inference-depth-budget-exceeded",
+        ),
+        (
+            TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+            ),
+            "semantic-inference-work-budget-exceeded",
+        ),
+        (
+            TscDeclarationFailureReason::Unsupported(UnsupportedReason::MacroKind),
+            "semantic-inference-unsupported-macro-kind",
+        ),
+        (
+            TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct),
+            "semantic-inference-unsupported-construct",
+        ),
+        (
+            TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingTypeArgument),
+            "semantic-inference-missing-type-argument",
+        ),
+        (
+            TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDeclaration),
+            "semantic-inference-missing-declaration",
+        ),
+        (
+            TscDeclarationFailureReason::Unresolved(UnresolvedReason::AmbiguousReference),
+            "semantic-inference-ambiguous-reference",
+        ),
+        (
+            TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDependency),
+            "semantic-inference-missing-dependency",
+        ),
+    ];
+
+    for (failure, expected) in cases {
+        let code = Reason::TypeInfoDeclarationFailure(failure).code();
+        assert_eq!(code, expected);
+        assert_ne!(code, "semantic-inference-unavailable");
+    }
+}
+
+#[test]
+fn typeinfo_declaration_budget_detail_survives_the_compiler_boundary() {
+    use super::script::{TscDeclarationShapeReason as Reason, TscGenerationError as Error};
+
+    for detail in [
+        TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+        TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+    ] {
+        let mut declaration = dependency("Payload", Vec::new());
+        declaration.declaration_failure = Some(
+            TscDeclarationFailureReason::SemanticInferenceUnavailable(detail),
+        );
+        let bundle = props_bundle_with_scope(TscScopeRequirements {
+            owner_value_dependencies: Vec::new(),
+            retained_bindings: Vec::new(),
+            dependency_declarations: vec![declaration],
+        });
+        let source = r#"<script setup lang="ts">
+class Payload {}
+defineProps<Payload>()
+</script>"#;
+
+        assert_eq!(
+            generate_with_bundle(source, TscMode::Declaration, &bundle).unwrap_err(),
+            Error::UnsupportedDeclarationShape {
+                subject: macro_subject(0),
+                reason: Reason::TypeInfoDeclarationFailure(
+                    TscDeclarationFailureReason::SemanticInferenceUnavailable(detail),
+                ),
+            }
+        );
+    }
+}
+
+#[test]
+fn unsupported_class_shapes_have_closed_typed_reasons() {
+    use super::script::{TscDeclarationShapeReason as Reason, TscGenerationError as Error};
+
+    let cases = [
+        ("@sealed class Payload {}", Reason::ClassDecorator),
+        (
+            "class Payload extends mixin(Base) {}",
+            Reason::ComplexClassHeritage,
+        ),
+        (
+            "class Payload { @dec value = 1 }",
+            Reason::DecoratedClassMember,
+        ),
+        (
+            "class Payload { [key]: string }",
+            Reason::ComputedClassMember,
+        ),
+        ("class Payload { #value = 1 }", Reason::PrivateClassMember),
+        (
+            "class Payload { method(...args: string[]) {} }",
+            Reason::RestClassParameter,
+        ),
+        (
+            "class Payload { method({ value }: { value: string }) {} }",
+            Reason::DestructuredClassParameter,
+        ),
+        (
+            "class Payload { method(@dec value: string) {} }",
+            Reason::DecoratedClassParameter,
+        ),
+        (
+            "class Payload { constructor(value: string); constructor(value: unknown) {} }",
+            Reason::ConstructorOverload,
+        ),
+    ];
+
+    for (source, reason) in cases {
+        assert_eq!(
+            declaration_shape_error(source),
+            Error::UnsupportedDeclarationShape {
+                subject: macro_subject(0),
+                reason,
+            },
+            "source: {source}"
+        );
+    }
+}
+
+#[test]
+fn supported_class_projection_covers_static_generic_accessors_and_parameter_properties() {
+    let source = r#"<script setup lang="ts">
+interface Base<T> {}
+class Payload<T extends string> implements Base<T> {
+  static count: number
+  readonly literal = 1
+  value = 1
+  constructor(public id?: number, protected name = "x") {}
+  method(input = 1) { return input }
+  get label() { return "x" }
+  set label(value: string) {}
+}
+defineProps<{ payload: Payload<"x"> }>()
+</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![
+            dependency("Base", Vec::new()),
+            dependency(
+                "Payload",
+                vec![
+                    inferred_class_member(
+                        "literal",
+                        0,
+                        false,
+                        TscInferredClassTypePosition::Property,
+                        "1",
+                    ),
+                    inferred_class_member(
+                        "value",
+                        0,
+                        false,
+                        TscInferredClassTypePosition::Property,
+                        "number",
+                    ),
+                    inferred_class_member(
+                        "name",
+                        0,
+                        false,
+                        TscInferredClassTypePosition::Property,
+                        "string",
+                    ),
+                    inferred_class_member(
+                        "input",
+                        0,
+                        false,
+                        TscInferredClassTypePosition::Parameter,
+                        "number",
+                    ),
+                    inferred_class_member(
+                        "method",
+                        0,
+                        false,
+                        TscInferredClassTypePosition::Return,
+                        "number",
+                    ),
+                    inferred_class_member(
+                        "label",
+                        0,
+                        false,
+                        TscInferredClassTypePosition::Return,
+                        "string",
+                    ),
+                ],
+            ),
+        ],
+    });
+
+    let code = generate_with_bundle(source, TscMode::Declaration, &bundle)
+        .unwrap()
+        .code;
+    let compact = code
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert!(compact.contains("declareclassPayload<Textendsstring>implementsBase<T>"));
+    assert!(compact.contains("staticcount:number"));
+    assert!(compact.contains("readonlyliteral:1"));
+    assert!(compact.contains("value:number"));
+    assert!(compact.contains("id?:number;"));
+    assert!(compact.contains("protectedname:string;"));
+    assert!(compact.contains("constructor(id?:number,name?:string);"));
+    assert!(compact.contains("method(input?:number):number;"));
+    assert!(compact.contains("getlabel():string;"));
+    assert!(compact.contains("setlabel(value:string);"));
+    assert!(!code.contains("return input"));
+    assert!(!code.contains("= 1"));
+}
+
+#[test]
+fn method_overload_implementation_is_removed_without_inference_rows() {
+    let source = r#"<script setup lang="ts">
+class Payload {
+  method(value: string): string
+  method(value: number): number
+  method(value: string | number) { return value }
+}
+defineProps<Payload>()
+</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency("Payload", Vec::new())],
+    });
+    let code = generate_with_bundle(source, TscMode::Declaration, &bundle)
+        .unwrap()
+        .code;
+    assert_eq!(code.matches("method(").count(), 2, "{code}");
+    assert!(!code.contains("string | number"), "{code}");
+    assert!(!code.contains("return value"), "{code}");
+}
+
+#[test]
+fn ambient_constructor_signatures_are_preserved() {
+    let source = r#"<script setup lang="ts">
+declare class Payload {
+  constructor(value: string)
+  constructor(value: number)
+}
+defineProps<Payload>()
+</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency("Payload", Vec::new())],
+    });
+    let code = generate_with_bundle(source, TscMode::Declaration, &bundle)
+        .unwrap()
+        .code;
+    assert_eq!(code.matches("constructor(").count(), 2, "{code}");
+}
+
+#[test]
+fn type_and_value_declaration_carriers_satisfy_typeof_value_dependencies() {
+    let source = r#"<script setup lang="ts">
+class Base {}
+type Props = { ctor: typeof Base }
+defineProps<Props>()
+</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![
+            dependency("Base", Vec::new()),
+            dependency("Props", Vec::new()),
+        ],
+    });
+    let code = generate_with_bundle(source, TscMode::Declaration, &bundle)
+        .unwrap()
+        .code;
+    assert!(code.contains("declare class Base"));
+    assert!(code.contains("typeof Base"));
+
+    let self_source = r#"<script setup lang="ts">
+class Payload { peer!: typeof Payload }
+defineProps<Payload>()
+</script>"#;
+    let self_bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency("Payload", Vec::new())],
+    });
+    let self_code = generate_with_bundle(self_source, TscMode::Declaration, &self_bundle)
+        .unwrap()
+        .code;
+    assert!(self_code.contains("peer: typeof Payload"), "{self_code}");
+}
+
+#[test]
+fn explicit_props_fixture_drives_testing_rows_and_typed_import_retention() {
+    let source = r#"<script setup lang="ts">
+import type { External } from './types'
+defineProps<External>()
+</script>"#;
+    let output = gen_tsc_mode_with(
+        source,
+        TscMode::Testing,
+        &[props_root_fixture_at(
+            0,
+            "External",
+            &[root_prop("value", false, "External['value']", 0)],
+            &["External"],
+            &[],
+        )],
+    );
+
+    assert!(output
+        .code
+        .contains("import type { External } from './types'"));
+    assert!(output
+        .code
+        .contains("declare const value: External['value']"));
+    assert!(output
+        .code
+        .contains("$props: import(\"vue\").PublicProps & External"));
+}
+
+/// Mutation recipe: synthesize `state.emits_names` from the authoritative TSC
+/// event rows. The exact public handler/overload may still pass, but the
+/// runtime-`emits` negative assertion must fail because TSC and runtime bundles
+/// are independent authorities.
+#[test]
+fn explicit_emit_fixture_drives_emit_and_handler_parameter_contracts() {
+    let source = r#"<script setup lang="ts">defineEmits<{ save: [id: number] }>()</script>"#;
+    let bundle = MacroTscBundle {
+        entries: vec![MacroTscEntry {
+            syntax_index: 0,
+            macro_index: 0,
+            outcome: MacroTscOutcome::Complete(MacroTscProjection::Emits(TscEmitsProjection {
+                events: vec![TscEmitRow {
+                    name: "save".to_owned(),
+                    emit_parameters: TscSpliceText::new("id: number"),
+                    handler_parameters: TscSpliceText::new("payload: number"),
+                    anchor: MacroAnchor::MacroArgument { macro_index: 0 },
+                }],
+                scope: TscScopeRequirements::default(),
+            })),
+        }],
+    };
+    let output = generate_tsc_output_with_options(
+        source,
+        "TestComp",
+        &TscGenOptions::default(),
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect("explicit emit DTO");
+
+    assert!(output
+        .code
+        .contains(r#"((event: "save", id: number) => void)"#));
+    assert!(output.code.contains("(payload: number) => void"));
+    let comp = output.code.split("declare const TestComp").next().unwrap();
+    assert!(
+        !comp.contains("emits: ["),
+        "type-only TSC rows must not synthesize runtime emits: {comp}"
+    );
+}
 
 fn gen_tsc(sfc: &str) -> String {
     gen_tsc_output(sfc).code
+}
+
+fn gen_tsc_props(sfc: &str) -> String {
+    gen_tsc_with(sfc, &[props_fixture("", &[])])
+}
+
+fn gen_tsc_narrowing_props(sfc: &str, rows: &[FixturePropRow<'_>]) -> String {
+    gen_tsc_narrowing_with(sfc, &[props_fixture("", rows)])
 }
 
 fn gen_tsc_output(sfc: &str) -> super::script::TscOutput {
@@ -16,45 +1529,13 @@ fn gen_tsc_output(sfc: &str) -> super::script::TscOutput {
             filename: Some("/test/TestComp.vue".to_string()),
             ..Default::default()
         },
+        MacroTscInput::NotRequired,
     )
+    .expect("fixture has no typed codegen macro")
 }
 
-fn gen_tsc_with_external_type(sfc: &str, type_name: &str, dep_source: &str) -> String {
-    gen_tsc_output_with_external_type(sfc, type_name, dep_source).code
-}
-
-fn gen_tsc_output_with_external_type(
-    sfc: &str,
-    type_name: &str,
-    dep_source: &str,
-) -> super::script::TscOutput {
-    gen_tsc_output_with_external_type_and_mode(sfc, type_name, dep_source, TscMode::Public)
-}
-
-fn gen_tsc_output_with_external_type_and_mode(
-    sfc: &str,
-    type_name: &str,
-    dep_source: &str,
-    mode: TscMode,
-) -> super::script::TscOutput {
-    let alloc = Allocator::default();
-    let resolved = resolve_external_type(type_name, dep_source, &alloc)
-        .expect("failed to resolve external type");
-    let mut external_types = FxHashMap::default();
-    external_types.insert(type_name.to_string(), resolved);
-    generate_tsc_output_with_options(
-        sfc,
-        "TestComp",
-        &TscGenOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-            external_types: Some(external_types),
-            mode,
-            ..Default::default()
-        },
-    )
-}
-
-fn gen_tsc_narrowing(sfc: &str) -> String {
+fn gen_tsc_narrowing_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> String {
+    let bundle = fixture_bundle(fixtures);
     generate_tsc_output_with_options(
         sfc,
         "TestComp",
@@ -62,7 +1543,9 @@ fn gen_tsc_narrowing(sfc: &str) -> String {
             conditional_root_narrowing: true,
             ..Default::default()
         },
+        MacroTscInput::Authoritative(&bundle),
     )
+    .expect("explicit TSC fixture must match typed macro syntax")
     .code
 }
 
@@ -79,11 +1562,9 @@ fn gen_tsc_output_testing(sfc: &str) -> super::script::TscOutput {
             mode: TscMode::Testing,
             ..Default::default()
         },
+        MacroTscInput::NotRequired,
     )
-}
-
-fn gen_tsc_testing_with_external_type(sfc: &str, type_name: &str, dep_source: &str) -> String {
-    gen_tsc_output_with_external_type_and_mode(sfc, type_name, dep_source, TscMode::Testing).code
+    .expect("fixture has no typed codegen macro")
 }
 
 fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
@@ -104,11 +1585,12 @@ fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
 
 #[test]
 fn tsc_codegen_type_only_props_inlined_in_declare() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 import type { Props } from './types'
 defineProps<Props>()
 </script><template><div>hello</div></template>"#,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
     );
 
     assert!(
@@ -255,22 +1737,23 @@ defineProps({ title: String, count: { type: Number, required: true } })
 
 #[test]
 fn tsc_codegen_define_model_runtime_and_typed() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 const title = defineModel<string>('title')
 </script><template/>"#,
+        &[model_fixture("title", "string")],
     );
 
     assert!(r.contains("props: {"), "runtime props in __comp");
     assert!(r.contains("title: String"), "runtime model prop");
     assert!(r.contains("emits: ["), "runtime emits in __comp");
-    assert!(r.contains("'update:title'"), "runtime model emit");
+    assert!(r.contains("\"update:title\""), "runtime model emit");
     assert!(
         r.contains("\"onUpdate:title\""),
         "model onUpdate prop in declare"
     );
     assert!(
-        r.contains("event: 'update:title', v: string"),
+        r.contains(r#"event: "update:title", v: string"#),
         "model emit type in $emit overload"
     );
     assert!(!r.contains("defineModel"), "macro removed");
@@ -290,13 +1773,13 @@ defineEmits(['change', 'update:model'])
     );
 
     assert!(r.contains("emits: ["), "runtime emits in __comp");
-    assert!(r.contains("'change'"), "runtime emits has change");
+    assert!(r.contains("\"change\""), "runtime emits has change");
     assert!(
-        r.contains("'update:model'"),
+        r.contains("\"update:model\""),
         "runtime emits has update:model"
     );
     assert!(
-        r.contains("event: 'update:model'"),
+        r.contains(r#"event: "update:model""#),
         "typed emits in $emit overload"
     );
     assert!(!r.contains("setup("), "no setup() in __comp");
@@ -544,7 +2027,7 @@ defineProps({
 
 #[test]
 fn tsc_codegen_complex_real_world_sfc() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 import { ref, computed } from 'vue'
 import type { PropType } from 'vue'
@@ -570,6 +2053,7 @@ const isValid = computed(() => props.title !== '')
     <input v-model="name" :ref="inputRef" />
   </form>
 </template>"#,
+        &[model_fixture_at(3, "name", "string", &[], &[])],
     );
 
     assert!(!r.contains("const inputRef"), "no ref variable");
@@ -592,9 +2076,9 @@ const isValid = computed(() => props.title !== '')
         "no PropType in runtime"
     );
     assert!(comp_section.contains("emits: ["), "runtime emits");
-    assert!(comp_section.contains("'submit'"), "submit emit");
-    assert!(comp_section.contains("'cancel'"), "cancel emit");
-    assert!(comp_section.contains("'update:name'"), "model emit");
+    assert!(comp_section.contains("\"submit\""), "submit emit");
+    assert!(comp_section.contains("\"cancel\""), "cancel emit");
+    assert!(comp_section.contains("\"update:name\""), "model emit");
 
     let declare_section = r.split("declare const").nth(1).unwrap();
     assert!(
@@ -638,12 +2122,22 @@ defineProps({ items: Array as PropType<string[]> })
 
 #[test]
 fn tsc_codegen_with_defaults_makes_props_optional() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 withDefaults(defineProps<{ title: string; count: number }>(), {
   title: 'hello'
 })
 </script><template/>"#,
+        &[props_fixture_identity(
+            0,
+            1,
+            &[
+                authored_prop("title", false, "string", 0, 0),
+                authored_prop("count", false, "number", 0, 1),
+            ],
+            &[],
+            &[],
+        )],
     );
 
     assert!(r.contains("title?: string"), "title optional with default");
@@ -659,11 +2153,12 @@ withDefaults(defineProps<{ title: string; count: number }>(), {
 
 #[test]
 fn tsc_codegen_with_defaults_imported_type() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 import type { Props } from './types'
 withDefaults(defineProps<Props>(), { title: 'hello' })
 </script><template/>"#,
+        &[props_fixture_identity(0, 1, &[], &["Props"], &[])],
     );
 
     assert!(
@@ -671,75 +2166,16 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
         "import type statement present"
     );
     assert!(
-        r.contains("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"),
+        r.contains(r#"Omit<Props, "title"> & Partial<Pick<Props, "title">>"#),
         "defaulted imported props should be wrapped to make keys optional: {r}"
     );
     assert!(!r.contains("withDefaults"), "macro removed");
 }
 
-// @ai-generated - Imported prop types must not slice foreign spans when defaults are present.
-#[test]
-fn tsc_codegen_public_mode_with_defaults_imported_type_does_not_panic() {
-    let r = gen_tsc_with_external_type(
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-withDefaults(defineProps<Props>(), {
-  title: 'hello',
-})
-</script><template><div>{{ title }} {{ count }}</div></template>"#,
-        "Props",
-        r#"
-export interface Props {
-  title: string
-  count: number
-}
-"#,
-    );
-
-    assert!(
-        r.contains("import type { Props } from './types'"),
-        "import type statement should be preserved: {r}"
-    );
-    assert!(
-        r.contains("Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"),
-        "defaulted imported props should stay wrapped as a named type: {r}"
-    );
-}
-
-// @ai-generated - Testing mode should expose imported props without indexing into foreign source text.
-#[test]
-fn tsc_testing_mode_with_defaults_imported_type_uses_indexed_access_without_panicking() {
-    let r = gen_tsc_testing_with_external_type(
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-withDefaults(defineProps<Props>(), {
-  title: 'hello',
-})
-</script><template><div>{{ title }} {{ count }}</div></template>"#,
-        "Props",
-        r#"
-export interface Props {
-  title: string
-  count: number
-}
-"#,
-    );
-
-    assert!(
-        r.contains("declare const title: Props['title']"),
-        "defaulted imported props should use indexed access in testing mode: {r}"
-    );
-    assert!(
-        r.contains("declare const count: Props['count']"),
-        "non-defaulted imported props should use indexed access in testing mode: {r}"
-    );
-}
-
 // @ai-generated - Companion-script resolved prop spans should be consumed as absolute SFC spans.
 #[test]
 fn tsc_testing_mode_same_sfc_companion_props_use_absolute_spans() {
-    let r = gen_tsc_testing(
-        r#"<script lang="ts">
+    let source = r#"<script lang="ts">
 export interface Props {
   title: string
   count?: number
@@ -749,8 +2185,33 @@ export interface Props {
 withDefaults(defineProps<Props>(), {
   title: 'hello',
 })
-</script><template><div>{{ title }} {{ count }}</div></template>"#,
-    );
+</script><template><div>{{ title }} {{ count }}</div></template>"#;
+    let mut bundle = fixture_bundle(&[props_fixture_identity(
+        0,
+        1,
+        &[
+            root_prop("title", false, "string", 0),
+            root_prop("count", true, "number", 0),
+        ],
+        &[],
+        &[(
+            "Props",
+            "interface Props {\n  title: string\n  count?: number\n}",
+        )],
+    )]);
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) =
+        &mut bundle.entries[0].outcome
+    else {
+        unreachable!()
+    };
+    let [declaration] = props.scope.dependency_declarations.as_mut_slice() else {
+        unreachable!()
+    };
+    declaration.owner = TscScriptOwner::Companion;
+
+    let r = generate_with_bundle(source, TscMode::Testing, &bundle)
+        .expect("companion-owned fixture must match typed macro syntax")
+        .code;
 
     assert!(
         r.contains("declare const title: string"),
@@ -830,15 +2291,16 @@ defineProps({
 
 #[test]
 fn tsc_codegen_define_model_default_name() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 const mv = defineModel<number>()
 </script><template/>"#,
+        &[model_fixture("modelValue", "number")],
     );
 
     assert!(r.contains("modelValue: Number"), "runtime modelValue prop");
     assert!(
-        r.contains("'update:modelValue'"),
+        r.contains("\"update:modelValue\""),
         "runtime update:modelValue emit"
     );
     assert!(
@@ -853,17 +2315,24 @@ const mv = defineModel<number>()
 
 #[test]
 fn tsc_codegen_multiple_define_models() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 const first = defineModel<string>('firstName')
 const last = defineModel<string>('lastName')
 </script><template/>"#,
+        &[
+            model_fixture_at(0, "firstName", "string", &[], &[]),
+            model_fixture_at(1, "lastName", "string", &[], &[]),
+        ],
     );
 
     assert!(r.contains("firstName: String"), "runtime firstName prop");
     assert!(r.contains("lastName: String"), "runtime lastName prop");
-    assert!(r.contains("'update:firstName'"), "runtime update:firstName");
-    assert!(r.contains("'update:lastName'"), "runtime update:lastName");
+    assert!(
+        r.contains("\"update:firstName\""),
+        "runtime update:firstName"
+    );
+    assert!(r.contains("\"update:lastName\""), "runtime update:lastName");
     assert!(r.contains("firstName?: string"), "TS firstName type");
     assert!(r.contains("lastName?: string"), "TS lastName type");
 }
@@ -889,11 +2358,12 @@ const val = defineModel('value')
 
 #[test]
 fn tsc_codegen_define_model_imported_type() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 import type { User } from './types'
 const user = defineModel<User>()
 </script><template/>"#,
+        &[model_fixture_at(0, "modelValue", "User", &["User"], &[])],
     );
 
     assert!(
@@ -902,14 +2372,14 @@ const user = defineModel<User>()
     );
     assert!(r.contains("modelValue?: User"), "TS User type");
     assert!(
-        r.contains("event: 'update:modelValue', v: User"),
+        r.contains(r#"event: "update:modelValue", v: User"#),
         "emit type with User in $emit overload"
     );
 }
 
 #[test]
 fn tsc_codegen_define_model_local_type_dependencies_are_emitted() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 interface Role {
   name: string
@@ -921,6 +2391,16 @@ interface User {
 
 const user = defineModel<User>()
 </script><template/>"#,
+        &[model_fixture_at(
+            0,
+            "modelValue",
+            "User",
+            &[],
+            &[
+                ("Role", "interface Role {\n  name: string\n}"),
+                ("User", "interface User {\n  role: Role\n}"),
+            ],
+        )],
     );
 
     assert!(
@@ -941,11 +2421,12 @@ const user = defineModel<User>()
 
 #[test]
 fn tsc_codegen_define_model_with_define_props() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup>
 defineProps({ label: String })
 const text = defineModel<string>()
 </script><template/>"#,
+        &[model_fixture_at(1, "modelValue", "string", &[], &[])],
     );
 
     assert!(r.contains("label: String"), "runtime label prop");
@@ -1027,7 +2508,7 @@ const addClass = props.tabContentClass
 
 #[test]
 fn tsc_codegen_print_real_world_slidev() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineProps<{
   disabled?: boolean
@@ -1043,6 +2524,10 @@ const value = defineModel<boolean>('modelValue', {
     <input v-model="value" type="checkbox" :disabled="disabled">
   </div>
 </template>"#,
+        &[
+            props_fixture("", &[authored_prop("disabled", true, "boolean", 0, 0)]),
+            model_fixture_at(1, "modelValue", "boolean", &[], &[]),
+        ],
     );
     eprintln!("\n=== Slidev FormCheckbox.vue ===\n{}\n", r);
 
@@ -1053,7 +2538,7 @@ const value = defineModel<boolean>('modelValue', {
 
 #[test]
 fn tsc_codegen_print_real_world_element_plus_watermark() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useMutationObserver } from '@vueuse/core'
@@ -1089,6 +2574,7 @@ const stopObservation = ref(false)
     <slot />
   </div>
 </template>"#,
+        &[props_fixture_identity(1, 2, &[], &["WatermarkProps"], &[])],
     );
     eprintln!("\n=== Element Plus watermark.vue ===\n{}\n", r);
 
@@ -1099,7 +2585,7 @@ const stopObservation = ref(false)
     );
     assert!(
         r.contains(
-            "$props: import(\"vue\").PublicProps & Omit<WatermarkProps, 'zIndex' | 'rotate' | 'content' | 'gap'> & Partial<Pick<WatermarkProps, 'zIndex' | 'rotate' | 'content' | 'gap'>>"
+            r#"$props: import("vue").PublicProps & Omit<WatermarkProps, "zIndex" | "rotate" | "content" | "gap"> & Partial<Pick<WatermarkProps, "zIndex" | "rotate" | "content" | "gap">>"#
         ),
         "defaulted imported props should be optional in $props"
     );
@@ -1110,7 +2596,7 @@ const stopObservation = ref(false)
 
 #[test]
 fn tsc_codegen_print_real_world_complex_type_syntax() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 import type { HTMLAttributes } from 'vue'
 
@@ -1136,6 +2622,25 @@ const dir = ref<'ltr' | 'rtl'>('ltr')
     <slot />
   </div>
 </template>"#,
+        &[
+            props_fixture_identity(
+                0,
+                1,
+                &[],
+                &["HTMLAttributes"],
+                &[(
+                    "CarouselProps",
+                    "interface CarouselProps {\n  opts?: Record<string, unknown>\n  plugins?: unknown[]\n  orientation?: 'horizontal' | 'vertical'\n  class?: HTMLAttributes['class']\n}",
+                )],
+            ),
+            emits_fixture_identity(
+                1,
+                2,
+                &[authored_emit("init-api", "api: unknown", "api: unknown", 2, 0)],
+                &[],
+                &[],
+            ),
+        ],
     );
     eprintln!(
         "\n=== Carousel.vue (type syntax + withDefaults + emits) ===\n{}\n",
@@ -1146,7 +2651,7 @@ const dir = ref<'ltr' | 'rtl'>('ltr')
         r.contains("orientation?"),
         "orientation optional via default"
     );
-    assert!(r.contains("'init-api'"), "emit name in output");
+    assert!(r.contains("\"init-api\""), "emit name in output");
     assert!(!r.contains("const dir"), "no script body");
 }
 
@@ -1210,7 +2715,7 @@ defineProps({ msg: String as PropType<string | (() => any)> })
 
 #[test]
 fn tsc_codegen_type_only_union_function() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{ cb: string | (() => void) }>()
 </script><template/>"#,
@@ -1279,11 +2784,12 @@ defineProps({
 
 #[test]
 fn tsc_codegen_type_import_emits_import_statement() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 import type { Props } from './types'
 defineProps<Props>()
 </script><template/>"#,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
     );
 
     // Positive: should emit a proper import type statement
@@ -1308,11 +2814,12 @@ defineProps<Props>()
 
 #[test]
 fn tsc_codegen_type_import_specifier_level() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 import { type MyProps, someValue } from './shared'
 defineProps<MyProps>()
 </script><template/>"#,
+        &[props_root_fixture_at(0, "MyProps", &[], &["MyProps"], &[])],
     );
 
     // Should emit type import for the type-only specifier
@@ -1335,41 +2842,8 @@ defineProps<MyProps>()
 }
 
 #[test]
-fn tsc_codegen_define_emits_imported_type_emits_import_statement() {
-    let r = gen_tsc_with_external_type(
-        r#"<script setup lang="ts">
-import type { Emits } from './types'
-defineEmits<Emits>()
-</script><template/>"#,
-        "Emits",
-        "export interface Emits { (e: 'submit', payload: string): void; confirm: [id: number] }",
-    );
-
-    assert!(
-        r.contains("import type { Emits } from './types'"),
-        "defineEmits imported type should emit import type statement: {r}"
-    );
-    assert!(
-        r.contains("((event: 'submit', payload: string) => void)"),
-        "defineEmits imported type should inline call-signature overloads in $emit: {r}"
-    );
-    assert!(
-        r.contains("((event: 'confirm', ...args: [id: number]) => void)"),
-        "defineEmits imported type should inline shorthand overloads in $emit: {r}"
-    );
-    assert!(
-        r.contains(r#""onSubmit"?: (payload: string) => void"#),
-        "defineEmits imported type should inline submit handler props: {r}"
-    );
-    assert!(
-        r.contains(r#""onConfirm"?: (...args: [id: number]) => void"#),
-        "defineEmits imported type should inline confirm handler props: {r}"
-    );
-}
-
-#[test]
 fn tsc_codegen_define_emits_local_type_dependencies_are_emitted() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 interface Payload {
   value: string
@@ -1381,6 +2855,23 @@ interface Emits {
 
 defineEmits<Emits>()
 </script><template/>"#,
+        &[emits_fixture_at(
+            0,
+            &[root_emit(
+                "submit",
+                "payload: Payload",
+                "payload: Payload",
+                0,
+            )],
+            &[],
+            &[
+                ("Payload", "interface Payload {\n  value: string\n}"),
+                (
+                    "Emits",
+                    "interface Emits {\n  (e: 'submit', payload: Payload): void\n}",
+                ),
+            ],
+        )],
     );
 
     assert!(
@@ -1395,11 +2886,12 @@ defineEmits<Emits>()
 
 #[test]
 fn tsc_codegen_type_import_with_defaults() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 import type { Props } from './types'
 withDefaults(defineProps<Props>(), { title: 'hello' })
 </script><template/>"#,
+        &[props_fixture_identity(0, 1, &[], &["Props"], &[])],
     );
 
     // Should emit import type statement even through withDefaults
@@ -1411,7 +2903,7 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
     // $props should preserve the named type while optionalizing defaulted keys
     assert!(
         r.contains(
-            "$props: import(\"vue\").PublicProps & Omit<Props, 'title'> & Partial<Pick<Props, 'title'>>"
+            r#"$props: import("vue").PublicProps & Omit<Props, "title"> & Partial<Pick<Props, "title">>"#
         ),
         "should wrap named props when defaults are present: got {}",
         r
@@ -1420,12 +2912,13 @@ withDefaults(defineProps<Props>(), { title: 'hello' })
 
 #[test]
 fn tsc_codegen_no_unused_type_imports() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 import type { UnusedType } from './unused'
 import type { Props } from './types'
 defineProps<Props>()
 </script><template/>"#,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
     );
 
     // Should NOT emit unused type imports
@@ -1451,7 +2944,7 @@ defineProps<Props>()
 
 #[test]
 fn tsc_codegen_jsdoc_on_props() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{
   /** The title of the component */
@@ -1479,7 +2972,7 @@ defineProps<{
 
 #[test]
 fn tsc_codegen_jsdoc_multiline() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{
   /**
@@ -1506,11 +2999,12 @@ defineProps<{
 
 #[test]
 fn tsc_codegen_no_jsdoc_on_type_ref() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 import type { Props } from './types'
 defineProps<Props>()
 </script><template/>"#,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
     );
 
     // No JSDoc should be present when using external type reference
@@ -1579,7 +3073,7 @@ defineSlots<MySlots>()
 
 #[test]
 fn tsc_codegen_no_slots_when_not_defined() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{ title: string }>()
 </script><template/>"#,
@@ -1623,7 +3117,7 @@ defineSlots<MySlots>()
 
 #[test]
 fn tsc_codegen_generic_basic() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" generic="T">
 defineProps<{ items: T[] }>()
 </script><template/>"#,
@@ -1650,7 +3144,7 @@ defineProps<{ items: T[] }>()
 
 #[test]
 fn tsc_codegen_generic_with_constraints() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" generic="T extends string">
 defineProps<{ value: T }>()
 </script><template/>"#,
@@ -1665,7 +3159,7 @@ defineProps<{ value: T }>()
 
 #[test]
 fn tsc_codegen_generic_multiple() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" generic="K extends string, V">
 defineProps<{ key: K; value: V }>()
 </script><template/>"#,
@@ -1680,7 +3174,7 @@ defineProps<{ key: K; value: V }>()
 
 #[test]
 fn tsc_codegen_no_generic_no_angle_brackets() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{ title: string }>()
 </script><template/>"#,
@@ -1707,11 +3201,21 @@ defineProps<{ title: string }>()
 
 #[test]
 fn tsc_codegen_recursive_prop_types_no_excessive_depth() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 export interface Action { label: string; callback?: (a: Action) => void }
 defineProps<{ actions: Action[] }>()
 </script><template/>"#,
+        &[props_fixture_at(
+            0,
+            "",
+            &[],
+            &[],
+            &[(
+                "Action",
+                "export interface Action { label: string; callback?: (a: Action) => void }",
+            )],
+        )],
     );
     // Positive: constructor accepts props param
     assert!(
@@ -1735,7 +3239,7 @@ defineProps<{ actions: Action[] }>()
 
 #[test]
 fn tsc_codegen_transitive_local_type_dependencies_are_emitted() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 interface Role {
   name: string
@@ -1751,6 +3255,17 @@ interface Props {
 
 defineProps<Props>()
 </script><template/>"#,
+        &[props_fixture_at(
+            0,
+            "Props",
+            &[],
+            &[],
+            &[
+                ("Role", "interface Role {\n  name: string\n}"),
+                ("User", "interface User {\n  role: Role\n}"),
+                ("Props", "interface Props {\n  user: User\n}"),
+            ],
+        )],
     );
 
     assert!(
@@ -1771,7 +3286,7 @@ defineProps<Props>()
 
 #[test]
 fn tsc_codegen_attrs_explicit_type() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" attrs="{ class?: string; id?: string }">
 defineProps<{ title: string }>()
 </script><template/>"#,
@@ -1793,7 +3308,7 @@ defineProps<{ title: string }>()
 
 #[test]
 fn tsc_codegen_attrs_default_empty() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{ title: string }>()
 </script><template/>"#,
@@ -1809,7 +3324,7 @@ defineProps<{ title: string }>()
 
 #[test]
 fn tsc_codegen_attrs_alias_attributes() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" attributes="{ role?: string }">
 defineProps<{ title: string }>()
 </script><template/>"#,
@@ -1825,7 +3340,7 @@ defineProps<{ title: string }>()
 
 #[test]
 fn tsc_codegen_attrs_with_generic() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" generic="T" attrs="{ value: T }">
 defineProps<{ items: T[] }>()
 </script><template/>"#,
@@ -1854,6 +3369,174 @@ import type { Attrs } from './types'
     assert!(
         r.contains("$attrs: Attrs"),
         "named attrs type should be preserved: {r}"
+    );
+}
+
+#[test]
+fn tsc_type_dependency_inventory_ignores_comment_and_literal_text_and_keeps_unicode_roots() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="Attrs">
+import type { Phantom, Réel } from './types'
+
+interface Attrs {
+  literal: 'Phantom'
+  actual: Réel /* Phantom */
+}
+</script><template/>"#,
+    );
+
+    assert!(r.contains("import type { Réel } from './types'"), "{r}");
+    assert!(!r.contains("import type { Phantom }"), "{r}");
+    assert!(r.contains("interface Attrs"), "{r}");
+}
+
+#[test]
+fn tsc_type_dependency_inventory_unions_all_merged_contributors() {
+    let r = gen_tsc(
+        r#"<script setup lang="ts" attrs="Attrs">
+import type { First, Second } from './types'
+interface Attrs { first: First }
+interface Attrs { second: Second }
+</script><template/>"#,
+    );
+
+    assert!(r.contains("import type { First } from './types'"), "{r}");
+    assert!(r.contains("import type { Second } from './types'"), "{r}");
+    assert_eq!(r.matches("interface Attrs").count(), 2, "{r}");
+}
+
+// @ai-generated - Guards declaration-carrier dependency closure across all members of a namespace.
+#[test]
+fn tsc_namespace_carrier_unions_all_member_and_nested_dependencies() {
+    let output = gen_tsc_output(
+        r#"<script setup lang="ts" attrs="Surface.First & Surface.Nested.Second">
+import type { FirstExternal } from './first'
+import type { SecondExternal } from './second'
+
+interface FirstDependency { value: FirstExternal }
+interface SecondDependency { value: SecondExternal }
+
+namespace Surface {
+  export interface First { dependency: FirstDependency }
+  export namespace Nested {
+    export interface Second { dependency: SecondDependency }
+  }
+}
+</script><template/>"#,
+    );
+    assert_generated_tsx_parses(&output.code);
+    let r = output.code;
+
+    assert!(r.contains("namespace Surface"), "{r}");
+    assert!(r.contains("interface FirstDependency"), "{r}");
+    assert!(r.contains("interface SecondDependency"), "{r}");
+    assert!(
+        r.contains("import type { FirstExternal } from './first'"),
+        "{r}"
+    );
+    assert!(
+        r.contains("import type { SecondExternal } from './second'"),
+        "{r}"
+    );
+}
+
+// @ai-generated - Proves recovered raw attrs type syntax cannot silently emit invalid TSC output.
+#[test]
+fn tsc_malformed_raw_attrs_type_fails_closed() {
+    let source = r#"<script setup lang="ts" attrs="Attrs.">
+import type { Attrs } from './types'
+</script><template/>"#;
+    let start = source.find("Attrs.").expect("authored attrs payload") as u32;
+    let result = generate_tsc_output_with_options(
+        source,
+        "TestComp",
+        &TscGenOptions::default(),
+        MacroTscInput::NotRequired,
+    );
+
+    let expected = super::script::TscGenerationError::UnavailableOutcome {
+        subject: super::script::TscFailureSubject::ScriptSetupAttrs {
+            source_range: crate::common::Span::new(start, start + "Attrs.".len() as u32),
+        },
+        outcome: super::script::TscUnavailableOutcome::Invalid(
+            super::script::TscInvalidOutcome::AuthoredTypeSyntax(
+                super::script::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+            ),
+        ),
+    };
+    assert_eq!(result.unwrap_err(), expected);
+
+    let extracted = extract_tsc_state(source, "TestComp", &TscExtractOptions::default())
+        .expect("script setup syntax must still produce a cached extraction");
+    assert_eq!(
+        generate_tsc_from_state(
+            &extracted,
+            "TestComp",
+            TscMode::Public,
+            MacroTscInput::NotRequired,
+        )
+        .unwrap_err(),
+        expected,
+    );
+}
+
+// @ai-generated - Pins source-carrier parse failures ahead of semantic carrier validation on every generation path.
+#[test]
+fn tsc_direct_and_cached_generation_share_terminal_failure_precedence() {
+    let source = r#"<script setup lang="ts" attrs="Attrs.">
+enum Payload { Value = Math.random() }
+defineProps<Payload>()
+</script><template/>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency("Payload", Vec::new())],
+    });
+    let start = source.find("Attrs.").expect("authored attrs payload") as u32;
+    let expected = super::script::TscGenerationError::UnavailableOutcome {
+        subject: super::script::TscFailureSubject::ScriptSetupAttrs {
+            source_range: crate::common::Span::new(start, start + "Attrs.".len() as u32),
+        },
+        outcome: super::script::TscUnavailableOutcome::Invalid(
+            super::script::TscInvalidOutcome::AuthoredTypeSyntax(
+                super::script::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+            ),
+        ),
+    };
+
+    let direct = generate_with_bundle(source, TscMode::Public, &bundle)
+        .expect_err("malformed source-owned attrs must win direct generation precedence");
+    assert_eq!(direct, expected);
+
+    let extracted = extract_tsc_state(source, "TestComp", &TscExtractOptions::default())
+        .expect("script setup syntax must still produce a cached extraction");
+    let cached = generate_tsc_from_state(
+        &extracted,
+        "TestComp",
+        TscMode::Public,
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect_err("malformed source-owned attrs must win cached generation precedence");
+    assert_eq!(cached, direct);
+}
+
+// @ai-generated - Unplanted control for valid raw attrs parsing and dependency retention.
+#[test]
+fn tsc_valid_raw_attrs_type_keeps_typed_dependency_paths() {
+    let output = gen_tsc_output(
+        r#"<script setup lang="ts" attrs="Attrs & ImportedAttrs">
+import type { ImportedAttrs } from './types'
+interface Attrs { role?: string }
+</script><template/>"#,
+    );
+    assert_generated_tsx_parses(&output.code);
+    let r = output.code;
+
+    assert!(r.contains("$attrs: Attrs & ImportedAttrs"), "{r}");
+    assert!(r.contains("interface Attrs"), "{r}");
+    assert!(
+        r.contains("import type { ImportedAttrs } from './types'"),
+        "{r}"
     );
 }
 
@@ -1914,11 +3597,18 @@ const attrs = useAttrs<Attrs>()
 
 #[test]
 fn tsc_codegen_dedupes_shared_named_type_references_across_surfaces() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts" attrs="Shared">
 import type { Shared } from './types'
 const model = defineModel<Shared>()
 </script><template/>"#,
+        &[model_fixture_at(
+            0,
+            "modelValue",
+            "Shared",
+            &["Shared"],
+            &[],
+        )],
     );
 
     let count = r.matches("import type { Shared } from './types'").count();
@@ -2089,7 +3779,7 @@ const x = 1
 
 #[test]
 fn tsc_codegen_uses_omit_new_for_barrel_safety() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{
   zIndex?: number
@@ -2153,7 +3843,7 @@ defineProps<{
 
 #[test]
 fn tsc_codegen_generic_uses_omit_new() {
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts" generic="T">
 defineProps<{ items: T[] }>()
 </script><template/>"#,
@@ -2182,11 +3872,12 @@ defineProps<{ items: T[] }>()
 
 #[test]
 fn tsc_narrowing_basic() {
-    let r = gen_tsc_narrowing(
+    let r = gen_tsc_narrowing_props(
         r#"<script setup lang="ts">
 defineProps<{foo?: boolean}>()
 </script>
 <template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+        &[authored_prop("foo", true, "boolean", 0, 0)],
     );
     // Positive: narrowing generic on new()
     assert!(
@@ -2207,11 +3898,15 @@ defineProps<{foo?: boolean}>()
 
 #[test]
 fn tsc_narrowing_multi() {
-    let r = gen_tsc_narrowing(
+    let r = gen_tsc_narrowing_props(
         r#"<script setup lang="ts">
 defineProps<{foo?: boolean, s?: 'foo' | 'bar'}>()
 </script>
 <template><div v-if="foo">A</div><span v-else-if="s === 'foo'">B</span><canvas v-else-if="s === 'bar'">C</canvas><input v-else /></template>"#,
+        &[
+            authored_prop("foo", true, "boolean", 0, 0),
+            authored_prop("s", true, "'foo' | 'bar'", 0, 1),
+        ],
     );
     assert!(
         r.contains("T_foo extends boolean = boolean"),
@@ -2226,11 +3921,12 @@ defineProps<{foo?: boolean, s?: 'foo' | 'bar'}>()
 
 #[test]
 fn tsc_narrowing_with_sfc_generics() {
-    let r = gen_tsc_narrowing(
+    let r = gen_tsc_narrowing_props(
         r#"<script setup lang="ts" generic="T extends string">
 defineProps<{show?: boolean}>()
 </script>
 <template><div v-if="show">A</div><span v-else>B</span></template>"#,
+        &[authored_prop("show", true, "boolean", 0, 0)],
     );
     // Both existing generic and narrowing generic
     assert!(
@@ -2242,7 +3938,7 @@ defineProps<{show?: boolean}>()
 #[test]
 fn tsc_narrowing_disabled() {
     // Use default (narrowing disabled)
-    let r = gen_tsc(
+    let r = gen_tsc_props(
         r#"<script setup lang="ts">
 defineProps<{foo?: boolean}>()
 </script>
@@ -2260,13 +3956,14 @@ defineProps<{foo?: boolean}>()
 
 #[test]
 fn tsc_narrowing_component_roots() {
-    let r = gen_tsc_narrowing(
+    let r = gen_tsc_narrowing_props(
         r#"<script setup lang="ts">
 import MyComp from './MyComp.vue'
 import Other from './Other.vue'
 defineProps<{v?: 'a' | 'b'}>()
 </script>
 <template><MyComp v-if="v === 'a'" /><Other v-else /></template>"#,
+        &[authored_prop("v", true, "'a' | 'b'", 0, 0)],
     );
     assert!(r.contains("T_v extends"), "should have T_v generic: {r}");
     assert!(
@@ -2302,10 +3999,17 @@ defineEmits(['change', 'clickOverlay'])
 
 #[test]
 fn tsc_codegen_typed_emits_to_props() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'click', event: MouseEvent): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit(
+            "click",
+            "event: MouseEvent",
+            "event: MouseEvent",
+            0,
+            0,
+        )])],
     );
 
     assert!(
@@ -2313,18 +4017,33 @@ defineEmits<{ (e: 'click', event: MouseEvent): void }>()
         "type-based emits should inline handler props with preserved payload types: {r}"
     );
     assert!(
-        r.contains("((event: 'click', event: MouseEvent) => void)"),
+        r.contains(r#"((event: "click", event: MouseEvent) => void)"#),
         "type-based emits should inline $emit overloads: {r}"
     );
 }
 
 #[test]
 fn tsc_codegen_emits_and_models_props() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'submit', data: string): void }>()
 const model = defineModel<string>()
 </script><template/>"#,
+        &[
+            emits_fixture_at(
+                0,
+                &[authored_emit(
+                    "submit",
+                    "data: string",
+                    "data: string",
+                    0,
+                    0,
+                )],
+                &[],
+                &[],
+            ),
+            model_fixture_at(1, "modelValue", "string", &[], &[]),
+        ],
     );
 
     assert!(
@@ -2347,10 +4066,17 @@ const model = defineModel<string>()
 // via __EmitToProps<OriginalType> rather than manual (...args: unknown[]) => void
 #[test]
 fn tsc_codegen_kebab_emit_type_based_both_keys_with_correct_handler() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'my-event', value: string): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit(
+            "my-event",
+            "value: string",
+            "value: string",
+            0,
+            0,
+        )])],
     );
 
     assert!(
@@ -2370,10 +4096,17 @@ defineEmits<{ (e: 'my-event', value: string): void }>()
 // Type-based defineEmits with multi-segment kebab
 #[test]
 fn tsc_codegen_multi_segment_kebab_emit_type_based() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'my-custom-event'): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit(
+            "my-custom-event",
+            "",
+            "",
+            0,
+            0,
+        )])],
     );
 
     assert!(
@@ -2407,7 +4140,7 @@ defineEmits({
         "object emits should inline the camel handler key: {r}"
     );
     assert!(
-        r.contains("((event: 'my-event', value: string) => void)"),
+        r.contains(r#"((event: "my-event", value: string) => void)"#),
         "object emits should inline $emit overloads from validator params: {r}"
     );
 }
@@ -2445,10 +4178,11 @@ defineEmits(['my-event', 'click'])
 // camelCase emit (type-based) → camel + kebab handler aliases
 #[test]
 fn tsc_codegen_camel_emit_no_duplicate_prop() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'myEvent'): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit("myEvent", "", "", 0, 0)])],
     );
 
     assert!(
@@ -2464,10 +4198,11 @@ defineEmits<{ (e: 'myEvent'): void }>()
 // Simple emit (type-based) → single deduped handler key per props block
 #[test]
 fn tsc_codegen_simple_emit_no_duplicate_prop() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'click'): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit("click", "", "", 0, 0)])],
     );
 
     let count = r.matches(r#""onClick"?: () => void"#).count();
@@ -2480,10 +4215,17 @@ defineEmits<{ (e: 'click'): void }>()
 // update: prefix (type-based) → colon form only
 #[test]
 fn tsc_codegen_update_prefix_emit_no_camelize() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'update:modelValue'): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit(
+            "update:modelValue",
+            "",
+            "",
+            0,
+            0,
+        )])],
     );
 
     assert!(
@@ -2500,21 +4242,37 @@ defineEmits<{ (e: 'update:modelValue'): void }>()
 
 #[test]
 fn tsc_codegen_shorthand_emits_emit_type_uses_emit_fn() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{
   change: [value: string];
   update: [id: number, data: { name: string }];
 }>()
 </script><template/>"#,
+        &[emits_fixture(&[
+            authored_emit(
+                "change",
+                "...args: [value: string]",
+                "...args: [value: string]",
+                0,
+                0,
+            ),
+            authored_emit(
+                "update",
+                "...args: [id: number, data: { name: string }]",
+                "...args: [id: number, data: { name: string }]",
+                0,
+                1,
+            ),
+        ])],
     );
 
     assert!(
-        r.contains("((event: 'change', ...args: [value: string]) => void)"),
+        r.contains(r#"((event: "change", ...args: [value: string]) => void)"#),
         "shorthand emits should inline tuple overloads in $emit: {r}"
     );
     assert!(
-        r.contains("((event: 'update', ...args: [id: number, data: { name: string }]) => void)"),
+        r.contains(r#"((event: "update", ...args: [id: number, data: { name: string }]) => void)"#),
         "shorthand emits should preserve tuple payload text in $emit: {r}"
     );
     assert!(
@@ -2525,12 +4283,19 @@ defineEmits<{
 
 #[test]
 fn tsc_codegen_shorthand_emits_props_uses_emit_to_props() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{
   change: [value: string];
 }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit(
+            "change",
+            "...args: [value: string]",
+            "...args: [value: string]",
+            0,
+            0,
+        )])],
     );
 
     assert!(
@@ -2542,14 +4307,21 @@ defineEmits<{
 // Function-form type-based: $emit should also inline overloads
 #[test]
 fn tsc_codegen_function_form_emits_emit_type_uses_emit_fn() {
-    let r = gen_tsc(
+    let r = gen_tsc_with(
         r#"<script setup lang="ts">
 defineEmits<{ (e: 'click', event: MouseEvent): void }>()
 </script><template/>"#,
+        &[emits_fixture(&[authored_emit(
+            "click",
+            "event: MouseEvent",
+            "event: MouseEvent",
+            0,
+            0,
+        )])],
     );
 
     assert!(
-        r.contains("((event: 'click', event: MouseEvent) => void)"),
+        r.contains(r#"((event: "click", event: MouseEvent) => void)"#),
         "function-form emits should inline $emit overloads: {r}"
     );
     assert!(
@@ -2576,7 +4348,7 @@ defineEmits({
         "object-arg emits should inline handler props: {r}"
     );
     assert!(
-        r.contains("((event: 'submit', ...args: unknown[]) => void)"),
+        r.contains(r#"((event: "submit", ...args: unknown[]) => void)"#),
         "null validators should fall back to unknown[] in $emit: {r}"
     );
     assert!(
@@ -2590,7 +4362,16 @@ fn tsc_sourcemap_emit_handler_prop_maps_to_event_name() {
     let sfc = r#"<script setup lang="ts">
 defineEmits<{ (e: 'my-event', value: string): void }>()
 </script><template/>"#;
-    let out = gen_tsc_output(sfc);
+    let out = gen_tsc_output_with(
+        sfc,
+        &[emits_fixture(&[authored_emit(
+            "my-event",
+            "value: string",
+            "value: string",
+            0,
+            0,
+        )])],
+    );
     let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
     let lookup = sourcemap.generate_lookup_table();
     let generated_offset = out
@@ -2615,7 +4396,16 @@ fn tsc_sourcemap_prop_key_maps_to_prop_name() {
     let sfc = r#"<script setup lang="ts">
 defineProps<{ title: string; count?: number }>()
 </script><template/>"#;
-    let out = gen_tsc_output(sfc);
+    let out = gen_tsc_output_with(
+        sfc,
+        &[props_fixture(
+            "",
+            &[
+                authored_prop("title", false, "string", 0, 0),
+                authored_prop("count", true, "number", 0, 1),
+            ],
+        )],
+    );
     let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
     let lookup = sourcemap.generate_lookup_table();
     let generated_offset = out.code.find("title: string").expect("generated prop");
@@ -2637,7 +4427,7 @@ fn tsc_sourcemap_model_members_map_to_model_name() {
     let sfc = r#"<script setup lang="ts">
 const title = defineModel<string>('title')
 </script><template/>"#;
-    let out = gen_tsc_output(sfc);
+    let out = gen_tsc_output_with(sfc, &[model_fixture("title", "string")]);
     let sourcemap = SourceMap::from_json_string(&out.source_map).expect("valid source map");
     let lookup = sourcemap.generate_lookup_table();
     let generated_offset = out
@@ -2655,6 +4445,75 @@ const title = defineModel<string>('title')
     assert_eq!(token.get_source(), Some("/test/TestComp.vue"));
     assert_eq!(token.get_src_line(), expected_line);
     assert_eq!(token.get_src_col(), expected_col);
+}
+
+#[test]
+fn class_declaration_sourcemap_maps_preserved_authored_text_but_not_inferred_replacements() {
+    let source = r#"<script setup lang="ts">
+class Payload { value = 1 }
+defineProps<Payload>()
+</script>"#;
+    let bundle = props_bundle_with_scope(TscScopeRequirements {
+        owner_value_dependencies: Vec::new(),
+        retained_bindings: Vec::new(),
+        dependency_declarations: vec![dependency(
+            "Payload",
+            vec![inferred_class_member(
+                "value",
+                0,
+                false,
+                TscInferredClassTypePosition::Property,
+                "number",
+            )],
+        )],
+    });
+    let output = generate_with_bundle(source, TscMode::Declaration, &bundle).unwrap();
+    let map = SourceMap::from_json_string(&output.source_map).expect("valid source map");
+    let lookup = map.generate_lookup_table();
+    let generated_class_start = output
+        .code
+        .find("class Payload")
+        .expect("preserved generated class");
+    let source_class_start = source
+        .find("class Payload")
+        .expect("preserved source class");
+    let inferred_offset = generated_class_start
+        + output.code[generated_class_start..]
+            .find("number")
+            .expect("inferred type text");
+    let inferred_position = offset_to_zero_based_line_col(&output.code, inferred_offset);
+
+    for needle in ["class Payload", "value", " }"] {
+        let generated_offset = generated_class_start
+            + output.code[generated_class_start..]
+                .find(needle)
+                .expect("preserved generated neighbor");
+        let source_offset = source_class_start
+            + source[source_class_start..]
+                .find(needle)
+                .expect("preserved source neighbor");
+        let generated_position = offset_to_zero_based_line_col(&output.code, generated_offset);
+        let source_position = offset_to_zero_based_line_col(source, source_offset);
+        let token = map
+            .lookup_source_view_token(&lookup, generated_position.0, generated_position.1)
+            .expect("preserved neighbor mapping");
+        assert_eq!(token.get_source(), Some("/test/TestComp.vue"));
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            source_position,
+            "{needle:?} must retain its exact authored line/column"
+        );
+    }
+
+    let inferred_token = map
+        .lookup_source_view_token(&lookup, inferred_position.0, inferred_position.1)
+        .expect("explicit generated-text reset");
+    assert!(inferred_token.get_source_id().is_none());
+    assert_eq!(
+        (inferred_token.get_dst_line(), inferred_token.get_dst_col()),
+        inferred_position,
+        "the unmapped replacement reset must begin exactly at the inferred text"
+    );
 }
 
 // ── Extract + Generate cache equivalence tests ───────────────────────────
@@ -2678,13 +4537,41 @@ defineEmits<{ (e: 'change', val: number): void }>()
     )
     .expect("should extract from SFC with script setup");
 
-    let from_cache = generate_tsc_from_state(&extracted, sfc, "TestComp", TscMode::Public, None);
-    let direct = gen_tsc(sfc);
+    let bundle = fixture_bundle(&[
+        props_fixture(
+            "{ x: number; y?: string }",
+            &[
+                authored_prop("x", false, "number", 0, 0),
+                authored_prop("y", true, "string", 0, 1),
+            ],
+        ),
+        emits_fixture_at(
+            1,
+            &[authored_emit("change", "val: number", "val: number", 1, 0)],
+            &[],
+            &[],
+        ),
+    ]);
+    let from_cache = generate_tsc_from_state(
+        &extracted,
+        "TestComp",
+        TscMode::Public,
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect("explicit semantic DTO");
+    let direct = generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+            ..Default::default()
+        },
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect("explicit semantic DTO");
 
-    assert_eq!(
-        from_cache.code, direct,
-        "cached path must produce identical code to direct path"
-    );
+    assert_eq!(from_cache.code, direct.code);
+    assert_eq!(from_cache.source_map, direct.source_map);
 }
 
 #[test]
@@ -2704,135 +4591,18 @@ defineEmits(['click', 'update'])
     )
     .expect("should extract from SFC with runtime macros");
 
-    let from_cache = generate_tsc_from_state(&extracted, sfc, "TestComp", TscMode::Public, None);
+    let from_cache = generate_tsc_from_state(
+        &extracted,
+        "TestComp",
+        TscMode::Public,
+        MacroTscInput::NotRequired,
+    )
+    .expect("runtime macros require no semantic DTO");
     let direct = gen_tsc(sfc);
 
     assert_eq!(
         from_cache.code, direct,
         "cached path must match direct for runtime macros"
-    );
-}
-
-#[test]
-fn extract_cache_with_external_emits_matches_direct() {
-    let sfc = r#"<script setup lang="ts">
-import type { ImportedEmits } from './types'
-defineEmits<ImportedEmits>()
-</script>
-<template><div /></template>"#;
-
-    let dep_source = r#"
-export interface ImportedEmits {
-    (e: 'save', data: string): void
-    (e: 'cancel'): void
-}
-"#;
-
-    // Extract WITHOUT external types (as cache would)
-    let extracted = extract_tsc_state(
-        sfc,
-        "TestComp",
-        &TscExtractOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-        },
-    )
-    .expect("should extract");
-
-    // Verify unresolved emits ref is recorded
-    assert!(
-        extracted.unresolved_emits_ref.is_some(),
-        "should record unresolved emits type ref"
-    );
-
-    // Resolve external types
-    let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
-        "ImportedEmits",
-        dep_source,
-        &alloc,
-    )
-    .expect("resolve external type");
-    let mut external_types = FxHashMap::default();
-    external_types.insert("ImportedEmits".to_string(), resolved);
-
-    // Generate from cache WITH external types
-    let from_cache = generate_tsc_from_state(
-        &extracted,
-        sfc,
-        "TestComp",
-        TscMode::Public,
-        Some(&external_types),
-    );
-
-    // Generate directly with external types
-    let direct = gen_tsc_with_external_type(sfc, "ImportedEmits", dep_source);
-
-    assert_eq!(
-        from_cache.code, direct,
-        "cached + external emits must match direct path"
-    );
-    assert!(
-        !from_cache.code.contains("emits: []"),
-        "should not have empty emits array"
-    );
-}
-
-#[test]
-fn extract_cache_with_external_props_testing_mode() {
-    let sfc = r#"<script setup lang="ts">
-import type { ImportedProps } from './types'
-defineProps<ImportedProps>()
-</script>
-<template><div /></template>"#;
-
-    let dep_source = r#"
-export interface ImportedProps {
-    title: string
-    count?: number
-}
-"#;
-
-    // Extract WITHOUT external types
-    let extracted = extract_tsc_state(
-        sfc,
-        "TestComp",
-        &TscExtractOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-        },
-    )
-    .expect("should extract");
-
-    assert!(
-        extracted.unresolved_props_ref.is_some(),
-        "should record unresolved props type ref"
-    );
-
-    // Resolve external types
-    let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
-        "ImportedProps",
-        dep_source,
-        &alloc,
-    )
-    .expect("resolve external type");
-    let mut external_types = FxHashMap::default();
-    external_types.insert("ImportedProps".to_string(), resolved);
-
-    // Generate from cache in Testing mode
-    let from_cache = generate_tsc_from_state(
-        &extracted,
-        sfc,
-        "TestComp",
-        TscMode::Testing,
-        Some(&external_types),
-    );
-
-    // Generate directly in Testing mode
-    let direct = gen_tsc_testing_with_external_type(sfc, "ImportedProps", dep_source);
-
-    assert_eq!(
-        from_cache.code, direct,
-        "cached Testing mode with external props must match direct"
     );
 }
 
@@ -2847,38 +4617,17 @@ fn extract_returns_none_without_script_setup() {
     );
 }
 
-#[test]
-fn extract_records_unresolved_refs() {
-    let sfc = r#"<script setup lang="ts">
-import type { Ext } from './external'
-defineProps<Ext>()
-</script>
-<template><div /></template>"#;
-
-    let extracted = extract_tsc_state(
-        sfc,
-        "TestComp",
-        &TscExtractOptions {
-            filename: Some("/test/TestComp.vue".to_string()),
-        },
-    )
-    .expect("should extract");
-
-    assert_eq!(
-        extracted.unresolved_props_ref.as_deref(),
-        Some("Ext"),
-        "should record the unresolved props type name"
-    );
-    assert!(
-        extracted.unresolved_emits_ref.is_none(),
-        "should not have unresolved emits ref when no defineEmits"
-    );
-}
-
 // ── TSC output with dotted component names ──────────────────────────
 
-fn assert_valid_tsc_output(source: &str, name: &str) {
-    let tsc_out = super::generate_tsc_output(source, name);
+fn assert_valid_tsc_output(source: &str, name: &str, props: &[FixturePropRow<'_>]) {
+    let bundle = fixture_bundle(&[props_fixture("", props)]);
+    let tsc_out = generate_tsc_output_with_options(
+        source,
+        name,
+        &TscGenOptions::default(),
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect("explicit fixture matches typed macro");
     let code = &tsc_out.code;
     eprintln!("=== TSC {} ===\n{}\n=== END ===", name, code);
 
@@ -2902,7 +4651,11 @@ fn tsc_dotted_component_name_sanitized() {
 defineProps<{ open: boolean }>()
 </script>
 <template><div>hello</div></template>"#;
-    assert_valid_tsc_output(source, "Drawer.draggable");
+    assert_valid_tsc_output(
+        source,
+        "Drawer.draggable",
+        &[authored_prop("open", false, "boolean", 0, 0)],
+    );
 }
 
 #[test]
@@ -2912,7 +4665,11 @@ fn tsc_multi_dotted_component_name_sanitized() {
 defineProps<{ count: number }>()
 </script>
 <template><div>{{ count }}</div></template>"#;
-    assert_valid_tsc_output(source, "SwiperCardStyle.story.component");
+    assert_valid_tsc_output(
+        source,
+        "SwiperCardStyle.story.component",
+        &[authored_prop("count", false, "number", 0, 0)],
+    );
 }
 
 #[test]
@@ -2921,7 +4678,17 @@ fn tsc_dotted_name_produces_valid_identifiers() {
 defineProps<{ value: string }>()
 </script>
 <template><div>{{ value }}</div></template>"#;
-    let tsc_out = super::generate_tsc_output(source, "My.Component.Name");
+    let bundle = fixture_bundle(&[props_fixture(
+        "",
+        &[authored_prop("value", false, "string", 0, 0)],
+    )]);
+    let tsc_out = generate_tsc_output_with_options(
+        source,
+        "My.Component.Name",
+        &TscGenOptions::default(),
+        MacroTscInput::Authoritative(&bundle),
+    )
+    .expect("explicit fixture matches typed macro");
     let code = &tsc_out.code;
 
     // The output must NOT contain bare `My.Component.Name` as an identifier
@@ -3330,7 +5097,9 @@ fn reserved_word_component_name_is_prefixed() {
         "<template><div>hello</div></template>",
         "default",
         &TscGenOptions::default(),
+        MacroTscInput::NotRequired,
     )
+    .expect("no typed macros")
     .code;
     assert!(
         code.contains("_default"),
@@ -3350,7 +5119,9 @@ fn digit_prefix_component_name_is_prefixed() {
         "<template><div>not found</div></template>",
         "404",
         &TscGenOptions::default(),
+        MacroTscInput::NotRequired,
     )
+    .expect("no typed macros")
     .code;
     assert!(
         code.contains("_404"),
@@ -3381,8 +5152,14 @@ fn gen_tsc_declaration(sfc: &str) -> String {
             mode: TscMode::Declaration,
             ..Default::default()
         },
+        MacroTscInput::NotRequired,
     )
+    .expect("fixture has no typed codegen macro")
     .code
+}
+
+fn gen_tsc_declaration_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> String {
+    gen_tsc_mode_with(sfc, TscMode::Declaration, fixtures).code
 }
 
 #[test]
@@ -3392,7 +5169,24 @@ defineProps<{ msg: string; count?: number }>()
 defineEmits<{ change: [value: string] }>()
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[
+            props_fixture("", &[]),
+            emits_fixture_at(
+                1,
+                &[authored_emit(
+                    "change",
+                    "...args: [value: string]",
+                    "...args: [value: string]",
+                    1,
+                    0,
+                )],
+                &[],
+                &[],
+            ),
+        ],
+    );
 
     // NEGATIVE: a `.d.ts` MUST NOT contain any runtime / value code. The
     // `Public` mode emits all of these; the declaration path emits none.
@@ -3434,7 +5228,7 @@ fn declaration_mode_preserves_the_public_props_surface() {
 defineProps<{ msg: string; count?: number }>()
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(sfc, &[props_fixture("", &[])]);
 
     // The declaration must carry the SAME public `$props` surface the Public
     // mode computes (rendered as an explicit declaration). The prop names and
@@ -3457,7 +5251,10 @@ import type { Props } from './types'
 defineProps<Props>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
+    );
 
     // Type-only imports are declaration-legal and MUST survive.
     assert!(
@@ -3580,7 +5377,7 @@ export default defineComponent({
         "options-API prop `msg` survives into the declaration surface, got:\n{d}"
     );
     assert!(
-        d.contains("'change'"),
+        d.contains("\"change\""),
         "options-API emit `change` survives into the declaration emit surface, got:\n{d}"
     );
 
@@ -3762,7 +5559,10 @@ import { Props } from './types'
 defineProps<Props>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
+    );
 
     // POSITIVE: `Props` is brought into scope via a declaration-legal type
     // import.
@@ -3797,7 +5597,10 @@ runtimeHelper()
 defineProps<Props>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
+    );
 
     // The type-position import is promoted...
     assert!(
@@ -3837,7 +5640,9 @@ defineExpose({ internal })
             mode: TscMode::Public,
             ..Default::default()
         },
+        MacroTscInput::NotRequired,
     )
+    .expect("fixture has no typed codegen macro")
     .code;
 
     // (a) NEGATIVE: the declaration must NOT reference the omitted setup binding
@@ -3913,7 +5718,24 @@ defineProps<{ msg: string; count?: number }>()
 defineEmits<{ change: [value: string] }>()
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[
+            props_fixture("", &[]),
+            emits_fixture_at(
+                1,
+                &[authored_emit(
+                    "change",
+                    "...args: [value: string]",
+                    "...args: [value: string]",
+                    1,
+                    0,
+                )],
+                &[],
+                &[],
+            ),
+        ],
+    );
 
     // The component value is declared and default-exported (so `import C from
     // "..."` and `const x: typeof C` bind).
@@ -3951,16 +5773,9 @@ fn declaration_mode_differs_from_public_mode_on_runtime_tokens() {
 defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#;
-    let public = generate_tsc_output_with_options(
-        sfc,
-        "TestComp",
-        &TscGenOptions {
-            mode: TscMode::Public,
-            ..Default::default()
-        },
-    )
-    .code;
-    let decl = gen_tsc_declaration(sfc);
+    let fixture = [props_fixture("", &[])];
+    let public = gen_tsc_mode_with(sfc, TscMode::Public, &fixture).code;
+    let decl = gen_tsc_declaration_with(sfc, &fixture);
 
     assert!(
         public.contains("const __comp = defineComponent"),
@@ -3990,7 +5805,10 @@ import * as NS from './ns'
 defineProps<NS.Props>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(0, "NS.Props", &[], &["NS"], &[])],
+    );
 
     // POSITIVE: `NS` resolves via the declaration-legal namespace type-only
     // import, so `NS.Props` is bound.
@@ -4023,7 +5841,10 @@ import Props from './types'
 defineProps<Props>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
+    );
 
     // POSITIVE: `Props` resolves via the declaration-legal default type-only
     // import.
@@ -4056,7 +5877,7 @@ import { Props as P } from './types'
 defineProps<P>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(sfc, &[props_root_fixture_at(0, "P", &[], &["P"], &[])]);
 
     // POSITIVE: the imported name `Props` is preserved, aliased to the local
     // `P` — the only form that actually resolves.
@@ -4086,7 +5907,10 @@ import { Props } from './types'
 defineProps<Props>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(0, "Props", &[], &["Props"], &[])],
+    );
 
     assert!(
         d.contains("import type { Props } from './types'"),
@@ -4112,7 +5936,7 @@ import type { Props as P } from './types'
 defineProps<P>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(sfc, &[props_root_fixture_at(0, "P", &[], &["P"], &[])]);
 
     assert!(
         d.contains("import type { Props as P } from './types'"),
@@ -4135,7 +5959,16 @@ import Default, { Named as N } from './mixed'
 defineProps<Default & N>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(
+        sfc,
+        &[props_root_fixture_at(
+            0,
+            "Default & N",
+            &[],
+            &["Default", "N"],
+            &[],
+        )],
+    );
 
     // The default part promotes to the default type-only form.
     assert!(
@@ -4169,7 +6002,7 @@ import { "vue-props" as P } from './types'
 defineProps<P>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(sfc, &[props_root_fixture_at(0, "P", &[], &["P"], &[])]);
 
     // POSITIVE: the string-literal imported name keeps its quotes, aliased to the
     // local `P` — the only declaration-legal form that resolves.
@@ -4201,7 +6034,7 @@ import type { "vue-props" as P } from './types'
 defineProps<P>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(sfc, &[props_root_fixture_at(0, "P", &[], &["P"], &[])]);
 
     assert!(
         d.contains(r#"import type { "vue-props" as P } from './types'"#),
@@ -4232,7 +6065,7 @@ import { "line\nprops" as P } from './types'
 defineProps<P>()
 </script>
 <template><div>hello</div></template>"#;
-    let d = gen_tsc_declaration(sfc);
+    let d = gen_tsc_declaration_with(sfc, &[props_root_fixture_at(0, "P", &[], &["P"], &[])]);
 
     // The reconstructed import re-escapes the cooked LF as the two-character
     // sequence backslash-n (`"line\nprops"`), NOT a raw newline.

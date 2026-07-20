@@ -3292,6 +3292,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         imports: vec![
             verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3299,6 +3300,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
             },
             verter_semantic::analysis::AnalyzedImport {
                 source: "./utils".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3306,6 +3308,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
             },
             verter_semantic::analysis::AnalyzedImport {
                 source: "./Other.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3313,6 +3316,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
             },
             verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
@@ -3357,6 +3361,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
     let imports = vec![
         verter_semantic::analysis::AnalyzedImport {
             source: "./TypedSlotComp.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::new(0, 0),
@@ -3364,6 +3369,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
         },
         verter_semantic::analysis::AnalyzedImport {
             source: "./utils".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::new(0, 0),
@@ -10701,7 +10707,9 @@ defineProps<{ msg: string }>()
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
     assert!(
-        host.get_public_api(&canonical_id).is_some(),
+        host.get_public_api(&canonical_id)
+            .expect("public API projection")
+            .is_some(),
         "compiled .vue must expose a public API for the background API sync"
     );
 
@@ -10843,7 +10851,10 @@ defineProps<{ msg: string }>()
     let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
     assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
     let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
-    assert!(host.get_public_api(&canonical_id).is_some());
+    assert!(host
+        .get_public_api(&canonical_id)
+        .expect("public API projection")
+        .is_some());
 
     let ide_path = format!("{canonical_id}.tsx");
     // A DIFFERENT (stale) prior API path so the task's transition yields a genuinely-stale API

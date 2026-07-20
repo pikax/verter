@@ -70,6 +70,7 @@ fn test_script_completions_include_imports() {
         vec![],
         vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
@@ -191,6 +192,7 @@ fn test_template_excludes_type_only_imports() {
         vec![],
         vec![AnalyzedImport {
             source: "./types".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
                 name: "Props".to_string(),
@@ -1406,6 +1408,7 @@ fn tag_name_uppercase_nontype_import_stays_module_kind() {
         vec![],
         vec![AnalyzedImport {
             source: "./Foo.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Foo".to_string(),
@@ -1525,6 +1528,7 @@ fn workspace_auto_import_kind_is_class_in_tag_position_but_module_in_expression_
         vec![AnalyzedImport {
             // A plain value import (NOT a component) — stays MODULE everywhere.
             source: "./utils".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "formatDate".to_string(),
@@ -2078,6 +2082,7 @@ fn test_script_completions_have_sort_text() {
         }],
         vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ref".to_string(),
@@ -2563,6 +2568,7 @@ fn test_component_prop_completions_from_macros() {
         macros: std::sync::Arc::new(vec![
             AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: None,
@@ -2608,6 +2614,7 @@ fn test_component_prop_completions_from_macros() {
             },
             AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineEmits,
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
                 type_references: vec![],
                 binding_name: None,

@@ -52,6 +52,7 @@ fn warm_read_validates_outside_entries_mutex() {
         &host,
         verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

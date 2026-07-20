@@ -117,6 +117,149 @@ fn upsert_augmentation_fixture(host: &VerterHost) {
     );
 }
 
+#[test]
+fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
+    use crate::file_artifact_store::{
+        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+    };
+    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let host = make_host();
+    upsert_augmentation_fixture(&host);
+
+    let reverse_deps = host.workspace().reverse_deps_for("/types.ts");
+    assert!(
+        reverse_deps.iter().any(|canonical| canonical == "/aug.ts"),
+        "the workspace reverse-dependency graph must expose the relative augmenter: {reverse_deps:?}"
+    );
+    for reverse_dep in reverse_deps {
+        host.ensure_indexed_ready(&reverse_dep)
+            .unwrap_or_else(|| panic!("reverse dependency must index: {reverse_dep}"));
+    }
+
+    let relative_artifacts = host
+        .current_content_pinned_artifacts("/aug.ts")
+        .expect("relative augmenter artifacts");
+    let relative_fact = relative_artifacts
+        .augmentations
+        .iter()
+        .find(|fact| fact.augmented_name.as_ref() == "Foo")
+        .expect("relative augmenter must emit a Foo fact");
+    assert_eq!(relative_fact.specifier.as_ref(), "./types");
+    assert_eq!(relative_fact.owner, TopLevelOwnerId::ordinary_file());
+    assert_eq!(
+        host.resolve_type_dependency_canonical("/aug.ts", relative_fact.specifier.as_ref())
+            .as_deref(),
+        Some("/types.ts"),
+        "the relative augmentation target must normalize to the base canonical"
+    );
+
+    let env = host.host_view_env_hashes();
+    let relative_key = AugmentationTargetKey {
+        project_identity: host.host_view_project_identity(),
+        resolve_env_hash: env.resolve_env_hash,
+        lib_env_hash: env.lib_env_hash,
+        population: AugmentationPopulation::Base,
+        target: AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from("/types.ts")),
+    };
+    let relative_set = host
+        .project_type_store()
+        .indexed()
+        .ensure_augmentation_index_populated(
+            &relative_key,
+            |augmenter, specifier| {
+                host.resolve_type_dependency_canonical(augmenter, specifier)
+                    .map(Arc::from)
+            },
+            None,
+        );
+    assert_eq!(relative_set.entries.len(), 1);
+    assert_eq!(relative_set.entries[0].canonical().as_ref(), "/aug.ts");
+
+    let relative_state = host
+        .shallow_file_state("/aug.ts")
+        .expect("relative augmenter shallow state");
+    let relative_bundle = host
+        .prepared_decl_bundle("/aug.ts")
+        .expect("relative augmenter prepared bundle");
+    let relative_scope = AugmentationScopeKind::Module("./types".to_string());
+    let relative_prepared = relative_bundle
+        .prepare_augmentation_type_decl_in(&relative_scope, relative_fact.owner, "Foo")
+        .expect("relative augmentation preparation must not fail")
+        .expect("relative augmentation contributor must prepare");
+    assert_eq!(relative_prepared.root_identity.owner, relative_fact.owner);
+    assert_eq!(
+        relative_prepared
+            .name_resolution
+            .get("Foo")
+            .map(|identity| {
+                (
+                    identity.canonical_id.as_ref(),
+                    identity.owner,
+                    identity.symbol_name.as_ref(),
+                )
+            }),
+        Some(("/types.ts", TopLevelOwnerId::ordinary_file(), "Foo",)),
+        "the bundle-owned canonicalization must retain the imported base's exact identity"
+    );
+
+    let wrong_owner_canonicalization =
+        crate::resolver_core::prepared_decl::ImportCanonicalization {
+            final_resolution: rustc_hash::FxHashMap::from_iter([(
+                verter_type_expr::DeclBindingKey::new(TopLevelOwnerId::module(1), "Foo"),
+                verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+                    "/types.ts",
+                    TopLevelOwnerId::ordinary_file(),
+                    "Foo",
+                ),
+            )]),
+        };
+    let wrong_owner_result = crate::resolver_core::prepared_decl::prepare_augmentation_type_decl_in(
+        "/aug.ts",
+        &relative_state,
+        &relative_scope,
+        relative_fact.owner,
+        "Foo",
+        Some(relative_bundle.dep_edges.as_ref()),
+        &wrong_owner_canonicalization,
+        host.project_type_store().identity_interner(),
+    );
+    assert!(
+        matches!(
+            &wrong_owner_result,
+            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+            local_name,
+        }) if local_name == "Foo"
+        ),
+        "a canonicalization entry under another lexical owner must fail closed: {wrong_owner_result:?}"
+    );
+
+    upsert_ts(
+        &host,
+        "/external-aug.ts",
+        "declare module 'pkg' { interface Foo { fromExternal: boolean } }\n",
+    );
+    host.ensure_indexed_ready("/external-aug.ts")
+        .expect("external augmenter must index");
+    let external_key = AugmentationTargetKey {
+        project_identity: host.host_view_project_identity(),
+        resolve_env_hash: env.resolve_env_hash,
+        lib_env_hash: env.lib_env_hash,
+        population: AugmentationPopulation::Base,
+        target: AugmentationTargetKind::ExternalSpecifier("pkg".into()),
+    };
+    let external_set = host
+        .project_type_store()
+        .indexed()
+        .ensure_augmentation_index_populated(&external_key, |_, _| None, None);
+    assert_eq!(external_set.entries.len(), 1);
+    assert_eq!(
+        external_set.entries[0].canonical().as_ref(),
+        "/external-aug.ts"
+    );
+}
+
 /// The INDEPENDENT oracle: walk the base file's file-scope `type_symbols["Foo"]`
 /// (the `base` member) and UNION the augmenter file's
 /// `augmentation_scopes[(Module("./types"), "Foo")]` (the `fromAug` member),
@@ -151,7 +294,10 @@ fn oracle_augmented_foo_member_names(host: &VerterHost) -> Vec<String> {
         .expect("base env for /aug.ts must build");
     let aug_key = (
         AugmentationScopeKind::Module("./types".to_string()),
-        "Foo".to_string(),
+        verter_type_expr::DeclBindingKey::new(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Foo",
+        ),
     );
     let aug_group = aug_env
         .augmentation_scopes
@@ -522,7 +668,11 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            dispatch.type_slot_for(
+                Arc::from("/types.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Foo"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/types.ts",
@@ -740,7 +890,11 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            dispatch.type_slot_for(
+                Arc::from("/types.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("Foo"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/types.ts",
@@ -831,6 +985,114 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// warm-serve the STALE `fromTwo: number` surface here (flat build count),
 /// failing both the `+ 1` build assertion and the edited-surface assertion.
 #[test]
+fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::prepared_decl::{PreparationFailure, PreparedTypeDeclResolution};
+    use crate::resolver_core::resolver_context::ResolverContext;
+    use crate::semantic_query::{ProjectionReductionContext, QueryResult, SemanticQueryKey};
+
+    fn prepare_and_read(
+        host: &VerterHost,
+    ) -> (
+        PreparedTypeDeclResolution,
+        crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+        >,
+    ) {
+        let view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
+        let preparation = ctx
+            .prepared_decl_bundle("/use.ts")
+            .expect("consumer prepared bundle")
+            .prepared_type_decls
+            .get_in_for_projection(verter_type_expr::TopLevelOwnerId::ordinary_file(), "U");
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                "/use.ts",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        ));
+        (preparation, dispatch.execute_read(key))
+    }
+
+    let ambient = make_host();
+    upsert_ts(
+        ambient.as_ref(),
+        "/ambient.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { live: string } }\n",
+    );
+    upsert_ts(
+        ambient.as_ref(),
+        "/use.ts",
+        "import type { Cfg } from \"ext-pkg\"\nexport type U = Cfg\n",
+    );
+    let (ambient_preparation, ambient_read) = prepare_and_read(ambient.as_ref());
+    assert!(
+        matches!(
+            ambient_preparation,
+            PreparedTypeDeclResolution::AuthoredPartial {
+                failure: PreparationFailure::MissingExternalOwner { ref local_name },
+                ..
+            } if local_name == "Cfg"
+        ),
+        "a non-file ambient import must begin as exact typed unresolved-owner debt"
+    );
+    assert!(
+        !ambient_read.result_is_partial && !ambient_read.cache_suppress,
+        "the exact Cfg debt must discharge when the normal resolver reaches the live ambient \
+         augmentation; got partial={}, suppress={}",
+        ambient_read.result_is_partial,
+        ambient_read.cache_suppress,
+    );
+    let ambient_node = match ambient_read.value {
+        QueryResult::Value(value) => value,
+        other => panic!("ambient U must resolve to a value, got {other:?}"),
+    };
+    assert_eq!(
+        object_member_surface(
+            &ambient
+                .project_node_to_type_expr_for_test(ambient_node)
+                .expect("ambient U projects"),
+        ),
+        vec![("live".to_string(), "Primitive(String)".to_string())],
+        "debt discharge must be backed by the resolved ambient contributor",
+    );
+
+    let missing = make_host();
+    upsert_ts(
+        missing.as_ref(),
+        "/use.ts",
+        "import type { Missing } from \"absent-pkg\"\nexport type U = Missing\n",
+    );
+    let (missing_preparation, missing_read) = prepare_and_read(missing.as_ref());
+    assert!(
+        matches!(
+            missing_preparation,
+            PreparedTypeDeclResolution::AuthoredPartial {
+                failure: PreparationFailure::MissingExternalOwner { ref local_name },
+                ..
+            } if local_name == "Missing"
+        ),
+        "the absent import must retain exact typed unresolved-owner debt"
+    );
+    assert!(
+        missing_read.result_is_partial && missing_read.cache_suppress,
+        "an undischargeable owner debt must remain Partial(MissingDependency) and ReturnOnly; \
+         got partial={}, suppress={}",
+        missing_read.result_is_partial,
+        missing_read.cache_suppress,
+    );
+}
+
+#[test]
 fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
@@ -871,7 +1133,11 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/use.ts",
@@ -1025,7 +1291,11 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/use.ts",
@@ -1130,7 +1400,11 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&ctx);
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+                dispatch.type_slot_for(
+                    Arc::from("/types.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("Foo"),
+                ),
                 Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     "/types.ts",
@@ -1192,7 +1466,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
 }
 
 /// EXTERNAL (`declare module "<bare>"`) augmentation fold — a BROKEN decl-body
-/// lease pin on a contributing augmenter (`prepare_augmentation_type_decl_outcome`
+/// lease pin on a contributing augmenter (`prepare_augmentation_type_decl_outcome_in`
 /// → `PreparedDeclOutcome::LeaseMiss`) must FOLD its no-warm bit into the
 /// enclosing `Instantiate` query's `QueryBuildOutput.cache_suppress`, so the
 /// parent `/use.ts::U` cannot warm-publish an under-merged surface.
@@ -1250,7 +1524,10 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         .expect("aug1 indexes");
     let aug1_state = Arc::clone(&serve.indexed.shallow_state);
     assert!(
-        aug1_state.decl_bodies().type_decl("Pin1").is_some(),
+        aug1_state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin1")
+            .is_some(),
         "the file-scope pin demand must acquire aug1's retained-snapshot lease"
     );
     aug1_state
@@ -1262,7 +1539,11 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            dispatch.type_slot_for(
+                Arc::from("/use.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("U"),
+            ),
             Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/use.ts",

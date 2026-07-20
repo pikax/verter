@@ -121,6 +121,7 @@ fn path_a_c_full_bar_navigates_intermediates_and_expands_terminal() {
     let resolve_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/types.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("A"),

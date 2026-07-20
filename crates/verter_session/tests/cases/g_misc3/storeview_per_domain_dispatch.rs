@@ -236,6 +236,7 @@ fn dispatch_table_bound_by_fact_domain_not_fact_key() {
         canonical_id: "/a.ts".into(),
         key: FactKey::ModuleAugmentation {
             specifier: "vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             augmented_name: InternedName::from("ComponentOptions"),
             space: SymbolSpace::Type,
         },

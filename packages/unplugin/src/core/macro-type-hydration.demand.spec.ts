@@ -199,4 +199,90 @@ describe("hydrateMacroTypeDeps demand-driven contract", () => {
     // The reka/radix heritage chain: the .vue dep's @/ alias import loads.
     expect(upserts).toContain("/proj/src/Primitive.ts");
   });
+
+  // Regression guard (F14): a path-alias specifier (`@/…`) resolves PER
+  // PACKAGE. Two packages that both import `@/Primitive` resolve it — through
+  // the importer-aware resolve hook — to two DIFFERENT files, and both must
+  // hydrate. An importer-agnostic cache keyed on the bare specifier would let
+  // package B warm-hit package A's file and silently drop B's own heritage.
+  it("resolves the same @/ alias per-package (no importer-agnostic warm hit)", async () => {
+    // Importer-aware hook: `@/Primitive` and `./types` resolve relative to the
+    // importing package, exactly like a per-package tsconfig `paths` alias.
+    const resolveId = async (source: string, importer: string) => {
+      const pkg = importer.includes("/pkgA/") ? "pkgA" : "pkgB";
+      if (source === "./types") return `/${pkg}/src/types.d.ts`;
+      if (source === "@/Primitive") return `/${pkg}/src/Primitive.ts`;
+      return null;
+    };
+
+    const { host, ws, upserts } = makeWorld({
+      "/pkgA/src/App.vue": {
+        source: "<template/>",
+        analysis: {
+          macroTypeDeps: [{ typeName: "Props", importSource: "./types", macroKind: "defineProps" }],
+        },
+      },
+      "/pkgA/src/types.d.ts": {
+        source: "import type { P } from '@/Primitive';\nexport interface Props extends P {}",
+        analysis: { imports: [{ source: "@/Primitive" }] },
+      },
+      "/pkgA/src/Primitive.ts": { source: "export interface P { a: string }", analysis: {} },
+      "/pkgB/src/App.vue": {
+        source: "<template/>",
+        analysis: {
+          macroTypeDeps: [{ typeName: "Props", importSource: "./types", macroKind: "defineProps" }],
+        },
+      },
+      "/pkgB/src/types.d.ts": {
+        source: "import type { P } from '@/Primitive';\nexport interface Props extends P {}",
+        analysis: { imports: [{ source: "@/Primitive" }] },
+      },
+      "/pkgB/src/Primitive.ts": { source: "export interface P { b: number }", analysis: {} },
+    });
+
+    // Hydrate package A first, then package B, against the SAME host memo.
+    await hydrateMacroTypeDeps(host, "/pkgA/src/App.vue", resolveId, ws);
+    await hydrateMacroTypeDeps(host, "/pkgB/src/App.vue", resolveId, ws);
+
+    // Each package's OWN Primitive must be hydrated — not A's for both.
+    expect(upserts).toContain("/pkgA/src/Primitive.ts");
+    expect(upserts).toContain("/pkgB/src/Primitive.ts");
+  });
+
+  // Regression guard (F24): the vue closure walk must follow PLAIN value
+  // imports, not only `import type` ones. An intermediate `.vue` whose
+  // heritage base arrives via a plain `import { Base }` (no `type` keyword,
+  // verbatimModuleSyntax off) and which declares no own defineProps still
+  // contributes `Base` to a downstream `defineProps<X>()`. Filtering the
+  // closure to type-only imports would drop `base.ts` and under-hydrate.
+  it("walks plain (non-type) heritage imports inside an intermediate .vue closure", async () => {
+    const resolveId = async (source: string) =>
+      source === "./Base.vue"
+        ? "/proj/src/Base.vue"
+        : source === "./base"
+          ? "/proj/src/base.ts"
+          : null;
+    const { host, ws, upserts } = makeWorld({
+      [ENTRY]: {
+        source: "<template/>",
+        analysis: {
+          macroTypeDeps: [{ typeName: "X", importSource: "./Base.vue", macroKind: "defineProps" }],
+        },
+      },
+      "/proj/src/Base.vue": {
+        // Plain value import (no `type` keyword) feeding an exported heritage
+        // interface; the .vue itself has NO defineProps macro of its own.
+        source:
+          "<script setup lang='ts'>import { Base } from './base'\nexport interface X extends Base {}</script>",
+        analysis: { imports: [{ source: "./base" }] },
+      },
+      "/proj/src/base.ts": { source: "export class Base { a = 1 }", analysis: {} },
+    });
+
+    await hydrateMacroTypeDeps(host, ENTRY, resolveId, ws);
+
+    expect(upserts).toContain("/proj/src/Base.vue");
+    // The plain-import heritage base must be hydrated for downstream props.
+    expect(upserts).toContain("/proj/src/base.ts");
+  });
 });

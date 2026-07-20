@@ -124,6 +124,7 @@ fn public_api_stub_with(
         });
     }
     host.get_public_api(target)
+        .unwrap_or_else(|error| panic!("public API projection failed for {target}: {error}"))
         .unwrap_or_else(|| panic!("get_public_api returned None for {target}"))
         .code
         .to_string()

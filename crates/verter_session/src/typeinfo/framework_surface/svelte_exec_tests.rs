@@ -140,6 +140,120 @@ fn host_with_svelte(
     (host, view)
 }
 
+#[test]
+fn instance_export_type_resolution_uses_the_exact_binding_owner() {
+    let canonical = "/OwnerExact.svelte";
+    let source = "<script module lang=\"ts\">\n\
+             export const shared: string = 'module';\n\
+             </script>\n\
+             <script lang=\"ts\">\n\
+             export const shared: number = 1;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = host_with_svelte(canonical, source);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, canonical)
+        .expect("svelte facts");
+    let export = facts
+        .instance_exports
+        .iter()
+        .find(|export| export.exported_name == "shared")
+        .expect("instance shared export");
+    assert_eq!(
+        export.binding_key.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "the capture preserves the instance binding owner"
+    );
+
+    let outcome =
+        resolve_svelte_surface(&host, &ctx, canonical, SvelteSurfaceSource::InstanceExports);
+    let ResolvedOutcome::Resolved(dtos) = outcome else {
+        panic!("the instance-export surface must resolve, got {outcome:?}");
+    };
+    let shared = dtos
+        .expose
+        .as_ref()
+        .and_then(|surface| {
+            surface
+                .members
+                .iter()
+                .find(|member| member.name == "shared")
+        })
+        .expect("the instance `shared` member publishes");
+    assert_eq!(
+        shared.value,
+        Some(
+            crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::Primitive(
+                verter_type_expr::PrimitiveName::Number,
+            )
+        ),
+        "the instance binding resolves as number, never the module string binding"
+    );
+    assert_eq!(shared.type_annotation.as_deref(), Some("number"));
+}
+
+#[test]
+fn exported_route_closure_keeps_same_name_class_owners_disjoint() {
+    let canonical = "/RouteOwnerExact.svelte";
+    let source = "<script module lang=\"ts\">\n\
+             import type { ModuleDep } from './module-dep';\n\
+             class Shared { value!: ModuleDep }\n\
+             export { Shared as ModuleShared };\n\
+             </script>\n\
+             <script lang=\"ts\">\n\
+             import type { InstanceDep } from './instance-dep';\n\
+             class Shared { value!: InstanceDep }\n\
+             export { Shared as InstanceShared };\n\
+             </script>\n\
+             <div />";
+    let (host, _view) = host_with_svelte(canonical, source);
+
+    let state = host
+        .routed_shallow_state(canonical)
+        .expect("route-owner fixture indexes");
+    let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+    assert_eq!(
+        state.required_declaration_import_names_in(instance_owner, "Shared"),
+        rustc_hash::FxHashSet::from_iter(["InstanceDep".to_string()]),
+        "the instance declaration-carrier closure is exact-owner"
+    );
+    assert_eq!(
+        state.required_declaration_import_names_in(module_owner, "Shared"),
+        rustc_hash::FxHashSet::from_iter(["ModuleDep".to_string()]),
+        "the module declaration-carrier closure is exact-owner"
+    );
+
+    let instance = host.required_import_routes_for_exported_route(
+        canonical,
+        "InstanceShared",
+        &crate::resolver_core::RouteDemand::Whole,
+    );
+    assert_eq!(
+        instance.get("InstanceDep"),
+        Some(&crate::resolver_core::RouteDemand::Whole),
+        "the instance-owner class supplement keeps its own imported dependency"
+    );
+    assert!(
+        !instance.contains_key("ModuleDep"),
+        "the same-name module-owner class must not contaminate instance closure"
+    );
+
+    let module = host.required_import_routes_for_exported_route(
+        canonical,
+        "ModuleShared",
+        &crate::resolver_core::RouteDemand::Whole,
+    );
+    assert_eq!(
+        module.get("ModuleDep"),
+        Some(&crate::resolver_core::RouteDemand::Whole),
+    );
+    assert!(!module.contains_key("InstanceDep"));
+}
+
 /// Build a WORKSPACE host (rooted at `/workspace`) carrying one `.svelte`
 /// component plus extra supporting files injected into the VFS. A bare
 /// `svelte` import laid out under `/workspace/node_modules/svelte/` (with a
@@ -248,6 +362,7 @@ fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
 
     let declaration = host
         .get_public_api_with_mode(component, crate::PublicApiMode::Declaration, None)
+        .expect("Svelte public API projection")
         .expect("a dispatcher-bearing Svelte component projects a public API")
         .code
         .to_string();
@@ -419,6 +534,7 @@ fn nsnippet(
     graph.intern_node(crate::semantic_query::SemanticNodeData::InstantiationRef {
         base: crate::semantic_query::DeclIdentity {
             canonical_id: Arc::from("__builtin__"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: Arc::from("Snippet"),
         },
@@ -1715,8 +1831,50 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect("svelte facts");
     let props_type = facts.props_type.as_ref().expect("props type");
+    let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let preparation = ctx
+        .prepared_decl_bundle(component)
+        .expect("prepared declaration bundle")
+        .prepared_type_decls
+        .get_in_for_projection(props_owner, "Props");
+    match preparation {
+        crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::AuthoredPartial {
+            root_identity,
+            declaration,
+            failure:
+                crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                    local_name,
+                },
+        } => {
+            assert_eq!(root_identity.owner, props_owner);
+            assert_eq!(root_identity.symbol_name.as_ref(), "Props");
+            assert_eq!(local_name, "Args");
+            assert!(
+                declaration.member_index.contains_key("bad")
+                    && declaration.member_index.contains_key("good"),
+                "the exact authored declaration survives as a partial carrier"
+            );
+        }
+        other => panic!("expected exact authored partial preparation, got {other:?}"),
+    }
+
+    // The props surface itself stays COMPLETE: the member LIST is
+    // authoritative and the unresolved `Args` stays an honest carrier the
+    // demand points retry — Instantiate completeness is demand-local, so a
+    // member-value miss never poisons the root object. Recovery is owned by
+    // the demand-time `ImportRoute` fact rail (asserted end-to-end below),
+    // not by a blanket partial.
+    let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let completeness = crate::request_context::current_cold_compute_completeness();
+    assert!(
+        !completeness.is_partial(),
+        "a member-value miss keeps the root props surface COMPLETE (the member \
+         list is authoritative; the unresolved value is an honest carrier), \
+         got {completeness:?}"
+    );
+    drop(completeness_scope);
     let dispatch = ctx.dispatch();
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
@@ -1728,11 +1886,62 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .iter()
         .find(|m| m.name.as_ref() == "bad")
         .expect("the `bad` member is present");
+    let graph = ctx.project_type_store().semantic_graph();
+    let bad_data = graph.node_data(bad.value).expect("bad member graph node");
+    let crate::semantic_query::SemanticNodeData::InstantiationRef { base, args } =
+        bad_data.as_ref()
+    else {
+        panic!("the authored Snippet application remains a carrier, got {bad_data:?}");
+    };
+    assert_eq!(base.decl_name.as_ref(), "Snippet");
+    let [args_node] = args.as_ref() else {
+        panic!("Snippet carries exactly one Params argument, got {args:?}");
+    };
+    let args_data = graph.node_data(*args_node).expect("Args graph node");
+    assert_eq!(
+        args_data
+            .bare_ref_head()
+            .map(|(name, _scope)| name.as_ref()),
+        Some("Args"),
+        "the unresolved exact-owner import stays an authored BareRef"
+    );
     assert_eq!(
         CallableNodeView::new(&dispatch, bad.value).validated_snippet_positional_params(context),
         None,
         "an unresolved `Params` carrier fails closed (never a present slot \
          presented as binding-complete)"
+    );
+
+    let base = dispatch
+        .raise_semantic_type_source_to_hot(
+            &verter_type_expr::facts::SemanticTypeSource::Authored(props_type.locator.clone()),
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: component,
+                scope_owner: props_owner,
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .expect("props payload raises")
+        .node();
+    let read = dispatch.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    });
+    assert!(
+        !read.result_is_partial && !read.cache_suppress,
+        "the carrier-bearing surface is COMPLETE and cacheable — its read-set \
+         carries the owner's ImportRoute recovery fact, so the appearance of \
+         the missing dependency invalidates the warm entry instead of a \
+         permanent partial (got partial={}, suppress={})",
+        read.result_is_partial,
+        read.cache_suppress,
     );
 
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
@@ -1755,5 +1964,159 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
             .collect::<Vec<_>>(),
         vec!["item"],
         "the resolvable snippet publishes its ordered binding"
+    );
+
+    // RECOVERY (the invariant that replaces the old blanket partial): the
+    // missing `./missing-types` module APPEARS. The demand-time `ImportRoute`
+    // recovery fact recorded at the unresolved-head site invalidates every
+    // warm entry that consumed the carrier, so a fresh resolution now
+    // prepares Props COMPLETE and publishes the previously-dropped `bad`
+    // slot with its resolved binding. A tree that warm-served the stale
+    // carrier surface (no recovery fact) keeps `bad` dropped and FAILS.
+    let _ = host
+        .upsert(crate::types::UpsertRequest {
+            canonical_id: Some("/workspace/missing-types.ts".to_string()),
+            input_id: "/workspace/missing-types.ts".to_string(),
+            source: Arc::from("export type Args = [item: boolean];\n"),
+            file_language: crate::types::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("late dependency upsert");
+    let recovered_view =
+        crate::typeinfo::current_store_view_for_query(&host).expect("post-upsert store view");
+    let recovered_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let recovered_ctx = crate::resolver_core::HostResolverContext::from_current(
+        &host,
+        &recovered_view,
+        recovered_overlay,
+    );
+    let recovered_facts = host
+        .resolve_svelte_script_facts_with_ctx(&recovered_ctx, component)
+        .expect("svelte facts after the dependency appears");
+    let recovered_props = recovered_facts.props_type.as_ref().expect("props type");
+    let recovered_surface =
+        navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
+            .expect("props surface after recovery");
+    let recovered_filtered =
+        retain_members(&recovered_surface, &["bad".to_string(), "good".to_string()]);
+    let recovered_resolved = macro_surface_shell(
+        recovered_filtered,
+        AnalyzedMacroKind::DefineSlots,
+        component,
+    );
+    let recovered_slots =
+        svelte_snippet_slots_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
+    let recovered_bad = recovered_slots
+        .iter()
+        .find(|s| s.name == "bad")
+        .expect("the previously-dropped slot publishes once its dependency appears (recovery)");
+    assert_eq!(
+        recovered_bad
+            .bindings
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["item"],
+        "the recovered snippet publishes its resolved ordered binding"
+    );
+}
+
+#[test]
+fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
+    let component = "/workspace/ResolvedSnippet.svelte";
+    let source = "<script lang=\"ts\">\n\
+             import type { Snippet } from './snippet';\n\
+             import type { Args } from './types';\n\
+             interface Props { row: Snippet<Args> }\n\
+             let { row }: Props = $props();\n\
+             void row;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[
+            (
+                "/workspace/snippet.ts",
+                "export interface Snippet<Params extends unknown[] = []> {\n\
+                     (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                     }\n",
+            ),
+            (
+                "/workspace/types.ts",
+                "export type Args = [item: string];\n",
+            ),
+        ],
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let props_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+
+    let preparation = ctx
+        .prepared_decl_bundle(component)
+        .expect("prepared declaration bundle")
+        .prepared_type_decls
+        .get_in_for_projection(props_owner, "Props");
+    let crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Complete(declaration) =
+        preparation
+    else {
+        panic!("fully resolved Props must prepare completely, got {preparation:?}");
+    };
+    assert_eq!(declaration.root_identity.owner, props_owner);
+    assert!(declaration.member_index.contains_key("row"));
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    assert_eq!(
+        crate::request_context::current_cold_compute_completeness(),
+        crate::semantic_query::ResultCompleteness::Complete,
+        "a fully resolved declaration remains Complete"
+    );
+
+    let row = surface
+        .members
+        .iter()
+        .find(|member| member.name.as_ref() == "row")
+        .expect("resolved row member");
+    let dispatch = ctx.dispatch();
+    let params = CallableNodeView::new(&dispatch, row.value)
+        .validated_snippet_positional_params(
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
+        .expect("resolved Args tuple validates");
+    assert_eq!(params.len(), 1);
+
+    let base = dispatch
+        .raise_semantic_type_source_to_hot(
+            &verter_type_expr::facts::SemanticTypeSource::Authored(props_type.locator.clone()),
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: component,
+                scope_owner: props_owner,
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .expect("props payload raises")
+        .node();
+    let read = dispatch.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    });
+    assert!(
+        !read.result_is_partial && !read.cache_suppress,
+        "the fully resolved path remains Complete and cacheable"
     );
 }

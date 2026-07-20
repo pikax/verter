@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use verter_span::Span;
 use verter_type_expr::facts::ResolvedLocalShape;
 use verter_type_expr::locators::MacroPayloadLocator;
-use verter_type_expr::TypeExprScope;
+use verter_type_expr::{TopLevelOwnerId, TopLevelOwnerKind, TypeExprScope};
 
 /// Truncated SHA-256 hash (first 16 bytes). Used for content-based change detection.
 pub type Hash16 = [u8; 16];
@@ -27,14 +27,21 @@ pub type Hash16 = [u8; 16];
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StableDeclarationId {
     canonical_id: String,
+    owner: TopLevelOwnerId,
     name: String,
 }
 
 impl StableDeclarationId {
     /// Create a stable declaration ID for a named declaration in a file.
     pub fn new(canonical_id: &str, name: &str) -> Self {
+        Self::new_in_owner(canonical_id, TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    /// Create a stable declaration ID in an explicit top-level lexical owner.
+    pub fn new_in_owner(canonical_id: &str, owner: TopLevelOwnerId, name: &str) -> Self {
         Self {
             canonical_id: canonical_id.to_string(),
+            owner,
             name: name.to_string(),
         }
     }
@@ -43,6 +50,7 @@ impl StableDeclarationId {
     pub fn for_file(canonical_id: &str) -> Self {
         Self {
             canonical_id: canonical_id.to_string(),
+            owner: TopLevelOwnerId::ordinary_file(),
             name: "*".to_string(),
         }
     }
@@ -57,6 +65,11 @@ impl StableDeclarationId {
         &self.name
     }
 
+    /// Top-level lexical owner within the canonical file.
+    pub const fn owner(&self) -> TopLevelOwnerId {
+        self.owner
+    }
+
     /// Whether this is a file-level reference rather than a named declaration.
     pub fn is_file_level(&self) -> bool {
         self.name == "*"
@@ -64,24 +77,48 @@ impl StableDeclarationId {
 
     /// Convert to the string representation used as `ResolutionNodeKey.symbol_id`.
     pub fn to_symbol_id(&self) -> String {
-        format!("{}#{}", self.canonical_id, self.name)
+        if self.owner == TopLevelOwnerId::ordinary_file() {
+            return format!("{}#{}", self.canonical_id, self.name);
+        }
+        let kind = match self.owner.kind() {
+            TopLevelOwnerKind::Module => 'm',
+            TopLevelOwnerKind::Instance => 'i',
+            TopLevelOwnerKind::Frontmatter => 'f',
+        };
+        format!(
+            "{}#@{}{:x}#{}",
+            self.canonical_id,
+            kind,
+            self.owner.ordinal(),
+            self.name
+        )
     }
 
     /// Parse a `symbol_id` string back into a `StableDeclarationId`.
     ///
     /// Returns `None` if the string doesn't contain `#`.
     pub fn from_symbol_id(symbol_id: &str) -> Option<Self> {
+        if let Some((canonical_id, encoded)) = symbol_id.rsplit_once("#@") {
+            let (owner, name) = encoded.split_once('#')?;
+            let kind = owner.get(..1)?;
+            let ordinal = owner.get(1..)?;
+            let ordinal = u32::from_str_radix(ordinal, 16).ok()?;
+            let owner = match kind {
+                "m" => TopLevelOwnerId::module(ordinal),
+                "i" => TopLevelOwnerId::instance(ordinal),
+                "f" => TopLevelOwnerId::frontmatter(ordinal),
+                _ => return None,
+            };
+            return Some(Self::new_in_owner(canonical_id, owner, name));
+        }
         let (canonical_id, name) = symbol_id.rsplit_once('#')?;
-        Some(Self {
-            canonical_id: canonical_id.to_string(),
-            name: name.to_string(),
-        })
+        Some(Self::new(canonical_id, name))
     }
 }
 
 impl std::fmt::Display for StableDeclarationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}#{}", self.canonical_id, self.name)
+        f.write_str(&self.to_symbol_id())
     }
 }
 
@@ -107,6 +144,9 @@ pub enum LocalDeclarationKind {
 pub struct LocalDeclarationEntry {
     /// Declaration name.
     pub name: String,
+    /// Top-level lexical owner of the declaration.
+    #[serde(default)]
+    pub owner: TopLevelOwnerId,
     /// Whether this is a type, value, or both.
     pub kind: LocalDeclarationKind,
     /// Content hash of the declaration body. Changes when the declaration text changes.
@@ -318,6 +358,8 @@ pub struct NestedMacroCall {
 pub struct AnalyzedImport {
     /// The import source specifier (e.g., "./types", "vue", "@/utils").
     pub source: String,
+    /// Top-level lexical owner of the import declaration.
+    pub owner: TopLevelOwnerId,
     /// Whether this is `import type { ... }` (declaration-level type-only).
     pub is_type_only: bool,
     /// Individual bindings imported.
@@ -385,9 +427,10 @@ pub struct AnalyzedModuleReference {
 impl serde::Serialize for AnalyzedImport {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count = 5 + usize::from(self.resolved_canonical_id.is_some());
+        let count = 6 + usize::from(self.resolved_canonical_id.is_some());
         let mut s = serializer.serialize_struct("AnalyzedImport", count)?;
         s.serialize_field("source", &self.source)?;
+        s.serialize_field("owner", &self.owner)?;
         s.serialize_field("isTypeOnly", &self.is_type_only)?;
         s.serialize_field("bindings", &self.bindings)?;
         s.serialize_field("spanStart", &self.span.start)?;
@@ -405,6 +448,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImport {
         #[serde(rename_all = "camelCase")]
         struct Wire {
             source: String,
+            #[serde(default)]
+            owner: TopLevelOwnerId,
             is_type_only: bool,
             bindings: Vec<AnalyzedImportBinding>,
             #[serde(default)]
@@ -417,6 +462,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImport {
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
             source: w.source,
+            owner: w.owner,
             is_type_only: w.is_type_only,
             bindings: w.bindings,
             span: Span::new(w.span_start, w.span_end),
@@ -1354,6 +1400,9 @@ pub struct AnalyzedDefaultValue {
 pub struct ResolvedLocalType {
     /// The type name as referenced in the macro (e.g., `"Props"`).
     pub name: String,
+    /// Top-level lexical owner of the resolved declaration.
+    #[serde(default)]
+    pub owner: TopLevelOwnerId,
     /// The expanded type text (e.g., `"{ count: number; label?: string }"`).
     pub expanded: String,
     /// The synthesized closed shape of the resolved local type: a primitive
@@ -1367,6 +1416,7 @@ pub struct ResolvedLocalType {
 impl PartialEq for ResolvedLocalType {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
+            && self.owner == other.owner
             && self.expanded == other.expanded
             && self.shape == other.shape
             && self.span == other.span
@@ -1380,6 +1430,8 @@ impl Eq for ResolvedLocalType {}
 pub struct AnalyzedMacro {
     /// Which macro was called.
     pub kind: AnalyzedMacroKind,
+    /// Top-level lexical owner of the macro call.
+    pub owner: TopLevelOwnerId,
     /// Whether the macro uses type params `<...>`.
     pub is_type_based: bool,
     /// Type names referenced in the type params.
@@ -1433,7 +1485,7 @@ pub struct AnalyzedMacro {
 impl serde::Serialize for AnalyzedMacro {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count = 7
+        let count = 8
             + usize::from(self.model_name.is_some())
             + usize::from(!self.prop_fields.is_empty())
             + usize::from(!self.emit_fields.is_empty())
@@ -1446,6 +1498,7 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(self.parsed_type_argument_scope.is_some());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
+        s.serialize_field("owner", &self.owner)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
         s.serialize_field("typeReferences", &self.type_references)?;
         s.serialize_field("bindingName", &self.binding_name)?;
@@ -1497,6 +1550,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
         #[serde(rename_all = "camelCase")]
         struct Wire {
             kind: AnalyzedMacroKind,
+            #[serde(default)]
+            owner: TopLevelOwnerId,
             is_type_based: bool,
             type_references: Vec<String>,
             binding_name: Option<String>,
@@ -1534,6 +1589,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
             kind: w.kind,
+            owner: w.owner,
             is_type_based: w.is_type_based,
             type_references: w.type_references,
             binding_name: w.binding_name,
@@ -1588,6 +1644,22 @@ pub enum MacroTypeDepUsage {
     /// (`defineProps<{ foo: X }>()`): unresolvable ⇒ that member's runtime
     /// type degrades to `null` ⇒ warning.
     Member,
+    /// Surface-tier dependency rooted in a value query (`typeof value`).
+    ValueQuerySurface,
+    /// Member-tier dependency rooted in a value query (`prop: typeof value`).
+    ValueQueryMember,
+}
+
+impl MacroTypeDepUsage {
+    #[must_use]
+    pub const fn is_surface(self) -> bool {
+        matches!(self, Self::Surface | Self::ValueQuerySurface)
+    }
+
+    #[must_use]
+    pub const fn is_value_query(self) -> bool {
+        matches!(self, Self::ValueQuerySurface | Self::ValueQueryMember)
+    }
 }
 
 /// Which imported types are used by which macros.
@@ -2022,11 +2094,13 @@ mod analyzed_macro_serde_tests {
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     };
+    use verter_type_expr::TopLevelOwnerId;
 
     fn sample_payload_locator(symbol: &str) -> MacroPayloadLocator {
         MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from(""),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from(symbol),
                 space: LocatorSymbolSpace::Value,
             },
@@ -2038,6 +2112,7 @@ mod analyzed_macro_serde_tests {
     fn empty_macro() -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -2119,6 +2194,7 @@ mod analyzed_macro_serde_tests {
         m.parsed_type_argument = Some(MacroPayloadLocator {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from(""),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from("default"),
                 space: LocatorSymbolSpace::Value,
             },

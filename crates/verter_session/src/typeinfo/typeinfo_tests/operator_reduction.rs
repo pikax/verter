@@ -238,7 +238,11 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
 
     let canonical: Arc<str> = Arc::from("/fixtures/index_signatures.ts");
-    let base = dispatch.type_slot_for(Arc::clone(&canonical), Arc::from("NumericLookup"));
+    let base = dispatch.type_slot_for(
+        Arc::clone(&canonical),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("NumericLookup"),
+    );
     let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         base,
         Arc::from(Vec::new().into_boxed_slice()),

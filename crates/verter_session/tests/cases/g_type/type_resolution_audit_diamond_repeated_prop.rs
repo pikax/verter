@@ -49,6 +49,7 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     let resolve_ab = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/diamond.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("AB"),

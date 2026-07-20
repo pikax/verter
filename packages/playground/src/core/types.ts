@@ -1,5 +1,149 @@
 import { detectFrameworkId, isCarrierFilename } from "./frameworks";
 
+export type PublicApiDeclarationShapeReason =
+  | "semantic-inference-depth-budget-exceeded"
+  | "semantic-inference-work-budget-exceeded"
+  | "semantic-inference-unsupported-macro-kind"
+  | "semantic-inference-unsupported-construct"
+  | "semantic-inference-missing-type-argument"
+  | "semantic-inference-missing-declaration"
+  | "semantic-inference-ambiguous-reference"
+  | "semantic-inference-missing-dependency"
+  | "owner-value-dependency-unavailable"
+  | "class-decorator"
+  | "complex-class-heritage"
+  | "decorated-class-member"
+  | "computed-class-member"
+  | "private-class-member"
+  | "rest-class-parameter"
+  | "destructured-class-parameter"
+  | "decorated-class-parameter"
+  | "constructor-overload"
+  | "unsupported-class-shape"
+  | "unsupported-enum-shape"
+  | "inconsistent-class-inference";
+
+export type PublicApiPartialReason =
+  | "budget-exceeded"
+  | "cancelled"
+  | "superseded-generation"
+  | "unstable-state"
+  | "recursion"
+  | "incomplete-traversal";
+
+export type PublicApiUnresolvedReason =
+  | "missing-type-argument"
+  | "missing-declaration"
+  | "ambiguous-reference"
+  | "missing-dependency";
+
+export type PublicApiUnsupportedReason = "macro-kind" | "semantic-construct";
+export type PublicApiMacroInvalidReason = "non-object-root";
+export type PublicApiAuthoredTypeSyntaxInvalidReason = "malformed-or-recovered-type-syntax";
+
+export interface PublicApiMacroProjectionSubject {
+  kind: "macro";
+  syntaxIndex: number;
+}
+
+export interface PublicApiScriptSetupAttrsProjectionSubject {
+  kind: "scriptSetupAttrs";
+  sourceRange: { start: number; end: number };
+}
+
+export type PublicApiProjectionSubject =
+  | PublicApiMacroProjectionSubject
+  | PublicApiScriptSetupAttrsProjectionSubject;
+
+export type PublicApiUnavailableOutcome =
+  | {
+      subject: PublicApiMacroProjectionSubject;
+      outcomeKind: "partial";
+      outcomeReason: PublicApiPartialReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: PublicApiMacroProjectionSubject;
+      outcomeKind: "unresolved";
+      outcomeReason: PublicApiUnresolvedReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: PublicApiMacroProjectionSubject;
+      outcomeKind: "unsupported";
+      outcomeReason: PublicApiUnsupportedReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: PublicApiMacroProjectionSubject;
+      outcomeKind: "invalid";
+      outcomeReason: PublicApiMacroInvalidReason;
+      outcomeDiagnostic: string | null;
+    }
+  | {
+      subject: PublicApiScriptSetupAttrsProjectionSubject;
+      outcomeKind: "invalid";
+      outcomeReason: PublicApiAuthoredTypeSyntaxInvalidReason;
+      outcomeDiagnostic: null;
+    };
+
+interface NoPublicApiUnavailableOutcome {
+  outcomeKind: null;
+  outcomeReason: null;
+  outcomeDiagnostic: null;
+}
+
+interface PublicApiProjectionErrorBase {
+  code: "tsc-generation";
+}
+
+export type PublicApiProjectionError =
+  | (PublicApiProjectionErrorBase & {
+      detailCode: "unsupported-declaration-shape";
+      subject: PublicApiProjectionSubject;
+      declarationShapeReason: PublicApiDeclarationShapeReason;
+      memberOrdinal: null;
+    } & NoPublicApiUnavailableOutcome)
+  | (PublicApiProjectionErrorBase & {
+      detailCode: "invalid-authored-member-ordinal";
+      subject: PublicApiProjectionSubject;
+      declarationShapeReason: null;
+      memberOrdinal: number;
+    } & NoPublicApiUnavailableOutcome)
+  | (PublicApiProjectionErrorBase &
+      PublicApiUnavailableOutcome & {
+        detailCode: "unavailable-outcome";
+        declarationShapeReason: null;
+        memberOrdinal: null;
+      })
+  | (PublicApiProjectionErrorBase & {
+      detailCode:
+        | "missing-authoritative-semantics"
+        | "missing-entry"
+        | "duplicate-entry"
+        | "role-mismatch"
+        | "macro-identity-mismatch"
+        | "unexpected-entry"
+        | "missing-scope-binding"
+        | "value-scope-binding-unavailable"
+        | "missing-scope-declaration"
+        | "invalid-macro-anchor"
+        | "missing-authored-argument-geometry";
+      subject: PublicApiProjectionSubject;
+      declarationShapeReason: null;
+      memberOrdinal: null;
+    } & NoPublicApiUnavailableOutcome);
+
+export interface PublicApiResponse {
+  code: string;
+  sourceMap: string | null;
+}
+
+export type PublicApiModeOutcome =
+  | { kind: "value"; value: PublicApiResponse }
+  | { kind: "absent" }
+  | { kind: "projectionFailure"; error: PublicApiProjectionError };
+
 export interface HostDiagnostic {
   severity: "error" | "warning" | "info";
   code: string;
@@ -8,6 +152,8 @@ export interface HostDiagnostic {
   spanStart?: number;
   /** Absolute source offset in the host boundary encoding (UTF-16 for wasm/native). */
   spanEnd?: number;
+  /** Closed projection identity when this diagnostic reports carrier API failure. */
+  projectionError?: PublicApiProjectionError;
 }
 
 export interface DestructuredBlockMeta {
@@ -30,8 +176,12 @@ export interface CompiledFile {
   verterSourceMap: string;
   /** TSC declaration output (minimal .d.ts). */
   tscCode: string;
+  /** Structured outcome for the application-facing public API mode. */
+  publicApiOutcome: PublicApiModeOutcome;
   /** Declaration-carrier surface (`getPublicApi(id, "declaration")` — `X.d.vue.ts`). */
   declCode: string;
+  /** Structured outcome for declaration-carrier mode, independent of public mode. */
+  declarationOutcome: PublicApiModeOutcome;
   /** V3 source map JSON for {@link declCode} (empty when the host emits none). */
   declSourceMap: string;
   /** SSR-compiled JS output (when SSR mode is enabled). */
@@ -54,7 +204,9 @@ export class File {
     templateCode: "",
     verterSourceMap: "",
     tscCode: "",
+    publicApiOutcome: { kind: "absent" },
     declCode: "",
+    declarationOutcome: { kind: "absent" },
     declSourceMap: "",
     ssrCode: "",
     errors: [],

@@ -17,10 +17,10 @@
 use std::sync::Arc;
 
 use verter_type_expr::facts::{
-    ResolvedLocalTypeFact, SemanticTypeSource, ValueAnnotationClass, ValueDeclIdentityPart,
-    ValueTypeAnnotationFact,
+    InferenceUnavailableReason, ResolvedLocalTypeFact, SemanticTypeSource, ValueAnnotationClass,
+    ValueDeclIdentityPart, ValueTypeAnnotationFact,
 };
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
 use crate::analysis::types::ResolvedLocalType;
 
@@ -34,6 +34,7 @@ pub(crate) fn build_resolved_local_type_fact(src: &ResolvedLocalType) -> Resolve
     // EXHAUSTIVE destructure — every field named, none elided via `..`.
     let ResolvedLocalType {
         name,
+        owner,
         // Display-only expanded-type TEXT — a carve-out, never a semantic fact.
         expanded: _display_only_expanded,
         shape,
@@ -45,6 +46,7 @@ pub(crate) fn build_resolved_local_type_fact(src: &ResolvedLocalType) -> Resolve
 
     ResolvedLocalTypeFact {
         name: name.clone(),
+        owner: *owner,
         shape: shape.clone(),
     }
 }
@@ -72,8 +74,19 @@ pub(crate) fn value_type_annotation_fact(
     annotation: Option<&TypeExpr>,
     own_decl_name: &str,
     declaring_canonical: &Arc<str>,
+    owner: TopLevelOwnerId,
     annotation_source: Option<SemanticTypeSource>,
+    inference_unavailable: Option<InferenceUnavailableReason>,
 ) -> ValueTypeAnnotationFact {
+    if let Some(reason) = inference_unavailable {
+        debug_assert!(annotation.is_none());
+        debug_assert!(annotation_source.is_none());
+        return ValueTypeAnnotationFact {
+            typeof_alias_target: None,
+            classification: ValueAnnotationClass::InferenceUnavailable(reason),
+            annotation: None,
+        };
+    }
     let Some(annotation) = annotation else {
         debug_assert!(
             annotation_source.is_none(),
@@ -92,6 +105,7 @@ pub(crate) fn value_type_annotation_fact(
         {
             Some(ValueDeclIdentityPart {
                 canonical_id: declaring_canonical.clone(),
+                owner,
                 symbol: Arc::from(value_ref.path[0].as_str()),
                 member_path: Arc::from([]),
             })
@@ -126,6 +140,7 @@ mod tests {
         ResolvedLocalShape::Ref(SymbolBodyLocator {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/ws/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 symbol: Arc::from(name),
                 space: LocatorSymbolSpace::Type,
             },
@@ -135,6 +150,7 @@ mod tests {
     fn local_type(name: &str, shape: ResolvedLocalShape) -> ResolvedLocalType {
         ResolvedLocalType {
             name: name.to_string(),
+            owner: TopLevelOwnerId::ordinary_file(),
             expanded: "<expanded text>".to_string(),
             shape,
             span: Span::default(),
@@ -182,6 +198,8 @@ mod tests {
             Some(&typeof_annotation(&["source"])),
             "alias",
             &canonical,
+            TopLevelOwnerId::ordinary_file(),
+            None,
             None,
         );
         assert_eq!(fact.classification, ValueAnnotationClass::TypeOfAlias);
@@ -201,6 +219,8 @@ mod tests {
             Some(&typeof_annotation(&["obj", "member"])),
             "alias",
             &canonical,
+            TopLevelOwnerId::ordinary_file(),
+            None,
             None,
         );
         assert_eq!(
@@ -215,8 +235,14 @@ mod tests {
         // The self-reference break: `const own: typeof own` must not produce a
         // follow edge — the Some/None decision IS the termination guard.
         let canonical: Arc<str> = Arc::from("/ws/a.ts");
-        let fact =
-            value_type_annotation_fact(Some(&typeof_annotation(&["own"])), "own", &canonical, None);
+        let fact = value_type_annotation_fact(
+            Some(&typeof_annotation(&["own"])),
+            "own",
+            &canonical,
+            TopLevelOwnerId::ordinary_file(),
+            None,
+            None,
+        );
         assert_eq!(fact.typeof_alias_target, None, "self-peel must break");
         assert_eq!(fact.classification, ValueAnnotationClass::Direct);
     }
@@ -224,7 +250,14 @@ mod tests {
     #[test]
     fn absent_and_direct_annotations_classify_without_a_target() {
         let canonical: Arc<str> = Arc::from("/ws/a.ts");
-        let absent = value_type_annotation_fact(None, "x", &canonical, None);
+        let absent = value_type_annotation_fact(
+            None,
+            "x",
+            &canonical,
+            TopLevelOwnerId::ordinary_file(),
+            None,
+            None,
+        );
         assert_eq!(absent.classification, ValueAnnotationClass::Absent);
         assert_eq!(absent.typeof_alias_target, None);
         assert_eq!(absent.annotation, None);
@@ -233,11 +266,13 @@ mod tests {
             Some(&TypeExpr::Primitive(PrimitiveName::String)),
             "x",
             &canonical,
+            TopLevelOwnerId::ordinary_file(),
             Some(SemanticTypeSource::Closed(
                 verter_type_expr::facts::ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
                     PrimitiveName::String,
                 )),
             )),
+            None,
         );
         assert_eq!(direct.classification, ValueAnnotationClass::Direct);
         assert_eq!(direct.typeof_alias_target, None);

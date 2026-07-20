@@ -641,6 +641,7 @@ impl ExecutorResolveCtx<'_> {
         let decl = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from(base.owner_canonical.as_ref()),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from(base.symbol_name.as_ref()),

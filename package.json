@@ -65,11 +65,14 @@
     "prepare": "husky",
     "proto:gen": "buf generate && oxfmt packages/proto/src/gen",
     "test:coverage": "vitest run --coverage",
-    "compare:vue-behavior": "node scripts/vue-behavior-compare/run.mjs"
+    "compare:vue-behavior": "node scripts/vue-behavior-compare/run.mjs",
+    "gen:vue-macro-oracle": "node scripts/gen-vue-macro-runtime-oracle.mjs",
+    "gen:vue-macro-oracle:check": "node scripts/gen-vue-macro-runtime-oracle.mjs --check",
+    "test:vue-macro-oracle": "node --test scripts/vue-macro-runtime-oracle/oracle.test.mjs"
   },
   "dependencies": {
     "@vue/compiler-core": "^3.5.34",
-    "@vue/compiler-sfc": "^3.5.34",
+    "@vue/compiler-sfc": "3.5.34",
     "oxfmt": "^0.52.0"
   },
   "devDependencies": {

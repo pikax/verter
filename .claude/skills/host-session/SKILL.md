@@ -17,7 +17,6 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 - `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. The canonical lazy semantic layer and sole authority for reusable type-resolution work. Two parallel memos:
   - **Node memo** (mode-erased `FamilyKey` → `FamilySlots`) for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
   - **Relation memo** (keyed by full-identity `RelateMemoKey` — source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements. `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }` — all three cache-with-fence.
-  - Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
   - Canonical node variants include `SemanticNodeData::Function { params, return_type, type_parameters }` (class/interface lower to `Object` with heritage merged).
 - `IntrinsicRegistry` — SDK-intrinsic dispatch table.
 - `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
@@ -27,6 +26,48 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 Host view: resolver-path helpers receive `&HostStoreView` directly as result-DB fence authority; `IndexedReady` is the single canonical post-parse artifact (former `ModuleFactsDb` deleted). Validated-cache writes record a `ReadSetSignature.facts` fact signature; warm hits revalidate it against the live `StoreView` before returning. Full store-view contract: "Host Store View" + "Store-View Token, Lane Identity, and Singleflight" below.
 
 **Resolver-context seal:** resolver-path code does NOT take `&VerterHost` directly. It takes `ctx: &'a dyn ResolverContext` — a `pub(crate)` sealed super-trait at `crates/verter_session/src/resolver_core/resolver_context.rs`. Only `VerterHost` implements `ResolverContext` (`sealed::Sealed` marker closed at trait definition). Guard `no_concrete_verter_host_in_seal_scope` mechanically forbids re-introducing `&VerterHost` parameters under the resolver_core/meta_resolve/host_manage/component_meta_query_engine seal scope. New trait-surface methods are an architectural decision; widen with care.
+
+## Vue Macro Codegen Producer
+
+`typeinfo/vue_macro_codegen.rs` is the sole semantic producer for compiler-facing
+Vue macro DTOs. One invocation inventories one already-indexed SFC under one
+request-bound `ResolverContext` and fulfills `Runtime`, `Tsc`, or
+`RuntimeAndTsc` demand. Runtime and TSC bundles are independent. Each entry is
+joined to compiler syntax by stable `syntax_index`; semantic values come from
+`ProjectSemanticDispatch` and TypeInfo projection, never from parser type
+expansion.
+
+The output is request-local and is not retained as an aggregate graph-id cache.
+Underlying semantic queries keep their canonical memo/singleflight behavior.
+The producer submits exactly one interactive scoped cache-node job per
+`(canonical SFC, exact demand, session)` request. The semantic key is
+content-free; resolver epoch and external-validity fingerprint live only in the
+job's input pin, so an edit preserves the key while moving the pin. Every macro,
+member, owner, runtime classifier, and TSC materialization stays inside that one
+scheduled closure. The scoped rendezvous disappears at terminal state and is
+not a second cache authority.
+
+The producer records one fact footprint, returns typed
+completeness/cacheability, and reports the sorted transitive canonicals observed
+by that request. Cancellation returns only typed `Partial(Cancelled)` entries,
+marks the result non-cacheable, and never publishes the cancelled aggregate; a
+live dedup sibling may still complete and publish to that sibling. Compile entry
+points call the producer once per SFC/request for the target's combined demand,
+pass `output.compiler_input()` to the compiler, and unconditionally replace the
+semantic transitive-dependency axis with the returned canonical set. Public-API
+rendering requests one TSC bundle; runtime rendering requests one runtime
+bundle. Audited compilation invokes the producer inside the request observer
+scope so its semantic reads are attributed to the same audit record.
+
+Vue custom-element script policy is an explicit compile-profile axis:
+`CompileProfile.custom_element` (host/NAPI `customElement`) defaults to `false`,
+participates in the derived profile hash, and threads through
+`RuntimeCompileOptions` to `CodegenOptions.custom_element`. The batch-render
+lane carries the same axis as required
+`CompileBatchRenderProfile.custom_element`; callers must set it explicitly.
+Never infer it from template `custom_elements`, whose only responsibility is
+custom-tag parsing. The standard dev/prod profiles remain non-custom-element
+unless the caller selects this axis.
 
 ## Language Server Architecture
 
@@ -268,9 +309,8 @@ Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `ups
 - **Per-input requested mode, classifier-owned actual mode.** Each input carries a `requested_mode` (`CompileBatchInput.requested_mode`, defaulting to `CompileBatchOptions.default_mode` → `Session`). The `compile_cache_mode` classifier is SOLE authority for `actual_mode`: `Session` stays `Session` under every eligibility reason (its fact rail handles them); `Content` downgrades to `Stateless` on any reason (its pure key cannot represent cross-file / session-scoped input); `Stateless` is the floor. Compile dedup keyed by `(canonical, effective requested_mode)`.
 - **Svelte `cssHash` override — cache identity + fail-closed content admission.** A resolved Svelte `cssHash` override (the callback is resolved OUTSIDE the compiler; only the resolved `Option<String>` threads in) is COMPILE-OUTPUT PROFILE identity, carried on `CompileProfile.svelte_css_hash_override`. It participates automatically in BOTH cache keys — `compile_profile_hash` (the session slot u64) and `content_mode_profile_hash` (the Content pure key). Because the session slot addresses on the u64 alone, `CompileOutputNodeFactValidatedSession::lookup` ALSO re-checks the exact `Option<Arc<str>>` override on the slot against the live value (`slot.css_hash_override != live` misses), so a u64 collision can never serve a result with a different scope hash ("never wrong"). A user-supplied override is not provably content-deterministic, so `classify_compile_mode` pushes `DowngradeReason::CssHashOverridePresent` when one is present ⇒ a requested `Content` compile fail-closes to `Stateless`; `Session` caching stays safe via the profile identity + the exact slot check. The override never overloads Vue's `component_id`; a static guard bans `component_id` reads from Svelte CSS hashing.
 - **Session-only compile-tier prefetch.** The cold compute installs `prefetch_compile_tier_observation_targets` (cross-file import-route cache + dependency `IndexedReady` pre-population) ONLY for `actual_mode == Session`, because the compile-tier fact tracer it feeds is installed only for `Session`. `Content` / `Stateless` compile correctness (external `src=` resolution, macro-type collection, dep sync) is produced independently by `compile_entry`.
-- **Empty-`macro_type_deps` collector skip.** When an input has no macro type deps, the cold path skips building the external-macro-type collector (it would return empty anyway) but still calls `sync_transitive_macro_type_dependencies` with the empty set — that semantic-axis clearing (`replace_semantic_transitive`) is unconditional.
-- **Tiered missing-macro-type-dep diagnostics.** `HOST_MISSING_MACRO_TYPE_DEP` severity follows the dep's structural position (`MacroTypeDep.usage`): a SURFACE miss (direct type argument, intersection/union arm, extends heritage, alias-chain hop) is an Error and aborts `compile_entry`; a MEMBER miss (top-level member annotation — `defineProps<{ foo: Missing }>()`) is a Warning that surfaces on the SUCCESSFUL compile while the compiler degrades that member's runtime type to `null`. Nested references (`defineProps<{ foo: { test: Missing } }>()`) never become deps at all — silent, no resolution attempted. The RuntimeRender lane's code-keyed softening (all `HOST_MISSING_MACRO_TYPE_DEP` → warning) is unchanged on top of this. Classification happens at analysis time (`verter_semantic::analysis::macros::classify_macro_type_reference_roles`); severity is stamped in `HostExternalMacroTypeCollector::map_external_macro_type_error` and routed by `compile_entry`'s severity partition.
-- **FOUND dep, unresolvable SURFACE-composition arm ⇒ Error.** A dep type that RESOLVES but whose surface composition references an unresolvable IMPORT-BACKED type (`interface Found extends NotFound {…}`, `type Found = Other & NotFound` / `| NotFound`, where `NotFound` is an import binding of the DECLARING file that fails to resolve to a loaded file or isn't exported by its target) also errors under the same code. The shared shallow walker reports each dropped arm as `ShallowDiagnostic::UnresolvedSurfaceArm { name, owner_canonical }` (root drops excluded — the legacy missing-root channel owns those; mapped to `ExpansionStopReason::UnresolvedReference` for component-meta); the facts ride `VueMacroSurface.unresolved_surface_arms` into `HostExternalMacroTypeCollector`, which applies the import-backed filter (`resolve_loaded_dependency_canonical` + the declaring file's `snapshot.imports`/`export_signatures`) and mints Error diagnostics through the `resolve_external_macro_type` sink param, anchored to the dep's owning import by `collect_external_macro_types`. MEMBER-position references inside the found type (`{ foo: NotFound }`, nested) stay silent — member values are carriers the shallow walk never visits — and a heritage name with no owning import (ambient/lib) never errors. Warm dispatch-memo reads replay the walker diagnostics, so recompiles reproduce the error.
+- **Target-sensitive macro demand.** `compile_entry` requests runtime, TSC, or both from the TypeInfo producer based on `CompileTarget`. Empty output still replaces the semantic transitive-dependency axis with an empty set.
+- **Typed macro degradation.** Producer entries carry `Complete`, `Partial`, `Unresolved`, or `Unsupported` outcomes. The compiler accepts only a complete projection with the expected role; missing bundles, degraded entries, or role mismatches fail closed at the authored macro/type anchor. No member is silently reconstructed from parser semantics.
 
 ### LSP Integration
 

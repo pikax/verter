@@ -1,5 +1,5 @@
 //! Architecture guard: there must be EXACTLY ONE production
-//! `graph.execute_cooperative(` call site dispatched from
+//! `graph.execute_cooperative_value(` call site dispatched from
 //! `ProjectSemanticDispatch`. The single allowed call site lives
 //! inside `ProjectSemanticDispatch::execute_via_cold_build_helper`
 //! (tagged with the `arch-guard:single-execute-cooperative-call`
@@ -14,7 +14,7 @@
 //! The scan walks `crates/verter_session/src/**/*.rs`, strips any
 //! `#[cfg(test)]` regions (so the existing test-only memo driver
 //! invocations at `semantic_query_memo/tests.rs` do not false-trigger),
-//! and counts `graph.execute_cooperative(` matches. Production
+//! and counts `graph.execute_cooperative_value(` matches. Production
 //! callsites in `*tests.rs` files or under `tests/` paths are not
 //! scanned.
 
@@ -93,7 +93,7 @@ fn walk_dir(dir: &PathBuf, out: &mut Vec<PathBuf>) {
 }
 
 /// Strip line / block comments so a doc comment that mentions
-/// `graph.execute_cooperative(` doesn't false-trigger the call-site
+/// `graph.execute_cooperative_value(` doesn't false-trigger the call-site
 /// count. Conservative: removes `// ...` to end-of-line, and `/* ... */`
 /// across lines.
 fn strip_comments(src: &str) -> String {
@@ -142,7 +142,7 @@ fn dispatch_has_exactly_one_production_execute_cooperative_call_site() {
     walk_dir(&src_root, &mut files);
 
     // For each production file, strip comments + `#[cfg(test)]`
-    // regions then count `graph.execute_cooperative(` occurrences.
+    // regions then count `graph.execute_cooperative_value(` occurrences.
     // Doc comments that REFERENCE the call-site pattern (e.g. the
     // architecture guard comment on the helper itself) must NOT
     // false-trigger.
@@ -152,7 +152,7 @@ fn dispatch_has_exactly_one_production_execute_cooperative_call_site() {
         let raw = fs::read_to_string(path).expect("read file");
         let stripped_cfg = strip_cfg_test_regions(&raw);
         let stripped = strip_comments(&stripped_cfg);
-        let count = stripped.matches("graph.execute_cooperative(").count();
+        let count = stripped.matches("graph.execute_cooperative_value(").count();
         if count > 0 {
             hits.push((path.clone(), count));
             total += count;
@@ -161,7 +161,7 @@ fn dispatch_has_exactly_one_production_execute_cooperative_call_site() {
 
     assert_eq!(
         total, 1,
-        "exactly ONE production `graph.execute_cooperative(` call site is allowed \
+        "exactly ONE production `graph.execute_cooperative_value(` call site is allowed \
          (inside `ProjectSemanticDispatch::execute_via_cold_build_helper` — the shared \
          cold-build helper). Hits: {hits:?}"
     );
@@ -174,7 +174,7 @@ fn dispatch_has_exactly_one_production_execute_cooperative_call_site() {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     assert!(
         file_name.ends_with("mod.rs"),
-        "the single production `graph.execute_cooperative(` call site must live in the shared \
+        "the single production `graph.execute_cooperative_value(` call site must live in the shared \
          cold-build helper (project_semantic_dispatch/mod.rs), not {file_name}"
     );
 
@@ -215,11 +215,11 @@ fn execute_read_does_not_call_execute_cooperative_directly() {
     // `execute_read` lives in `project_semantic_dispatch/raise.rs`.
     // After the shared cold-build helper refactor, `execute_read`
     // delegates to `execute_via_cold_build_helper`; it does NOT call
-    // `graph.execute_cooperative(` directly.
+    // `graph.execute_cooperative_value(` directly.
     let src = read_session_src("project_semantic_dispatch/raise.rs");
     assert!(
-        !src.contains("graph.execute_cooperative("),
-        "execute_read must NOT call `graph.execute_cooperative(` directly. It must \
+        !src.contains("graph.execute_cooperative_value("),
+        "execute_read must NOT call `graph.execute_cooperative_value(` directly. It must \
          delegate to `execute_via_cold_build_helper` so the fact tracer is always \
          installed around the cold-build closure."
     );

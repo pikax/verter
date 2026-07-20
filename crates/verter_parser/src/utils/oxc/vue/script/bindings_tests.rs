@@ -1,6 +1,5 @@
 use super::*;
 use crate::types::BindingType;
-use crate::utils::oxc::script::type_surface::build_type_context;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -11,9 +10,7 @@ fn classify(source: &str) -> Vec<(String, BindingType)> {
     let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
     assert!(ret.errors.is_empty(), "Parse errors: {:?}", ret.errors);
     let ctx = ScriptParseContext::new(0, source.as_bytes());
-    // Standalone caller (no macro pass): build the context and resolve locally.
-    let type_ctx = build_type_context(&ret.program, source.as_bytes(), 0);
-    let entries = extract_bindings(&ret.program, &ctx, &type_ctx, None);
+    let entries = extract_bindings(&ret.program, &ctx);
     entries
         .into_iter()
         .map(|(span, bt)| {
@@ -338,26 +335,26 @@ fn const_define_slots() {
 
 // ── Standalone expression macros ─────────────────────────────────────
 
-/// @ai-generated
+/// Typed macro surfaces are registered from TypeInfo DTOs, not parser bindings.
 #[test]
 fn standalone_define_props_typed() {
     let b = classify("defineProps<{ msg: string }>();");
-    assert_eq!(find(&b, "msg"), Some(BindingType::Props));
+    assert_eq!(find(&b, "msg"), None);
 }
 
 /// @ai-generated
 #[test]
 fn standalone_define_props_multi_props() {
     let b = classify("defineProps<{ msg: string; count: number }>();");
-    assert_eq!(find(&b, "msg"), Some(BindingType::Props));
-    assert_eq!(find(&b, "count"), Some(BindingType::Props));
+    assert_eq!(find(&b, "msg"), None);
+    assert_eq!(find(&b, "count"), None);
 }
 
 /// @ai-generated
 #[test]
 fn standalone_with_defaults_typed() {
     let b = classify("withDefaults(defineProps<{ msg: string }>(), { msg: 'hi' });");
-    assert_eq!(find(&b, "msg"), Some(BindingType::Props));
+    assert_eq!(find(&b, "msg"), None);
 }
 
 // ── Props: runtime object syntax ────────────────────────────────────
@@ -414,19 +411,19 @@ fn standalone_define_props_array_syntax() {
 
 // ── Props: type reference (interface / type alias) ──────────────────
 
-/// @ai-generated — `defineProps<MyInterface>()` with local interface should resolve props
+/// Type references remain semantic and do not enter parser binding inventory.
 #[test]
 fn standalone_define_props_interface_reference() {
     let b = classify("interface MyProps { foo: string; bar: number }\ndefineProps<MyProps>();");
     assert_eq!(
         find(&b, "foo"),
-        Some(BindingType::Props),
-        "Interface-referenced prop 'foo' should be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
     assert_eq!(
         find(&b, "bar"),
-        Some(BindingType::Props),
-        "Interface-referenced prop 'bar' should be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
 }
 
@@ -436,8 +433,8 @@ fn standalone_define_props_type_alias_reference() {
     let b = classify("type MyProps = { msg: string }\ndefineProps<MyProps>();");
     assert_eq!(
         find(&b, "msg"),
-        Some(BindingType::Props),
-        "Type-alias-referenced prop 'msg' should be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
 }
 
@@ -449,22 +446,21 @@ fn standalone_with_defaults_interface_reference() {
     );
     assert_eq!(
         find(&b, "foo"),
-        Some(BindingType::Props),
-        "withDefaults + interface prop 'foo' should be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
     assert_eq!(
         find(&b, "bar"),
-        Some(BindingType::Props),
-        "withDefaults + interface prop 'bar' should be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
 }
 
 // ── Props: declarator + individual prop extraction ───────────────────
 
-/// @ai-generated — `const props = defineProps<{ foo: string }>()` should extract
-/// both `props` as SetupConst AND `foo` as Props
+/// Typed prop names stay out of the syntax binding inventory.
 #[test]
-fn const_define_props_typed_also_extracts_individual_props() {
+fn const_define_props_typed_records_only_authored_declarator() {
     let b = classify("const props = defineProps<{ foo: string, bar: number }>();");
     assert_eq!(
         find(&b, "props"),
@@ -473,13 +469,13 @@ fn const_define_props_typed_also_extracts_individual_props() {
     );
     assert_eq!(
         find(&b, "foo"),
-        Some(BindingType::Props),
-        "Individual typed prop 'foo' should also be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
     assert_eq!(
         find(&b, "bar"),
-        Some(BindingType::Props),
-        "Individual typed prop 'bar' should also be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
 }
 
@@ -505,10 +501,9 @@ fn const_define_props_runtime_also_extracts_individual_props() {
     );
 }
 
-/// @ai-generated — `const props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' })`
-/// should extract both `props` as SetupConst AND `foo` as Props
+/// withDefaults does not change ownership of typed prop semantics.
 #[test]
-fn const_with_defaults_typed_also_extracts_individual_props() {
+fn const_with_defaults_typed_records_only_authored_declarator() {
     let b =
         classify("const props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' });");
     assert_eq!(
@@ -518,14 +513,14 @@ fn const_with_defaults_typed_also_extracts_individual_props() {
     );
     assert_eq!(
         find(&b, "foo"),
-        Some(BindingType::Props),
-        "Individual prop 'foo' from withDefaults should also be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
 }
 
-/// @ai-generated — `const props = defineProps<MyInterface>()` with local interface
+/// Interface expansion is owned by TypeInfo.
 #[test]
-fn const_define_props_interface_ref_also_extracts_individual_props() {
+fn const_define_props_interface_ref_records_only_authored_declarator() {
     let b = classify("interface MyProps { title: string }\nconst props = defineProps<MyProps>();");
     assert_eq!(
         find(&b, "props"),
@@ -534,8 +529,8 @@ fn const_define_props_interface_ref_also_extracts_individual_props() {
     );
     assert_eq!(
         find(&b, "title"),
-        Some(BindingType::Props),
-        "Interface prop 'title' should be Props"
+        None,
+        "typed prop names are registered from the TypeInfo DTO"
     );
 }
 
@@ -824,8 +819,7 @@ fn spans_are_local_coordinates() {
     let alloc = Allocator::default();
     let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
     let ctx = ScriptParseContext::new(0, source.as_bytes());
-    let type_ctx = build_type_context(&ret.program, source.as_bytes(), 0);
-    let entries = extract_bindings(&ret.program, &ctx, &type_ctx, None);
+    let entries = extract_bindings(&ret.program, &ctx);
     assert_eq!(entries.len(), 1);
     let (span, bt) = &entries[0];
     // 'x' is at position 6 in source
@@ -903,8 +897,8 @@ fn export_default_no_binding() {
 /// Pins the COMPLETE ordered `(name, BindingType)` output of
 /// `extract_bindings` for a representative `<script setup>` program
 /// covering every classification family: imports (value, type-only),
-/// reactivity helpers, literals, `defineProps` destructuring with
-/// individual-prop extraction, plain consts, `let` bindings, and
+/// reactivity helpers, literals, `defineProps` destructuring, plain consts,
+/// `let` bindings, and
 /// function / class / enum declarations. The Vue classification layer
 /// delegates generic statement/pattern inventory to the neutral script
 /// bindings module; this pin holds that delegation byte-stable.
@@ -947,8 +941,6 @@ interface AlsoIgnored {
         ("reactive".to_string(), BindingType::SetupImport),
         ("foo".to_string(), BindingType::PropsAliased),
         ("bar".to_string(), BindingType::PropsAliased),
-        ("foo".to_string(), BindingType::Props),
-        ("bar".to_string(), BindingType::Props),
         ("count".to_string(), BindingType::SetupRef),
         ("doubled".to_string(), BindingType::SetupRef),
         ("state".to_string(), BindingType::SetupReactiveConst),

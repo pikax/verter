@@ -30,6 +30,24 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::SemanticNodeId;
 use crate::VerterHost;
 
+/// Render one graph node as terminal TypeScript display text through the
+/// registered TypeInfo output sink.
+///
+/// The caller receives only text. The sealed materialized carrier and its
+/// `TypeExpr` never cross this module boundary, so graph-oriented consumers
+/// cannot branch on a reverse-materialized shape.
+pub(crate) fn render_node_display_with_ctx(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> Option<String> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+    let type_expr = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
+    verter_type_expr::render_type_expr_display(&type_expr)
+        .ok()
+        .map(|rendered| rendered.text)
+}
+
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
     /// The typeinfo FFI bytes-facade output-sink capability: the facade here
     /// holds this to materialize a graph node into a sealed output carrier

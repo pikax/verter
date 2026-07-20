@@ -48,23 +48,31 @@ fn walk_rs(path: &PathBuf, out: &mut Vec<PathBuf>) {
 #[test]
 fn eval_env_type_symbols_are_grouped_not_last_wins_map() {
     let src = read("crates/verter_semantic/src/analysis/type_eval.rs");
+    // The owner-aware `DeclMap<..Group>` carrier preserves the ordered
+    // contributor-GROUP semantics (values stay `TypeDeclGroup` /
+    // `ValueDeclGroup`) while keying canonically by `(owner, name)`.
     assert!(
-        src.contains("pub type_symbols: FxHashMap<String, TypeDeclGroup>"),
+        src.contains("pub type_symbols: DeclMap<TypeDeclGroup>"),
         "EvalEnv.type_symbols must be keyed to TypeDeclGroup (ordered contributors)"
     );
     assert!(
-        src.contains("pub value_symbols: FxHashMap<String, ValueDeclGroup>"),
+        src.contains("pub value_symbols: DeclMap<ValueDeclGroup>"),
         "EvalEnv.value_symbols must be keyed to ValueDeclGroup (ordered contributors)"
     );
-    // The last-wins map shape is forbidden.
-    assert!(
-        !src.contains("type_symbols: FxHashMap<String, TypeDeclInfo>"),
-        "EvalEnv.type_symbols must NOT be a last-wins FxHashMap<String, TypeDeclInfo>"
-    );
-    assert!(
-        !src.contains("value_symbols: FxHashMap<String, ValueDeclInfo>"),
-        "EvalEnv.value_symbols must NOT be a last-wins FxHashMap<String, ValueDeclInfo>"
-    );
+    // The last-wins map shapes are forbidden — neither the legacy
+    // name-keyed map nor an owner-aware map may hold bare `*Info`
+    // values (a group-less value is last-wins by construction).
+    for forbidden in [
+        "type_symbols: FxHashMap<String, TypeDeclInfo>",
+        "value_symbols: FxHashMap<String, ValueDeclInfo>",
+        "type_symbols: DeclMap<TypeDeclInfo>",
+        "value_symbols: DeclMap<ValueDeclInfo>",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "EvalEnv symbol tables must NOT use the last-wins shape `{forbidden}`"
+        );
+    }
 }
 
 /// (ii) `add_type` / `add_value` must APPEND contributors (no bare overwrite

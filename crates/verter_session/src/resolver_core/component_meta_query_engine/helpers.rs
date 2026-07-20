@@ -85,39 +85,65 @@ pub(super) enum ImportedRegistrySymbolResolution {
 pub(super) fn resolve_imported_registry_symbol_with_budget<F>(
     ctx: &dyn ResolverContext,
     canonical_id: &str,
+    source_owner: verter_type_expr::TopLevelOwnerId,
     exported_name: &str,
     mut allow_route: F,
 ) -> ImportedRegistrySymbolResolution
 where
     F: FnMut() -> bool,
 {
-    let (resolved_id, resolved_name) = if ctx
-        .prepared_type_decl(canonical_id, exported_name)
+    let resolved = if ctx
+        .prepared_type_decl_return_only(canonical_id, source_owner, exported_name)
         .is_some()
     {
-        (canonical_id.to_string(), exported_name.to_string())
+        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+            canonical_id,
+            source_owner,
+            exported_name,
+        )
+    } else if source_owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+        if let Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name }) = ctx
+            .shallow_file_state(canonical_id)
+            .and_then(|state| state.export_target(exported_name).cloned())
+        {
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+                canonical_id,
+                owner,
+                symbol_name,
+            )
+        } else {
+            if !allow_route() {
+                // Fuse exhaustion — the route was NOT taken, so this is a
+                // partial, not an absent. Distinguish it explicitly.
+                return ImportedRegistrySymbolResolution::FuseTripped;
+            }
+            let (resolved, route_facts) =
+                ctx.resolve_imported_type_root_with_facts(canonical_id, exported_name);
+            ctx.observe_borrowed_signature(&route_facts);
+            let Some(resolved) = resolved else {
+                return ImportedRegistrySymbolResolution::Resolved(None);
+            };
+            resolved
+        }
     } else {
-        if !allow_route() {
-            // Fuse exhaustion — the route was NOT taken, so this is a
-            // partial, not an absent. Distinguish it explicitly.
-            return ImportedRegistrySymbolResolution::FuseTripped;
-        }
-        match ctx.resolve_named_type_export_target_shallow(canonical_id, exported_name) {
-            Some(pair) => pair,
-            None => return ImportedRegistrySymbolResolution::Resolved(None),
-        }
+        return ImportedRegistrySymbolResolution::Resolved(None);
     };
 
-    let Some(prepared) = ctx.prepared_type_decl(&resolved_id, &resolved_name) else {
+    let Some(prepared) = ctx.prepared_type_decl_return_only(
+        &resolved.canonical_id,
+        resolved.owner,
+        &resolved.symbol_name,
+    ) else {
         return ImportedRegistrySymbolResolution::Resolved(None);
     };
 
     ImportedRegistrySymbolResolution::Resolved(Some(ResolvedImportedRegistrySymbol {
-        canonical_id: resolved_id.clone(),
-        exported_name: resolved_name,
+        canonical_id: resolved.canonical_id.to_string(),
+        owner: resolved.owner,
+        exported_name: resolved.symbol_name.to_string(),
         body: prepared.body_facts.clone(),
         canonical_dependencies: prepared_type_decl_canonical_dependencies(
-            resolved_id.as_str(),
+            resolved.canonical_id.as_ref(),
             prepared.as_ref(),
         ),
     }))

@@ -204,6 +204,10 @@ pub struct ScopeId {
     /// version indirectly via any [`ResolveDeclKey`] whose scope points to a
     /// specific `(canonical_id, whole_hash)` artifact.
     pub canonical_id: Arc<str>,
+    /// Exact authored top-level owner within `canonical_id`. Module and
+    /// instance scripts are disjoint lexical scopes even when they declare the
+    /// same name at the same source generation.
+    pub owner: verter_type_expr::TopLevelOwnerId,
     /// Optional local scope index for inner scopes (lambda body, type-param
     /// scope, block scope). `None` means the file top-level scope. Only valid
     /// inside the lowered version of the owning canonical.
@@ -217,10 +221,11 @@ pub struct ScopeId {
 }
 
 impl ScopeId {
-    /// A file top-level scope rooted in `canonical_id`.
-    pub fn file(canonical_id: Arc<str>) -> Self {
+    /// A file top-level scope rooted in an exact authored owner.
+    pub fn file(canonical_id: Arc<str>, owner: verter_type_expr::TopLevelOwnerId) -> Self {
         Self {
             canonical_id,
+            owner,
             local_scope: None,
         }
     }
@@ -255,6 +260,8 @@ pub enum NodeScopeId {
     /// type-param scope).
     File {
         canonical_id: Arc<str>,
+        /// Exact authored top-level owner within `canonical_id`.
+        owner: verter_type_expr::TopLevelOwnerId,
         whole_hash: HashValue,
         local_scope: Option<u32>,
     },
@@ -275,6 +282,15 @@ impl NodeScopeId {
         match self {
             Self::Global => None,
             Self::File { canonical_id, .. } => Some(Arc::clone(canonical_id)),
+        }
+    }
+
+    /// Exact authored top-level owner for a declaration-bound scope.
+    #[must_use]
+    pub fn top_level_owner(&self) -> Option<verter_type_expr::TopLevelOwnerId> {
+        match self {
+            Self::Global => None,
+            Self::File { owner, .. } => Some(*owner),
         }
     }
 }
@@ -374,6 +390,7 @@ pub struct ResolveDeclKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclIdentity {
     pub canonical_id: Arc<str>,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub whole_hash: HashValue,
     pub decl_name: Arc<str>,
 }
@@ -389,15 +406,18 @@ impl DeclIdentity {
         match scope {
             NodeScopeId::Global => Self {
                 canonical_id: Arc::from(""),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name,
             },
             NodeScopeId::File {
                 canonical_id,
+                owner,
                 whole_hash,
                 ..
             } => Self {
                 canonical_id: Arc::clone(canonical_id),
+                owner: *owner,
                 whole_hash: *whole_hash,
                 decl_name,
             },
@@ -412,6 +432,7 @@ impl DeclIdentity {
     pub fn synthetic(display_name: &str) -> Self {
         Self {
             canonical_id: Arc::from("<synthetic>"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: Arc::from(display_name),
         }
@@ -434,6 +455,7 @@ impl DeclIdentity {
     pub fn to_type_slot_unscoped(&self) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::clone(&self.canonical_id),
+            self.owner,
             Arc::clone(&self.decl_name),
         )
     }
@@ -573,6 +595,8 @@ pub struct ResolvedDeclSlotIdentity {
     /// see audit doc `docs/arch/materialize-owner-local-audit.md`
     /// (a) for the `local_fence_seed` derivation rationale.
     pub defining_canonical: Arc<str>,
+    /// Exact authored top-level owner inside `defining_canonical`.
+    pub owner: verter_type_expr::TopLevelOwnerId,
     /// Stable merged-symbol name. Invariant under declaration
     /// reordering AND under TS declaration merging.
     pub merged_symbol_name: Arc<str>,
@@ -590,6 +614,7 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn type_slot(
         defining_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         merged_symbol_name: Arc<str>,
         project_identity: u32,
         type_env_hash: HashValue,
@@ -597,6 +622,7 @@ impl ResolvedDeclSlotIdentity {
     ) -> Self {
         Self {
             defining_canonical,
+            owner,
             merged_symbol_name,
             symbol_space: SemanticSymbolSpace::Type,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
@@ -607,6 +633,7 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn value_slot(
         defining_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         merged_symbol_name: Arc<str>,
         project_identity: u32,
         type_env_hash: HashValue,
@@ -614,6 +641,7 @@ impl ResolvedDeclSlotIdentity {
     ) -> Self {
         Self {
             defining_canonical,
+            owner,
             merged_symbol_name,
             symbol_space: SemanticSymbolSpace::Value,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
@@ -634,9 +662,14 @@ impl ResolvedDeclSlotIdentity {
     /// integration crates consume it; the one-path contract is pinned by
     /// the arch guard `no_production_caller_of_zero_env_slot_constructors`.
     #[must_use]
-    pub fn type_slot_unscoped(canonical: Arc<str>, name: Arc<str>) -> Self {
+    pub fn type_slot_unscoped(
+        canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: Arc<str>,
+    ) -> Self {
         Self::type_slot(
             canonical,
+            owner,
             name,
             0,
             HashValue::default(),
@@ -651,7 +684,11 @@ impl ResolvedDeclSlotIdentity {
     /// instead. See [`Self::type_slot_unscoped`].
     #[must_use]
     pub fn builtin_unscoped(name: &str) -> Self {
-        Self::type_slot_unscoped(Arc::from("__builtin__"), Arc::from(name))
+        Self::type_slot_unscoped(
+            Arc::from("__builtin__"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        )
     }
 
     /// TEST/FIXTURE-ONLY constructor: derive a slot identity from a
@@ -681,6 +718,7 @@ impl ResolvedDeclSlotIdentity {
     ) -> Self {
         Self {
             defining_canonical: Arc::clone(&identity.canonical_id),
+            owner: identity.owner,
             merged_symbol_name: Arc::clone(&identity.decl_name),
             symbol_space,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
@@ -704,6 +742,7 @@ impl ResolvedDeclSlotIdentity {
     pub fn with_symbol_space(&self, symbol_space: SemanticSymbolSpace) -> Self {
         Self {
             defining_canonical: Arc::clone(&self.defining_canonical),
+            owner: self.owner,
             merged_symbol_name: Arc::clone(&self.merged_symbol_name),
             symbol_space,
             env: self.env,
@@ -723,7 +762,7 @@ impl ResolvedDeclSlotIdentity {
 #[must_use]
 pub fn value_root_of(value_slot: &ResolvedDeclSlotIdentity) -> ValueRootKey {
     ValueRootKey {
-        scope: ScopeId::file(Arc::clone(&value_slot.defining_canonical)),
+        scope: ScopeId::file(Arc::clone(&value_slot.defining_canonical), value_slot.owner),
         name: Arc::clone(&value_slot.merged_symbol_name),
     }
 }
@@ -1066,6 +1105,44 @@ pub enum ReductionDemand {
     /// `ProjectPath` / `keyof` keep `Published` (intersection is correct
     /// there).
     MacroObjectSurface,
+    /// Vue runtime props/emits object-surface publication.
+    ///
+    /// This has the same operator-reduction and union-of-members semantics as
+    /// [`Self::MacroObjectSurface`], plus one explicit policy: heritage arms
+    /// carrying producer-minted `@vue-ignore` facts are removed before their
+    /// heads resolve or merge. The policy is runtime-only. TSC, component-meta,
+    /// slots, and ordinary macro surfaces retain [`Self::MacroObjectSurface`]
+    /// and therefore preserve the complete TypeScript heritage surface.
+    ///
+    /// It is a distinct cache identity so a runtime-filtered surface can never
+    /// warm-serve an unfiltered macro/TSC query over the same graph node.
+    VueRuntimeObjectSurface,
+}
+
+/// Vue heritage publication policy — an orthogonal, content-free reduction
+/// context axis.
+///
+/// [`ReductionDemand`] answers whether operator materialisation is publication
+/// work or structural transit work. This axis answers a different question:
+/// whether producer-addressed `@vue-ignore` heritage arms are retained while a
+/// declaration body is lowered. Keeping the policy independent lets an
+/// internal carrier unwrap demote `VueRuntimeObjectSurface` to
+/// `StructuralTransit` (preserving carrier-stop semantics) without losing the
+/// runtime-only heritage filter.
+///
+/// The axis is folded into every `ProjectionReductionContext`-bearing memo
+/// family and mapped-member context encoding. It contains no content/version
+/// state; prepared-declaration facts and file self-roots remain the sole value
+/// versioning rail (R6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+pub enum VueHeritagePolicy {
+    /// Retain the complete TypeScript heritage surface. This is the default
+    /// for TSC, component-meta, slots, and every non-runtime query.
+    #[default]
+    RetainAll,
+    /// Remove only producer-addressed `@vue-ignore` heritage arms before
+    /// substitution, head resolution, and surface merging.
+    SuppressIgnored,
 }
 
 /// Surface-provenance axis — by design.
@@ -1247,8 +1324,9 @@ impl PartialEq<MemberMergeRole> for MergeRoleStamp {
     }
 }
 
-/// Projection reduction context — the `(mode, demand, provenance, merge_role)`
-/// tuple threaded through every operator dispatch (`Instantiate` /
+/// Projection reduction context — the
+/// `(mode, demand, provenance, merge_role, vue_heritage_policy)` tuple
+/// threaded through every operator dispatch (`Instantiate` /
 /// `KeyOf` / `MappedType` and the builtin-utility dispatch that
 /// composes them).
 ///
@@ -1279,6 +1357,12 @@ pub struct ProjectionReductionContext {
     /// heritage-arm surface and a structural surface of the same node cache
     /// distinctly.
     pub merge_role: MemberMergeRole,
+    /// Runtime-only Vue heritage policy. Orthogonal to [`Self::demand`]: an
+    /// internal carrier unwrap may require `StructuralTransit` operator
+    /// semantics while still suppressing producer-addressed ignored heritage.
+    /// Folded into every context-bearing family identity so filtered and
+    /// unfiltered structural-transit reductions cannot cross-serve.
+    pub vue_heritage_policy: VueHeritagePolicy,
 }
 
 impl ProjectionReductionContext {
@@ -1294,6 +1378,7 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::Published,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
         }
     }
 
@@ -1313,6 +1398,7 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::Published,
             provenance: SurfaceProvenanceContext::MacroTypeArgOwnBody,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
         }
     }
 
@@ -1334,6 +1420,26 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::MacroObjectSurface,
             provenance,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
+        }
+    }
+
+    /// Construct the Vue runtime props/emits object-surface demand.
+    ///
+    /// This is the only constructor that enables typed `@vue-ignore`
+    /// heritage suppression. It remains a `Shallow` publication demand, not a
+    /// projection mode, and carries the same provenance axis as
+    /// [`Self::macro_object_surface`].
+    pub const fn vue_runtime_object_surface(
+        mode: ProjectionMode,
+        provenance: SurfaceProvenanceContext,
+    ) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::VueRuntimeObjectSurface,
+            provenance,
+            merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::SuppressIgnored,
         }
     }
 
@@ -1342,7 +1448,17 @@ impl ProjectionReductionContext {
     /// union-of-members over the common-member intersection.
     #[must_use]
     pub const fn is_macro_object_surface(self) -> bool {
-        matches!(self.demand, ReductionDemand::MacroObjectSurface)
+        matches!(
+            self.demand,
+            ReductionDemand::MacroObjectSurface | ReductionDemand::VueRuntimeObjectSurface
+        )
+    }
+
+    /// Whether this demand suppresses producer-identified `@vue-ignore`
+    /// heritage arms before semantic resolution.
+    #[must_use]
+    pub const fn suppresses_vue_ignored_heritage(self) -> bool {
+        matches!(self.vue_heritage_policy, VueHeritagePolicy::SuppressIgnored)
     }
 
     /// Construct a `StructuralTransit` context — used by the relation
@@ -1356,6 +1472,7 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::StructuralTransit,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
         }
     }
 
@@ -1378,6 +1495,25 @@ impl ProjectionReductionContext {
             demand: ReductionDemand::StructuralTransit,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: MemberMergeRole::Authored,
+            vue_heritage_policy: VueHeritagePolicy::RetainAll,
+        }
+    }
+
+    /// Demote this context to structural transit at `mode` while preserving
+    /// every orthogonal value-affecting axis.
+    ///
+    /// The empty-path Shallow walker uses this at declaration-carrier unwraps:
+    /// operator dispatch must carrier-stop, but macro provenance, merge role,
+    /// and the Vue heritage policy still describe the declaration surface
+    /// being requested.
+    #[must_use]
+    pub const fn into_structural_transit_with_mode(self, mode: ProjectionMode) -> Self {
+        Self {
+            mode,
+            demand: ReductionDemand::StructuralTransit,
+            provenance: self.provenance,
+            merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1400,6 +1536,7 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance: SurfaceProvenanceContext::Structural,
             merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1417,6 +1554,7 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance: self.provenance,
             merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1431,6 +1569,7 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance,
             merge_role: self.merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
     }
 
@@ -1447,7 +1586,52 @@ impl ProjectionReductionContext {
             demand: self.demand,
             provenance: self.provenance,
             merge_role,
+            vue_heritage_policy: self.vue_heritage_policy,
         }
+    }
+
+    /// Derive a context from `self` while inheriting every orthogonal axis
+    /// from `source`.
+    ///
+    /// This is the single adapter for sites that intentionally choose fresh
+    /// mode/demand/provenance/merge-role semantics but remain inside the same
+    /// runtime request. In particular, Vue ignored-heritage suppression must
+    /// survive those semantic transitions. Both destructures are exhaustive:
+    /// adding a field to [`ProjectionReductionContext`] fails compilation here
+    /// until it is explicitly classified as template-owned or inherited.
+    ///
+    /// Kept crate-local so [`Self::vue_runtime_object_surface`] remains the
+    /// only producer of [`VueHeritagePolicy::SuppressIgnored`]; downstream
+    /// reducers may propagate that value but cannot mint it directly.
+    #[must_use]
+    pub(crate) const fn with_orthogonal_axes_from(self, source: Self) -> Self {
+        let Self {
+            mode,
+            demand,
+            provenance,
+            merge_role,
+            vue_heritage_policy: _,
+        } = self;
+        let Self {
+            mode: _,
+            demand: _,
+            provenance: _,
+            merge_role: _,
+            vue_heritage_policy,
+        } = source;
+        Self {
+            mode,
+            demand,
+            provenance,
+            merge_role,
+            vue_heritage_policy,
+        }
+    }
+
+    /// The orthogonal Vue heritage policy carried by this reduction.
+    #[must_use]
+    pub const fn vue_heritage_policy(self) -> VueHeritagePolicy {
+        self.vue_heritage_policy
     }
 
     /// Whether this context is entering the macro type-argument's own
@@ -1559,8 +1743,8 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 /// resolve imported type-argument references, and the
 /// [`InstantiateBodySource`] source-kind axis (`FileBacked(P)` /
 /// `NonFile`) — alongside the embedded [`ProjectionReductionContext`]
-/// (the `mode` / `demand` / `provenance` / `merge_role`
-/// projection-demand identity).
+/// (the `mode` / `demand` / `provenance` / `merge_role` /
+/// `vue_heritage_policy` projection-demand identity).
 ///
 /// **Per-key context, not shared global (parity §2.6):** the env dims
 /// ride on this dedicated `Instantiate` context — NOT on the shared
@@ -1597,7 +1781,7 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstantiateContext {
     /// Embedded projection-demand identity (`mode` / `demand` /
-    /// `provenance` / `merge_role`). The shared
+    /// `provenance` / `merge_role` / `vue_heritage_policy`). The shared
     /// [`ProjectionReductionContext`] stays a pure projection identity;
     /// the env dims live on this wrapper, never inside it.
     projection_reduction: ProjectionReductionContext,
@@ -1725,6 +1909,7 @@ fn w_projection_reduction_context(context: &ProjectionReductionContext) {
         demand,
         provenance,
         merge_role,
+        vue_heritage_policy,
     } = context;
     match mode {
         ProjectionMode::Identity
@@ -1736,13 +1921,17 @@ fn w_projection_reduction_context(context: &ProjectionReductionContext) {
     match demand {
         ReductionDemand::Published
         | ReductionDemand::StructuralTransit
-        | ReductionDemand::MacroObjectSurface => {}
+        | ReductionDemand::MacroObjectSurface
+        | ReductionDemand::VueRuntimeObjectSurface => {}
     }
     match provenance {
         SurfaceProvenanceContext::Structural | SurfaceProvenanceContext::MacroTypeArgOwnBody => {}
     }
     match merge_role {
         MemberMergeRole::Authored | MemberMergeRole::OwnBody | MemberMergeRole::Heritage => {}
+    }
+    match vue_heritage_policy {
+        VueHeritagePolicy::RetainAll | VueHeritagePolicy::SuppressIgnored => {}
     }
 }
 
@@ -1914,7 +2103,8 @@ impl MacroPayloadContext {
 /// `resolve_env_hash` (`R`), because `build_typeof` resolves the value
 /// name through the owning file's name resolution / export tables —
 /// alongside the embedded [`ProjectionReductionContext`] (the `mode` /
-/// `demand` / `provenance` / `merge_role` projection-demand identity).
+/// `demand` / `provenance` / `merge_role` / `vue_heritage_policy`
+/// projection-demand identity).
 ///
 /// **Per-key context, not shared global (parity with
 /// [`InstantiateContext`]):** the env dim rides on this dedicated
@@ -1933,7 +2123,7 @@ impl MacroPayloadContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeOfContext {
     /// Embedded projection-demand identity (`mode` / `demand` /
-    /// `provenance` / `merge_role`). The shared
+    /// `provenance` / `merge_role` / `vue_heritage_policy`). The shared
     /// [`ProjectionReductionContext`] stays a pure projection identity;
     /// the env dim lives on this wrapper, never inside it.
     pub projection_reduction: ProjectionReductionContext,
@@ -2001,12 +2191,14 @@ impl TypeOfContext {
 /// follows the same code path as the builtin `Pick<T,K>` and obeys
 /// the SAME predicate.
 pub const fn may_reduce_operator(ctx: ProjectionReductionContext) -> bool {
-    // `MacroObjectSurface` is a publication demand: operators reduce
-    // exactly like `Published`. The two demands differ ONLY in the
-    // union-arm merge rule at the empty-path Shallow terminal surface.
+    // Both macro object-surface demands are publication demands: operators
+    // reduce exactly like `Published`. Their policy differences live at the
+    // empty-path surface/heritage boundary, never in operator reduction.
     matches!(
         ctx.demand,
-        ReductionDemand::Published | ReductionDemand::MacroObjectSurface
+        ReductionDemand::Published
+            | ReductionDemand::MacroObjectSurface
+            | ReductionDemand::VueRuntimeObjectSurface
     )
 }
 
@@ -2092,7 +2284,7 @@ pub struct SurfaceMember {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_parser::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
+    /// the macro-root `declared_in_macro_type_arg` provenance bit
     /// for the structural definition. Propagated through the prepared-surface
     /// walker and `surface_member_to_expanded_field`. Witness-gated: a
     /// non-neutral value exists only via
@@ -2247,6 +2439,11 @@ impl PartialReasonSet {
     /// demand's host-recursion ceiling. Structural worklist depth is not
     /// counted by this rail.
     pub const CONNECTED_QUERY_DEPTH_LIMIT: Self = Self(1 << 12);
+    /// An exact authored declaration was available, but at least one imported
+    /// dependency owner could not be resolved. The usable authored subset is
+    /// preserved for fail-closed consumers and is never warm-admitted as a
+    /// complete result.
+    pub const MISSING_DEPENDENCY: Self = Self(1 << 13);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]
@@ -2625,6 +2822,10 @@ pub enum QueryError {
     UnsupportedIntrinsic { name: Arc<str> },
     /// The resolver hit one of its structured safety rails.
     BudgetExceeded(BudgetExceededFailure),
+    /// The request (or its aggregate scheduler job after all owners detached)
+    /// was cancelled. Cancellation is a typed partial/ReturnOnly outcome and
+    /// is never eligible for shared memo publication.
+    Cancelled,
     /// The completion fence exhausted its retry budget (default: 3).
     UnstableState { attempts: u8 },
     /// The path walker re-entered an alias it had already visited on the
@@ -2647,6 +2848,7 @@ pub enum QueryError {
     /// Instantiate" rather than "not found."
     DeclPlaceholder {
         canonical_id: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: Arc<str>,
         whole_hash: HashValue,
     },
@@ -2729,6 +2931,7 @@ impl QueryError {
             | QueryError::ValueDomainMismatch { .. } => true,
             QueryError::Miss
             | QueryError::BudgetExceeded(_)
+            | QueryError::Cancelled
             | QueryError::UnstableState { .. }
             | QueryError::AliasCycle { .. }
             | QueryError::RecursiveRef { .. }
@@ -2761,6 +2964,7 @@ impl PartialEq for QueryError {
                 a == b
             }
             (Self::BudgetExceeded(_), Self::BudgetExceeded(_)) => true,
+            (Self::Cancelled, Self::Cancelled) => true,
             (Self::UnstableState { attempts: a }, Self::UnstableState { attempts: b }) => a == b,
             (Self::AliasCycle { chain: a }, Self::AliasCycle { chain: b }) => a == b,
             (Self::RecursiveRef { name: a }, Self::RecursiveRef { name: b }) => a == b,
@@ -2768,15 +2972,17 @@ impl PartialEq for QueryError {
             (
                 Self::DeclPlaceholder {
                     canonical_id: a_c,
+                    owner: a_o,
                     name: a_n,
                     whole_hash: a_h,
                 },
                 Self::DeclPlaceholder {
                     canonical_id: b_c,
+                    owner: b_o,
                     name: b_n,
                     whole_hash: b_h,
                 },
-            ) => a_c == b_c && a_n == b_n && a_h == b_h,
+            ) => a_c == b_c && a_o == b_o && a_n == b_n && a_h == b_h,
             (
                 Self::ValueDomainMismatch {
                     expected: a_e,
@@ -2814,6 +3020,9 @@ impl std::hash::Hash for QueryError {
             Self::BudgetExceeded(_) => {
                 2u8.hash(state);
             }
+            Self::Cancelled => {
+                14u8.hash(state);
+            }
             Self::UnstableState { attempts } => {
                 3u8.hash(state);
                 attempts.hash(state);
@@ -2832,11 +3041,13 @@ impl std::hash::Hash for QueryError {
             }
             Self::DeclPlaceholder {
                 canonical_id,
+                owner,
                 name,
                 whole_hash,
             } => {
                 7u8.hash(state);
                 canonical_id.hash(state);
+                owner.hash(state);
                 name.hash(state);
                 whole_hash.hash(state);
             }
@@ -2908,9 +3119,10 @@ pub enum QueryResult<T> {
 ///
 /// Every live [`SemanticQueryKey`] that PRODUCES a value produces
 /// [`TypeNode`](Self::TypeNode) — the interned graph node id for the
-/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`], whose
-/// live producer fills [`OverloadSet`](Self::OverloadSet) (the boundary
-/// `execute` wrap converts its signature-group-bearing node). The
+/// resolved type — EXCEPT [`SemanticQueryKey::ResolveOverloadSet`] and
+/// [`SemanticQueryKey::ClassifyBroadRuntime`], whose live producers fill
+/// [`OverloadSet`](Self::OverloadSet) and
+/// [`BroadRuntime`](Self::BroadRuntime), respectively. The
 /// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
 /// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
 /// `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and forward-declare
@@ -2921,8 +3133,8 @@ pub enum QueryResult<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticQueryValue {
     /// The interned graph node id for the resolved type — the domain every
-    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`],
-    /// whose live producer fills [`OverloadSet`](Self::OverloadSet).
+    /// live query produces, EXCEPT [`SemanticQueryKey::ResolveOverloadSet`]
+    /// and [`SemanticQueryKey::ClassifyBroadRuntime`].
     TypeNode(SemanticNodeId),
     /// Narrowed / contextual type produced by flow or contextual program
     /// analysis. No live producer.
@@ -2945,6 +3157,10 @@ pub enum SemanticQueryValue {
     /// The tri-state outcome of a relation query. No live producer; the
     /// live relation path is the separate relation memo.
     Relation(RelationPayload),
+    /// Ordered, terminal broad runtime classification used by Vue macro
+    /// runtime lowering. The classifier is a semantic query, not a consumer-
+    /// local graph walk.
+    BroadRuntime(BroadRuntimeClassification),
     /// Reserved native-checker seam for diagnostic analysis. NON-LIVE: no
     /// producer, no key spec row. Uses a local shell so this crate keeps no
     /// back-edge to `verter_tsc::CheckResult`.
@@ -2961,6 +3177,7 @@ pub enum SemanticQueryValueTag {
     DeclarationAnalysis,
     OverloadSet,
     Relation,
+    BroadRuntime,
     DiagnosticAnalysis,
 }
 
@@ -2974,8 +3191,71 @@ impl SemanticQueryValue {
             Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
             Self::Relation(_) => SemanticQueryValueTag::Relation,
+            Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
+    }
+}
+
+/// Closed runtime constructor vocabulary shared by the canonical semantic
+/// classifier and downstream framework adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BroadRuntimeKind {
+    String,
+    Number,
+    Boolean,
+    Symbol,
+    Null,
+    Array,
+    Function,
+    Date,
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+    Promise,
+    Error,
+    Object,
+    Unknown,
+}
+
+impl BroadRuntimeKind {
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+}
+
+/// Stable first-occurrence-deduplicated broad runtime facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BroadRuntimeClassification {
+    kinds: Arc<[BroadRuntimeKind]>,
+}
+
+impl BroadRuntimeClassification {
+    #[must_use]
+    pub fn new(kinds: impl IntoIterator<Item = BroadRuntimeKind>) -> Self {
+        let mut seen = 0u16;
+        let mut ordered = Vec::new();
+        for kind in kinds {
+            let bit = kind.bit();
+            if seen & bit == 0 {
+                seen |= bit;
+                ordered.push(kind);
+            }
+        }
+        Self {
+            kinds: Arc::from(ordered.into_boxed_slice()),
+        }
+    }
+
+    #[must_use]
+    pub fn kinds(&self) -> &[BroadRuntimeKind] {
+        &self.kinds
+    }
+
+    #[must_use]
+    pub fn contains_unknown(&self) -> bool {
+        self.kinds.contains(&BroadRuntimeKind::Unknown)
     }
 }
 
@@ -3532,6 +3812,20 @@ pub struct EnumContext {
 pub struct OverloadSetContext {
     /// Import / name-resolution dimension (`R`).
     pub resolve_env_hash: HashValue,
+}
+
+/// Environment a modeless broad-runtime classification depends on.
+///
+/// The content-free subject locator carries the owning macro slot and exact
+/// payload/member route. Classification re-sources its live graph carrier and
+/// may settle unresolved heads and global nominal types, so the key includes
+/// the complete `{R,T,L,J}` environment and no projection-mode axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BroadRuntimeContext {
+    pub resolve_env_hash: HashValue,
+    pub type_env_hash: HashValue,
+    pub lib_env_hash: HashValue,
+    pub project_identity: u32,
 }
 
 /// Env a [`SemanticQueryKey::ApparentType`] value depends on (env dims
@@ -4521,8 +4815,8 @@ pub enum SemanticQueryKey {
     ///
     /// **Value domain** [`SemanticQueryValueTag::OverloadSet`]
     /// (`SemanticQueryValue::OverloadSet(Arc<[SignatureRef]>)`): the inner
-    /// pipeline carries the signature-group-bearing node; the public
-    /// `execute` boundary converts it into the `OverloadSet` carrier.
+    /// pipeline carries the signature-group-bearing node; the cold build
+    /// converts it into the typed `OverloadSet` value before memo publication.
     /// Node-narrowing consumers (`execute_type_node`) report
     /// [`QueryError::ValueDomainMismatch`] instead of leaking the carrier
     /// node as a type node.
@@ -4532,6 +4826,18 @@ pub enum SemanticQueryKey {
         callee: SemanticNodeId,
         type_args: Arc<[SemanticNodeId]>,
         context: OverloadSetContext,
+    },
+    /// Classify a canonical macro payload/member route into Vue-compatible
+    /// broad runtime kinds. Modeless and terminal: the reducer re-sources the
+    /// live carrier from the content-free locator, follows semantic carriers
+    /// and union arms, but never enumerates nested object members.
+    ///
+    /// `subject` contains no `SemanticNodeId`, content hash, or span. Anonymous
+    /// graph subjects use the dispatch's explicit transient ReturnOnly path and
+    /// never enter this durable family.
+    ClassifyBroadRuntime {
+        subject: crate::locator_identity::BroadRuntimeSubjectLocator,
+        context: BroadRuntimeContext,
     },
     /// Resolve the APPARENT type of `base` — the member surface a value of
     /// that type exposes (a primitive widens to its lib wrapper:
@@ -4715,6 +5021,7 @@ pub enum SemanticQueryKeyTag {
     ResolveAmbientNamespace,
     ResolveEnum,
     ResolveOverloadSet,
+    ClassifyBroadRuntime,
     ApparentType,
     TemplateLiteralReduce,
     FlowNarrowingAt,
@@ -4744,6 +5051,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::ResolveAmbientNamespace,
         SemanticQueryKeyTag::ResolveEnum,
         SemanticQueryKeyTag::ResolveOverloadSet,
+        SemanticQueryKeyTag::ClassifyBroadRuntime,
         SemanticQueryKeyTag::ApparentType,
         SemanticQueryKeyTag::TemplateLiteralReduce,
         SemanticQueryKeyTag::FlowNarrowingAt,
@@ -4775,6 +5083,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::ResolveAmbientNamespace => "ResolveAmbientNamespace",
             SemanticQueryKeyTag::ResolveEnum => "ResolveEnum",
             SemanticQueryKeyTag::ResolveOverloadSet => "ResolveOverloadSet",
+            SemanticQueryKeyTag::ClassifyBroadRuntime => "ClassifyBroadRuntime",
             SemanticQueryKeyTag::ApparentType => "ApparentType",
             SemanticQueryKeyTag::TemplateLiteralReduce => "TemplateLiteralReduce",
             SemanticQueryKeyTag::FlowNarrowingAt => "FlowNarrowingAt",
@@ -4791,7 +5100,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 22 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 23 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -4853,6 +5162,9 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::ResolveEnum { .. } => SemanticQueryKeyTag::ResolveEnum,
             SemanticQueryKey::ResolveOverloadSet { .. } => SemanticQueryKeyTag::ResolveOverloadSet,
+            SemanticQueryKey::ClassifyBroadRuntime { .. } => {
+                SemanticQueryKeyTag::ClassifyBroadRuntime
+            }
             SemanticQueryKey::ApparentType { .. } => SemanticQueryKeyTag::ApparentType,
             SemanticQueryKey::TemplateLiteralReduce { .. } => {
                 SemanticQueryKeyTag::TemplateLiteralReduce
@@ -5756,7 +6068,8 @@ pub trait SemanticQueryApi {
     /// [`SemanticQueryValue`] wrapped with the provenance of the producing
     /// work. Every live key that produces a value resolves to
     /// [`SemanticQueryValue::TypeNode`] except `ResolveOverloadSet`
-    /// ([`SemanticQueryValue::OverloadSet`]); the non-producing keys
+    /// ([`SemanticQueryValue::OverloadSet`]) and `ClassifyBroadRuntime`
+    /// ([`SemanticQueryValue::BroadRuntime`]); the non-producing keys
     /// (e.g. `Relate`) return `Miss`. Callers that want the node narrow
     /// with [`execute_type_node`].
     ///
@@ -5827,6 +6140,7 @@ pub trait SemanticQueryApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_type_expr::TopLevelOwnerId;
 
     /// The shared structural carrier-arg accessor returns the `type_args`
     /// slice for each of the three carriers that apply type arguments
@@ -5854,6 +6168,7 @@ mod tests {
             ValueRootKey {
                 scope: ScopeId {
                     canonical_id: Arc::from("/m.ts"),
+                    owner: TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                 },
                 name: Arc::from("factory"),
@@ -5895,6 +6210,7 @@ mod tests {
     fn resolve_decl_keys_dedup_by_scope_and_name() {
         let scope = ScopeId {
             canonical_id: Arc::from("/w/src/types.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -5915,6 +6231,7 @@ mod tests {
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/a.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("Foo"),
@@ -5922,6 +6239,7 @@ mod tests {
         let b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/w/b.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("Foo"),
@@ -6223,6 +6541,12 @@ mod tests {
                 SemanticQueryValueTag::Relation,
             ),
             (
+                SemanticQueryValue::BroadRuntime(BroadRuntimeClassification::new([
+                    BroadRuntimeKind::Object,
+                ])),
+                SemanticQueryValueTag::BroadRuntime,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -6230,13 +6554,13 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: six cases, six unique tags. Sort before dedup so
+        // Distinctness: seven cases, seven unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 6, "every value domain must have a distinct tag");
+        assert_eq!(tags.len(), 7, "every value domain must have a distinct tag");
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

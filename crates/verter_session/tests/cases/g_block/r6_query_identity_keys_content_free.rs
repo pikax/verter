@@ -72,7 +72,11 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
     let host = verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
     let key = verter_session::for_tests::instantiate_key_for_tests(
         &host,
-        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.ts"), Arc::from("Foo")),
+        ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/r6_check.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Foo"),
+        ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -96,6 +100,7 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
             // compilation there until classified.
             let ResolvedDeclSlotIdentity {
                 defining_canonical,
+                owner: _,
                 merged_symbol_name,
                 symbol_space: _,
                 env: _,
@@ -117,6 +122,7 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
     use verter_session::semantic_query::{MacroPayloadContext, ResolvedDeclSlotIdentity};
     let owner = ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from("/r6_check.vue"),
+        verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
     );
     let key = SemanticQueryKey::ResolveMacroPayload {
@@ -131,6 +137,7 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
             owner:
                 ResolvedDeclSlotIdentity {
                     defining_canonical,
+                    owner: _,
                     merged_symbol_name,
                     symbol_space: _,
                     env: _,

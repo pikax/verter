@@ -231,13 +231,14 @@ impl VerterHost {
             canonical.as_str(),
             "with-resolution path",
             || {
-                let mut resolved = match self.resolve_component_meta_with_view_and_fixed(
-                    canonical.as_str(),
-                    crate::types::ProjectionMode::Expanded,
-                    view,
-                    executor_fixed,
-                ) {
-                    Some(r) => r,
+                let (mut resolved, admission) = match self
+                    .resolve_component_meta_with_view_and_fixed_admission(
+                        canonical.as_str(),
+                        crate::types::ProjectionMode::Expanded,
+                        view,
+                        executor_fixed,
+                    ) {
+                    Some(pair) => pair,
                     None => return None,
                 };
                 resolved.request_id = request_id;
@@ -270,6 +271,14 @@ impl VerterHost {
                     &resolved,
                     true, // include_fallthrough
                     host_ctx_ref,
+                );
+                self.merge_extraction_facts_into_admitted_resolved_meta(
+                    canonical.as_str(),
+                    crate::types::ProjectionMode::Expanded,
+                    view.fingerprint(),
+                    &mut resolved,
+                    extract.fallthrough_fact_versions.as_deref(),
+                    admission.as_ref(),
                 );
                 Some((extract.analysis, resolved, extract.completeness))
             },
@@ -481,9 +490,9 @@ impl VerterHost {
         // second unrelated store view and pair a fresh-view analysis with
         // this capture's extraction context (the torn-result race).
         let fixed = self.capture_batch_fixed_view(view);
-        let mut resolved = {
+        let (mut resolved, admission) = {
             let (executor_view, executor_fp) = fixed.executor_fixed_view();
-            self.resolve_component_meta_with_view_and_fixed(
+            self.resolve_component_meta_with_view_and_fixed_admission(
                 canonical.as_str(),
                 crate::types::ProjectionMode::Expanded,
                 view,
@@ -491,31 +500,38 @@ impl VerterHost {
             )?
         };
         resolved.request_id = self.next_request_id();
-        // Build a HostResolverContext before extract so engine
-        // constructions inside the policy / fallthrough path bind to the
-        // request-bound ctx rather than a bare-host. This is a post-fence
-        // extraction binder — the pinned resolve already ran under its own
-        // publish fence — and it seeds from the SAME capture's cold-seed: a
-        // non-current capture fails the ctx's nested warm-cache probes
-        // closed rather than validating against a stale snapshot.
+        // Keep the session view attached while extracting: policy,
+        // fallthrough, and macro-DTO replay all bind to this request context.
+        // It seeds from the SAME capture's cold-seed, so a non-current capture
+        // fails nested warm-cache probes closed rather than validating against
+        // a stale snapshot.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
+            view,
             fixed.cold_seed(),
             overlay,
         );
-        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
+            &session_ctx;
         // This view path does NOT publish to `ComponentMetaResultDb`, so the
         // extract completeness carrier is discarded here.
-        let analysis = extract_component_meta_from_resolved(
+        let extract = extract_component_meta_from_resolved(
             self,
             canonical.as_str(),
             &resolved,
             true,
             host_ctx_ref,
-        )
-        .analysis;
-        Some((analysis, resolved))
+        );
+        self.merge_extraction_facts_into_admitted_resolved_meta(
+            canonical.as_str(),
+            crate::types::ProjectionMode::Expanded,
+            view.fingerprint(),
+            &mut resolved,
+            extract.fallthrough_fact_versions.as_deref(),
+            admission.as_ref(),
+        );
+        Some((extract.analysis, resolved))
     }
 
     /// Cache-hit path. Returns `Some((analysis, resolution))` on a

@@ -191,6 +191,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: StdArc::from("/p.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: StdArc::from("v"),
@@ -354,6 +355,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
 
     let reference = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
         canonical_id: StdArc::from("/p.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         name: StdArc::from("Foo"),
         whole_hash: HashValue::default(),
     }));
@@ -400,6 +402,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity {
             canonical_id: StdArc::from("/p.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: StdArc::from("Owner"),
         },
@@ -422,6 +425,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: StdArc::from("/p.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: StdArc::from("Foo"),
         },
@@ -429,6 +433,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let instantiation_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: StdArc::from("/p.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
             decl_name: StdArc::from("Gen"),
         },

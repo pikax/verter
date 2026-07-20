@@ -17,7 +17,6 @@ use super::types::{
 };
 use crate::common::Span;
 use crate::types::BindingType;
-use crate::utils::oxc::script::type_surface::TypeResolutionContext;
 
 /// Context for options script parsing
 pub struct OptionsContext;
@@ -282,16 +281,8 @@ fn process_setup_value<'a>(
             }
             if let Some(body) = &func.body {
                 // Process setup body like script setup (but without macros)
-                let empty_type_ctx = TypeResolutionContext::new(ctx.source_bytes);
                 let mut setup_ctx = SetupContext::new();
-                process_setup_statements(
-                    &body.statements,
-                    ctx,
-                    &empty_type_ctx,
-                    &mut setup_ctx,
-                    items,
-                    errors,
-                );
+                process_setup_statements(&body.statements, ctx, &mut setup_ctx, items, errors);
                 if setup_ctx.is_async {
                     *is_async = true;
                 }
@@ -311,12 +302,10 @@ fn process_setup_value<'a>(
                 None
             } else {
                 // Block body with statements
-                let empty_type_ctx = TypeResolutionContext::new(ctx.source_bytes);
                 let mut setup_ctx = SetupContext::new();
                 process_setup_statements(
                     &arrow.body.statements,
                     ctx,
-                    &empty_type_ctx,
                     &mut setup_ctx,
                     items,
                     errors,

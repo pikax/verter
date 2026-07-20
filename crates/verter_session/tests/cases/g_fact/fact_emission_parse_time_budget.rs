@@ -44,11 +44,6 @@ use verter_session::fact_emission::emit_parse_facts;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
-}
-
 fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
     // Author `decl_count` IDENTICAL-shape interface decls and build
     // through the production-shaped service-backed path: the real header
@@ -65,7 +60,6 @@ fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
         shallow,
         Arc::from(source.as_str()),
         Arc::from(source.as_str()),
-        empty_external(),
     ))
 }
 

@@ -64,23 +64,25 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn project_intrinsic_root_shape(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         type_name: &str,
     ) -> Option<ExpandedObjectShape> {
         if let Some(shape) =
-            self.project_intrinsic_root_shape_primary(scope_canonical_id, type_name)
+            self.project_intrinsic_root_shape_primary(scope_canonical_id, scope_owner, type_name)
         {
             return Some(shape);
         }
         // FALLBACK (Class-A): project the bare-named root in node domain, then
         // build the object shape from the ADMITTED route node's one-level
         // SurfaceView.
-        let parent = self.intrinsic_root_parent_source(scope_canonical_id, type_name);
+        let parent = self.intrinsic_root_parent_source(scope_canonical_id, scope_owner, type_name);
         let ctx = self.ctx;
         let named = TypeExpr::named(type_name);
         let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
             ctx,
             Some(self),
             scope_canonical_id,
+            scope_owner,
             &named,
         )?;
         let view = ctx.dispatch().resolve_typeinfo_surface_view(
@@ -113,6 +115,7 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn project_intrinsic_tag_member_shape(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         tag_source: &SemanticTypeSource,
     ) -> Option<ExpandedObjectShape> {
         let ctx = self.ctx;
@@ -121,6 +124,7 @@ impl ComponentMetaQueryEngine<'_> {
             tag_source,
             SourceRaiseContext {
                 scope_canonical_id,
+                scope_owner,
                 context: ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 ),
@@ -148,6 +152,7 @@ impl ComponentMetaQueryEngine<'_> {
     fn project_intrinsic_root_shape_primary(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         type_name: &str,
     ) -> Option<ExpandedObjectShape> {
         // An exhausted projection budget yields no primary surface (the Class-A
@@ -156,8 +161,8 @@ impl ComponentMetaQueryEngine<'_> {
             return None;
         }
         let (_surface, node) =
-            self.dispatch_projected_surface_with_node(scope_canonical_id, type_name)?;
-        let parent = self.intrinsic_root_parent_source(scope_canonical_id, type_name);
+            self.dispatch_projected_surface_with_node(scope_canonical_id, scope_owner, type_name)?;
+        let parent = self.intrinsic_root_parent_source(scope_canonical_id, scope_owner, type_name);
         let ctx = self.ctx;
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let view = dispatch.resolve_typeinfo_surface_view(
@@ -180,9 +185,10 @@ impl ComponentMetaQueryEngine<'_> {
     fn intrinsic_root_parent_source(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         type_name: &str,
     ) -> Option<SemanticTypeSource> {
-        let declaration = self.resolve_type_declaration(scope_canonical_id, type_name);
+        let declaration = self.resolve_type_declaration(scope_canonical_id, scope_owner, type_name);
         if declaration.canonical_source.is_empty() {
             return None;
         }
@@ -195,6 +201,7 @@ impl ComponentMetaQueryEngine<'_> {
             TypeBodySlot {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(declaration.canonical_source.as_str()),
+                    owner: declaration.owner,
                     symbol: Arc::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },

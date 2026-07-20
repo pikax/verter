@@ -145,6 +145,7 @@ fn r7_materialization_cache_key_is_content_free_canonical_subject() {
 
     let slot = ResolvedDeclSlotIdentity::type_slot(
         Arc::from("/src/ChatMessageProps.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("ChatMessageProps"),
         1,
         [1; 16],

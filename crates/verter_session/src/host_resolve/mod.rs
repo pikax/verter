@@ -20,36 +20,29 @@
 //!   repeated wildcard re-export scans are expensive.
 //!
 //! Module layout:
-//! - [`frontier_helpers`] — shared types, traces, and helpers.
-//! - [`test_guards`] — test-only `forbid_*` thread-local guards.
-//! - [`external_macro_collector`] — adapter into
-//!   `resolver_core::collect_external_macro_types`.
+//! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
 //! - [`dependency_resolution`] — import-route + dependency canonical
 //!   resolution.
-//! - [`external_type_resolution`] — `resolve_external_type_from_loaded_files`
-//!   + component-meta macro element entry points.
-//! - [`frontier_engine`] — frontier closure, materialisation, and
-//!   named-type export route resolution (the file's main intra-SCC).
+//! - [`frontier_engine`] — named-type export route resolution.
 //! - [`route_surface`] — route-surface facts, prepared-decl walking,
 //!   and dependency-source readers.
 //! - [`virtual_file_pipeline`] — `resolve` / `ensure_compiled` /
 //!   `get_virtual_file` / `get_ide` / `get_public_api*` / `compile_entry`.
 //! - [`vue_script_extract`] — free helpers for SFC `<script>` extraction
 //!   and template-converter input shaping.
-//! - [`frontier_adapter`] — `HostFrontierAdapter` request-scoped bridge
-//!   into `resolver_core::FrontierHost`.
 
 mod dependency_resolution;
-mod external_macro_collector;
 mod external_type_resolution;
-mod frontier_adapter;
 mod frontier_engine;
 mod frontier_helpers;
 mod route_surface;
 mod rune_ambient;
-mod test_guards;
 mod virtual_file_pipeline;
+mod vue_macro_dependency_diagnostics;
 mod vue_script_extract;
+
+#[cfg(test)]
+pub(crate) use virtual_file_pipeline::vue_macro_output_matches_revision;
 
 // Re-exports preserving the pre-split public surface at
 // `crate::host_resolve::*`. `#[allow(unused_imports)]` because some
@@ -58,19 +51,11 @@ mod vue_script_extract;
 // that name them via `crate::host_resolve::*`; the lint cannot see
 // through the cfg gate / sibling-path resolution.
 #[allow(unused_imports)]
-pub(crate) use frontier_adapter::HostFrontierAdapter;
-#[allow(unused_imports)]
 pub(crate) use rune_ambient::is_svelte_rune_module;
 #[allow(unused_imports)]
 pub(crate) use rune_ambient::{
     merge_rune_ambient_into_env, merge_rune_ambient_inventory_into_env, rune_ambient_has_type,
     rune_ambient_has_value, rune_ambient_type_decl, rune_ambient_value_decl,
-};
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use test_guards::{
-    forbid_route_frontier_for_tests, route_frontier_forbidden_for_current_thread,
-    RouteFrontierGuard,
 };
 pub(crate) use vue_script_extract::{
     build_position_preserving_script_source, extract_vue_script_content,
@@ -98,19 +83,6 @@ pub use virtual_file_pipeline::CompileForceOverflowGuard;
 #[doc(hidden)]
 pub use virtual_file_pipeline::{
     compile_tier_prefetch_invocations, reset_compile_tier_prefetch_invocations,
-};
-
-// Test-only re-exports: `host_resolve_tests.rs` and the inline frontier
-// tests reference internal helpers via `super::*`. After the split,
-// `super` from those tests resolves to this `mod.rs`, so we re-expose
-// the internals here under the same names.
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use frontier_helpers::{
-    external_type_frontier_layer_result_detail, external_type_frontier_layer_start_detail,
-    external_type_trace_deltas, external_type_trace_error_status,
-    external_type_trace_success_status, ExternalTypeTraceBaseline, FrontierCompanionPlans,
-    FrontierRequestedRoutes, PlannedFrontierCompanion,
 };
 
 #[cfg(test)]

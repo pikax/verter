@@ -128,6 +128,7 @@ mod tests {
     fn make_define_slots(slot_fields: Vec<AnalyzedSlotField>) -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineSlots,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
             type_references: vec![],
             binding_name: None,

@@ -9,16 +9,248 @@
 //! options and type declarations for cross-block type resolution.
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_macro_dto::{
+    MacroRuntimeBundle, MacroRuntimeOutcome, MacroRuntimeShape, ModelRuntimeShape,
+    PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
+};
 
 use super::prepared::PreparedCompanion;
 use crate::template::code_gen::binding::BindingType;
+use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::script::type_surface::{
-    format_runtime_types, format_runtime_types_with_default,
-};
+use crate::template::code_gen::vdom::props::needs_quoted_key;
+use crate::utils::oxc::vue::{MacroObjectArg, MacroProperty};
 use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
 
 use super::ScriptContext;
+
+/// Emit a runtime props object key, quoting when the name is not a bare JS
+/// identifier (e.g. `onUpdate:visible`, `aria-label`). Unquoted colon keys
+/// are a parse error in the generated module (element-plus tooltip, etc.).
+pub(super) fn push_js_string_literal(buf: &mut String, value: &str) {
+    buf.push('"');
+    escape_js_string_into(buf, value);
+    buf.push('"');
+}
+
+pub(super) fn js_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len().saturating_add(2));
+    push_js_string_literal(&mut literal, value);
+    literal
+}
+
+pub(super) fn push_runtime_prop_key(buf: &mut String, name: &str) {
+    if needs_quoted_key(name) {
+        push_js_string_literal(buf, name);
+    } else {
+        buf.push_str(name);
+    }
+}
+
+fn runtime_shape(
+    bundle: Option<&MacroRuntimeBundle>,
+    syntax_index: u32,
+) -> Option<&MacroRuntimeShape> {
+    let entry = bundle?
+        .entries
+        .iter()
+        .find(|entry| entry.syntax_index == syntax_index)?;
+    match &entry.outcome {
+        MacroRuntimeOutcome::Complete(shape) => Some(shape),
+        MacroRuntimeOutcome::Partial(_)
+        | MacroRuntimeOutcome::Unresolved(_)
+        | MacroRuntimeOutcome::Unsupported(_)
+        | MacroRuntimeOutcome::Invalid(_) => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RuntimePropProfile {
+    is_production: bool,
+    custom_element: bool,
+}
+
+fn runtime_type_expression(prop: &RuntimeProp) -> (Vec<RuntimeConstructor>, String) {
+    let constructors = prop
+        .type_shape
+        .constructors()
+        .map(verter_macro_dto::OrderedRuntimeConstructors::as_slice)
+        .unwrap_or_default()
+        .to_vec();
+    let runtime_expressions: Vec<&str> = constructors
+        .iter()
+        .filter_map(|constructor| constructor.as_runtime_expression())
+        .collect();
+    let runtime_type = match runtime_expressions.as_slice() {
+        [] => "null".to_string(),
+        [constructor] => (*constructor).to_string(),
+        constructors => format!("[{}]", constructors.join(", ")),
+    };
+    (constructors, runtime_type)
+}
+
+fn render_runtime_prop_options(
+    prop: &RuntimeProp,
+    profile: RuntimePropProfile,
+    retain_function_in_production: bool,
+    static_default: Option<&str>,
+) -> String {
+    let (constructors, runtime_type) = runtime_type_expression(prop);
+
+    if profile.is_production {
+        let retains_type = constructors.contains(&RuntimeConstructor::Boolean)
+            || (retain_function_in_production
+                && constructors.contains(&RuntimeConstructor::Function));
+        if retains_type {
+            let mut fields = vec![format!("type: {runtime_type}")];
+            fields.extend(static_default.map(str::to_owned));
+            return format!("{{ {} }}", fields.join(", "));
+        }
+        if profile.custom_element {
+            let mut fields = Vec::with_capacity(2);
+            fields.extend(static_default.map(str::to_owned));
+            fields.push(format!("type: {runtime_type}"));
+            return format!("{{ {} }}", fields.join(", "));
+        }
+        return static_default
+            .map(|default| format!("{{ {default} }}"))
+            .unwrap_or_else(|| "{}".to_owned());
+    }
+
+    let mut fields = vec![format!("type: {runtime_type}")];
+    fields.push(format!("required: {}", !prop.optional));
+    if prop.type_shape.skip_check() {
+        fields.push("skipCheck: true".to_owned());
+    }
+    fields.extend(static_default.map(str::to_owned));
+    format!("{{ {} }}", fields.join(", "))
+}
+
+#[derive(Default)]
+struct StaticPropDefaults {
+    by_name: FxHashMap<String, String>,
+}
+
+fn render_runtime_props(
+    shape: &PropsRuntimeShape,
+    profile: RuntimePropProfile,
+    static_defaults: Option<&StaticPropDefaults>,
+) -> String {
+    let mut out = String::from("{\n");
+    for prop in &shape.props {
+        let static_default = static_defaults.and_then(|defaults| defaults.by_name.get(&prop.name));
+        // Official Vue retains Function in production when defaults are
+        // dynamic, or when this exact statically-defaulted row has a default.
+        let retain_function = static_defaults.is_none() || static_default.is_some();
+        out.push_str("    ");
+        push_runtime_prop_key(&mut out, &prop.name);
+        out.push_str(": ");
+        out.push_str(&render_runtime_prop_options(
+            prop,
+            profile,
+            retain_function,
+            static_default.map(String::as_str),
+        ));
+        out.push_str(",\n");
+    }
+    out.push('}');
+    out
+}
+
+fn render_model_options(
+    model: &ModelRuntimeShape,
+    syntax_options: Option<&str>,
+    is_production: bool,
+) -> String {
+    let (_, runtime_type) = runtime_type_expression(&model.prop);
+    let constructors = model
+        .prop
+        .type_shape
+        .constructors()
+        .map(verter_macro_dto::OrderedRuntimeConstructors::as_slice)
+        .unwrap_or_default();
+    let keep_type = !is_production
+        || constructors.contains(&RuntimeConstructor::Boolean)
+        || (syntax_options.is_some() && constructors.contains(&RuntimeConstructor::Function));
+    let mut type_fields = Vec::new();
+    if keep_type {
+        type_fields.push(format!("type: {runtime_type}"));
+        if !is_production && model.prop.type_shape.skip_check() {
+            type_fields.push("skipCheck: true".to_owned());
+        }
+    }
+    let base = if type_fields.is_empty() {
+        "{}".to_owned()
+    } else {
+        format!("{{ {} }}", type_fields.join(", "))
+    };
+    match syntax_options {
+        Some(options) if base == "{}" => options.to_owned(),
+        Some(options) => {
+            let inner = base
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+                .unwrap_or(base.as_str())
+                .trim();
+            format!("{{ {inner}, ...({options}) }}")
+        }
+        None => base,
+    }
+}
+
+fn render_static_defaults(
+    defaults: &MacroObjectArg<'_>,
+    content_str: &str,
+    stripped: Option<&StrippedSections>,
+) -> Option<StaticPropDefaults> {
+    if !defaults.static_eligibility.is_eligible() {
+        return None;
+    }
+    let mut rendered = StaticPropDefaults::default();
+    for property in &defaults.properties {
+        let value = render_static_default(property, content_str, stripped)?;
+        // Official Vue selects the first matching default property.
+        rendered
+            .by_name
+            .entry(property.name.to_owned())
+            .or_insert(value);
+    }
+    Some(rendered)
+}
+
+fn render_static_default(
+    property: &MacroProperty<'_>,
+    content_str: &str,
+    stripped: Option<&StrippedSections>,
+) -> Option<String> {
+    if !property.is_method {
+        let value = match property.value_span {
+            Some(span) => section_text(span.start, span.end, content_str, stripped),
+            None => section_text(
+                property.name_span.start,
+                property.name_span.end,
+                content_str,
+                stripped,
+            ),
+        };
+        return Some(format!("default: {value}"));
+    }
+
+    let value_span = property.value_span?;
+    if property.property_span.start > property.name_span.start
+        || property.name_span.end > value_span.start
+        || value_span.end > property.property_span.end
+    {
+        return None;
+    }
+    let prefix = content_str
+        .get(property.property_span.start as usize..property.name_span.start as usize)?;
+    let between = content_str.get(property.name_span.end as usize..value_span.start as usize)?;
+    let function = section_text(value_span.start, value_span.end, content_str, stripped);
+    // A quoted key is valid for every object-method kind (`async`, getter,
+    // setter, generator) and avoids reinterpreting computed-key punctuation.
+    Some(format!("{prefix}\"default\"{between}{function}"))
+}
 
 /// Force-js-stripped text for a macro-argument expression, keyed by its
 /// content-local `(start, end)` span. Built once per setup parse (see
@@ -46,31 +278,6 @@ fn section_text<'a>(
 }
 
 // ======================== Helpers ========================
-
-/// Push a method shorthand value as an arrow function.
-///
-/// Method shorthand `() { return ... }` → arrow function `() => { return ... }`.
-/// Finds the matching `)` for the first `(` (handling nesting) and inserts ` =>`.
-pub(super) fn push_method_as_arrow(out: &mut String, val: &str) {
-    let mut depth = 0;
-    for (i, c) in val.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    out.push_str(&val[..i + 1]);
-                    out.push_str(" =>");
-                    out.push_str(&val[i + 1..]);
-                    return;
-                }
-            }
-            _ => {}
-        }
-    }
-    // Fallback: push as-is if no matching parens found
-    out.push_str(val);
-}
 
 // ======================== Macro state ========================
 
@@ -100,9 +307,15 @@ pub(super) struct MacroState {
     pub has_expose: bool,
     /// Whether `defineEmits` was used (needs `__emit` in setup params).
     pub has_emit: bool,
-    /// Model entries from `defineModel()` calls — each needs a prop and emit declaration.
-    /// Tuple of (model_name, optional_options_source).
-    pub model_names: Vec<(String, Option<String>)>,
+    /// Authoritative model entries from the runtime semantic bundle.
+    pub models: Vec<ModelSection>,
+}
+
+pub(super) struct ModelSection {
+    pub prop_name: String,
+    pub prop_options: String,
+    pub modifiers_name: String,
+    pub update_event: String,
 }
 
 impl MacroState {
@@ -115,7 +328,7 @@ impl MacroState {
             ref_bindable_imports: FxHashSet::default(),
             has_expose: false,
             has_emit: false,
-            model_names: Vec::new(),
+            models: Vec::new(),
         }
     }
 }
@@ -134,14 +347,23 @@ impl MacroState {
 /// inconsistent span coordinate systems (object-syntax keys are SFC-absolute,
 /// while array-syntax keys are content-relative).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn process_macro_item<'a>(
     mac: &ScriptMacro<'a>,
+    syntax_index: u32,
     content_start: u32,
     content_str: &'a str,
     ctx: &mut ScriptContext<'a>,
     state: &mut MacroState,
     stripped: Option<&StrippedSections>,
+    runtime_bundle: Option<&MacroRuntimeBundle>,
+    is_production: bool,
+    custom_element: bool,
 ) {
+    let runtime_profile = RuntimePropProfile {
+        is_production,
+        custom_element,
+    };
     match mac {
         ScriptMacro::DefineExpose { span, .. } => {
             state.has_expose = true;
@@ -193,47 +415,17 @@ pub(super) fn process_macro_item<'a>(
                 }
             }
 
-            // Type-based defineProps: extract prop names from resolved type elements
-            // and build a runtime props declaration for the component definition.
-            // For intra-file types, key spans are SFC-absolute. For external types
-            // (cross-file), key_name is pre-resolved since spans reference another file.
-            if let Some(tp) = type_params {
-                if !tp.resolved.props.is_empty() {
-                    let mut props_obj = String::from("{\n");
-                    for prop in &tp.resolved.props {
-                        // Use pre-resolved key_name for external types, span extraction for intra-file
-                        let name: &'a str = if let Some(ref kn) = prop.key_name {
-                            ctx.alloc.alloc_str(kn)
-                        } else {
-                            let key_start = prop.key.start as usize;
-                            let key_end = prop.key.end as usize;
-                            if key_end > ctx.source.len() {
-                                continue;
-                            }
-                            &ctx.source[key_start..key_end]
-                        };
-                        ctx.bindings.insert(name, BindingType::Props);
-
-                        // Build runtime prop definition
-                        let type_str = format_runtime_types(&prop.types);
-                        props_obj.push_str("    ");
-                        props_obj.push_str(name);
-                        props_obj.push_str(": { type: ");
-                        props_obj.push_str(&type_str);
-                        if !prop.optional {
-                            props_obj.push_str(", required: true");
-                        }
-                        // Optional props (Boolean included) emit NO default,
-                        // matching official plugin-vue: the runtime resolves
-                        // an absent optional Boolean to `false` via the
-                        // boolean cast. An explicit `default: undefined`
-                        // would make `props.x === false` fail for unset
-                        // props — an observable divergence.
-                        props_obj.push_str(" },\n");
+            if type_params.is_some() {
+                state.props_section = match runtime_shape(runtime_bundle, syntax_index) {
+                    Some(runtime_shape @ MacroRuntimeShape::Props(shape)) => {
+                        super::visit_runtime_macro_binding_names(runtime_shape, |name| {
+                            ctx.bindings
+                                .insert(ctx.alloc.alloc_str(name), BindingType::Props);
+                        });
+                        Some(render_runtime_props(shape, runtime_profile, None))
                     }
-                    props_obj.push('}');
-                    state.props_section = Some(props_obj);
-                }
+                    _ => None,
+                };
             }
 
             // Replace macro call
@@ -267,24 +459,18 @@ pub(super) fn process_macro_item<'a>(
                 state.emits_section = Some(arr_text.to_string());
             }
 
-            // Type-based defineEmits: emit event names come EXCLUSIVELY from
-            // resolved call signatures (call-signature form and named-tuple
-            // property form, both classified as emits during resolution —
-            // including alias / indexed-access forwarding). A surface that
-            // resolved to plain PROPS only is NOT an emits declaration:
-            // inventing `emits: [...]` from prop key names would silently
-            // convert a mis-routed props-shaped type into runtime emit
-            // filtering. Fail closed instead (no emits section).
-            if let Some(tp) = type_params {
-                if !tp.resolved.call_signatures.is_empty() {
-                    let emit_names: Vec<String> = tp
-                        .resolved
-                        .call_signatures
-                        .iter()
-                        .map(|emit| format!("\"{}\"", emit.name))
-                        .collect();
-                    state.emits_section = Some(format!("[{}]", emit_names.join(", ")));
-                }
+            if type_params.is_some() {
+                state.emits_section = match runtime_shape(runtime_bundle, syntax_index) {
+                    Some(MacroRuntimeShape::Emits(emits)) => Some(format!(
+                        "[{}]",
+                        emits
+                            .iter()
+                            .map(|emit| js_string_literal(&emit.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    _ => None,
+                };
             }
 
             // Replace macro call
@@ -320,33 +506,50 @@ pub(super) fn process_macro_item<'a>(
 
         ScriptMacro::DefineModel {
             span,
-            name_span,
+            type_params,
+            name,
             options_span,
             ..
         } => {
             let abs_start = content_start + span.start;
             let abs_end = content_start + span.end;
 
-            // Get model name (default: 'modelValue').
-            // OXC StringLiteral span includes surrounding quotes, so strip them.
-            let model_name = name_span
-                .map(|ns| {
-                    let raw = &content_str[ns.start as usize..ns.end as usize];
-                    raw.trim_matches(|c| c == '\'' || c == '"')
-                })
-                .unwrap_or("modelValue");
+            // Public semantics use OXC's decoded string value. The authored
+            // span is retained independently for diagnostics and source maps.
+            let model_name = name.unwrap_or("modelValue");
 
-            // Extract options object source (e.g., `{ type: Boolean, default: false }`)
             let options_src =
-                options_span.map(|os| content_str[os.start as usize..os.end as usize].to_string());
+                options_span.map(|span| section_text(span.start, span.end, content_str, stripped));
 
-            // Track this model name + options for prop/emit declaration generation
-            state
-                .model_names
-                .push((model_name.to_string(), options_src));
+            if type_params.is_some() {
+                if let Some(runtime_shape @ MacroRuntimeShape::Model(model)) =
+                    runtime_shape(runtime_bundle, syntax_index)
+                {
+                    super::visit_runtime_macro_binding_names(runtime_shape, |name| {
+                        ctx.bindings
+                            .insert(ctx.alloc.alloc_str(name), BindingType::Props);
+                    });
+                    state.models.push(ModelSection {
+                        prop_name: model.prop.name.clone(),
+                        prop_options: render_model_options(model, options_src, is_production),
+                        modifiers_name: model.modifiers_prop.name.clone(),
+                        update_event: model.update_event.name.clone(),
+                    });
+                }
+            } else {
+                state.models.push(ModelSection {
+                    prop_name: model_name.to_string(),
+                    prop_options: options_src.unwrap_or("{}").to_string(),
+                    modifiers_name: if model_name == "modelValue" {
+                        "modelModifiers".to_string()
+                    } else {
+                        format!("{model_name}Modifiers")
+                    },
+                    update_event: format!("update:{model_name}"),
+                });
+            }
 
-            // Replace with _useModel(__props, 'name')
-            let replacement = format!("_useModel(__props, '{}')", model_name);
+            let replacement = format!("_useModel(__props, {})", js_string_literal(model_name));
             ctx.out.overwrite(abs_start, abs_end, &replacement);
 
             ctx.imports.push("_useModel");
@@ -363,188 +566,44 @@ pub(super) fn process_macro_item<'a>(
             let abs_start = content_start + span.start;
             let abs_end = content_start + span.end;
 
-            // Build props from type-based defineProps with defaults merged in.
-            // Type-based: withDefaults(defineProps<{ color?: string }>(), { color: 'primary' })
-            // → props: { color: { type: String, default: 'primary' } }
-            if let Some(tp) = define_props_type_params {
-                if !tp.resolved.props.is_empty() {
-                    let mut props_obj = String::from("{\n");
-                    let mut emitted_names: rustc_hash::FxHashSet<String> =
-                        rustc_hash::FxHashSet::default();
-                    for prop in &tp.resolved.props {
-                        // Use pre-resolved key_name for external types (where spans
-                        // reference a different source), span extraction for intra-file.
-                        let name: &str = if let Some(ref kn) = prop.key_name {
-                            kn.as_str()
-                        } else {
-                            let key_start = prop.key.start as usize;
-                            let key_end = prop.key.end as usize;
-                            if key_end > ctx.source.len() {
-                                continue;
-                            }
-                            &ctx.source[key_start..key_end]
-                        };
-                        ctx.bindings
-                            .insert(ctx.alloc.alloc_str(name), BindingType::Props);
-                        emitted_names.insert(name.to_string());
-
-                        // Check if this prop has a default in the defaults object.
-                        // defaults spans are OXC-local (0-based within content_str).
-                        let default_prop = defaults
-                            .as_ref()
-                            .and_then(|d| d.properties.iter().find(|p| p.name == name));
-                        let default_value = default_prop.and_then(|p| {
-                            p.value_span
-                                .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
+            if define_props_type_params.is_some() {
+                state.props_section = match (
+                    runtime_shape(runtime_bundle, syntax_index),
+                    defaults_arg_span,
+                ) {
+                    (
+                        Some(runtime_shape @ MacroRuntimeShape::Props(shape)),
+                        Some(defaults_span),
+                    ) => {
+                        super::visit_runtime_macro_binding_names(runtime_shape, |name| {
+                            ctx.bindings
+                                .insert(ctx.alloc.alloc_str(name), BindingType::Props);
                         });
-
-                        // Official parity: a declared default keeps Function
-                        // alive in an otherwise-unresolvable union (function
-                        // default value vs factory distinction).
-                        let type_str =
-                            format_runtime_types_with_default(&prop.types, default_value.is_some());
-                        props_obj.push_str("    ");
-                        props_obj.push_str(name);
-                        props_obj.push_str(": { type: ");
-                        props_obj.push_str(&type_str);
-
-                        if let Some(val) = default_value {
-                            props_obj.push_str(", default: ");
-                            if default_prop.is_some_and(|p| p.is_method) {
-                                push_method_as_arrow(&mut props_obj, val);
-                            } else {
-                                props_obj.push_str(val);
-                            }
-                        } else if !prop.optional {
-                            props_obj.push_str(", required: true");
-                        }
-                        // Optional props with no declared default emit NO
-                        // default entry — official plugin-vue shape; the
-                        // runtime boolean-casts absent optional Booleans to
-                        // `false`.
-                        props_obj.push_str(" },\n");
-                    }
-                    // Defaults for keys NOT present on the resolved type surface
-                    // must still become runtime prop declarations. This covers
-                    // heritage/base props that failed to expand (e.g.
-                    // `withDefaults(defineProps<CellProps>(), { as: 'td' })`
-                    // when PrimitiveProps was not hydrated) — without them
-                    // `$props.as` / `_ctx.as` is undefined and table cells
-                    // render as divs (reka-ui Calendar focus regression).
-                    if let Some(d) = defaults.as_ref() {
-                        for prop in &d.properties {
-                            if emitted_names.contains(prop.name) {
-                                continue;
-                            }
-                            ctx.bindings
-                                .insert(ctx.alloc.alloc_str(prop.name), BindingType::Props);
-                            emitted_names.insert(prop.name.to_string());
-                            let val = prop
-                                .value_span
-                                .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
-                                .unwrap_or("undefined");
-                            props_obj.push_str("    ");
-                            props_obj.push_str(prop.name);
-                            props_obj.push_str(": { default: ");
-                            if prop.is_method {
-                                push_method_as_arrow(&mut props_obj, val);
-                            } else {
-                                props_obj.push_str(val);
-                            }
-                            props_obj.push_str(" },\n");
-                        }
-                    }
-                    props_obj.push('}');
-                    // Spreads: `withDefaults(defineProps<T>(), { ...Defaults })`
-                    // — a defaults object containing ANY spread is not
-                    // statically analyzable. Pass the WHOLE second-argument
-                    // expression through Vue's 2-arity
-                    // `_mergeDefaults(base, defaults)` (official shape):
-                    // runtime object-spread evaluation preserves the user's
-                    // key precedence, and non-identifier spreads ride along.
-                    if defaults.as_ref().is_some_and(|d| d.has_spread) {
-                        if let Some(arg_span) = defaults_arg_span {
-                            let defaults_src =
-                                section_text(arg_span.start, arg_span.end, content_str, stripped);
-                            ctx.imports.push("_mergeDefaults");
-                            props_obj = format!("_mergeDefaults({}, {})", props_obj, defaults_src);
-                        }
-                    }
-                    // When defaults is a *variable* (not an object literal),
-                    // wrap with Vue's `mergeDefaults(base, VAR)` so runtime
-                    // defaults (e.g. DEFAULT_LABEL_PROPS.as = 'label') apply
-                    // to the resolved type props. Object-literal defaults are
-                    // already inlined above.
-                    if defaults.is_none() {
-                        if let Some(arg_span) = defaults_arg_span {
-                            let defaults_src =
-                                section_text(arg_span.start, arg_span.end, content_str, stripped);
-                            ctx.imports.push("_mergeDefaults");
-                            state.props_section =
-                                Some(format!("_mergeDefaults({}, {})", props_obj, defaults_src));
+                        if let Some(static_defaults) = defaults.as_ref().and_then(|defaults| {
+                            render_static_defaults(defaults, content_str, stripped)
+                        }) {
+                            Some(render_runtime_props(
+                                shape,
+                                runtime_profile,
+                                Some(&static_defaults),
+                            ))
                         } else {
-                            state.props_section = Some(props_obj);
+                            let defaults = section_text(
+                                defaults_span.start,
+                                defaults_span.end,
+                                content_str,
+                                stripped,
+                            );
+                            ctx.imports.push("_mergeDefaults");
+                            Some(format!(
+                                "_mergeDefaults({}, {})",
+                                render_runtime_props(shape, runtime_profile, None),
+                                defaults
+                            ))
                         }
-                    } else {
-                        state.props_section = Some(props_obj);
                     }
-                } else if defaults.is_some() || defaults_arg_span.is_some() {
-                    // Unresolvable type reference (e.g., `defineProps<ImportedType>()`)
-                    // with defaults present. Vue's `mergeDefaults({}, defaults)` does NOT
-                    // create new prop declarations from an empty base — it only merges
-                    // defaults into existing declarations. We must create the declarations
-                    // ourselves.
-                    //
-                    // Case 1: Object literal defaults — extract keys at compile time
-                    //   `{ key: { default: val }, ... }`
-                    // Case 2: Variable reference defaults — convert at runtime
-                    //   `((d)=>{const p={};for(const k in d)p[k]={default:d[k]};return p})(VAR)`
-                    if let Some(d) = defaults {
-                        // Object literal: build inline prop declarations from parsed keys
-                        let mut props_obj = String::from("{\n");
-                        for (i, prop) in d.properties.iter().enumerate() {
-                            // Register each default key as a Props binding so
-                            // template bare identifiers (`as`) resolve to
-                            // `$props.as` rather than `_ctx.as` (undefined when
-                            // setup returns {}).
-                            ctx.bindings
-                                .insert(ctx.alloc.alloc_str(prop.name), BindingType::Props);
-                            let val = prop
-                                .value_span
-                                .map(|vs| section_text(vs.start, vs.end, content_str, stripped))
-                                .unwrap_or("undefined");
-                            props_obj.push_str("    ");
-                            props_obj.push_str(prop.name);
-                            props_obj.push_str(": { default: ");
-                            if prop.is_method {
-                                push_method_as_arrow(&mut props_obj, val);
-                            } else {
-                                props_obj.push_str(val);
-                            }
-                            props_obj.push_str(" }");
-                            if i < d.properties.len() - 1 {
-                                props_obj.push(',');
-                            }
-                            props_obj.push('\n');
-                        }
-                        props_obj.push('}');
-                        state.props_section = Some(props_obj);
-                    } else if let Some(arg_span) = defaults_arg_span {
-                        // Variable reference: convert at runtime using IIFE.
-                        // Prop names are not known statically; template bare
-                        // ids still need a Props binding for any keys the
-                        // host already resolved, and for pure compile-time
-                        // we leave bindings empty (host-backed compile should
-                        // resolve the type and take the non-empty props path
-                        // above).
-                        let defaults_src =
-                            section_text(arg_span.start, arg_span.end, content_str, stripped);
-                        state.props_section = Some(format!(
-                            "((d)=>{{const p={{}};for(const k in d)p[k]={{default:d[k]}};return p}})({})",
-                            defaults_src
-                        ));
-                    }
-                }
+                    _ => None,
+                };
             }
 
             // Replace macro call

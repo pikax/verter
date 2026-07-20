@@ -37,6 +37,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cache_id::SchedulerCacheId;
+use crate::cancellation::CancellationToken;
 use crate::job::{CompletionSender, CompletionState, RequestResult, SchedulerError};
 use crate::stage::{Priority, TargetStage, TaskKind};
 
@@ -326,6 +327,10 @@ pub(in crate::dag) struct DagNode {
     /// Optional session-side context propagated by the driver. Carried
     /// as opaque bytes; the dispatch loop reads it when installing TLS.
     pub(in crate::dag) request_context: Option<crate::request_context::OpaqueRequestContext>,
+    /// Aggregate job-liveness token. It is independent of the first request
+    /// context retained for TLS attribution and is cancelled by DAG terminal
+    /// cancellation/reset (or, for scoped cache nodes, loss of all owners).
+    pub(in crate::dag) cancellation: CancellationToken,
     /// Dependency identities this node is gated on. Each entry is the
     /// identity of another work node whose readiness must clear before
     /// this node is dispatchable.
@@ -461,6 +466,9 @@ pub struct ReadyJob {
     pub priority: Priority,
     pub enqueue_time: Instant,
     pub request_context: Option<crate::request_context::OpaqueRequestContext>,
+    /// Aggregate job token created at admission and shared unchanged with the
+    /// executor. Never a winner request's private token.
+    pub cancellation: CancellationToken,
     /// [`FailedDepRecord`]s for blockers whose producer failed
     /// terminally before this node dispatched. Drained from the
     /// node's `failed_blocker_deps` at `next_ready` time. The pre-
@@ -1420,6 +1428,7 @@ impl SchedulerDag {
             base_priority: priority,
             enqueue_time: Instant::now(),
             request_context,
+            cancellation: CancellationToken::aggregate(),
             deps_remaining,
             failed_blocker_deps: BTreeMap::new(),
             dispatched: false,
@@ -1445,6 +1454,19 @@ impl SchedulerDag {
     /// Look up the token currently associated with `identity`, if any.
     pub fn token_for(&self, identity: &WorkNodeIdentity) -> Option<SubmissionToken> {
         self.by_identity.get(identity).copied()
+    }
+
+    /// Clone the aggregate liveness token owned by an admitted node.
+    ///
+    /// The scheduler uses this immediately after scoped cache-node admission
+    /// to attach every request owner to the job rather than to the dedup
+    /// winner's private cancellation token.
+    pub(crate) fn cancellation_for(
+        &self,
+        identity: &WorkNodeIdentity,
+    ) -> Option<CancellationToken> {
+        let token = self.by_identity.get(identity)?;
+        self.nodes.get(token).map(|node| node.cancellation.clone())
     }
 
     /// `true` if `owner_identity` is currently admitted in the DAG
@@ -1759,6 +1781,7 @@ impl SchedulerDag {
         }
         if let Some(node) = self.nodes.get_mut(&tok) {
             node.cancelled = true;
+            node.cancellation.cancel();
         }
         // A cancelled node is no longer dispatch-ready — drop its lane
         // entry (if it had one).
@@ -2102,6 +2125,7 @@ impl SchedulerDag {
                 priority,
                 enqueue_time: node.enqueue_time,
                 request_context: node.request_context.clone(),
+                cancellation: node.cancellation.clone(),
                 failed_blocker_deps,
             });
         }
@@ -2118,6 +2142,7 @@ impl SchedulerDag {
         // decrements the counters; the explicit zero below catches
         // any stragglers held outside the dag.
         for (_, mut node) in self.nodes.drain() {
+            node.cancellation.cancel();
             // Reservation::Drop returns permits to both counters.
             let _ = node.reservation.take();
         }

@@ -118,6 +118,7 @@ Component-meta completeness is part of the public API surface.
 ## JSDoc & Default-Value Publication
 
 - **Span-borne JSDoc supply (single path).** Members publish description/tags from the typeinfo surface's per-member JSDoc spans — `TypeInfoSurface::with_member_jsdoc_spans` stamps each member's spans from its DECLARATION-origin file, and publication slices them from the declaring file's cache-owned `IndexedReady.raw_source` (props, emits, slots via the Vue surface DTO path; exposed via the same enriched surface) — never a fresh parse. Homomorphic mapped production (`Partial`/`Required`/`Readonly`/identity-mapped over a matched source member) threads the source member's `spans` + `declaration_origin` through (`project_semantic_dispatch/build.rs`, `walk.rs`); genuinely synthetic members (non-homomorphic mapped, union common-members) stay span-less and publish no docs. Emit docs ride the same DTO rail (call-signature, property-style, and generic-instantiated emits); the evaluator-only expanded-events branch has no doc carrier and publishes none. NO name-keyed cross-file doc recovery exists: the SFC name-scan text fallback and the post-hoc prop-only repair (`fill_missing_component_meta_prop_descriptions_from_imported_roots` + its barrel/heritage BFS helpers) are deleted.
+- **Macro input inventory authority.** The analyzed snapshot macro indices are the SOLE authority for normalized extractor-input order and cardinality: every admitted index reads exactly one `vue_macro_dtos` bundle, including a module-script declaration consumed by a setup-script macro when the optional `ResolvedMacroMeta` sidecar is empty. `ResolvedMacroMeta` carries declaration identity/JSDoc enrichment for registry publication; it MUST NOT gate normalized field publication or multiply rows. Object-literal `defineExpose` remains analyzer-owned and is excluded from DTO input enumeration; partial DTO reads still suppress warm promotion through the shared fact rail.
 - **Exposed docs + tags.** `defineExpose({ ... })` object-literal fields capture leading JSDoc at the field key span (`AnalyzedExposeField.description`/`tags`); `defineExpose<T>()` rides the enriched surface spans like props. The published exposed surface is the UNION (`extract_exposed_from_macro`): object-literal fields first (their own leading JSDoc wins), then type-argument surface members not in the literal set, in surface order — a type-argument-only `defineExpose<T>()` publishes its members with their docs and raised surface types (`AnalyzedExposeField.type_expr`/`type_expr_scope`, populated by the DTO normalizer like props). Surface-derived fields carry `span: None` (`Option<Span>` — only analyzer object-literal fields have an SFC-absolute key span); the public-instance sidecar derives from the published union. `ExposedAnalysis`/`ExposedMeta` and the public-instance sidecar member carry `tags` end-to-end (proto `ExposedMeta` field 5 + `PublicInstanceMemberMeta` field 7, appended; TS `ExposedMeta.tags`; compat forwards tags instead of hardcoding `[]`).
 - **Default values are source-faithful.** Default extraction returns the verbatim source slice for every expression kind INCLUDING string literals (`default: 'vertical'` publishes `'vertical'`, quoted) through the one shared helper `default_value_source_text` (`verter_semantic::analysis::macros`) used by both the macro and Options API extractors. Compat must not infer string-ness from descriptor type compatibility (that inference branch is deleted); lossless quote-STYLE normalization of an already-string-literal value at the display boundary remains permitted.
 
@@ -135,7 +136,7 @@ The native component-meta / typeinfo type resolver — analyzer (`verter_semanti
   - `AnalyzedSlotField.return_expr: Option<TypeExpr>` (raw text on `return_type`)
   - `ResolvedLocalType.type_expr` MUST be populated whenever `expanded` is non-empty.
   - `AnalyzedMacro.parsed_type_argument` is populated via `lower_ts_type(first, source)` directly on the OXC AST node, not via source slice + `parse_type_annotation`.
-- `ResolvedNativeProp.type_annotation` (the keep-all `native_props` rows on `ResolvedMacroElements`) is a display-only passthrough rendered once from the member's raised typed value; consumers do not parse it back.
+- `ResolvedNativeProp.type_annotation` is a display-only passthrough rendered once by the component-meta-owned native projector from the member node; consumers do not parse it back. Component-meta never consumes the legacy `ResolvedElements` runtime DTO.
 
 **Consumer contract** — every downstream stage walks the typed form:
 
@@ -260,13 +261,12 @@ The NAPI/WASM/LSP wire boundary consumes the session-owned, fully-materialized
   `verter_type_expr::MemberVisibility`, carried VERBATIM from the
   shared-dispatch `TypeInfoSurfaceMember` (the keep-all rows are built by
   `ResolvedNativeProp::from_surface_member` in
-  `resolver_core/surface_projector.rs`, invoked from the projection terminal
-  `macro_elements_from_surface` in
-  `typeinfo/framework_surface/vue_exec/imported_elements.rs` — under
-  `NativeProjection::Include`; the compile-facing elements-only routes pass
-  `Skip` and build no native rows — from the SAME one-level surface
-  resolution that produces the legacy elements DTO — the
-  `ResolvedMacroElements` carrier — never from a parser DTO round-trip;
+  `resolver_core/component_meta/native_props.rs` after exactly one graph-only
+  empty-path Shallow surface demand). The request-local
+  `NativePropProjectionCache` is independent from `ExternalTypeBodyCache`;
+  resolved-empty is distinct from `Miss`, and `Recursive` is never admitted.
+  The legacy compile-facing `ResolvedElements` projection is independent and
+  never feeds this native surface;
   `span` is always `Span::default()`: the FFI/proto row carries no
   declaration-file id, so a declaration-site byte offset would be unanchored
   for a cross-file inherited member).

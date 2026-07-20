@@ -104,13 +104,9 @@ pub(crate) fn apply_component_meta_resolution_policy(
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
 ) {
     let macro_participating_idents: FxHashSet<ResolvedRootIdentity> = match snapshot {
-        Some(snap) => build_policy_macro_role_identities(
-            host,
-            ctx,
-            owner_canonical,
-            snap,
-            TYPE_ROLE_MACRO_KINDS,
-        ),
+        Some(snap) => {
+            build_policy_macro_role_identities(ctx, owner_canonical, snap, TYPE_ROLE_MACRO_KINDS)
+        }
         None => FxHashSet::default(),
     };
     apply_component_meta_resolution_policy_with_participation(
@@ -149,6 +145,7 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
         registry: &registry,
         engine: &mut engine,
         owner_canonical,
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
         host,
         macro_participating_idents,
         active_refs: FxHashSet::default(),
@@ -309,7 +306,6 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
 ///   → `{ ButtonProps, AvatarProps }` (named alias body contributes
 ///   its full reference closure)
 fn build_policy_macro_role_identities(
-    host: &VerterHost,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -319,12 +315,13 @@ fn build_policy_macro_role_identities(
     let mut visited_names: FxHashSet<String> = FxHashSet::default();
 
     let record_name = |name: &str,
+                       owner: verter_type_expr::TopLevelOwnerId,
                        identities: &mut FxHashSet<ResolvedRootIdentity>,
                        visited_names: &mut FxHashSet<String>| {
         if !visited_names.insert(name.to_string()) {
             return;
         }
-        if let Some(identity) = resolve_ref_to_root_identity(host, owner_canonical, name) {
+        if let Some(identity) = resolve_ref_to_root_identity(ctx, owner_canonical, owner, name) {
             identities.insert(identity);
         }
     };
@@ -350,13 +347,14 @@ fn build_policy_macro_role_identities(
                 ),
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
+                    scope_owner: mac.owner,
                     context: transit_ctx,
                     interior_failures: None,
                 },
             );
             if let Some(hot) = payload {
                 harvest_role_bearing_refs_node(ctx, hot.node(), |name| {
-                    record_name(name, &mut identities, &mut visited_names);
+                    record_name(name, mac.owner, &mut identities, &mut visited_names);
                 });
             }
         }
@@ -368,6 +366,7 @@ fn build_policy_macro_role_identities(
         for resolved_local in mac.resolved_local_types.iter() {
             record_name(
                 resolved_local.name.as_str(),
+                mac.owner,
                 &mut identities,
                 &mut visited_names,
             );
@@ -377,13 +376,14 @@ fn build_policy_macro_role_identities(
                 ),
                 crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
+                    scope_owner: mac.owner,
                     context: transit_ctx,
                     interior_failures: None,
                 },
             );
             if let Some(hot) = shape_hot {
                 harvest_role_bearing_refs_node(ctx, hot.node(), |name| {
-                    record_name(name, &mut identities, &mut visited_names);
+                    record_name(name, mac.owner, &mut identities, &mut visited_names);
                 });
             }
         }
@@ -412,6 +412,7 @@ fn build_policy_macro_role_identities(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
                         canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+                        owner: identity.owner,
                         symbol: std::sync::Arc::clone(&identity.symbol_name),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
@@ -423,6 +424,7 @@ fn build_policy_macro_role_identities(
             &body_source,
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: owner_canonical,
+                scope_owner: identity.owner,
                 context: transit_ctx,
                 interior_failures: None,
             },
@@ -434,10 +436,12 @@ fn build_policy_macro_role_identities(
             if !visited_names.contains(name) {
                 newly_recorded.push(name.to_string());
             }
-            record_name(name, &mut identities, &mut visited_names);
+            record_name(name, identity.owner, &mut identities, &mut visited_names);
         });
         for name in newly_recorded {
-            if let Some(new_identity) = resolve_ref_to_root_identity(host, owner_canonical, &name) {
+            if let Some(new_identity) =
+                resolve_ref_to_root_identity(ctx, owner_canonical, identity.owner, &name)
+            {
                 frontier.push(new_identity);
             }
         }

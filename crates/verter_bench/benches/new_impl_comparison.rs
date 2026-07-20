@@ -108,8 +108,7 @@ fn compile_full(source: &str) -> String {
         has_scoped_style: has_scoped,
         ..Default::default()
     };
-    let prepared =
-        PreparedScript::build(source, syntax.script(), syntax.script_setup(), &alloc, None);
+    let prepared = PreparedScript::build(source, syntax.script(), syntax.script_setup(), &alloc);
     let script_result = generate_script(
         syntax.script(),
         syntax.script_setup(),

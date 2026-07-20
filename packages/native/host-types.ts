@@ -71,6 +71,8 @@ export interface HostConfig {
 export interface HostCompileProfile {
   filename?: string;
   isProduction?: boolean;
+  /** Vue custom-element script policy; unrelated to template `customElements`. */
+  customElement?: boolean;
   ssr?: boolean;
   /**
    * SSR asset-collection module id registered on `ssrContext.modules`.

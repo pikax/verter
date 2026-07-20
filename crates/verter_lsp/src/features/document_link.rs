@@ -201,6 +201,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "./Foo.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "Foo".to_string(),
@@ -231,6 +232,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![],
                 span: verter_span::Span::new(15, 40),

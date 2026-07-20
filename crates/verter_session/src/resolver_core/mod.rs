@@ -15,8 +15,6 @@ pub mod component_meta_registry;
 mod component_meta_request;
 mod declaration_metadata;
 mod export_graph;
-mod external_macro_types;
-mod external_type_body;
 pub mod external_type_frontier;
 mod fallthrough;
 pub mod fallthrough_override_key;
@@ -72,13 +70,15 @@ pub use route_db::{
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub(crate) use component_meta::component_meta_resolved_macros;
 pub use component_meta::{
-    collect_requested_binding_names, component_meta_type_registry, resolve_component_meta_parts,
+    collect_requested_binding_demands, component_meta_type_registry, resolve_component_meta_parts,
     ComponentMetaEvalOutputs, ComponentMetaResolutionPurpose, ComponentMetaResolverHost,
     ResolvedComponentMetaParts, ResolvedImportedMacroSurface, ResolvedJsdocBlock, ResolvedJsdocTag,
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
-pub(crate) use component_meta_request::ComponentMetaComputeOutcome;
+pub(crate) use component_meta_request::{
+    ComponentMetaCacheLookup, ComponentMetaComputeOutcome, ComponentMetaRequestResult,
+};
 // The surface-projection helpers (`surface_view_from_semantic_node`,
 // `compound_root_surface_view_via_dispatch`,
 // `surface_view_to_registry_type_expr`) are intentionally NOT re-exported from
@@ -97,6 +97,7 @@ pub(crate) use component_meta_query_engine::{
 // `node_contains_semantic_miss_with_dispatch` /
 // `node_root_is_unmaterialized_sentinel_with_dispatch`); the raised-shape suite
 // imports them through these re-exports.
+pub use component_meta::ResolvedNativeProp;
 #[cfg(test)]
 pub(crate) use component_meta_query_engine::{
     type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
@@ -112,13 +113,6 @@ pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
     resolve_exports_from_graph_best_effort, resolve_named_export_from_graph, ExportGraphResolver,
     ExportSurface, ResolvedGraphExport,
-};
-pub use external_macro_types::{
-    collect_external_macro_types, ExternalMacroTypeCollection, ExternalMacroTypeCollectorHost,
-    ExternalMacroTypeDiagnostic,
-};
-pub use external_type_body::{
-    resolve_external_type_from_source_body, ExternalTypeBodyCache, ExternalTypeBodyResolver,
 };
 pub use external_type_frontier::{
     ExternalTypeFrontier, FrontierHost, PendingExternalSymbol, ResolvedRouteProvenance,
@@ -147,7 +141,7 @@ pub use route_demand::{
     RoutedSymbolResult, RoutedSymbolStatus, SymbolSpace,
 };
 pub use runtime_values::{
-    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
+    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver, ValueDeclIdentity,
 };
 pub use shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef,
@@ -155,7 +149,6 @@ pub use shallow_file_state::{
     ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
     ShallowValueSymbol, WildcardReexport,
 };
-pub use surface_projector::{ResolvedMacroElements, ResolvedNativeProp};
 
 /// Lane-identity token for singleflight / stability-request
 /// deduplication.
@@ -1310,6 +1303,25 @@ pub struct Candidate<V> {
     pub fact_dep_signature: Arc<[FactVersionRef]>,
 }
 
+/// Call-owned identity of one exact [`ValidatedFactCache`] candidate.
+///
+/// The candidate `Arc` is the identity: cache enrichment may replace a
+/// candidate only while the same key still contains this exact allocation.
+/// The proof is intentionally opaque so callers cannot manufacture an
+/// admission from an equal-but-unadmitted value.
+#[derive(Debug, Clone)]
+#[doc(hidden)]
+pub struct ValidatedFactAdmission<V> {
+    candidate: Arc<Candidate<V>>,
+}
+
+impl<V> ValidatedFactAdmission<V> {
+    #[must_use]
+    pub(crate) fn value(&self) -> &Arc<V> {
+        &self.candidate.value
+    }
+}
+
 /// Per-slot candidate cap. The 5th admission triggers FIFO eviction
 /// of the oldest candidate.
 pub const CANDIDATE_CAP: usize = 4;
@@ -1372,6 +1384,20 @@ where
     where
         TView: StoreView + ?Sized,
     {
+        self.get_if_valid_with_admission(key, view)
+            .map(|(value, _admission)| value)
+    }
+
+    /// Validate and return both the value and a call-owned identity for the
+    /// exact candidate that satisfied the lookup.
+    pub(crate) fn get_if_valid_with_admission<TView>(
+        &self,
+        key: &K,
+        view: &TView,
+    ) -> Option<(Arc<V>, ValidatedFactAdmission<V>)>
+    where
+        TView: StoreView + ?Sized,
+    {
         // R24 counter: increments once per read attempt. Hot-path
         // single atomic. Producers fold the four `*_count()` reads
         // into a `FactValidationSummary` event at request close-out.
@@ -1387,7 +1413,12 @@ where
             if ok {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Some(candidate.value.clone());
+                return Some((
+                    candidate.value.clone(),
+                    ValidatedFactAdmission {
+                        candidate: Arc::clone(candidate),
+                    },
+                ));
             }
         }
         // Entry existed but no candidate validated under the active
@@ -1576,8 +1607,8 @@ where
         value: Arc<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) {
-        self.insert_arc_inner(key, value, facts, Some(cache_kind));
+    ) -> Option<ValidatedFactAdmission<V>> {
+        self.insert_arc_inner(key, value, facts, Some(cache_kind))
     }
 
     fn insert_arc_inner(
@@ -1586,7 +1617,7 @@ where
         value: Arc<V>,
         facts: Vec<FactVersionRef>,
         strict_cache_kind: Option<&'static str>,
-    ) {
+    ) -> Option<ValidatedFactAdmission<V>> {
         // R20 signature-size bound. Reject candidates whose fact
         // signature exceeds FACT_SIGNATURE_CAP.
         if facts.len() > FACT_SIGNATURE_CAP {
@@ -1602,7 +1633,7 @@ where
                     cap: FACT_SIGNATURE_CAP as u32,
                 },
             );
-            return;
+            return None;
         }
         // R20 fact-completeness guard. Strict callers
         // (`insert_arc_with_kind`) refuse empty signatures so
@@ -1617,7 +1648,7 @@ where
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
                     },
                 );
-                return;
+                return None;
             }
         }
         let fact_arc: Arc<[FactVersionRef]> = Arc::from(facts.into_boxed_slice());
@@ -1651,6 +1682,73 @@ where
             new.push(Arc::clone(&candidate));
             new
         });
+        Some(ValidatedFactAdmission { candidate })
+    }
+
+    /// Re-sign only the exact candidate named by `admission` under `key`.
+    /// If the candidate was displaced or the slot was cleared, this is a
+    /// no-op; the method never creates a candidate from a stale proof.
+    pub(crate) fn resign_arc_with_kind(
+        &self,
+        key: &K,
+        admission: &ValidatedFactAdmission<V>,
+        value: Arc<V>,
+        facts: Vec<FactVersionRef>,
+        cache_kind: &'static str,
+    ) -> bool {
+        if facts.len() > FACT_SIGNATURE_CAP {
+            self.signature_overflow
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::host_manage::push_structured_event(
+                crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
+                    candidate_size: facts.len() as u32,
+                    cap: FACT_SIGNATURE_CAP as u32,
+                },
+            );
+            return false;
+        }
+        if facts.is_empty() {
+            self.admission_refused
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::host_manage::push_structured_event(
+                crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
+                    cache_kind: Arc::from(cache_kind),
+                    reason: verter_audit::AdmissionRefusalReason::EmptySignature,
+                },
+            );
+            return false;
+        }
+
+        let fact_arc: Arc<[FactVersionRef]> = Arc::from(facts.into_boxed_slice());
+        let replacement = Arc::new(Candidate {
+            signature_fingerprint: compute_signature_fingerprint(&fact_arc),
+            value,
+            fact_dep_signature: fact_arc,
+        });
+        let Some(entry) = self.entries.get(key) else {
+            return false;
+        };
+        let candidates_slot = &entry.candidates;
+        candidates_slot.rcu(|old| {
+            let mut new: smallvec::SmallVec<[Arc<Candidate<V>>; CANDIDATE_CAP]> =
+                old.iter().cloned().collect();
+            let mut replaced = false;
+            for candidate in &mut new {
+                if Arc::ptr_eq(candidate, &admission.candidate) {
+                    *candidate = Arc::clone(&replacement);
+                    replaced = true;
+                }
+            }
+            if replaced {
+                self.arcswap_stores
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            new
+        });
+        candidates_slot
+            .load()
+            .iter()
+            .any(|candidate| Arc::ptr_eq(&candidate.value, &replacement.value))
     }
 
     pub fn values(&self) -> Vec<Arc<V>> {
@@ -2765,6 +2863,68 @@ mod tests {
             cache.get_if_valid(&"node".to_string(), &view),
             Some(Arc::new(42))
         );
+    }
+
+    #[test]
+    fn validated_cache_resigns_only_the_exact_admitted_candidate() {
+        let cache = ValidatedFactCache::<String, usize>::default();
+        let key = "node".to_string();
+        let shared_value = Arc::new(42);
+        let first_fact = FactVersionRef::FileWholeHash {
+            canonical_id: "/src/first.ts".to_string(),
+            hash: [1; 16],
+        };
+        let second_fact = FactVersionRef::FileWholeHash {
+            canonical_id: "/src/second.ts".to_string(),
+            hash: [2; 16],
+        };
+        let resigned_fact = FactVersionRef::FileWholeHash {
+            canonical_id: "/src/resigned.ts".to_string(),
+            hash: [3; 16],
+        };
+
+        let first_admission = cache
+            .insert_arc_with_kind(
+                key.clone(),
+                Arc::clone(&shared_value),
+                vec![first_fact.clone()],
+                "test.validated-cache",
+            )
+            .expect("the first non-empty candidate must be admitted");
+        cache
+            .insert_arc_with_kind(
+                key.clone(),
+                shared_value,
+                vec![second_fact.clone()],
+                "test.validated-cache",
+            )
+            .expect("the second non-empty candidate must be admitted");
+
+        assert!(cache.resign_arc_with_kind(
+            &key,
+            &first_admission,
+            Arc::new(84),
+            vec![resigned_fact.clone()],
+            "test.validated-cache",
+        ));
+
+        let view = |fact| TestView {
+            token: StoreViewCompatToken {
+                epoch: 1,
+                session: None,
+                validity_fingerprint: 0,
+            },
+            valid_facts: [fact].into_iter().collect(),
+        };
+        assert_eq!(
+            cache.get_if_valid(&key, &view(resigned_fact)),
+            Some(Arc::new(84))
+        );
+        assert_eq!(
+            cache.get_if_valid(&key, &view(second_fact)),
+            Some(Arc::new(42))
+        );
+        assert!(cache.get_if_valid(&key, &view(first_fact)).is_none());
     }
 
     #[test]

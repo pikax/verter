@@ -133,6 +133,9 @@ pub struct RuntimeCompileOptions {
     pub filename: Option<String>,
     /// Production mode: strips dev-only code (`__file`, HMR, dev instrumentation).
     pub is_production: bool,
+    /// Compile the carrier as a custom element. This does not classify
+    /// template tags; each carrier maps it to its explicit compile-option axis.
+    pub custom_element: bool,
     /// Generate source maps for the produced runtime output.
     pub source_map: bool,
     /// Server-side rendering mode (the carrier emits its SSR backend).
@@ -183,10 +186,10 @@ pub struct RuntimeCompileOptions {
     /// Framework-PRIVATE resolved compile inputs, opaque to the neutral
     /// surface. A carrier downcasts this to its own typed extras
     /// (`vue_bridge::VueRuntimeCompileExtras` — the host-resolved
-    /// `external_types` / `prop_constness` / `style_v_bind_vars`); a carrier
-    /// without a private extras shape ignores it. Keeping it opaque keeps any
-    /// framework's resolution-specific types (e.g. Vue's eager type-surface
-    /// output) OUT of the cross-framework contract.
+    /// macro DTOs / `prop_constness` / `style_v_bind_vars`); a carrier
+    /// without a private extras shape ignores it. Keeping it opaque keeps each
+    /// framework's resolution-specific DTOs out of the cross-framework
+    /// contract.
     pub framework_extras: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 

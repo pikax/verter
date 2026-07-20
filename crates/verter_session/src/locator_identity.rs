@@ -63,6 +63,7 @@ use verter_type_expr::locators::{
     JsdocTypedefBodyLocator, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
 };
+use verter_type_expr::{TopLevelOwnerId, TopLevelOwnerKind};
 
 mod sealed {
     /// Private seal: only this module can name it, so `R6KeyDimension` cannot be
@@ -336,6 +337,8 @@ impl_r6_key_safe_leaf!(
 // tail) are key-safe; each stamp is BOUND to its exhaustive-destructure
 // witness below (a stamp without its `w_*` witness fails to compile).
 impl_r6_key_safe!(
+    TopLevelOwnerKind => w_top_level_owner_kind,
+    TopLevelOwnerId => w_top_level_owner_id,
     LocatorSymbolSpace => w_locator_symbol_space,
     AuthoredAnchor => w_authored_anchor,
     TypeBodyPathStep => w_type_body_path_step,
@@ -364,12 +367,32 @@ impl_r6_key_safe!(
 fn w_authored_anchor(a: &AuthoredAnchor) {
     let AuthoredAnchor {
         canonical_id,
+        owner,
         symbol,
         space,
     } = a;
     key_safe(canonical_id);
+    key_safe(owner);
     key_safe(symbol);
     key_safe(space);
+}
+
+fn w_top_level_owner_kind(kind: &TopLevelOwnerKind) {
+    match kind {
+        TopLevelOwnerKind::Module
+        | TopLevelOwnerKind::Instance
+        | TopLevelOwnerKind::Frontmatter => {}
+    }
+}
+
+fn w_top_level_owner_id(owner: &TopLevelOwnerId) {
+    // `TopLevelOwnerId` deliberately keeps its two fields private in
+    // `verter_type_expr`; its public, lossless decomposition is the structural
+    // witness available to this crate.
+    let kind = owner.kind();
+    let ordinal = owner.ordinal();
+    key_safe(&kind);
+    key_safe(&ordinal);
 }
 
 fn w_locator_symbol_space(s: &LocatorSymbolSpace) {
@@ -509,11 +532,13 @@ fn w_slot_env_identity(e: &SlotEnvIdentity) {
 fn w_resolved_decl_slot_identity(s: &ResolvedDeclSlotIdentity) {
     let ResolvedDeclSlotIdentity {
         defining_canonical,
+        owner,
         merged_symbol_name,
         symbol_space,
         env,
     } = s;
     key_safe(defining_canonical);
+    key_safe(owner);
     key_safe(merged_symbol_name);
     key_safe(symbol_space);
     key_safe(env);
@@ -526,7 +551,7 @@ fn w_resolved_decl_slot_identity(s: &ResolvedDeclSlotIdentity) {
 /// lowers under the wrong slot and nothing defers to a dispatch-time
 /// `ReturnOnly`.
 // The shared `Mismatch` postfix is the semantic content of every variant (the
-// gate has exactly three mismatch axes), not naming noise.
+// gate has exactly four mismatch axes), not naming noise.
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocatorKeyError {
@@ -536,6 +561,13 @@ pub enum LocatorKeyError {
         slot_canonical: Arc<str>,
         /// The locator anchor's canonical.
         locator_canonical: Arc<str>,
+    },
+    /// `locator.anchor.owner` ≠ `slot.owner`.
+    OwnerMismatch {
+        /// The slot's exact top-level owner.
+        slot_owner: TopLevelOwnerId,
+        /// The locator anchor's exact top-level owner.
+        locator_owner: TopLevelOwnerId,
     },
     /// `locator.anchor.symbol` ≠ `slot.merged_symbol_name`.
     SymbolMismatch {
@@ -600,9 +632,10 @@ impl LocatorLoweringKey {
     /// after the slot/locator anchor-match gate. REJECTS with a typed
     /// [`LocatorKeyError`] unless the locator anchor names the slot's
     /// declaration exactly (`anchor.canonical_id == slot.defining_canonical`,
-    /// `anchor.symbol == slot.merged_symbol_name`, and `anchor.space` maps to
-    /// `slot.symbol_space`). There are NO standalone `T`/`L`/`J` parameters to
-    /// cross-check — env coherence is by construction (slot-carried).
+    /// `anchor.owner == slot.owner`, `anchor.symbol == slot.merged_symbol_name`,
+    /// and `anchor.space` maps to `slot.symbol_space`). There are NO standalone
+    /// `T`/`L`/`J` parameters to cross-check — env coherence is by construction
+    /// (slot-carried).
     pub(crate) fn new_unsubstituted(
         slot: ResolvedDeclSlotIdentity,
         locator: AuthoredBodyLocator,
@@ -619,6 +652,12 @@ impl LocatorLoweringKey {
             return Err(LocatorKeyError::CanonicalMismatch {
                 slot_canonical: Arc::clone(&slot.defining_canonical),
                 locator_canonical: Arc::clone(&anchor.canonical_id),
+            });
+        }
+        if anchor.owner != slot.owner {
+            return Err(LocatorKeyError::OwnerMismatch {
+                slot_owner: slot.owner,
+                locator_owner: anchor.owner,
             });
         }
         if anchor.symbol != slot.merged_symbol_name {
@@ -729,6 +768,72 @@ pub struct SessionDemandIdentity {
     pub route: SessionDemandRoute,
 }
 
+/// Content-free root route for one broad-runtime classification.
+///
+/// The route starts at the owning SFC's macro hot-mirror slot and either
+/// classifies the payload itself (`defineModel`) or one named public member of
+/// the runtime props surface. It contains no graph handle, content hash, span,
+/// or rendered/source text. The live carrier is re-sourced from the owning
+/// artifact when [`SemanticQueryKey::ClassifyBroadRuntime`](crate::semantic_query::SemanticQueryKey::ClassifyBroadRuntime)
+/// executes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BroadRuntimeSubjectLocator {
+    owner: ResolvedDeclSlotIdentity,
+    macro_index: u32,
+    route: BroadRuntimeSubjectRoute,
+}
+
+/// Typed terminal below a [`BroadRuntimeSubjectLocator`]'s macro payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BroadRuntimeSubjectRoute {
+    /// Classify the effective macro payload itself.
+    Payload,
+    /// Classify one exact public runtime-props member.
+    Member(Arc<str>),
+}
+
+impl BroadRuntimeSubjectLocator {
+    /// Construct a macro-payload root route. `owner` is the env-bearing,
+    /// content-free SFC setup slot; `macro_index` is the analyzed macro's
+    /// source-order ordinal.
+    #[must_use]
+    pub(crate) fn payload(owner: ResolvedDeclSlotIdentity, macro_index: u32) -> Self {
+        Self {
+            owner,
+            macro_index,
+            route: BroadRuntimeSubjectRoute::Payload,
+        }
+    }
+
+    /// Derive an exact member route from this payload root.
+    #[must_use]
+    pub(crate) fn member(&self, name: Arc<str>) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            macro_index: self.macro_index,
+            route: BroadRuntimeSubjectRoute::Member(name),
+        }
+    }
+
+    /// The env-bearing, content-free macro owner slot.
+    #[must_use]
+    pub(crate) fn owner(&self) -> &ResolvedDeclSlotIdentity {
+        &self.owner
+    }
+
+    /// Source-order analyzed macro ordinal.
+    #[must_use]
+    pub(crate) const fn macro_index(&self) -> u32 {
+        self.macro_index
+    }
+
+    /// Typed terminal below the macro payload.
+    #[must_use]
+    pub(crate) fn route(&self) -> &BroadRuntimeSubjectRoute {
+        &self.route
+    }
+}
+
 // `SessionDemandIdentity` is content-free / env-free / session-only. It does NOT
 // lower via `LocatorLoweringKey`, but it IS still a keyable identity, so it gets
 // the same exhaustive-destructure R6-key-safe witnesses (each stamp bound to its
@@ -737,6 +842,8 @@ impl_r6_key_safe!(
     SessionDemandOwner => w_session_demand_owner,
     SessionDemandRoute => w_session_demand_route,
     SessionDemandIdentity => w_session_demand_identity,
+    BroadRuntimeSubjectRoute => w_broad_runtime_subject_route,
+    BroadRuntimeSubjectLocator => w_broad_runtime_subject_locator,
 );
 
 fn w_session_demand_owner(o: &SessionDemandOwner) {
@@ -765,6 +872,24 @@ fn w_session_demand_identity(d: &SessionDemandIdentity) {
     key_safe(route);
 }
 
+fn w_broad_runtime_subject_route(route: &BroadRuntimeSubjectRoute) {
+    match route {
+        BroadRuntimeSubjectRoute::Payload => {}
+        BroadRuntimeSubjectRoute::Member(name) => key_safe(name),
+    }
+}
+
+fn w_broad_runtime_subject_locator(locator: &BroadRuntimeSubjectLocator) {
+    let BroadRuntimeSubjectLocator {
+        owner,
+        macro_index,
+        route,
+    } = locator;
+    key_safe(owner);
+    key_safe(macro_index);
+    key_safe(route);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,7 +909,9 @@ mod tests {
         // key-safe. (A forbidden dimension — standalone or nested — fails these
         // bounds; that negative is proven by the trybuild compile-fail fixtures.)
         assert_r6_key_safe::<LocatorLoweringKey>();
+        assert_r6_key_safe::<BroadRuntimeSubjectLocator>();
         assert_r6_key_safe::<AuthoredBodyLocator>();
+        assert_r6_key_safe::<TopLevelOwnerId>();
         assert_r6_key_safe::<TypeParamBoundPosition>();
         assert_r6_key_safe::<ResolvedDeclSlotIdentity>();
         assert_r6_key_safe::<SlotEnvIdentity>();
@@ -799,6 +926,7 @@ mod tests {
     fn matching_slot_and_locator() -> (ResolvedDeclSlotIdentity, AuthoredBodyLocator) {
         let slot = ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/env/a.ts"),
+            TopLevelOwnerId::module(3),
             Arc::from("Foo"),
             7,
             [3u8; 16],
@@ -807,6 +935,7 @@ mod tests {
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/env/a.ts"),
+                owner: TopLevelOwnerId::module(3),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -840,6 +969,7 @@ mod tests {
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/env/other.ts"),
+                owner: TopLevelOwnerId::module(3),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -858,6 +988,33 @@ mod tests {
         );
     }
 
+    /// A locator anchored in a different top-level owner of the SAME source
+    /// must never alias the slot's authored body.
+    #[test]
+    fn locator_key_rejects_anchor_owner_mismatch() {
+        let (slot, _) = matching_slot_and_locator();
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/env/a.ts"),
+                owner: TopLevelOwnerId::instance(3),
+                symbol: Arc::from("Foo"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        });
+        let err = LocatorLoweringKey::new_unsubstituted(
+            slot,
+            locator,
+            ParseEnvHash::from_env_hash([1u8; 16]),
+            ResolveEnvHash::from_env_hash([2u8; 16]),
+        )
+        .expect_err("an owner-mismatched anchor must be rejected");
+        assert!(
+            matches!(err, LocatorKeyError::OwnerMismatch { .. }),
+            "expected OwnerMismatch, got {err:?}"
+        );
+    }
+
     /// A locator anchored on a DIFFERENT symbol than the slot's merged symbol
     /// name REJECTS with the typed symbol-mismatch error.
     #[test]
@@ -866,6 +1023,7 @@ mod tests {
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/env/a.ts"),
+                owner: TopLevelOwnerId::module(3),
                 symbol: Arc::from("Bar"),
                 space: LocatorSymbolSpace::Type,
             },
@@ -892,6 +1050,7 @@ mod tests {
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: Arc::from("/env/a.ts"),
+                owner: TopLevelOwnerId::module(3),
                 symbol: Arc::from("Foo"),
                 space: LocatorSymbolSpace::Value,
             },
@@ -961,6 +1120,7 @@ mod tests {
         let slot = |project: u32, type_env: u8, lib_env: u8| {
             ResolvedDeclSlotIdentity::type_slot(
                 Arc::from("/env/a.ts"),
+                TopLevelOwnerId::module(3),
                 Arc::from("T"),
                 project,
                 [type_env; 16],

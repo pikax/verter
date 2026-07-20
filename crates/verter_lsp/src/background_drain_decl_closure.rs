@@ -880,13 +880,23 @@ impl DeclOverlayOwner {
         configure_provider_paths_for_source(sync, snapshot, dep_canonical_id, true).await;
 
         let profile = documents.tsx_profile.read().clone();
-        let api = block_in_place_if_available(|| {
+        let api = match block_in_place_if_available(|| {
             host.get_public_api_with_mode(
                 dep_canonical_id,
                 verter_session::PublicApiMode::Declaration,
                 Some(&profile),
             )
-        })?; // no declaration surface this pass
+        }) {
+            Ok(api) => api,
+            Err(error) => {
+                crate::report_public_api_projection_error(
+                    "background_drain.declaration_closure",
+                    dep_canonical_id,
+                    &error,
+                );
+                return None;
+            }
+        }?; // no declaration surface this pass
 
         // Serialize this open against any concurrent close of the SAME overlay path:
         // a close in flight holds this lock across its provider `close_dts`, so this

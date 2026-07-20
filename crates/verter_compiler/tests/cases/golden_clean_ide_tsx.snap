@@ -16,14 +16,14 @@ const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VER
 void ___VERTER___directiveAccessor;
 
 const ___VERTER___unwrapped = ___VERTER___shallowUnwrapRef({
-    count: count as unknown as typeof count,
-    props: props as unknown as typeof props
+    props: props as unknown as typeof props,
+    count: count as unknown as typeof count
   });
 { /* verter-destructured-start */const { 
     props } = ___VERTER___unwrapped; let { 
     count } = ___VERTER___unwrapped; /* verter-destructured-end */
 <>
-  <><div></div>{ __props.msg }{ count }</>
+  <><div></div>{ ___VERTER___instance.msg }{ count }</>
 </>
 } // close block scope
 

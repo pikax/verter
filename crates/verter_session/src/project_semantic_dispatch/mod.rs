@@ -58,8 +58,8 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_solver::host::{
     BareRefOrigin, ResolvedRootIdentity, UtilitySource,
 };
-use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
+use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
@@ -87,6 +87,7 @@ use verter_type_expr::PrimitiveName;
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
 pub(crate) mod absorb;
+mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod carrier;
 pub(crate) mod enumerate;
@@ -171,7 +172,7 @@ pub(crate) use evaluate::StructuralFactDemandOutcome;
 /// `Arc<str>` so membership checks are refcount compares, not string
 /// compares. Lives on [`ProjectSemanticDispatch`] so nested
 /// `build_instantiate` invocations share the active set.
-pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
+pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
 
 const MAX_CONNECTED_PROJECTION_WORK: usize = 262_144;
 const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
@@ -469,6 +470,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.connected_query_depth_limit(),
             );
         }
+        if self.ctx.is_cancelled() {
+            state.tripped.set(
+                state
+                    .tripped
+                    .get()
+                    .union(crate::semantic_query::PartialReasonSet::CANCELLED),
+            );
+        }
         let mut entered_query_depth = false;
         let tripped = state.tripped.get();
         let trip = if !tripped.is_empty() {
@@ -503,6 +512,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             state.active.get(),
             "connected work must be charged inside a connected-demand guard"
         );
+        if self.ctx.is_cancelled() {
+            return Err(
+                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
+            );
+        }
         let tripped = state.tripped.get();
         if !tripped.is_empty() {
             return Err(tripped);
@@ -530,6 +544,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             state.active.get(),
             "connected work must be observed inside a connected-demand guard"
         );
+        if self.ctx.is_cancelled() {
+            return Err(
+                self.trip_connected_demand(crate::semantic_query::PartialReasonSet::CANCELLED)
+            );
+        }
         let tripped = state.tripped.get();
         if !tripped.is_empty() {
             return Err(tripped);
@@ -583,6 +602,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: DeclIdentity {
                         canonical_id: Arc::clone(&key.base().defining_canonical),
+                        owner: key.base().owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::clone(&key.base().merged_symbol_name),
                     },
@@ -655,12 +675,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: &SemanticQueryKey,
         reasons: crate::semantic_query::PartialReasonSet,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
-        let carrier = self.connected_limit_carrier(key, reasons);
+        let cancelled = reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED);
+        let carrier = (!cancelled).then(|| self.connected_limit_carrier(key, reasons));
         self.fold_local_partial_completeness(reasons);
         CacheRead {
-            value: QueryResult::Value(carrier),
+            value: match carrier {
+                Some(carrier) => QueryResult::Value(carrier),
+                None => QueryResult::Error(QueryError::Cancelled),
+            },
             dep_signature: empty_signature(),
-            walker_diagnostics: self.connected_limit_diagnostics(carrier, reasons),
+            walker_diagnostics: carrier
+                .map(|carrier| self.connected_limit_diagnostics(carrier, reasons))
+                .unwrap_or_else(|| Arc::from([])),
             cache_suppress: true,
             result_is_partial: true,
         }
@@ -683,11 +709,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Arc::from(diagnostics.into_boxed_slice())
     }
 
-    fn append_connected_limit_diagnostics(
+    fn append_connected_limit_diagnostics<T>(
         &self,
         key: &SemanticQueryKey,
         reasons: crate::semantic_query::PartialReasonSet,
-        read: &mut CacheRead<QueryResult<SemanticNodeId>>,
+        read: &mut CacheRead<QueryResult<T>>,
     ) {
         let root = self.connected_limit_carrier(key, reasons);
         let additions = self.connected_limit_diagnostics(root, reasons);
@@ -810,7 +836,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the DEFINING file's per-canonical env
     /// (`type_env_hash` = `T`, `lib_env_hash` = `L`) and folds the project
     /// identity (`J`) from `host_view_project_identity_for`, building the
-    /// slot DIRECTLY (no `DeclKey` ↔ slot adapter). `symbol_space` is
+    /// slot DIRECTLY (no `DeclBindingKey` ↔ slot adapter). `symbol_space` is
     /// always `Type` — an `Instantiate` base / macro owner is a
     /// type-space carrier (interface / type alias / class-type / builtin
     /// utility / synthetic SFC owner). The slot stays content-free (R6);
@@ -819,6 +845,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn type_slot_for(
         &self,
         canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: Arc<str>,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         let host = self.ctx.host_for_fact_tracer_install();
@@ -828,6 +855,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .fold_u32();
         crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
             canonical,
+            owner,
             name,
             project_identity,
             env.type_env_hash,
@@ -846,7 +874,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         name: &str,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-        self.type_slot_for(Arc::from("__builtin__"), Arc::from(name))
+        self.type_slot_for(
+            Arc::from("__builtin__"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        )
     }
 
     /// The `resolve_env_hash` (`R`) dimension for a declaration defined in
@@ -860,6 +892,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .host_for_fact_tracer_install()
             .host_view_env_hashes_for(canonical)
             .resolve_env_hash
+    }
+
+    /// Derive the exact modeless `{R,T,L,J}` identity for a broad-runtime
+    /// classification from its content-free owning canonical.
+    #[must_use]
+    fn broad_runtime_context_for_canonical(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::BroadRuntimeContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(canonical);
+        crate::semantic_query::BroadRuntimeContext {
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity: host.host_view_project_identity_for(canonical).fold_u32(),
+        }
+    }
+
+    /// Build the content-free canonical root route for one analyzed macro.
+    /// Returns `None` only when the source-order index cannot fit the closed
+    /// locator schema.
+    #[must_use]
+    pub(crate) fn broad_runtime_subject_for_macro(
+        &self,
+        owner: &crate::semantic_query::DeclIdentity,
+        macro_index: usize,
+    ) -> Option<crate::locator_identity::BroadRuntimeSubjectLocator> {
+        let macro_index = u32::try_from(macro_index).ok()?;
+        Some(
+            crate::locator_identity::BroadRuntimeSubjectLocator::payload(
+                self.type_slot_for(
+                    Arc::clone(&owner.canonical_id),
+                    owner.owner,
+                    Arc::clone(&owner.decl_name),
+                ),
+                macro_index,
+            ),
+        )
+    }
+
+    /// Build the sole durable broad-runtime query key. The key carries only
+    /// the content-free root route plus env dimensions; the live graph node is
+    /// re-sourced by the classifier build.
+    #[must_use]
+    pub(crate) fn broad_runtime_key_for(
+        &self,
+        subject: crate::locator_identity::BroadRuntimeSubjectLocator,
+    ) -> SemanticQueryKey {
+        let context =
+            self.broad_runtime_context_for_canonical(subject.owner().defining_canonical.as_ref());
+        SemanticQueryKey::ClassifyBroadRuntime { subject, context }
     }
 
     /// Build the [`InstantiateContext`](crate::semantic_query::InstantiateContext)
@@ -1003,7 +1087,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn push_instantiate_active(&self, identity: InstantiateIdentity) -> bool {
         let mut active = self.instantiate_active.borrow_mut();
         if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref() && existing.1.as_ref() == identity.1.as_ref()
+            existing.0.as_ref() == identity.0.as_ref()
+                && existing.1 == identity.1
+                && existing.2.as_ref() == identity.2.as_ref()
         }) {
             return false;
         }
@@ -1026,7 +1112,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn push_closedness_active(&self, identity: InstantiateIdentity) -> bool {
         let mut active = self.closedness_active.borrow_mut();
         if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref() && existing.1.as_ref() == identity.1.as_ref()
+            existing.0.as_ref() == identity.0.as_ref()
+                && existing.1 == identity.1
+                && existing.2.as_ref() == identity.2.as_ref()
         }) {
             return false;
         }
@@ -1043,11 +1131,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Check whether `identity` is currently being instantiated on this
     /// dispatcher's call chain without taking ownership.
-    pub(super) fn is_instantiate_active(&self, canonical_id: &str, name: &str) -> bool {
+    pub(super) fn is_instantiate_active(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
         let active = self.instantiate_active.borrow();
-        active.iter().any(|(existing_canonical, existing_name)| {
-            existing_canonical.as_ref() == canonical_id && existing_name.as_ref() == name
-        })
+        active
+            .iter()
+            .any(|(existing_canonical, existing_owner, existing_name)| {
+                existing_canonical.as_ref() == canonical_id
+                    && *existing_owner == owner
+                    && existing_name.as_ref() == name
+            })
     }
 
     pub(super) fn graph(&self) -> &Arc<SemanticGraphStore> {
@@ -1185,8 +1282,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_type_expr::TypeExpr,
         mode: crate::semantic_query::ProjectionMode,
     ) -> Option<SemanticNodeId> {
-        self.lower_type_expr_in_scope_with_context(
+        self.lower_type_expr_in_owner_scope_with_context(
             scope_canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            expr,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// Owner-exact mode-aware lowering for carrier-backed files whose module
+    /// and instance scripts share one canonical id.
+    pub fn lower_type_expr_in_owner_scope_with_mode(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> Option<SemanticNodeId> {
+        self.lower_type_expr_in_owner_scope_with_context(
+            scope_canonical_id,
+            owner,
             expr,
             crate::semantic_query::ProjectionReductionContext::published(mode),
         )
@@ -1211,6 +1326,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        self.lower_type_expr_in_owner_scope_with_context(
+            scope_canonical_id,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            expr,
+            context,
+        )
+    }
+
+    /// Owner-exact context-aware lowering. This is the carrier producer entry;
+    /// callers with a real authored region must pass its validated owner.
+    pub fn lower_type_expr_in_owner_scope_with_context(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
         // A scope whose file is not (yet) materialised still lowers: the
         // lowering is a pure typed-IR → carrier-graph mapping, and every
         // reference that cannot resolve NOW stays a scoped `BareRef`
@@ -1228,6 +1360,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .unwrap_or_default();
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(scope_canonical_id),
+            owner,
             whole_hash,
             local_scope: None,
         };
@@ -1238,7 +1371,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .prepared_decl_bundle(scope_canonical_id)
             .map(|bundle| {
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle,
+                    &bundle, owner,
                 )
             });
         // R15/F11 — construct the resolver-context
@@ -1322,11 +1455,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(crate) fn decl_body_hot_ref(
         &self,
         canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
         args: Arc<[SemanticNodeId]>,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::HotTypeRef> {
-        let slot = self.type_slot_for(Arc::from(canonical), Arc::from(symbol));
+        let slot = self.type_slot_for(Arc::from(canonical), owner, Arc::from(symbol));
         let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 slot,
@@ -1536,12 +1670,50 @@ pub(super) fn canonicalize_node_list(members: &[SemanticNodeId]) -> Arc<[Semanti
     Arc::from(sorted.into_boxed_slice())
 }
 
+fn widen_node_cache_read(
+    read: CacheRead<QueryResult<SemanticNodeId>>,
+) -> CacheRead<QueryResult<SemanticQueryValue>> {
+    let value = match read.value {
+        QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+        QueryResult::Recursive(node) => QueryResult::Recursive(node),
+        QueryResult::Error(error) => QueryResult::Error(error),
+    };
+    CacheRead {
+        value,
+        dep_signature: read.dep_signature,
+        walker_diagnostics: read.walker_diagnostics,
+        cache_suppress: read.cache_suppress,
+        result_is_partial: read.result_is_partial,
+    }
+}
+
+fn narrow_value_cache_read(
+    read: CacheRead<QueryResult<SemanticQueryValue>>,
+) -> CacheRead<QueryResult<SemanticNodeId>> {
+    let value = match read.value {
+        QueryResult::Value(SemanticQueryValue::TypeNode(node)) => QueryResult::Value(node),
+        QueryResult::Value(other) => QueryResult::Error(QueryError::ValueDomainMismatch {
+            expected: SemanticQueryValueTag::TypeNode,
+            actual: other.tag(),
+        }),
+        QueryResult::Recursive(node) => QueryResult::Recursive(node),
+        QueryResult::Error(error) => QueryResult::Error(error),
+    };
+    CacheRead {
+        value,
+        dep_signature: read.dep_signature,
+        walker_diagnostics: read.walker_diagnostics,
+        cache_suppress: read.cache_suppress,
+        result_is_partial: read.result_is_partial,
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Shared cold-build entry point used by BOTH
     /// [`SemanticQueryApi::execute`] and [`Self::execute_read`].
     ///
     /// **Single-call-site invariant.** This method holds the only
-    /// production `graph.execute_cooperative(...)` call site dispatched
+    /// production `graph.execute_cooperative_value(...)` call site dispatched
     /// from `ProjectSemanticDispatch`. The architecture guard
     /// `dispatch_cold_build_has_one_call_site.rs` asserts this with a
     /// static scan that strips test files + `#[cfg(test)]` regions and
@@ -1565,7 +1737,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// entry — the caller cold-recomputes on the next request.
     //
     // arch-guard:single-execute-cooperative-call — the helper holds
-    // the only production `graph.execute_cooperative(` call site. The
+    // the only production `graph.execute_cooperative_value(` call site. The
     // arch test parses `crates/verter_session/src/**/*.rs` (excluding
     // tests, stripping cfg(test) regions) and asserts exactly one
     // match.
@@ -1594,9 +1766,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (key, CarrierNormalizationPrelude::none());
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let (normalized, finalise) =
+        let ((normalized, partial_reasons), finalise) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let normalized = self.normalize_carrier_subject_key(key);
+                let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
                 // Test-only: force a fenced (ReturnOnly) serve observation onto
                 // the prelude tracer so the suppress wiring is exercisable
                 // without a superseded-artifact fixture. Zero-cost when unset.
@@ -1610,7 +1783,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
                     );
                 }
-                normalized
+                (normalized, partial_reasons)
             });
         let prelude = match finalise {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => CarrierNormalizationPrelude {
@@ -1620,11 +1793,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // from a served-without-publication artifact — refuse warm
                 // admission of any enclosing entry that rode this rewrite.
                 cache_suppress: false,
+                partial_reasons,
             },
             crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
                 CarrierNormalizationPrelude {
                     facts: Some(facts),
                     cache_suppress: true,
+                    partial_reasons,
                 }
             }
             crate::resolver_core::FactReadSetFinalise::Overflow => CarrierNormalizationPrelude {
@@ -1633,15 +1808,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // flows; the memo refuses).
                 facts: None,
                 cache_suppress: true,
+                partial_reasons,
             },
         };
         (normalized, prelude)
     }
 
+    fn overload_set_value_output(
+        &self,
+        output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        output.map_result(|result| match result {
+            QueryResult::Value(node) => match self.overload_set_refs_for(node) {
+                Some(refs) => QueryResult::Value(SemanticQueryValue::OverloadSet(refs)),
+                None => QueryResult::Error(QueryError::ValueDomainMismatch {
+                    expected: SemanticQueryValueTag::OverloadSet,
+                    actual: SemanticQueryValueTag::TypeNode,
+                }),
+            },
+            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+            QueryResult::Error(error) => QueryResult::Error(error),
+        })
+    }
+
     fn execute_via_cold_build_helper(
         &self,
         key: SemanticQueryKey,
-    ) -> CacheRead<QueryResult<SemanticNodeId>> {
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
         // Install or join the connected state before carrier normalisation,
         // whose resolver can itself dispatch. Query-depth/work charging waits
         // until the canonical memo identity is known so an exact same-path key
@@ -1727,17 +1920,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
         let mut query_depth_guard = None;
+        if preexisting_trip.is_some_and(|reasons| {
+            reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
+        }) {
+            return widen_node_cache_read(
+                self.connected_limit_read(&key, preexisting_trip.expect("checked as Some")),
+            );
+        }
         if !exact_same_path {
             if let Some(reasons) = preexisting_trip {
-                return self.connected_limit_read(&key, reasons);
+                return widen_node_cache_read(self.connected_limit_read(&key, reasons));
             }
             let (guard, depth_trip) = self.enter_connected_demand(true);
             if let Some(reasons) = depth_trip {
-                return self.connected_limit_read(&key, reasons);
+                return widen_node_cache_read(self.connected_limit_read(&key, reasons));
             }
             query_depth_guard = Some(guard);
             if let Err(reasons) = self.charge_connected_work() {
-                return self.connected_limit_read(&key, reasons);
+                return widen_node_cache_read(self.connected_limit_read(&key, reasons));
             }
         }
 
@@ -1832,7 +2032,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let reasons = self.trip_connected_demand(
                         crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
                     );
-                    return self.connected_limit_read(&key, reasons);
+                    return widen_node_cache_read(self.connected_limit_read(&key, reasons));
                 }
             }
         }
@@ -1858,7 +2058,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
         let key_for_build = key.clone();
-        let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
+            SemanticQueryValue,
+        > {
+            if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = &key_for_build {
+                return self.build_classify_broad_runtime(subject);
+            }
+            let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
                 if let Err(reasons) = self.charge_connected_work() {
                     let carrier = self.connected_limit_carrier(&key_for_build, reasons);
@@ -2003,6 +2209,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     type_args,
                     context: _,
                 } => self.build_resolve_overload_set(*callee, type_args),
+                SemanticQueryKey::ClassifyBroadRuntime { .. } => {
+                    unreachable!("typed classifier returned before node-domain build")
+                }
                 // ResolveAmbientNamespace / ResolveEnum / ApparentType /
                 // FlowNarrowingAt / ContextualTypeAt —
                 // non-producing: these variants have no execute-side reducer.
@@ -2026,6 +2235,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // build: worker-side lease-only deref of the authored body,
                 // then the carrier-only role-free graph lowering.
                 SemanticQueryKey::LowerLocator { key } => self.build_lower_locator(key),
+            }
+            };
+            let output = build_node();
+            if matches!(&key_for_build, SemanticQueryKey::ResolveOverloadSet { .. }) {
+                self.overload_set_value_output(output)
+            } else {
+                output.into()
             }
         };
         // Wrap the raw cold-build closure with the fact tracer, then
@@ -2057,7 +2273,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let host = self.ctx.host_for_fact_tracer_install();
         let provenance = Arc::clone(&host.provenance);
         let carrier_prelude_for_build = carrier_prelude.clone();
-        let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
+            SemanticQueryValue,
+        > {
             cold_build_ran_for_closure.store(true, std::sync::atomic::Ordering::Relaxed);
             // Open a cold-build-local taint frame for the duration of THIS
             // build. The shared read boundary folds every nested
@@ -2131,7 +2349,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             finalise_traced_build_output(output, finalise, &provenance, &carrier_prelude_for_build)
         };
-        let cache_read = graph.execute_cooperative(self.ctx, key.clone(), sentinel, traced_build);
+        let cache_read =
+            graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build);
         // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
@@ -2234,6 +2453,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if carrier_prelude.cache_suppress() {
             cache_read.cache_suppress = true;
         }
+        if carrier_prelude.is_partial() {
+            cache_read.result_is_partial = true;
+            cache_read.cache_suppress = true;
+            crate::request_context::fold_result_completeness(
+                crate::semantic_query::ResultCompleteness::partial(
+                    carrier_prelude.partial_reasons(),
+                ),
+            );
+        }
         if connected_guard.is_root() {
             if let Some(reasons) = self.connected_demand_trip() {
                 self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
@@ -2280,6 +2508,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 struct CarrierNormalizationPrelude {
     facts: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
     cache_suppress: bool,
+    partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 impl CarrierNormalizationPrelude {
@@ -2288,6 +2517,7 @@ impl CarrierNormalizationPrelude {
         Self {
             facts: None,
             cache_suppress: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         }
     }
 
@@ -2296,16 +2526,34 @@ impl CarrierNormalizationPrelude {
     fn cache_suppress(&self) -> bool {
         self.cache_suppress
     }
+
+    /// Whether exact runtime carrier normalization failed to produce a
+    /// resolved semantic subject.
+    fn is_partial(&self) -> bool {
+        !self.partial_reasons.is_empty()
+    }
+
+    /// Typed incompleteness observed before cooperative admission.
+    fn partial_reasons(&self) -> crate::semantic_query::PartialReasonSet {
+        self.partial_reasons
+    }
 }
 
 #[inline(never)]
-fn finalise_traced_build_output(
-    output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+fn finalise_traced_build_output<T>(
+    output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: crate::resolver_core::FactReadSetFinalise,
     provenance: &crate::types::MetaProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
-) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<T> {
     let mut output = output;
+    if carrier_prelude.is_partial() {
+        output.result_is_partial = true;
+        output.cache_suppress = true;
+        crate::request_context::fold_result_completeness(
+            crate::semantic_query::ResultCompleteness::partial(carrier_prelude.partial_reasons()),
+        );
+    }
     // The carrier-normalization prelude can independently suppress caching (an
     // overflowed / fenced-serve carrier rewrite) regardless of the build's own
     // finalise arm.
@@ -2525,36 +2773,16 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // discards the dep-signature rails from the helper's
         // `CacheRead`; `execute_read` keeps them.
         //
-        // The helper resolves to a bare node id; wrap it into the
-        // domain-agnostic value here at the public boundary. The wrap is
-        // key-aware: `ResolveOverloadSet` (the one live non-`TypeNode`
-        // producer — its inner pipeline value is the signature-group-
-        // bearing node) converts into the `OverloadSet(Arc<[SignatureRef]>)`
-        // domain; every other producing key wraps as `TypeNode`. The
+        // The helper already returns the typed semantic value held by the
+        // family memo. This boundary adds only clean result provenance. The
         // remaining non-producing keys (`Relate`, `ResolveAmbientNamespace`,
         // `ResolveEnum`, `ApparentType`, `FlowNarrowingAt`,
         // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap.
         // The boundary provenance is `clean` — a wrapper only, never a
         // cached semantic fact.
-        let wants_overload_set = matches!(key, SemanticQueryKey::ResolveOverloadSet { .. });
         match self.execute_via_cold_build_helper(key).value {
-            QueryResult::Value(node) if wants_overload_set => {
-                match self.overload_set_refs_for(node) {
-                    Some(refs) => QueryResult::Value(SemanticQueryOutput {
-                        value: SemanticQueryValue::OverloadSet(refs),
-                        provenance: ResultProvenance::clean(),
-                    }),
-                    // The memoized node is not signature-bearing (only
-                    // reachable through a poisoned synthetic publish) —
-                    // refuse to misrepresent it in either domain.
-                    None => QueryResult::Error(QueryError::ValueDomainMismatch {
-                        expected: SemanticQueryValueTag::OverloadSet,
-                        actual: SemanticQueryValueTag::TypeNode,
-                    }),
-                }
-            }
-            QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
-                value: SemanticQueryValue::TypeNode(node),
+            QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
+                value,
                 provenance: ResultProvenance::clean(),
             }),
             QueryResult::Recursive(n) => QueryResult::Recursive(n),
@@ -2624,10 +2852,15 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
 /// `canonical_id`. Wrapping the arc-conversion here keeps call sites tidy
 /// and avoids having each caller re-invent the scope construction.
 #[must_use]
-pub fn resolve_decl_key(canonical_id: &str, name: &str) -> ResolveDeclKey {
+pub fn resolve_decl_key(
+    canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    name: &str,
+) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from(canonical_id),
+            owner,
             local_scope: None,
         },
         name: Arc::from(name),
@@ -2679,6 +2912,7 @@ pub(crate) fn node_data_for(
 pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
         Arc::from("__builtin__"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Pick"),
         0,
         Default::default(),
@@ -2695,6 +2929,7 @@ pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
 pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
         Arc::from("__builtin__"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Omit"),
         0,
         Default::default(),
@@ -2993,14 +3228,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// Implementations: [`SessionDispatchHost`] routes per-base via the
 /// node-scope sidecar.
 pub trait DispatchHost {
-    /// Look up a prepared type declaration by its canonical root identity,
-    /// using the scope recorded in `base`'s sidecar to select the correct
-    /// declaration-scope payload.
+    /// Look up a prepared-declaration projection outcome by canonical root
+    /// identity, preserving a recoverable exact authored preparation failure
+    /// as a typed partial carrier.
     fn resolve_prepared_type_decl(
         &self,
         base: SemanticNodeId,
         root_identity: &ResolvedRootIdentity,
-    ) -> Option<Arc<PreparedTypeDecl>>;
+    ) -> PreparedTypeDeclResolution;
 
     /// Resolve a `(canonical_id, symbol_name)` pair into a stable root
     /// declaration identity, following re-exports and barrel hops through
@@ -3010,6 +3245,7 @@ pub trait DispatchHost {
         &self,
         base: SemanticNodeId,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<ResolvedRootIdentity>;
 
@@ -3080,11 +3316,15 @@ impl<'a> SessionDispatchHost<'a> {
         &self,
         base: SemanticNodeId,
     ) -> (
-        Option<String>,
+        Option<(String, verter_type_expr::TopLevelOwnerId)>,
         Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     ) {
         match self.base_scope(base) {
-            NodeScopeId::File { canonical_id, .. } => {
+            NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } => {
                 // Instrumentation: callsite attribution for
                 // `prepared_decl_bundle_warm` reads. The four
                 // `DispatchHost` trait callbacks
@@ -3101,10 +3341,11 @@ impl<'a> SessionDispatchHost<'a> {
                     |bundle| {
                         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                             &bundle,
+                            owner,
                         )
                     },
                 );
-                (Some(canonical_id.as_ref().to_string()), payload)
+                (Some((canonical_id.as_ref().to_string(), owner)), payload)
             }
             NodeScopeId::Global => (None, None),
         }
@@ -3116,11 +3357,11 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         &self,
         base: SemanticNodeId,
         root_identity: &ResolvedRootIdentity,
-    ) -> Option<Arc<PreparedTypeDecl>> {
-        let (scope_canonical, payload) = self.scope_payload_for_base(base);
+    ) -> PreparedTypeDeclResolution {
+        let (scope, payload) = self.scope_payload_for_base(base);
         crate::resolver_core::bare_name_resolve::resolve_prepared_type_decl_via_host(
             self.ctx,
-            scope_canonical.as_deref(),
+            scope.as_ref().map(|(canonical, _)| canonical.as_str()),
             payload.as_ref(),
             root_identity,
         )
@@ -3130,18 +3371,23 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         &self,
         base: SemanticNodeId,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        let (scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (scope, payload) = self.scope_payload_for_base(base);
         // An empty caller canonical defers to the base's origin scope.
-        let resolution_scope = if canonical_id.is_empty() {
-            scope_canonical.as_deref().unwrap_or("")
+        let (resolution_scope, resolution_owner) = if canonical_id.is_empty() {
+            scope
+                .as_ref()
+                .map(|(canonical, owner)| (canonical.as_str(), *owner))
+                .unwrap_or(("", verter_type_expr::TopLevelOwnerId::ordinary_file()))
         } else {
-            canonical_id
+            (canonical_id, owner)
         };
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,
             resolution_scope,
+            resolution_owner,
             payload.as_ref(),
             symbol_name,
         )
@@ -3149,7 +3395,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 
     fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource {
         use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-        let (_scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (_scope, payload) = self.scope_payload_for_base(base);
         // Scope-local shadowing takes priority: a userland `type Partial`
         // in scope wins over the built-in utility.
         if let Some(payload) = payload.as_ref() {
@@ -3177,7 +3423,7 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
     }
 
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin {
-        let (_scope_canonical, payload) = self.scope_payload_for_base(base);
+        let (_scope, payload) = self.scope_payload_for_base(base);
         if let Some(payload) = payload.as_ref() {
             if payload.import_bindings().contains_key(name) {
                 return BareRefOrigin::Imported;
@@ -3213,5 +3459,7 @@ mod mapped_key_domain_carrier_tests;
 #[cfg(test)]
 mod raised_shape_tests;
 
+#[cfg(test)]
+mod broad_runtime_tests;
 #[cfg(test)]
 mod projection_stack_safety_tests;

@@ -34,8 +34,7 @@ where
     let mut resolved_type_registry = Vec::new();
     let mut resolved_type_registry_meta = Vec::new();
     let mut seen_registry_names = FxHashSet::default();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = FxHashSet::default();
+    let mut native_props_cache = super::NativePropProjectionCache::default();
     let mut tracked_deps = BTreeSet::new();
 
     let eval_outputs = if expanded {
@@ -171,18 +170,25 @@ where
                 dep_exported_name.as_ref(),
                 &mut tracked_deps,
                 &mut resolution_deps,
-                &mut cache,
-                &mut visiting,
+                &mut native_props_cache,
             )
         } else {
             None
         };
         let declaration = if skip_declaration_metadata {
-            placeholder_type_declaration(dep_exported_name.as_ref(), dep_exported_name.as_ref())
+            placeholder_type_declaration(
+                dep_exported_name.as_ref(),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                dep_exported_name.as_ref(),
+            )
         } else if let Some(surface) = imported_surface.as_ref() {
             surface.declaration.clone()
         } else {
-            host.resolve_type_declaration(&dep_canonical, dep_exported_name.as_ref())
+            host.resolve_type_declaration(
+                &dep_canonical,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                dep_exported_name.as_ref(),
+            )
         };
         let jsdoc = if skip_declaration_metadata {
             None
@@ -192,8 +198,6 @@ where
                 declaration.span,
                 expanded,
                 &mut tracked_deps,
-                &mut cache,
-                &mut visiting,
             )
         };
 
@@ -235,26 +239,13 @@ where
             continue;
         }
 
-        let imported_elements = imported_surface
-            .take()
-            .map(|surface| surface.resolution)
-            .or_else(|| {
-                host.resolve_macro_elements(
-                    owner_canonical,
-                    &dep.import_source,
-                    dep_exported_name.as_ref(),
-                    &mut tracked_deps,
-                    &mut resolution_deps,
-                    &mut cache,
-                    &mut visiting,
-                )
-            });
-        if let Some(resolution) = imported_elements {
+        let imported_native_props = imported_surface.take().map(|surface| surface.native_props);
+        if let Some(native_props) = imported_native_props {
             // The native-only surface (`native_props`) rides the SAME
             // dispatch resolution that produced the elements payload:
             // keep-all rows built directly from the one-level
             // `TypeInfoSurface` members (visibility carried verbatim) —
-            // no `ResolvedElements` round-trip, no separate re-resolve.
+            // no parser projection round-trip, no separate re-resolve.
             // The published props/emits/slots/
             // exposed surface is NOT projected here — it is owned by the
             // typeinfo macro-surface path (`vue_macro_dtos`), which
@@ -312,12 +303,12 @@ where
                     import_source: dep.import_source.clone(),
                     surface_is_authoritative: imported_surface_is_authoritative,
                     declaration,
-                    native_props: resolution.native_props,
+                    native_props,
                     jsdoc,
                 });
             }
         } else {
-            // graph-native fallback. When `imported_elements`
+            // graph-native fallback. When `imported_native_props`
             // is `None` the macro has no resolvable surface; emit empty
             // surfaces and proceed. The previous source-text reparse
             // path (read source then call the source-typed projector)
@@ -452,12 +443,14 @@ where
                         declaration: if skip_macro_declaration_metadata_for_purpose(purpose) {
                             placeholder_type_declaration(
                                 resolved.name.as_str(),
+                                resolved.owner,
                                 resolved.name.as_str(),
                             )
                         } else {
                             resolve_local_type_declaration(
                                 host,
                                 owner_canonical,
+                                resolved.owner,
                                 resolved.name.as_str(),
                                 resolved.span,
                             )
@@ -495,6 +488,7 @@ where
                     // authoritative entry for this root.
                     if !host.owner_local_macro_root_has_surface(
                         owner_canonical,
+                        mac.owner,
                         root_name,
                         mac.kind,
                     ) {
@@ -517,9 +511,17 @@ where
                     }
 
                     let declaration = if skip_macro_declaration_metadata_for_purpose(purpose) {
-                        placeholder_type_declaration(root_name.as_str(), root_name.as_str())
+                        placeholder_type_declaration(
+                            root_name.as_str(),
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     } else {
-                        host.resolve_type_declaration(owner_canonical, root_name.as_str())
+                        host.resolve_type_declaration(
+                            owner_canonical,
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     };
                     let jsdoc = if skip_macro_declaration_metadata_for_purpose(purpose) {
                         None
@@ -529,8 +531,6 @@ where
                             declaration.span,
                             true,
                             &mut tracked_deps,
-                            &mut cache,
-                            &mut visiting,
                         )
                     };
                     resolved_macros.push(ResolvedMacroMeta {
@@ -553,9 +553,17 @@ where
             {
                 if seen_registry_names.insert(root_name.clone()) {
                     let declaration = if skip_macro_declaration_metadata_for_purpose(purpose) {
-                        placeholder_type_declaration(root_name.as_str(), root_name.as_str())
+                        placeholder_type_declaration(
+                            root_name.as_str(),
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     } else {
-                        host.resolve_type_declaration(owner_canonical, root_name.as_str())
+                        host.resolve_type_declaration(
+                            owner_canonical,
+                            mac.owner,
+                            root_name.as_str(),
+                        )
                     };
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: root_name.clone(),

@@ -187,6 +187,7 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/scope.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("UIMessage"),
@@ -281,6 +282,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     let resolve_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::from("/scope.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
         },
         name: Arc::from("UIMessage"),

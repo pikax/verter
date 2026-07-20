@@ -129,8 +129,11 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
         &mut refused,
     );
 
-    let declaration =
-        query_engine.resolve_type_declaration(declaration_scope, root_identity.decl_name.as_ref());
+    let declaration = query_engine.resolve_type_declaration(
+        declaration_scope,
+        root_identity.owner,
+        root_identity.decl_name.as_ref(),
+    );
     if matches!(
         declaration.kind,
         crate::resolver_core::ResolvedDeclarationKind::Interface
@@ -148,18 +151,25 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
     } else {
         declaration.resolved_name
     };
-    let (target_scope, target_name) = query_engine
-        .resolve_final_prepared_type_target(declaration_scope, declaration_name.as_str());
+    let target = query_engine.resolve_final_prepared_type_target(
+        declaration_scope,
+        declaration.owner,
+        declaration_name.as_str(),
+    );
     push_decl_scope_fence(
         query_engine.ctx,
-        target_scope.as_str(),
+        target.canonical_id.as_ref(),
         scope_canonical_id,
         &mut fence,
         &mut refused,
     );
 
     let verdict = query_engine
-        .named_decl_body(target_scope.as_str(), target_name.as_str())
+        .named_decl_body(
+            target.canonical_id.as_ref(),
+            target.owner,
+            target.symbol_name.as_ref(),
+        )
         .and_then(|locator| {
             let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
                 query_engine.ctx,

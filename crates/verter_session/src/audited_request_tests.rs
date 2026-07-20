@@ -86,6 +86,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
+        verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
     )
 }

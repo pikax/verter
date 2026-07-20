@@ -5,6 +5,7 @@ use oxc_span::{GetSpan, SourceType};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 use crate::analysis::classify::{
     classify_store_api, classify_vue_api, is_lifecycle_api, is_reactivity_api,
@@ -14,10 +15,11 @@ use crate::analysis::exports::extract_export_signatures_from_program;
 use crate::analysis::imports::analyze_import_declaration;
 
 use crate::analysis::macros::{
-    classify_macro_type_reference_roles, resolve_macro_type_references,
+    classify_macro_type_reference_roles_with_owners, resolve_macro_type_references_with_owners,
     stamp_macro_payload_locators, try_extract_macro_from_expr, try_extract_macro_from_var_decl,
 };
 use crate::analysis::scope::AnalysisScope;
+use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use crate::analysis::types::*;
 
 /// Walk a `TSModuleDeclaration` body looking for any
@@ -101,34 +103,60 @@ fn statement_declares_interface_app_config(stmt: &Statement<'_>) -> bool {
 /// O(1) lookup map from local binding name → (import source index, vue_api).
 /// The source index refers to the `imports` Vec for zero-copy source access.
 struct ImportBindingMap {
-    /// local_name → (index into imports Vec, vue_api classification)
-    map: FxHashMap<String, (usize, Option<VueApiClassification>)>,
+    /// Canonical `(owner, local_name)` binding index.
+    map: FxHashMap<DeclBindingKey, (usize, Option<VueApiClassification>)>,
+    /// Ownerless consumers are permitted only when the name has one unique
+    /// definition. `None` is an explicit ambiguity marker.
+    unambiguous_by_name: FxHashMap<String, Option<(usize, Option<VueApiClassification>)>>,
 }
 
 impl ImportBindingMap {
     fn new() -> Self {
         Self {
             map: FxHashMap::default(),
+            unambiguous_by_name: FxHashMap::default(),
         }
     }
 
     /// Register all bindings from an import at the given index.
     fn register(&mut self, import_idx: usize, import: &AnalyzedImport) {
         for b in &import.bindings {
-            self.map.insert(b.name.clone(), (import_idx, b.vue_api));
+            self.map.insert(
+                DeclBindingKey::new(import.owner, b.name.as_str()),
+                (import_idx, b.vue_api),
+            );
+            self.unambiguous_by_name
+                .entry(b.name.clone())
+                .and_modify(|entry| *entry = None)
+                .or_insert(Some((import_idx, b.vue_api)));
         }
     }
 
     /// Lookup the import source for a local binding name.
     fn source<'a>(&self, imports: &'a [AnalyzedImport], name: &str) -> Option<&'a str> {
-        self.map
+        self.unambiguous_by_name
             .get(name)
+            .and_then(Option::as_ref)
+            .map(|(idx, _)| imports[*idx].source.as_str())
+    }
+
+    fn source_in_owner<'a>(
+        &self,
+        imports: &'a [AnalyzedImport],
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&'a str> {
+        self.map
+            .get(&DeclBindingKey::new(owner, name))
             .map(|(idx, _)| imports[*idx].source.as_str())
     }
 
     /// Lookup the Vue API classification for a local binding name.
     fn vue_api(&self, name: &str) -> Option<VueApiClassification> {
-        self.map.get(name).and_then(|(_, api)| *api)
+        self.unambiguous_by_name
+            .get(name)
+            .and_then(Option::as_ref)
+            .and_then(|(_, api)| *api)
     }
 
     /// True iff `name` resolves to a RUNTIME (non-type-only) Vue import binding
@@ -142,7 +170,8 @@ impl ImportBindingMap {
         name: &str,
         api: VueApiClassification,
     ) -> bool {
-        let Some((idx, binding_api)) = self.map.get(name) else {
+        let Some((idx, binding_api)) = self.unambiguous_by_name.get(name).and_then(Option::as_ref)
+        else {
             return false;
         };
         if *binding_api != Some(api) {
@@ -163,7 +192,9 @@ impl ImportBindingMap {
 
     /// Iterate over all entries: (local_name, (import_index, vue_api)).
     fn iter(&self) -> impl Iterator<Item = (&String, &(usize, Option<VueApiClassification>))> {
-        self.map.iter()
+        self.unambiguous_by_name
+            .iter()
+            .filter_map(|(name, entry)| entry.as_ref().map(|entry| (name, entry)))
     }
 }
 
@@ -227,6 +258,27 @@ pub fn build_script_analysis_with_scope_from_program(
     .0
 }
 
+/// Analyze a pre-parsed program with an explicit, validated lexical-owner
+/// mapping. Ownership is read by statement index during the single shallow
+/// walk and stamped directly on every owner-bearing product.
+pub fn build_script_analysis_with_scope_from_program_with_owners(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    scope: AnalysisScope,
+    owners: &TopLevelOwnerTable,
+) -> ScriptAnalysisSnapshot {
+    build_script_analysis_with_scope_from_program_with_providers_and_owners(
+        content,
+        source_type,
+        program,
+        scope,
+        &[],
+        owners,
+    )
+    .0
+}
+
 /// As [`build_script_analysis_with_scope_from_program`], but threads the active
 /// the active framework script-fact providers into the ONE shallow pass and
 /// returns the captured [`FrameworkScriptCandidateSet`] alongside the snapshot.
@@ -247,12 +299,43 @@ pub fn build_script_analysis_with_scope_from_program_with_providers(
     ScriptAnalysisSnapshot,
     crate::analysis::framework_facts::FrameworkScriptCandidateSet,
 ) {
-    let candidates = crate::analysis::framework_facts::capture_script_candidates(
+    let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
+    build_script_analysis_with_scope_from_program_with_providers_and_owners(
+        content,
+        source_type,
+        program,
+        scope,
+        active_providers,
+        &owners,
+    )
+}
+
+/// Provider-enabled shallow analysis with an explicit validated owner table.
+pub fn build_script_analysis_with_scope_from_program_with_providers_and_owners(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    scope: AnalysisScope,
+    active_providers: &[std::sync::Arc<dyn crate::analysis::framework_facts::ScriptFactProvider>],
+    owners: &TopLevelOwnerTable,
+) -> (
+    ScriptAnalysisSnapshot,
+    crate::analysis::framework_facts::FrameworkScriptCandidateSet,
+) {
+    assert_eq!(
+        owners.len(),
+        program.body.len(),
+        "validated owner table must cover the analyzed program exactly"
+    );
+    let candidates = crate::analysis::framework_facts::capture_script_candidates_with_context(
         active_providers,
         content,
         program,
+        None,
+        None,
+        owners,
     );
-    let snapshot = build_script_analysis_inner(content, source_type, program, scope);
+    let snapshot = build_script_analysis_inner(content, source_type, program, scope, owners);
     (snapshot, candidates)
 }
 
@@ -261,6 +344,7 @@ fn build_script_analysis_inner(
     source_type: SourceType,
     program: &Program<'_>,
     scope: AnalysisScope,
+    owners: &TopLevelOwnerTable,
 ) -> ScriptAnalysisSnapshot {
     // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
@@ -279,10 +363,11 @@ fn build_script_analysis_inner(
     let mut options_api: Option<AnalyzedOptionsApi> = None;
     let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
-    for stmt in &program.body {
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
         match stmt {
             Statement::ImportDeclaration(decl) => {
-                let analyzed = analyze_import_declaration(decl);
+                let analyzed = analyze_import_declaration(decl, owner);
                 import_map.register(imports.len(), &analyzed);
                 module_references.push(build_static_module_reference(
                     ModuleReferenceSyntax::StaticImport,
@@ -352,6 +437,7 @@ fn build_script_analysis_inner(
                     &mut macros,
                     content,
                     &program.comments,
+                    owner,
                 );
                 try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
                 try_extract_dom_query(&expr_stmt.expression, &mut dom_query_calls);
@@ -393,7 +479,13 @@ fn build_script_analysis_inner(
                 };
 
                 for decl in &var_decl.declarations {
-                    try_extract_macro_from_var_decl(decl, &mut macros, content, &program.comments);
+                    try_extract_macro_from_var_decl(
+                        decl,
+                        &mut macros,
+                        content,
+                        &program.comments,
+                        owner,
+                    );
 
                     let (initializer, is_reactive, mut reactivity_kind) =
                         if let Some(ref init) = decl.init {
@@ -558,17 +650,21 @@ fn build_script_analysis_inner(
         }
     }
 
-    resolve_macro_type_references(program, &mut macros, content);
+    resolve_macro_type_references_with_owners(program, &mut macros, content, owners);
 
     // Final normalization: stamp the authored macro-payload locators at each
     // macro's final index (constructor sites record authored-annotation
     // presence via the scope pairing fields; positions are only known once
     // the macro list is final).
     for (macro_index, mac) in macros.iter_mut().enumerate() {
-        stamp_macro_payload_locators(mac, u32::try_from(macro_index).unwrap_or(u32::MAX));
+        let Ok(macro_index) = u32::try_from(macro_index) else {
+            break;
+        };
+        stamp_macro_payload_locators(mac, macro_index);
     }
 
-    let macro_type_ref_roles = classify_macro_type_reference_roles(program, &macros);
+    let macro_type_ref_roles =
+        classify_macro_type_reference_roles_with_owners(program, &macros, owners);
     let macro_type_deps =
         derive_macro_type_deps(&macros, &imports, &import_map, &macro_type_ref_roles);
 
@@ -607,7 +703,7 @@ fn build_script_analysis_inner(
         };
 
     let nested_macro_calls = collect_nested_macro_calls(program, 0);
-    let declaration_entries = collect_declaration_entries(content, program);
+    let declaration_entries = collect_declaration_entries(content, program, owners);
 
     ScriptAnalysisSnapshot {
         imports,
@@ -2474,7 +2570,7 @@ fn derive_macro_type_deps(
             continue;
         };
         for (type_ref_name, usage) in roles {
-            if let Some(source) = import_map.source(imports, type_ref_name) {
+            if let Some(source) = import_map.source_in_owner(imports, m.owner, type_ref_name) {
                 deps.push(MacroTypeDep {
                     type_name: type_ref_name.clone(),
                     import_source: source.to_string(),
@@ -2590,8 +2686,12 @@ const COMPILER_MACRO_NAMES: &[&str] = &[
 /// Walks `program.body` and extracts interfaces, type aliases, classes, enums,
 /// functions, and variable declarations. Each gets a `LocalDeclarationEntry`
 /// with a content hash derived from the declaration's source text.
-fn collect_declaration_entries(content: &str, program: &Program<'_>) -> Vec<LocalDeclarationEntry> {
-    use crate::analysis::types::{hash_16, LocalDeclarationEntry, LocalDeclarationKind};
+fn collect_declaration_entries(
+    content: &str,
+    program: &Program<'_>,
+    owners: &TopLevelOwnerTable,
+) -> Vec<LocalDeclarationEntry> {
+    use crate::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
 
     fn entry_from_span(
         content: &str,
@@ -2750,6 +2850,14 @@ fn collect_declaration_entries(content: &str, program: &Program<'_>) -> Vec<Loca
                 .map(|decl| extract_from_declaration(content, decl))
                 .unwrap_or_default(),
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
+                    vec![entry_from_span(
+                        content,
+                        d.id.name.to_string(),
+                        LocalDeclarationKind::Type,
+                        d.span.into(),
+                    )]
+                }
                 ExportDefaultDeclarationKind::ClassDeclaration(d) => {
                     d.id.as_ref()
                         .map(|id| {
@@ -2782,20 +2890,67 @@ fn collect_declaration_entries(content: &str, program: &Program<'_>) -> Vec<Loca
 
     let mut entries: Vec<LocalDeclarationEntry> = Vec::new();
 
-    for stmt in &program.body {
+    for (statement_index, stmt) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
         let items = extract_from_statement(content, stmt);
+        let statement_span = Span::from(stmt.span());
+        let statement_span = extend_declaration_span_to_leading_jsdoc(
+            statement_span,
+            statement_span.start,
+            &program.comments,
+        );
 
-        for (name, kind, body_text, span) in items {
+        for (name, kind, _body_text, _span) in items {
+            let span = statement_span;
+            let body_text = content
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or("");
             entries.push(LocalDeclarationEntry {
                 name,
+                owner,
                 kind,
-                content_hash: hash_16(body_text.as_bytes()),
+                content_hash: hash_owned_declaration(owner, body_text),
                 span,
             });
         }
     }
 
     entries
+}
+
+fn hash_owned_declaration(owner: verter_type_expr::TopLevelOwnerId, body: &str) -> Hash16 {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update([owner.kind() as u8]);
+    hasher.update(owner.ordinal().to_le_bytes());
+    hasher.update(body.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+fn extend_declaration_span_to_leading_jsdoc(
+    span: Span,
+    attachment_start: u32,
+    comments: &[Comment],
+) -> Span {
+    let start = comments
+        .iter()
+        .filter(|comment| {
+            comment.attached_to == attachment_start
+                && comment.position == CommentPosition::Leading
+                && comment.is_block()
+                && matches!(
+                    comment.content,
+                    CommentContent::Jsdoc | CommentContent::JsdocLegal
+                )
+        })
+        .map(|comment| comment.span.start)
+        .min()
+        .unwrap_or(span.start);
+    Span::new(start, span.end)
 }
 
 /// Walk the entire AST and collect macro calls that are NOT at the top level.

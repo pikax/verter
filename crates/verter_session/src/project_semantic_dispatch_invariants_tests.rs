@@ -1438,6 +1438,7 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     let source = graph.intern_node(SemanticNodeData::Opaque(
         crate::semantic_query::QueryError::DeclPlaceholder {
             canonical_id: Arc::from("/w/dep.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: Arc::from("Dep"),
             whole_hash: whole_hash_v1,
         },
@@ -2616,74 +2617,6 @@ fn indexed_access_open_skips_counter_retired() {
     );
 }
 
-/// Structured-budget-failure contract: the parser's syntactic depth
-/// guard must emit a structured
-/// `ResolutionBudgetExceeded { limit, actual, context }` record on
-/// cap-trip — **not** a silent `Applied`-style stub. A deeply nested
-/// `Foo<Foo<...>>` chain past the `PARSER_SYNTACTIC_DEPTH_LIMIT =
-/// 256` cap must produce a recorded `limit == 256`, a non-zero
-/// `actual`, and termination without stack overflow.
-#[test]
-fn budget_exceeded_returns_structured_failure_not_applied_stub() {
-    use verter_parser::utils::oxc::script::type_surface::{
-        resolve_type_elements_with_ctx, take_last_resolution_budget_exceeded,
-        PARSER_SYNTACTIC_DEPTH_LIMIT,
-    };
-
-    // Clear any stale record from previous tests on this thread.
-    let _ = take_last_resolution_budget_exceeded();
-
-    // Build a chain of type aliases A0 → A1 → A2 → ... → A_N → Leaf.
-    // Each `type A_i = A_{i+1}` hop re-enters
-    // `resolve_type_elements_inner_with_ctx` via the TSTypeReference arm's
-    // `find_type_alias` path, incrementing `RESOLUTION_DEPTH` once per
-    // hop. At `PARSER_SYNTACTIC_DEPTH_LIMIT` the guard refuses entry and
-    // stores the structured `ResolutionBudgetExceeded` record.
-    let chain_depth = (PARSER_SYNTACTIC_DEPTH_LIMIT as usize) + 20;
-    let mut source = String::from("interface Leaf { value: string }\n");
-    for i in 0..chain_depth {
-        source.push_str(&format!("type A{i} = A{next};\n", next = i + 1));
-    }
-    source.push_str(&format!("type A{chain_depth} = Leaf;\n"));
-    source.push_str("type Test = A0;\n");
-
-    // Lower the SFC script. The parser synthesises a TypeResolutionContext,
-    // walks `Test`'s chain, and trips the syntactic depth guard.
-    let allocator = oxc_allocator::Allocator::default();
-    let ret = oxc_parser::Parser::new(&allocator, &source, oxc_span::SourceType::ts()).parse();
-    let stmt = ret.program.body.iter().find_map(|s| match s {
-        oxc_ast::ast::Statement::TSTypeAliasDeclaration(decl)
-            if decl.id.name.as_str() == "Test" =>
-        {
-            Some(decl)
-        }
-        _ => None,
-    });
-    let test_alias = stmt.expect("Test alias must parse");
-    let mut ctx = verter_parser::utils::oxc::script::type_surface::build_type_context(
-        &ret.program,
-        source.as_bytes(),
-        0,
-    );
-    let _resolved = resolve_type_elements_with_ctx(&test_alias.type_annotation, 0, &mut ctx, true);
-
-    let record = take_last_resolution_budget_exceeded()
-        .expect("structured ResolutionBudgetExceeded must be recorded on cap-trip");
-    assert_eq!(
-        record.limit, PARSER_SYNTACTIC_DEPTH_LIMIT,
-        "ResolutionBudgetExceeded.limit must equal PARSER_SYNTACTIC_DEPTH_LIMIT"
-    );
-    assert!(
-        record.actual >= PARSER_SYNTACTIC_DEPTH_LIMIT,
-        "ResolutionBudgetExceeded.actual must be >= limit at cap-trip; got {}",
-        record.actual
-    );
-    assert!(
-        !record.context.is_empty(),
-        "ResolutionBudgetExceeded.context must be non-empty"
-    );
-}
-
 /// Budget-domain absence invariant: `SolveLimits::max_resolve_steps`
 /// is not part of the final design — there is no `resolve_steps`
 /// counter in dispatch. Assert by file absence + identifier
@@ -2809,8 +2742,12 @@ fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
         include_str!("resolver_core/component_meta_query_engine/helpers.rs"),
     ];
     let combined = cmqe_files.join("\n");
+    // The dispatch-first lowering entry is the OWNER-AWARE scope spelling
+    // (`lower_type_expr_in_owner_scope_with_mode`): the engine threads the
+    // exact top-level lexical owner into the dispatch lowering so a Vue
+    // module/setup owner pair never collapses onto one scope.
     assert!(
-        combined.contains("dispatch.lower_type_expr_in_scope_with_mode"),
+        combined.contains("dispatch.lower_type_expr_in_owner_scope_with_mode"),
         "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
     );
     assert!(
@@ -3435,7 +3372,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
 
 #[test]
 fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
-    // AX-hybrid amended predicate: `Published` (any mode) reduces;
+    // AX-hybrid amended predicate: publication demands (any mode) reduce;
     // `StructuralTransit` (any mode) carrier-stops. The spec's
     // original `&& mode == Expanded` restriction was over-restrictive
     // for the macro projector's `Published + Navigate` publication
@@ -3452,6 +3389,16 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
         (ReductionDemand::Published, ProjectionMode::Shallow, true),
         (ReductionDemand::Published, ProjectionMode::Expanded, true),
         (ReductionDemand::Published, ProjectionMode::Skeleton, true),
+        (
+            ReductionDemand::MacroObjectSurface,
+            ProjectionMode::Shallow,
+            true,
+        ),
+        (
+            ReductionDemand::VueRuntimeObjectSurface,
+            ProjectionMode::Shallow,
+            true,
+        ),
         (
             ReductionDemand::StructuralTransit,
             ProjectionMode::Identity,
@@ -3478,12 +3425,16 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
             false,
         ),
     ];
+    // Mutation recipe: remove either macro demand from
+    // `may_reduce_operator`; its corresponding row must fail while
+    // `StructuralTransit` remains carrier-stopped.
     for (demand, mode, expected) in cases {
         let ctx = ProjectionReductionContext {
             mode,
             demand,
             provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
             merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            vue_heritage_policy: crate::semantic_query::VueHeritagePolicy::RetainAll,
         };
         assert_eq!(
             may_reduce_operator(ctx),
@@ -3493,4 +3444,102 @@ fn ax_hybrid_may_reduce_operator_predicate_is_purely_structural() {
             mode,
         );
     }
+}
+
+#[test]
+fn vue_heritage_policy_survives_every_context_template_and_mapped_identity_encoding() {
+    use crate::semantic_query::{
+        may_reduce_operator, MemberMergeRole, ProjectionMode, ProjectionReductionContext,
+        ReductionDemand, SurfaceProvenanceContext, VueHeritagePolicy,
+    };
+
+    let runtime = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::Structural,
+    );
+    let ordinary_parent = ProjectionReductionContext::macro_object_surface(
+        ProjectionMode::Shallow,
+        SurfaceProvenanceContext::MacroTypeArgOwnBody,
+    );
+    let demoted = runtime.into_structural_transit_with_mode(ProjectionMode::Navigate);
+    let ordinary =
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+
+    assert_eq!(demoted.demand, ReductionDemand::StructuralTransit);
+    assert_eq!(demoted.mode, ProjectionMode::Navigate);
+    assert_eq!(
+        demoted.vue_heritage_policy,
+        VueHeritagePolicy::SuppressIgnored,
+        "runtime heritage policy must survive the carrier-stop demotion"
+    );
+    assert_eq!(
+        ordinary.vue_heritage_policy,
+        VueHeritagePolicy::RetainAll,
+        "ordinary transit must retain the complete TypeScript surface"
+    );
+    assert!(!may_reduce_operator(demoted));
+
+    let modes = [
+        ProjectionMode::Identity,
+        ProjectionMode::Navigate,
+        ProjectionMode::Shallow,
+        ProjectionMode::Expanded,
+        ProjectionMode::Skeleton,
+    ];
+    for mode in modes {
+        let templates = [
+            ProjectionReductionContext::published(mode),
+            ProjectionReductionContext::published_macro_type_arg_body(mode),
+            ProjectionReductionContext::macro_object_surface(
+                mode,
+                SurfaceProvenanceContext::Structural,
+            ),
+            ProjectionReductionContext::macro_object_surface(
+                mode,
+                SurfaceProvenanceContext::MacroTypeArgOwnBody,
+            )
+            .with_merge_role(MemberMergeRole::Heritage),
+            ProjectionReductionContext::structural_transit_with_mode(mode),
+        ];
+        for template in templates {
+            let filtered = template.with_orthogonal_axes_from(runtime);
+            let unfiltered = template.with_orthogonal_axes_from(ordinary_parent);
+
+            for derived in [filtered, unfiltered] {
+                assert_eq!(derived.mode, template.mode);
+                assert_eq!(derived.demand, template.demand);
+                assert_eq!(derived.provenance, template.provenance);
+                assert_eq!(derived.merge_role, template.merge_role);
+            }
+            assert_eq!(
+                filtered.vue_heritage_policy,
+                VueHeritagePolicy::SuppressIgnored,
+                "every fresh {:?}/{:?}/{:?}/{:?} template must inherit runtime policy",
+                template.mode,
+                template.demand,
+                template.provenance,
+                template.merge_role,
+            );
+            assert_eq!(
+                unfiltered.vue_heritage_policy,
+                VueHeritagePolicy::RetainAll,
+                "ordinary TypeScript demand must remain unfiltered"
+            );
+        }
+    }
+
+    assert_ne!(
+        crate::project_semantic_dispatch::build::encode_projection_reduction_context_bits_for_tests(
+            demoted,
+        ),
+        crate::project_semantic_dispatch::build::encode_projection_reduction_context_bits_for_tests(
+            ordinary,
+        ),
+        "mapped-member identity must distinguish filtered and unfiltered transit"
+    );
+
+    // Mutation recipe: bypass `with_orthogonal_axes_from` at any fresh-context
+    // transition, rebuild the demoted context from a default constructor, or
+    // omit the policy bit from the packed identity. The corresponding table,
+    // preservation, or encoding assertion fails.
 }

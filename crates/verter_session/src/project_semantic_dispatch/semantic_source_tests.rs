@@ -26,7 +26,7 @@ use verter_type_expr::facts::{
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
-    MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot,
+    MacroPayloadPosition, SymbolBodyLocator, TypeBodyPathStep, TypeBodySlot,
 };
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
@@ -87,6 +87,7 @@ fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -94,9 +95,13 @@ fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
     })
 }
 
-fn navigate_ctx(scope: &str) -> SourceRaiseContext<'_> {
+fn navigate_ctx(
+    scope: &str,
+    scope_owner: verter_type_expr::TopLevelOwnerId,
+) -> SourceRaiseContext<'_> {
     SourceRaiseContext {
         scope_canonical_id: scope,
+        scope_owner,
         context: ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
         interior_failures: None,
     }
@@ -128,7 +133,7 @@ fn authored_decl_body_source_raises_to_the_lower_locator_node() {
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             &SemanticTypeSource::Authored(locator.clone()),
-            navigate_ctx(OWNER_ID),
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
         .expect("the authored decl-body source must raise");
 
@@ -162,6 +167,7 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
     let locator = AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(SFC_ID),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             symbol: Arc::from("default"),
             space: LocatorSymbolSpace::Value,
         },
@@ -183,7 +189,7 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             &SemanticTypeSource::Authored(locator),
-            navigate_ctx(SFC_ID),
+            navigate_ctx(SFC_ID, verter_type_expr::TopLevelOwnerId::instance(0)),
         )
         .expect("the macro type-argument source must raise through the hot mirror");
 
@@ -209,7 +215,7 @@ fn closed_leaf_sources_lower_in_scope() {
             &SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
                 verter_type_expr::PrimitiveName::String,
             ))),
-            navigate_ctx(OWNER_ID),
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
         .expect("a primitive leaf must raise");
     assert!(
@@ -227,7 +233,7 @@ fn closed_leaf_sources_lower_in_scope() {
             &SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(
                 "Base".to_string(),
             ))),
-            navigate_ctx(OWNER_ID),
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
         .expect("a bare Ref leaf must raise");
     let data = crate::project_semantic_dispatch::node_data_for(&host, reference.node());
@@ -242,6 +248,89 @@ fn closed_leaf_sources_lower_in_scope() {
         !matches!(data.as_deref(), Some(SemanticNodeData::Opaque(_))),
         "a resolvable Ref leaf must never raise to a miss shell"
     );
+}
+
+fn owner_isolation_fixture() -> VerterHost {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/semantic-source/module-target.ts",
+        "export type ModuleTarget = { moduleOnly: string };\n",
+    );
+    upsert_ts(
+        &host,
+        "/w/semantic-source/instance-target.ts",
+        "export type InstanceTarget = { instanceOnly: number };\n",
+    );
+    upsert_vue(
+        &host,
+        "/w/semantic-source/OwnerIsolation.vue",
+        r#"<script lang="ts">
+import type { ModuleTarget as Shared } from './module-target'
+export type ModuleUse = Shared
+</script>
+<script setup lang="ts">
+import type { InstanceTarget as Shared } from './instance-target'
+defineProps<{ value?: Shared }>()
+</script>
+<template><div /></template>
+"#,
+    );
+    host
+}
+
+fn assert_instance_target(host: &VerterHost, node: crate::semantic_query::SemanticNodeId) {
+    let data = crate::project_semantic_dispatch::node_data_for(host, node);
+    let Some(SemanticNodeData::DeclRef { identity }) = data.as_deref() else {
+        panic!("owner-exact reference must lower to a declaration identity, got {data:?}");
+    };
+    assert_eq!(
+        identity.canonical_id.as_ref(),
+        "/w/semantic-source/instance-target.ts"
+    );
+    assert_eq!(identity.decl_name.as_ref(), "InstanceTarget");
+}
+
+#[test]
+fn closed_ref_leaf_uses_exact_instance_owner_when_module_import_has_same_name() {
+    const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
+    let host = owner_isolation_fixture();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(
+                "Shared".to_string(),
+            ))),
+            navigate_ctx(OWNER, verter_type_expr::TopLevelOwnerId::instance(0)),
+        )
+        .expect("the instance-owner leaf reference must raise");
+
+    assert_instance_target(&host, raised.node());
+}
+
+#[test]
+fn synthesized_symbol_ref_uses_exact_anchor_owner_when_module_import_has_same_name() {
+    const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
+    let host = owner_isolation_fixture();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Ref(SymbolBodyLocator {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(OWNER),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            symbol: Arc::from("Shared"),
+            space: LocatorSymbolSpace::Type,
+        },
+    }));
+
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
+        .expect("the anchor-owner symbol reference must raise");
+
+    assert_instance_target(&host, raised.node());
 }
 
 #[test]
@@ -275,7 +364,10 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
     }));
 
     let raised = dispatch
-        .raise_semantic_type_source_to_hot(&source, navigate_ctx(OWNER_ID))
+        .raise_semantic_type_source_to_hot(
+            &source,
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
+        )
         .expect("a closed tuple with a leaf-union element must raise");
 
     let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
@@ -361,6 +453,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
                 ty: FactOrLocator::Locator(TypeBodySlot {
                     anchor: AuthoredAnchor {
                         canonical_id: Arc::from(OWNER_ID),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         symbol: Arc::from("Base"),
                         space: LocatorSymbolSpace::Type,
                     },
@@ -375,7 +468,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             &SemanticTypeSource::Synthesized(shape),
-            navigate_ctx(OWNER_ID),
+            navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
         .expect("a synthesized object shape must raise");
     let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
@@ -514,6 +607,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                     Arc::from("Anchor"),
                     NodeScopeId::File {
                         canonical_id: Arc::from(SCOPE),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash,
                         local_scope: None,
                     },
@@ -521,6 +615,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                 ),
                 NodeScopeId::File {
                     canonical_id: Arc::from(SCOPE),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash,
                     local_scope: None,
                 },
@@ -559,6 +654,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                 &SemanticTypeSource::SyntheticSlotBinding(Arc::new(carrier.clone())),
                 SourceRaiseContext {
                     scope_canonical_id: SCOPE,
+                    scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     context: ProjectionReductionContext::published(ProjectionMode::Expanded),
                     interior_failures: None,
                 },

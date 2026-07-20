@@ -37,8 +37,9 @@ use std::time::Instant;
 use crate::host_manage::component_meta_request_impl::ViewBoundRequestHost;
 use crate::meta::MetaProject;
 use crate::resolver_core::{
-    run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaRequestHost,
-    RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole, StoreView,
+    run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaCacheLookup,
+    ComponentMetaRequestHost, RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole,
+    StoreView,
 };
 use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
@@ -177,6 +178,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let first = first.request;
 
     assert!(
         first.value.is_some(),
@@ -214,6 +216,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let second = second.request;
     assert_eq!(
         second.source,
         RequestSource::Flight {
@@ -247,6 +250,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let third = third.request;
     assert_eq!(third.source, RequestSource::Cache);
     assert_eq!(
         host.provenance()
@@ -411,6 +415,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
     type Mode = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Mode;
     type Resolution = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Resolution;
     type CapturedInputs = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::CapturedInputs;
+    type AdmissionProof = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::AdmissionProof;
 
     fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
         self.inner.cache_key(canonical, mode)
@@ -445,7 +450,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         store_view: &Self::View,
-    ) -> Option<Self::Resolution> {
+    ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
         self.inner
             .try_get_cached_component_meta(canonical, mode, store_view)
     }
@@ -472,7 +477,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
         canonical: &str,
         mode: Self::Mode,
         result: &Self::Resolution,
-    ) {
+    ) -> Option<Self::AdmissionProof> {
         self.inner
             .store_component_meta_result(canonical, mode, result)
     }
@@ -599,6 +604,7 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
             None,
             crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
         )
+        .request
     };
 
     let (leader_result, follower_results) = std::thread::scope(|scope| {
@@ -1169,7 +1175,10 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     );
     let state = Arc::clone(&serve.indexed.shallow_state);
     assert!(
-        state.decl_bodies().type_decl("Pin").is_some(),
+        state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .is_some(),
         "fixture invariant: the pin demand must acquire the retained-snapshot lease",
     );
     state.decl_bodies().release_retained_snapshot_for_test();
@@ -1178,7 +1187,9 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     let poison_returned = db.get_or_compute_traced_for_test(&poison_key, ctx, || {
         // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
         // funnel-entry check would have run and passed.
-        let leased = state.decl_bodies().type_decl("Probe");
+        let leased = state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Probe");
         assert!(
             leased.is_none(),
             "fixture invariant: the broken lease must actually miss (a `Some` here means the \
@@ -1243,6 +1254,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         declaration_id: None,
         resolved_name: "Probe".to_string(),
         canonical_source: "/m6_refusal.ts".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
         kind: ResolvedDeclarationKind::Interface,
         text: Some(text.to_string()),
@@ -1266,6 +1278,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     // (its closure never runs).
     let control_key = (
         Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::<str>::from("Probe"),
     );
     let control_computes = Cell::new(0usize);
@@ -1304,6 +1317,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     // SUBJECT — the same funnel, an UNROOTABLE compute.
     let key = (
         Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::<str>::from("Unrootable"),
     );
     let computes = Cell::new(0usize);
@@ -1405,6 +1419,8 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         type Resolution = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Resolution;
         type CapturedInputs =
             <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::CapturedInputs;
+        type AdmissionProof =
+            <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::AdmissionProof;
 
         fn cache_key(&self, canonical: &str, mode: Self::Mode) -> ResolutionNodeKey {
             self.inner.cache_key(canonical, mode)
@@ -1434,7 +1450,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
             _canonical: &str,
             _mode: Self::Mode,
             _store_view: &Self::View,
-        ) -> Option<Self::Resolution> {
+        ) -> Option<ComponentMetaCacheLookup<Self::Resolution, Self::AdmissionProof>> {
             // Force a result-cache MISS so the request always runs `compute`,
             // even though the prior `get_component_meta` warmed the result
             // cache. The internal resolver caches (prepared declarations,
@@ -1469,7 +1485,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
             canonical: &str,
             mode: Self::Mode,
             result: &Self::Resolution,
-        ) {
+        ) -> Option<Self::AdmissionProof> {
             self.inner
                 .store_component_meta_result(canonical, mode, result)
         }
@@ -1506,6 +1522,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         None,
         crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
     );
+    let result = result.request;
     let observed = delta.load(std::sync::atomic::Ordering::Relaxed);
 
     // The compute must have run (cold Leader / Fallback), so the delta was

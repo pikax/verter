@@ -103,18 +103,12 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMe
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
 
-mod imported_elements;
 mod normalize;
 mod normalize_slots;
 
 // The per-surface normalizers live in the `normalize` submodule (file-size
 // split). Re-export the ones the executor below and external consumers reach
 // through the flat `vue_exec::props_from_typeinfo_surface` path.
-pub(crate) use imported_elements::{
-    imported_emits_resolved_elements, imported_named_props_resolved_elements,
-    imported_props_resolved_elements, named_type_elements_outcome, NamedTypeElementsOutcome,
-    NativeProjection,
-};
 pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
     object_members_from_typeinfo_surface, props_from_typeinfo_surface,
@@ -179,6 +173,8 @@ pub(crate) struct UnresolvedSurfaceArm {
     pub(crate) name: Arc<str>,
     /// Canonical id of the file whose declaration authored the arm.
     pub(crate) owner_canonical: Arc<str>,
+    /// Exact top-level lexical owner that authored the arm.
+    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
 }
 
 /// Extract the unresolved SURFACE-COMPOSITION arm facts from a projection's
@@ -193,9 +189,11 @@ fn unresolved_surface_arms_from_diags(
             crate::project_semantic_dispatch::walk::ShallowDiagnostic::UnresolvedSurfaceArm {
                 name,
                 owner_canonical,
+                owner,
             } => Some(UnresolvedSurfaceArm {
                 name: Arc::clone(name),
                 owner_canonical: Arc::clone(owner_canonical),
+                owner: *owner,
             }),
             _ => None,
         })
@@ -204,6 +202,7 @@ fn unresolved_surface_arms_from_diags(
         a.name
             .cmp(&b.name)
             .then_with(|| a.owner_canonical.cmp(&b.owner_canonical))
+            .then_with(|| a.owner.cmp(&b.owner))
     });
     arms.dedup();
     arms
@@ -384,7 +383,17 @@ impl VerterHost {
         // macros, or a `.vue` carrying a USERLAND `export default` (synthesis
         // skipped) returns `None` here.
         let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
-        let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        let crate::resolver_core::shallow_file_state::ExportTarget::Local {
+            owner: default_owner,
+            symbol_name: default_name,
+        } = indexed.shallow_state.exports.get("default")?
+        else {
+            return None;
+        };
+        let default_owner = *default_owner;
+        let default_symbol = indexed
+            .shallow_state
+            .value_symbol_in(default_owner, default_name.as_str())?;
         if !default_symbol.is_synthesised_component_default {
             return None;
         }
@@ -393,7 +402,9 @@ impl VerterHost {
         // header); its absence means no public instance surface. The synth's
         // construct signature deliberately carries no authored return position
         // (`return_ty` is an honest `None`), so the annotation is the gate.
-        let default_body = indexed.shallow_state.value_decl("default")?;
+        let default_body = indexed
+            .shallow_state
+            .value_decl_in(default_owner, default_name.as_str())?;
         default_body.type_annotation.annotation.as_ref()?;
         let _whole_hash = indexed.whole_hash;
 
@@ -413,7 +424,11 @@ impl VerterHost {
         // under publication demand.
         let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(Arc::from(canonical_id), Arc::from("default")),
+                dispatch.type_slot_for(
+                    Arc::from(canonical_id),
+                    default_owner,
+                    Arc::from(default_name.as_str()),
+                ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     canonical_id,
@@ -684,6 +699,18 @@ pub(crate) fn navigate_param_to_object_surface(
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
 ) -> Option<TypeInfoSurface> {
     let dispatch = ctx.dispatch();
+    let scope_owner = match &payload.locator {
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
+        verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
+            body.anchor.owner
+        }
+        verter_type_expr::locators::AuthoredBodyLocator::JsdocTypedefBody(body) => {
+            body.anchor.owner
+        }
+        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload) => {
+            payload.anchor.owner
+        }
+    };
 
     // Raise the authored payload locator to its base node through the shared
     // source-raise bridge under structural-transit Navigate (member values
@@ -695,6 +722,7 @@ pub(crate) fn navigate_param_to_object_surface(
             &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
             crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: scope_canonical,
+                scope_owner,
                 context: ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 ),

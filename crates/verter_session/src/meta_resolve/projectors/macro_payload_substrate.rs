@@ -295,21 +295,24 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
         // shared `decl_body_hot_ref` hot accessor (the `Instantiate` memo,
         // the single resolution engine), which returns a graph-native node
         // that is never materialised back to a `TypeExpr`.
-        Some(SemanticNodeData::DeclRef { identity }) => {
-            lower_decl_body_to_node(dispatch, &identity.canonical_id, &identity.decl_name).and_then(
-                |resolved| {
-                    resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
-                },
-            )
-        }
+        Some(SemanticNodeData::DeclRef { identity }) => lower_decl_body_to_node(
+            dispatch,
+            &identity.canonical_id,
+            identity.owner,
+            &identity.decl_name,
+        )
+        .and_then(|resolved| {
+            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+        }),
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
         // `ResolveDecl`). Reach its body through the same shared
         // `decl_body_hot_ref` hot accessor.
         Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
             canonical_id,
+            owner,
             name,
             ..
-        })) => lower_decl_body_to_node(dispatch, canonical_id, name).and_then(|resolved| {
+        })) => lower_decl_body_to_node(dispatch, canonical_id, *owner, name).and_then(|resolved| {
             resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
         }),
         _ => None,
@@ -337,10 +340,12 @@ pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 fn lower_decl_body_to_node(
     dispatch: &ProjectSemanticDispatch<'_>,
     canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<SemanticNodeId> {
     let handle = dispatch.decl_body_hot_ref(
         canonical_id,
+        owner,
         name,
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),

@@ -732,6 +732,31 @@ fn interpolation_with_props() {
     );
 }
 
+// ── v-memo dependency mapping (F23) ───
+
+/// F23: the `v-memo="[deps]"` dependency expression must be mapped INTO the IDE
+/// surface so its identifiers type-check / hover / navigate, rather than being
+/// dropped. Emitted as `data-v-memo={[deps]}` with each identifier 1:1 mapped.
+#[test]
+fn v_memo_dependency_expression_is_mapped_into_ide_surface() {
+    let result = gen_tsx_template_with_bindings(
+        r#"<template><div v-memo="[count]">{{ count }}</div></template>"#,
+        &[("count", BindingType::SetupRef)],
+    );
+    // The dependency expression reaches the surface (identifiers navigable).
+    assert!(
+        result.contains("data-v-memo={[") && result.contains("count"),
+        "v-memo dep must be emitted into the IDE surface, got:\n{}",
+        result
+    );
+    // NEGATIVE: the raw v-memo directive must not survive verbatim.
+    assert!(
+        !result.contains("v-memo=\"[count]\""),
+        "raw v-memo directive must not survive in the IDE surface, got:\n{}",
+        result
+    );
+}
+
 // ── Structural directive removal (v-if, v-for, v-slot) ───
 
 #[test]
@@ -4892,7 +4917,13 @@ export default defineComponent({
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== FULL SFC TSX ===\n{}\n=== END ===", tsx.code);
 
@@ -4928,7 +4959,13 @@ fn balcard_vue_full_sfc_produces_valid_tsx() {
         source_map: true,
         ..Default::default()
     };
-    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        &source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== BALCARD FULL TSX ===\n{}\n=== END ===", tsx.code);
 
@@ -4969,7 +5006,13 @@ const checked = ref<boolean>(false);
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== DOCS BLOCK TSX ===\n{}\n=== END ===", tsx.code);
 
@@ -5007,7 +5050,13 @@ fn ant_design_switch_basic_produces_valid_tsx() {
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        &source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== ANT BASIC TSX ===\n{}\n=== END ===", tsx.code);
 
@@ -5038,7 +5087,13 @@ fn activist_card_topic_selection_produces_valid_tsx() {
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        &source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== ACTIVIST TSX ===\n{}\n=== END ===", tsx.code);
     let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
@@ -5068,7 +5123,13 @@ fn activist_machine_steps_produces_valid_tsx() {
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        &source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== MACHINE STEPS TSX ===\n{}\n=== END ===", tsx.code);
     let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
@@ -5100,7 +5161,13 @@ const tag = 'div';
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
 
     // Must NOT contain instantiateComponent(component, ...)
@@ -5135,7 +5202,13 @@ fn nexus_notification_produces_valid_tsx() {
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        &source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     // ___VERTER___props must be declared (not just referenced)
     assert!(
@@ -5177,7 +5250,13 @@ const { msg, count } = defineProps<{
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
 
     // ___VERTER___props must be declared, not just referenced
@@ -5222,7 +5301,13 @@ fn nexus_bloc_produces_valid_tsx() {
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(&source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        &source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== BLOC TSX ===\n{}\n=== END ===", tsx.code);
     let parsed = oxc_parser::Parser::new(&alloc, &tsx.code, oxc_span::SourceType::tsx()).parse();
@@ -5260,7 +5345,13 @@ defineProps({
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     eprintln!("=== RUNTIME PROPS TSX ===\n{}\n=== END ===", tsx.code);
 
@@ -5711,7 +5802,13 @@ fn compile_full_sfc_tsx(source: &str, filename: &str) -> String {
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
     tsx.code.clone()
 }
@@ -6995,7 +7092,13 @@ export default defineComponent({
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
 
     // Template should use <MyAlias> and MyAlias must be in scope
@@ -7042,7 +7145,13 @@ export default defineComponent({
         ..Default::default()
     };
     let verter_opts = crate::compile::VerterCompileOptions::default();
-    let result = crate::compile::compile(source, &options, &verter_opts, &alloc);
+    let result = crate::compile::compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    );
     let tsx = result.tsx.as_ref().expect("TSX should be generated");
 
     // SomeComp is already imported — no extra alias declaration needed

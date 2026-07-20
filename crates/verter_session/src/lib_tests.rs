@@ -4255,6 +4255,7 @@ mod upsert_compile_cache_tests {
 
         let imports = vec![
             verter_semantic::analysis::AnalyzedImport {
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 source: "./x".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
@@ -4262,6 +4263,7 @@ mod upsert_compile_cache_tests {
                 resolved_canonical_id: None,
             },
             verter_semantic::analysis::AnalyzedImport {
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 source: "./x".to_string(),
                 is_type_only: true,
                 bindings: Vec::new(),

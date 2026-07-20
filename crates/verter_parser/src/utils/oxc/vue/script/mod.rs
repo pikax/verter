@@ -23,11 +23,10 @@ pub mod usage;
 
 use oxc_ast::ast::Program;
 
-use crate::utils::oxc::script::type_surface::{build_type_context, ResolvedElements};
-
 pub use macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
-    MacroObjectArg, MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
+    MacroObjectArg, MacroObjectStaticEligibility, MacroProperty, MacroTypeParams,
+    RuntimeConstructorSyntax, ScriptMacro, VueMacroKind,
 };
 pub use setup::{extract_options_component_macro_args, OptionsComponentMacroArgs};
 pub use shared::ScriptParseContext;
@@ -100,21 +99,6 @@ pub fn parse_script<'a>(
     content_offset: u32,
     source: &'a str,
 ) -> ScriptParseResult<'a> {
-    parse_script_with_companion(program, mode, content_offset, source, None)
-}
-
-/// Parse a script program with optional companion type information.
-///
-/// When `companion_types` is `Some`, type references in `defineProps<T>()`
-/// that can't be resolved from the setup script's own declarations will
-/// fall back to these pre-resolved types from the companion `<script>` block.
-pub fn parse_script_with_companion<'a>(
-    program: &'a Program<'a>,
-    mode: ScriptMode,
-    content_offset: u32,
-    source: &'a str,
-    companion_types: Option<rustc_hash::FxHashMap<String, ResolvedElements>>,
-) -> ScriptParseResult<'a> {
     let ctx = ScriptParseContext::new(content_offset, source.as_bytes());
     let mut items = Vec::new();
     let mut errors = Vec::new();
@@ -130,32 +114,14 @@ pub fn parse_script_with_companion<'a>(
         }
     }
 
-    // Second pass: mode-specific processing + binding extraction.
-    //
-    // The setup type-resolution context is built once and shared by the
-    // statement pass and the binding pass — both need the same companion-aware
-    // context, so building it twice (and re-resolving `defineProps<T>`) is pure
-    // duplication. The binding pass reuses the macro pass's resolved prop-key
-    // spans instead of resolving the macro type a second time.
+    // Second pass: mode-specific syntax processing and binding extraction.
     let bindings = match mode {
         ScriptMode::Setup => {
-            let mut type_ctx = build_type_context(program, source.as_bytes(), content_offset);
-            if let Some(companion) = companion_types {
-                type_ctx.companion_types = companion;
-            }
             let mut setup_ctx = SetupContext::new();
-            process_setup_statements(
-                &program.body,
-                &ctx,
-                &type_ctx,
-                &mut setup_ctx,
-                &mut items,
-                &mut errors,
-            );
+            process_setup_statements(&program.body, &ctx, &mut setup_ctx, &mut items, &mut errors);
             is_async = setup_ctx.is_async;
 
-            let macro_prop_keys = collect_macro_prop_keys(&items);
-            bindings::extract_bindings(program, &ctx, &type_ctx, Some(&macro_prop_keys))
+            bindings::extract_bindings(program, &ctx)
         }
         ScriptMode::Options => {
             let mut options_ctx = OptionsContext::new();
@@ -179,40 +145,5 @@ pub fn parse_script_with_companion<'a>(
     }
 }
 
-/// Collect the local prop-key spans the macro pass already resolved for
-/// `defineProps<T>()` (and `withDefaults(defineProps<T>(), …)`), so the binding
-/// pass can reuse them instead of resolving the macro type a second time.
-///
-/// Only members whose `key` span addresses the local SFC are kept (`map_local`):
-/// a cross-file member's `key` span points into another source file and must not
-/// become a setup binding. This matches the binding pass's pre-existing
-/// local-only span output, which resolved the type without the companion
-/// fallback and so only ever produced local members.
-fn collect_macro_prop_keys(items: &[ScriptItem]) -> Vec<crate::common::Span> {
-    let mut keys = Vec::new();
-    for item in items {
-        let type_params = match item {
-            ScriptItem::Macro(ScriptMacro::DefineProps {
-                type_params: Some(tp),
-                ..
-            }) => tp,
-            ScriptItem::Macro(ScriptMacro::WithDefaults {
-                define_props_type_params: Some(tp),
-                ..
-            }) => tp,
-            _ => continue,
-        };
-        for prop in &type_params.resolved.props {
-            if prop.map_local {
-                keys.push(prop.key);
-            }
-        }
-    }
-    keys
-}
-
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod single_parse_dedup_tests;

@@ -514,10 +514,16 @@ fn ref_cycle_result_key_is_content_free_and_env_discriminating() {
     // versions of `/a.ts:Foo` yield the identical slot, hence the identical
     // key. That is the content-version co-location the migration delivers:
     // the whole-hash never enters the key, only the value's self-roots.
-    let slot_v1 =
-        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/a.ts"), Arc::from("Foo"));
-    let slot_v2 =
-        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/a.ts"), Arc::from("Foo"));
+    let slot_v1 = ResolvedDeclSlotIdentity::type_slot_unscoped(
+        Arc::from("/a.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Foo"),
+    );
+    let slot_v2 = ResolvedDeclSlotIdentity::type_slot_unscoped(
+        Arc::from("/a.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        Arc::from("Foo"),
+    );
     let key_v1 = RefCycleResultKey {
         root: slot_v1,
         resolve_env_hash: [2u8; 16],
@@ -562,7 +568,11 @@ fn ref_cycle_result_key_is_content_free_and_env_discriminating() {
 
     // A different root (different decl name) discriminates.
     let other = RefCycleResultKey {
-        root: ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/a.ts"), Arc::from("Bar")),
+        root: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            Arc::from("/a.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Bar"),
+        ),
         resolve_env_hash: [2u8; 16],
         version: REF_CYCLE_RESULT_VERSION,
     };
@@ -604,6 +614,7 @@ fn ref_cycle_result_key_slot_env_axes_discriminate() {
     let slot = |project_identity: u32, type_env: [u8; 16], lib_env: [u8; 16]| {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/a.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
             project_identity,
             type_env,
@@ -761,6 +772,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
     let slot = |project_identity: u32, type_env: [u8; 16], lib_env: [u8; 16]| {
         ResolvedDeclSlotIdentity::type_slot(
             Arc::from("/w/ChatMessageProps.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("ChatMessageProps"),
             project_identity,
             type_env,
@@ -853,6 +865,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
     let mut subject_variant = base.clone();
     subject_variant.decl = ResolvedDeclSlotIdentity::type_slot(
         Arc::from("/w/ChatMessageProps.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("OtherProps"),
         1,
         [2u8; 16],

@@ -7,9 +7,8 @@
 //!
 //! - [`bindings`] — Binding extraction from expressions (identifiers, functions, literals).
 //!   Re-exported at this level for convenience.
-//! - [`script`] — Framework-neutral script analysis: the raw pre-lowering
-//!   statement surface, the local type-surface capture engine
-//!   (`script::type_surface`), and the generic import/decl binding inventory.
+//! - [`script`] — Framework-neutral script analysis: syntax-only routes, lazy
+//!   raw statement surfaces, and the generic import/decl binding inventory.
 //! - [`vue`] — Vue-specific analysis: directive parsing (`v-for`, `v-slot`),
 //!   script block parsing (Options API and `<script setup>`), and template helpers.
 

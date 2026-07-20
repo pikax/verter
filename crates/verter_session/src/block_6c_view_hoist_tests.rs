@@ -101,7 +101,11 @@ fn view_build_count_drops_under_hosted_request() {
     // path reads through the borrow.
     let mut reads = 0u64;
     for _ in 0..5 {
-        let _ = ctx.prepared_type_decl(&canonical, "ButtonProps");
+        let _ = ctx.prepared_type_decl(
+            &canonical,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "ButtonProps",
+        );
         let _ = ctx.prepared_decl_bundle(&canonical);
         reads += 2;
     }
@@ -150,14 +154,26 @@ fn repeated_prepared_type_decl_no_view_rebuild() {
     // Warm the bundle: the first call walks the cold path
     // (`materialize_prepared_decl_bundle` etc.). Subsequent calls
     // hit the warm cache directly.
-    let _warm = ctx.prepared_type_decl(&canonical, "ButtonProps");
+    let _warm = ctx.prepared_type_decl(
+        &canonical,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "ButtonProps",
+    );
     let builds_after_warmup = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());
 
     // After warmup: repeated warm-hit reads against the threaded view.
     // None should trigger a new HostStoreView build.
     for _ in 0..5 {
-        let _ = ctx.prepared_type_decl(&canonical, "ButtonProps");
-        let _ = ctx.prepared_type_decl(&canonical, "Label");
+        let _ = ctx.prepared_type_decl(
+            &canonical,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "ButtonProps",
+        );
+        let _ = ctx.prepared_type_decl(
+            &canonical,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Label",
+        );
         let _ = ctx.prepared_decl_bundle(&canonical);
     }
     let builds_after_repeat = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());
@@ -312,16 +328,28 @@ fn session_overlay_rooting_runs_once_per_request() {
     // fresh view per call. The discriminating property is that
     // POST-warmup resolver-method calls do NOT trigger additional
     // builds.
-    let _warm = ctx.prepared_type_decl(&canonical, "ButtonProps");
+    let _warm = ctx.prepared_type_decl(
+        &canonical,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "ButtonProps",
+    );
     let builds_after_warmup = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());
 
     // Drive resolver-tier reads. The session context's `store_view()`
     // returns the borrowed pre-built `RequestStoreView` — none of
     // these calls re-run `with_session_overlay` or rebuild the base.
     for _ in 0..3 {
-        let _ = ctx.prepared_type_decl(&canonical, "ButtonProps");
+        let _ = ctx.prepared_type_decl(
+            &canonical,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "ButtonProps",
+        );
         let _ = ctx.prepared_decl_bundle(&canonical);
-        let _ = ctx.prepared_type_decl(&canonical, "Label");
+        let _ = ctx.prepared_type_decl(
+            &canonical,
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Label",
+        );
     }
 
     let builds_after_calls = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.get());

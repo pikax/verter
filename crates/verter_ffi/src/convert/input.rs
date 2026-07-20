@@ -75,6 +75,9 @@ pub fn ffi_profile_to_host(
         if let Some(is_production) = input.is_production {
             out.is_production = is_production;
         }
+        if let Some(custom_element) = input.custom_element {
+            out.custom_element = custom_element;
+        }
         if let Some(ssr) = input.ssr {
             out.ssr = ssr;
         }

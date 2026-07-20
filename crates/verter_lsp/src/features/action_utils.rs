@@ -447,6 +447,7 @@ mod tests {
             imports: vec![
                 verter_semantic::analysis::AnalyzedImport {
                     source: "vue".into(),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_only: false,
                     bindings: vec![],
                     span: verter_span::Span::new(15, 40),
@@ -454,6 +455,7 @@ mod tests {
                 },
                 verter_semantic::analysis::AnalyzedImport {
                     source: "vue".into(),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_only: false,
                     bindings: vec![],
                     span: verter_span::Span::new(41, 71),

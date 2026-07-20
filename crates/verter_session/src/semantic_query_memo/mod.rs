@@ -37,7 +37,7 @@ use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
     CacheRead, DepSignature, NodeScopeId, OriginEdge, OriginEdgeKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SemanticQueryValueTag,
 };
 #[cfg(test)]
 use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
@@ -53,6 +53,10 @@ mod member_index;
 mod prepared;
 mod reverse_index;
 mod stats;
+// `SemanticGraphStore`'s `#[doc(hidden)]` `*_for_tests` publish / probe
+// helpers live in a sibling continuation-impl file so the hot-path memo
+// logic here stays under the Tier-2 module-size budget.
+mod store_test_support;
 #[cfg(any(test, feature = "test-support"))]
 mod test_gates;
 mod trait_impls;
@@ -118,9 +122,44 @@ pub fn family_variant_label_for_tests(
     family.variant_label()
 }
 
+fn narrow_value_result(result: QueryResult<SemanticQueryValue>) -> QueryResult<SemanticNodeId> {
+    match result {
+        QueryResult::Value(SemanticQueryValue::TypeNode(node)) => QueryResult::Value(node),
+        QueryResult::Value(other) => QueryResult::Error(QueryError::ValueDomainMismatch {
+            expected: SemanticQueryValueTag::TypeNode,
+            actual: other.tag(),
+        }),
+        QueryResult::Recursive(node) => QueryResult::Recursive(node),
+        QueryResult::Error(error) => QueryResult::Error(error),
+    }
+}
+
+fn narrow_cache_read(
+    read: CacheRead<QueryResult<SemanticQueryValue>>,
+) -> CacheRead<QueryResult<SemanticNodeId>> {
+    CacheRead {
+        value: narrow_value_result(read.value),
+        dep_signature: read.dep_signature,
+        walker_diagnostics: read.walker_diagnostics,
+        cache_suppress: read.cache_suppress,
+        result_is_partial: read.result_is_partial,
+    }
+}
+
+fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
+    crate::request_context::mark_request_result_cancelled();
+    CacheRead {
+        value: QueryResult::Error(QueryError::Cancelled),
+        dep_signature: empty_signature(),
+        walker_diagnostics: Arc::from([]),
+        cache_suppress: true,
+        result_is_partial: true,
+    }
+}
+
 /// Test-only: `std::mem::size_of::<FamilyKey>()`. Lets the size-discipline
 /// guard pin that the hot single-node `FamilyKey → FamilySlots` keyspace is NOT
-/// inflated by embedding the ~130B `RelateMemoKey` by value — without exposing
+/// inflated by embedding the ~144B `RelateMemoKey` by value — without exposing
 /// the `pub(super)` `FamilyKey` taxonomy outside the crate. The `Relate` payload
 /// must stay BOXED (see [`family::FamilyKey::Relate`]).
 #[cfg(any(test, feature = "test-support"))]
@@ -2023,7 +2062,7 @@ impl SemanticGraphStore {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        result
+        result.map(narrow_cache_read)
     }
 
     /// Carrier-aware warm read that validates BEFORE bubbling. Returns
@@ -2057,7 +2096,8 @@ impl SemanticGraphStore {
         let requested = crate::semantic_query::demand::MaterializedPoint::new(
             family::point_for_slot(slot, &requested_path_for_key(key)),
         );
-        self.get_validated_impl(&family, slot, &requested, ctx)
+        self.get_validated_value_impl(&family, slot, &requested, ctx)
+            .map(narrow_cache_read)
     }
 
     /// Prepared-token variant of [`Self::get_validated`] — reads the
@@ -2065,12 +2105,12 @@ impl SemanticGraphStore {
     /// re-projecting the key. Used by the cooperative slow path's
     /// step-1 warm re-read.
     #[must_use]
-    fn get_validated_prepared(
+    fn get_validated_value_prepared(
         &self,
         prepared: &PreparedKeyHandle,
         ctx: &dyn crate::resolver_core::ResolverContext,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
-        self.get_validated_impl(
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        self.get_validated_value_impl(
             prepared.family(),
             prepared.slot(),
             prepared.requested_point(),
@@ -2078,13 +2118,13 @@ impl SemanticGraphStore {
         )
     }
 
-    fn get_validated_impl(
+    fn get_validated_value_impl(
         &self,
         family: &FamilyKey,
         slot: ModeSlot,
         requested: &crate::semantic_query::demand::MaterializedPoint,
         ctx: &dyn crate::resolver_core::ResolverContext,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -2256,6 +2296,8 @@ impl SemanticGraphStore {
     /// waits and abort-driven retries are unaffected: a populated
     /// warm slot means no joiner participation is needed.
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must fold into their dependency-fact set for the publish-side completion-fence revalidation"]
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // test-support feature can be enabled without the in-crate memo tests
     pub(crate) fn execute_cooperative<F, R, O>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -2265,7 +2307,30 @@ impl SemanticGraphStore {
     ) -> CacheRead<QueryResult<SemanticNodeId>>
     where
         F: FnOnce() -> O,
-        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput>,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId>>,
+        R: FnOnce() -> SemanticNodeId,
+    {
+        narrow_cache_read(self.execute_cooperative_value(ctx, key, recursion_sentinel, || {
+            let output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId> =
+                build().into();
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::<SemanticQueryValue>::from(
+                output,
+            )
+        }))
+    }
+
+    /// Domain-agnostic cooperative admission. This is the canonical memo
+    /// path for semantic queries whose value is not a graph node.
+    pub(crate) fn execute_cooperative_value<F, R, O>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        key: SemanticQueryKey,
+        recursion_sentinel: R,
+        build: F,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
+    where
+        F: FnOnce() -> O,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
         // Loop-5 instrumentation — count every logical entry. Logged
@@ -2273,6 +2338,13 @@ impl SemanticGraphStore {
         // slow-path entries.
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Request cancellation is a typed ReturnOnly terminal and must be
+        // observed before even a warm probe: canceled requests do not consume
+        // shared semantic work or reuse a value as if they completed normally.
+        if ctx.is_cancelled() {
+            return cancelled_cache_read();
+        }
 
         // Prepare the query token ONCE per execute: one
         // `family_and_slot` projection, one requested-point build, one
@@ -2298,13 +2370,17 @@ impl SemanticGraphStore {
         // execution falls through to the cooperative slow path that
         // owns same-path recursion, in-flight admission, and cold-build
         // publish.
-        if let Some(hit) = self.try_warm_hit_fast_path(ctx, &prepared) {
-            return hit;
+        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared) {
+            return if ctx.is_cancelled() {
+                cancelled_cache_read()
+            } else {
+                hit
+            };
         }
 
         // Slow path — cooperative-admission flow. Handles same-path
         // recursion, joiner-condvar waits, cold-build publish.
-        self.execute_cooperative_slow(ctx, prepared, recursion_sentinel, build)
+        self.execute_cooperative_value_slow(ctx, prepared, recursion_sentinel, build)
     }
 
     /// Warm-hit fast path for [`Self::execute_cooperative`]. Returns
@@ -2345,11 +2421,11 @@ impl SemanticGraphStore {
     /// `Vec` reorder, no fact-rail work. Mirrors the relation memo's
     /// `get_relation`.
     #[inline]
-    fn try_warm_hit_fast_path(
+    fn try_warm_value_hit_fast_path(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: &PreparedKeyHandle,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         let key = prepared.key();
         let family = prepared.family();
         let slot = prepared.slot();
@@ -2461,16 +2537,16 @@ impl SemanticGraphStore {
     /// dispatch recording for the COLD/MISS / JOINER paths live here.
     /// The warm-hit branch is intentionally absent — the fast path
     /// handles every warm hit before this function is called.
-    fn execute_cooperative_slow<F, R, O>(
+    fn execute_cooperative_value_slow<F, R, O>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: PreparedKeyHandle,
         recursion_sentinel: R,
         build: F,
-    ) -> CacheRead<QueryResult<SemanticNodeId>>
+    ) -> CacheRead<QueryResult<SemanticQueryValue>>
     where
         F: FnOnce() -> O,
-        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput>,
+        O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
         R: FnOnce() -> SemanticNodeId,
     {
         let mut miss_recorded = false;
@@ -2506,6 +2582,9 @@ impl SemanticGraphStore {
         );
 
         let inflight = loop {
+            if ctx.is_cancelled() {
+                return cancelled_cache_read();
+            }
             // 1. Warm memo hit. Reaches here only on the rare race
             //    where another thread published between our fast-path
             //    check and now (or on retry after an abort sweep). The
@@ -2513,7 +2592,7 @@ impl SemanticGraphStore {
             //    variant of `get_validated` — a freshly-published entry
             //    validates; a slot a concurrent invalidation made stale
             //    misses and the cold-build path below recomputes.
-            if let Some(hit) = self.get_validated_prepared(&prepared, ctx) {
+            if let Some(hit) = self.get_validated_value_prepared(&prepared, ctx) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
                     sched_ctx
@@ -2588,9 +2667,15 @@ impl SemanticGraphStore {
                 // production behaviour change (gated out of release builds).
                 #[cfg(any(test, feature = "test-support"))]
                 self.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
-                inflight
-                    .ready
-                    .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
+                while state.completed.is_none() && !state.aborted && !ctx.is_cancelled() {
+                    // Timed parking is the cancellation observation rail. A
+                    // canceled joiner detaches by returning from this call; it
+                    // never marks the shared flight aborted and therefore
+                    // cannot disturb an uncancelled winner or sibling.
+                    inflight
+                        .ready
+                        .wait_for(&mut state, std::time::Duration::from_millis(2));
+                }
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -2602,6 +2687,10 @@ impl SemanticGraphStore {
                     ctx.0.record_cache_event(
                         verter_scheduler::request_context::CacheEventKind::JoinedWait,
                     );
+                }
+                if ctx.is_cancelled() {
+                    drop(state);
+                    return cancelled_cache_read();
                 }
                 if state.aborted && retries < MAX_INFLIGHT_RETRIES {
                     // The (family, slot) this entry was serving was swept
@@ -2794,7 +2883,9 @@ impl SemanticGraphStore {
         let mut panic_guard =
             InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone());
         let build_start = Instant::now();
-        let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput = build().into();
+        let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+            SemanticQueryValue,
+        > = build().into();
         let build_held_ns = build_start.elapsed().as_nanos() as u64;
         let crate::project_semantic_dispatch::walk::QueryBuildOutput {
             result,
@@ -2840,6 +2931,15 @@ impl SemanticGraphStore {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
             .fetch_add(build_held_ns, std::sync::atomic::Ordering::Relaxed);
+
+        // A canceled leader owns no publish right. Abort this exact flight,
+        // wake live followers, and remove the admission so an uncancelled
+        // follower retries as a fresh cold owner. The computed value is
+        // intentionally discarded and can never enter the warm memo.
+        if ctx.is_cancelled() {
+            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            return cancelled_cache_read();
+        }
 
         // 5. Warm-publish only successful values; errors and recursion
         // sentinels never become shared-cache entries ( cache
@@ -2915,6 +3015,10 @@ impl SemanticGraphStore {
             } else {
                 Some(&broadcast_carrier)
             };
+        if ctx.is_cancelled() {
+            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            return cancelled_cache_read();
+        }
         if let Some(carrier) = publish_carrier {
             let published = self.warm_publish_one(
                 ctx,
@@ -2986,6 +3090,10 @@ impl SemanticGraphStore {
             if let Some(ctx) = crate::request_context::current_request_context() {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        if ctx.is_cancelled() {
+            self.abort_inflight_for_cancellation(&prepared, &inflight);
+            return cancelled_cache_read();
         }
         {
             // Bubble the build's carrier fact rail into this winner
@@ -3103,6 +3211,35 @@ impl SemanticGraphStore {
         }
     }
 
+    /// Abort and retire one canceled cold owner without publishing a result.
+    /// Joiners observe `aborted`, wake, and re-enter admission with their own
+    /// still-unconsumed build closure. Removal is pointer-guarded so a follower
+    /// that already installed a replacement flight cannot be evicted here.
+    fn abort_inflight_for_cancellation(
+        &self,
+        prepared: &PreparedKeyHandle,
+        inflight: &Arc<InflightEntry>,
+    ) {
+        {
+            let mut state = inflight.state.lock();
+            state.aborted = true;
+            state.completed = None;
+            state.dep_signature = None;
+            state.graph_carrier = None;
+            state.walker_diagnostics = None;
+            state.cache_suppress = true;
+            state.result_is_partial = true;
+        }
+        inflight.ready.notify_all();
+        let mut table = self.inflight.lock();
+        if table
+            .get(prepared)
+            .is_some_and(|entry| Arc::ptr_eq(entry, inflight))
+        {
+            table.remove(prepared);
+        }
+    }
+
     /// Cold-winner publish path. Extracted from
     /// [`Self::execute_cooperative`] step 5 (refactor — pure
     /// extraction, no behaviour change). Skips publish when the result is
@@ -3133,7 +3270,7 @@ impl SemanticGraphStore {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         prepared: &PreparedKeyHandle,
-        result: &QueryResult<SemanticNodeId>,
+        result: &QueryResult<SemanticQueryValue>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
@@ -3190,6 +3327,10 @@ impl SemanticGraphStore {
         // Atomic re-check under the entries lock — `state` is briefly
         // locked nested inside `entries`; no AB-BA deadlock risk because
         // no path holds `state` then acquires `entries`.
+        let cancelled = ctx.is_cancelled();
+        if cancelled {
+            inflight.state.lock().aborted = true;
+        }
         let aborted = inflight.state.lock().aborted;
         if aborted {
             drop(entries);
@@ -3369,7 +3510,11 @@ impl SemanticGraphStore {
         let validated_at_generation = ctx.project_type_store().project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let entry = MemoEntry {
-            result,
+            result: match result {
+                QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                QueryResult::Error(error) => QueryResult::Error(error),
+            },
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature,
             self_root_canonicals,
@@ -3573,196 +3718,6 @@ impl SemanticGraphStore {
                 }
             }
         }
-    }
-
-    /// Test-only accessor: read the entry's [`ReadSetSignature`]
-    /// carrier for `key`. Returns `None` when no entry is present.
-    /// Surfaces the carrier's path-precise `facts` rail so integration
-    /// tests can assert what facts the entry actually holds.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn entry_read_set_signature_for_tests(
-        &self,
-        key: &SemanticQueryKey,
-    ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
-        let (family, slot) = family_and_slot(key);
-        let entries = self.entries_lock_diagnosed();
-        entries
-            .get(&family)
-            .and_then(|slots| slots.slot_peek_any(slot).cloned())
-            .map(|entry| entry.read_set_signature)
-    }
-
-    /// Test-only probe: the §3.4 `satisfied_projection` (materialised
-    /// record set) of the FIRST candidate in `key`'s `(family, slot)`.
-    /// Lets a guard assert backfill writes the RECORDED points verbatim
-    /// (never a synthesised target-slot / meet point). `None` when the
-    /// slot is empty.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn entry_satisfied_projection_for_tests(
-        &self,
-        key: &SemanticQueryKey,
-    ) -> Option<MaterializedSet> {
-        let (family, slot) = family_and_slot(key);
-        let entries = self.entries_lock_diagnosed();
-        entries
-            .get(&family)
-            .and_then(|slots| slots.slot_peek_any(slot).cloned())
-            .map(|entry| entry.satisfied_projection)
-    }
-
-    /// Test-only direct publish. Delegates to
-    /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]
-    /// with an empty dispatch-dep signature and generation `0`.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn publish_with_carrier_for_tests(
-        &self,
-        key: SemanticQueryKey,
-        result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-    ) -> usize {
-        self.publish_with_carrier_dispatch_and_generation_for_tests(
-            key,
-            result,
-            read_set_signature,
-            self_root_canonicals,
-            empty_signature(),
-            0,
-        )
-    }
-
-    /// Variant of [`Self::publish_with_carrier_for_tests`] taking an
-    /// explicit `dispatch_dep_signature` (FIFO reverse-index symmetry
-    /// discriminator). Generation `0`.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn publish_with_carrier_and_dispatch_for_tests(
-        &self,
-        key: SemanticQueryKey,
-        result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        dispatch_dep_signature: DepSignature,
-    ) -> usize {
-        self.publish_with_carrier_dispatch_and_generation_for_tests(
-            key,
-            result,
-            read_set_signature,
-            self_root_canonicals,
-            dispatch_dep_signature,
-            0,
-        )
-    }
-
-    /// Variant taking an explicit `validated_at_generation` — used
-    /// by multi-candidate overlay/base tests. The `satisfied_projection`
-    /// defaults to the single requested point for `key` (so the published
-    /// entry self-satisfies its own slot's warm-hit gate). Use
-    /// [`Self::publish_with_materialized_set_for_tests`] to craft a record
-    /// set that DIFFERS from the nominal slot (the §3.4 discriminating
-    /// guards).
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn publish_with_carrier_dispatch_and_generation_for_tests(
-        &self,
-        key: SemanticQueryKey,
-        result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        dispatch_dep_signature: DepSignature,
-        validated_at_generation: u64,
-    ) -> usize {
-        let satisfied_projection = MaterializedSet::single(requested_point_for_key(&key));
-        self.publish_with_materialized_set_for_tests(
-            key,
-            result,
-            read_set_signature,
-            self_root_canonicals,
-            dispatch_dep_signature,
-            validated_at_generation,
-            satisfied_projection,
-        )
-    }
-
-    /// Test-only direct publish taking an EXPLICIT
-    /// `satisfied_projection` — the §3.4 materialised-record set the
-    /// published entry carries. Lets a guard publish an entry whose
-    /// recorded points DIFFER from its nominal slot (e.g. an `Expanded`
-    /// slot whose compute only materialised a `Navigate` point), exercising
-    /// the warm-hit `cached_satisfies` gate and the recorded-point
-    /// backfill directly.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn publish_with_materialized_set_for_tests(
-        &self,
-        key: SemanticQueryKey,
-        result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        dispatch_dep_signature: DepSignature,
-        validated_at_generation: u64,
-        satisfied_projection: MaterializedSet,
-    ) -> usize {
-        if !matches!(result, QueryResult::Value(_)) {
-            return 0;
-        }
-        let (family, slot) = family_and_slot(&key);
-        let requested_path = requested_path_for_key(&key);
-        let admission_seq = self.alloc_candidate_admission_seq();
-        let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
-        let entry = MemoEntry {
-            result,
-            read_set_signature: read_set_signature.clone(),
-            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
-            self_root_canonicals,
-            walker_diagnostics: Arc::from([]),
-            satisfied_projection,
-            validated_at_generation,
-            admission_seq,
-        };
-        let mut entries = self.entries_lock_diagnosed();
-        let family_was_new = !entries.contains_key(&family);
-        let outcome =
-            entries
-                .entry(family.clone())
-                .or_default()
-                .publish(slot, entry, &requested_path);
-        let populated_slots = outcome.populated;
-        for (displaced_slot, displaced_entry) in &outcome.displaced {
-            reverse_index::drain_candidate_reverse_index_registrations(
-                &self.canonical_to_entries,
-                &family,
-                *displaced_slot,
-                displaced_entry,
-            );
-        }
-        if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family);
-        }
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            &family,
-            &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature,
-            admission_seq,
-        );
-        drop(entries);
-        populated_slots.len()
-    }
-
-    /// Test-only candidate-count probe for `(family, slot)`.
-    #[doc(hidden)]
-    pub fn slot_candidate_count_for_tests(&self, key: &SemanticQueryKey) -> usize {
-        let (family, slot) = family_and_slot(key);
-        let entries = self.entries_lock_diagnosed();
-        entries
-            .get(&family)
-            .map(|slots| slots.slot_candidate_count_for_test(slot))
-            .unwrap_or(0)
     }
 }
 
@@ -3995,5 +3950,7 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
     }
 }
 
+#[cfg(test)]
+mod cancellation_tests;
 #[cfg(test)]
 mod tests;

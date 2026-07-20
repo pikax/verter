@@ -34,6 +34,16 @@ use verter_type_expr::{
     PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
 };
 
+mod dependency_facts;
+pub use dependency_facts::{
+    collect_class_dependency_facts, collect_interface_dependency_facts,
+    collect_type_alias_dependency_facts, collect_type_dependency_facts,
+    collect_type_dependency_paths, TypeDependencyFacts, UnsupportedValuePositionKind,
+};
+
+#[cfg(test)]
+mod dependency_facts_tests;
+
 /// Lower an OXC `TSType` node into a `TypeExpr`.
 ///
 /// `source` is the full source text, used for extracting raw text
@@ -261,8 +271,7 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
             // wrong literal `-1n`). Lowering it to a `BigInt` literal (rather than
             // the `Unknown` fallback) keeps it a first-class bigint literal so the
             // Vue runtime-constructor reducer maps it to `Number` exactly like a
-            // positive bigint literal — matching legacy `infer_runtime_type`'s
-            // unary-bigint -> Number rule (`type_surface/infer.rs`).
+            // positive bigint literal.
             Expression::BigIntLiteral(b) => match unary.operator {
                 UnaryOperator::UnaryNegation => TypeExpr::Literal(
                     verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),

@@ -32,6 +32,12 @@ export function getWorkspace(): Workspace | null {
   return workspace;
 }
 
+export function resetWorkspace(): void {
+  // `Workspace` holds no process-lifetime resources (unlike `VerterHost`), so
+  // dropping the reference is sufficient; GC reclaims the native handle.
+  workspace = null;
+}
+
 export function loadHost(config?: { devMode?: boolean }): VerterHost {
   if (host) return host;
   const n = loadNative();

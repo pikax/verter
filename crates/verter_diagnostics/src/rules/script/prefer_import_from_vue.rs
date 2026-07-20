@@ -67,6 +67,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "@vue/runtime-core".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![],
                 span: Span::new(0, 40),
@@ -88,6 +89,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![],
                 span: Span::new(0, 25),

@@ -14,6 +14,8 @@ use std::sync::Arc;
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
+use crate::TopLevelOwnerId;
+
 /// Symbol space of an authored declaration anchor. The lower-neutral analogue of
 /// the session `SemanticSymbolSpace` — `verter_type_expr` cannot depend on
 /// `verter_session`, so the locator carries its own closed space tag.
@@ -55,6 +57,8 @@ pub enum LocatorSymbolSpace {
 pub struct AuthoredAnchor {
     /// Canonical id of the file whose parse produced the authored body.
     pub canonical_id: Arc<str>,
+    /// Top-level lexical owner within the producing file.
+    pub owner: TopLevelOwnerId,
     /// Stable merged-symbol name of the owning declaration.
     pub symbol: Arc<str>,
     /// Type / value / namespace space of the owning declaration.
@@ -512,6 +516,7 @@ impl AuthoredAnchor {
     pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.canonical_id.is_empty().then(|| Self {
             canonical_id: Arc::from(canonical_id),
+            owner: self.owner,
             symbol: Arc::clone(&self.symbol),
             space: self.space,
         })

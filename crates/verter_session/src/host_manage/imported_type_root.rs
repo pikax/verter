@@ -28,7 +28,7 @@ impl VerterHost {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String) {
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts(dep_canonical, imported_name)
             .0
     }
@@ -47,19 +47,61 @@ impl VerterHost {
     /// discarded route facts are the only proof a barrel retarget
     /// invalidates the enclosing cache entry. Memoized builds route
     /// through the `_with_facts` sibling and record the facts onto the
-    /// active tracer.
+    /// active tracer. Production request-bound contexts now call the
+    /// `_with_facts_with_store_view` sibling directly; the sole
+    /// remaining caller is the test-support arm of the panic-shimmed
+    /// `ResolverContext::resolve_imported_type_root`, so this wrapper
+    /// is gated to that configuration.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn resolve_imported_type_root_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> (String, String) {
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts_with_store_view(
             view,
             dep_canonical,
             imported_name,
         )
         .0
+    }
+
+    /// Request-context-bound imported-root resolution.
+    ///
+    /// The [`crate::resolver_core::ResolverContext`] is the authority for both
+    /// the cache-validation view and every cold producer read. In particular,
+    /// a session context must keep its overlay-aware prepared declaration and
+    /// export-route reads all the way through the cold closure; reducing the
+    /// context to a `StoreView` would retain validation identity while losing
+    /// the overlay's semantic inputs.
+    pub(crate) fn resolve_imported_type_root_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+        self.resolve_imported_type_root_with_facts_with_context(ctx, dep_canonical, imported_name)
+            .0
+    }
+
+    /// Facts-returning sibling of
+    /// [`Self::resolve_imported_type_root_with_context`].
+    pub(crate) fn resolve_imported_type_root_with_facts_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
+        self.resolve_imported_type_root_with_facts_with_context_and_store_view(
+            ctx,
+            ctx.store_view(),
+            dep_canonical,
+            imported_name,
+        )
     }
 
     /// Like [`Self::resolve_imported_type_root`] but ALSO returns
@@ -81,7 +123,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         // Test-only convenience: seed the resolve-and-cache method with a
@@ -114,7 +156,25 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        (String, String),
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
+        self.resolve_imported_type_root_with_facts_with_context_and_store_view(
+            self,
+            view,
+            dep_canonical,
+            imported_name,
+        )
+    }
+
+    pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        view: &dyn crate::resolver_core::StoreView,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
@@ -139,7 +199,7 @@ impl VerterHost {
                 normalized_canonical.as_str(),
                 imported_name,
                 view,
-                self,
+                ctx,
                 || {
                     // Trace inside the closure: the closure runs only on
                     // cache miss, so the trace event records actual
@@ -157,7 +217,8 @@ impl VerterHost {
                     });
 
                     if let Some((resolved, facts)) = self
-                        .resolve_direct_imported_type_root_fast_path(
+                        .resolve_direct_imported_type_root_fast_path_with_context(
+                            ctx,
                             normalized_canonical.as_str(),
                             imported_name,
                         )
@@ -165,7 +226,8 @@ impl VerterHost {
                         return Some((
                             crate::resolver_core::ImportedRootResult::Resolved {
                                 canonical_source: resolved.0,
-                                resolved_symbol: resolved.1,
+                                owner: resolved.1,
+                                resolved_symbol: resolved.2,
                             },
                             facts,
                         ));
@@ -176,18 +238,22 @@ impl VerterHost {
                     // resolved by a prior query. Then collect full route
                     // participant facts via build_named_type_export_route_entry
                     // for proper cache invalidation on intermediate barrel changes.
-                    let (route_result, facts) = self.build_named_type_export_route_entry(
-                        normalized_canonical.as_str(),
-                        imported_name,
-                    )?;
+                    let (route_result, facts) = self
+                        .build_named_type_export_route_entry_with_context(
+                            ctx,
+                            normalized_canonical.as_str(),
+                            imported_name,
+                        )?;
                     let root_result = match route_result {
                         crate::resolver_core::RouteResult::Resolved {
                             defining_canonical,
+                            defining_owner,
                             defining_symbol,
                         } => crate::resolver_core::ImportedRootResult::Resolved {
                             canonical_source: self
                                 .resolve_eval_dependency_canonical(defining_canonical.as_str())
                                 .unwrap_or(defining_canonical),
+                            owner: defining_owner,
                             resolved_symbol: defining_symbol,
                         },
                         crate::resolver_core::RouteResult::Miss => {
@@ -198,16 +264,9 @@ impl VerterHost {
                 },
             );
         let (resolved, source_kind, facts) = match cached {
-            Some((cached, facts)) => match cached.as_tuple() {
-                Some(tuple) => (tuple, "named_export_target", facts),
-                None => (
-                    (normalized_canonical.clone(), imported_name.to_string()),
-                    "miss",
-                    facts,
-                ),
-            },
+            Some((cached, facts)) => (cached.as_identity(), "named_export_target", facts),
             None => (
-                (normalized_canonical.clone(), imported_name.to_string()),
+                None,
                 "miss",
                 crate::fact_signature_helpers::empty_fact_signature(),
             ),
@@ -224,13 +283,20 @@ impl VerterHost {
                     + imported_name.len()
                     + normalized_canonical.len()
                     + source_kind.len()
-                    + resolved.0.len()
-                    + resolved.1.len(),
+                    + resolved.as_ref().map_or(0, |identity| {
+                        identity.canonical_id.len() + identity.symbol_name.len()
+                    }),
             );
+            let target_canonical = resolved
+                .as_ref()
+                .map_or("<miss>", |identity| identity.canonical_id.as_ref());
+            let target_symbol = resolved
+                .as_ref()
+                .map_or("<miss>", |identity| identity.symbol_name.as_ref());
             let _ = write!(
                 detail,
                 "canonical={} imported={} normalized={} source={} target_canonical={} target_symbol={} store_view=false",
-                dep_canonical, imported_name, normalized_canonical, source_kind, resolved.0, resolved.1,
+                dep_canonical, imported_name, normalized_canonical, source_kind, target_canonical, target_symbol,
             );
             detail
         });

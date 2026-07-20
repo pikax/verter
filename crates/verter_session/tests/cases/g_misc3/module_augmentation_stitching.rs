@@ -45,11 +45,6 @@ fn fixture(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
 }
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
-}
-
 fn build_indexed_with_source(
     canonical: &str,
     raw: &str,
@@ -66,7 +61,6 @@ fn build_indexed_with_source(
         shallow,
         Arc::from(raw),
         Arc::from(raw),
-        empty_external(),
     ))
 }
 

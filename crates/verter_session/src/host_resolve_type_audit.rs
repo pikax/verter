@@ -78,6 +78,8 @@ pub type TypeResolutionResult = SemanticNodeId;
 /// `(Option<…>, …)` tuple that collapsed every error to `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeResolutionRequestError {
+    /// The request was cancelled before semantic resolution completed.
+    Cancelled,
     /// A declaration resolved to `= intrinsic` but the active TS SDK
     /// advertises an intrinsic the verter intrinsic registry does not
     /// implement.
@@ -138,6 +140,7 @@ impl TypeResolutionRequestError {
                 name: Arc::clone(name),
             }),
             QueryError::BudgetExceeded(failure) => Some(Self::BudgetExceeded(failure.clone())),
+            QueryError::Cancelled => Some(Self::Cancelled),
             QueryError::UnstableState { attempts } => Some(Self::UnstableState {
                 attempts: *attempts,
             }),
@@ -206,18 +209,25 @@ impl VerterHost {
         // that do not carry a mode field — Conditional, KeyOf, …).
         let query_mode = query_projection_mode(&query);
 
-        // Construct a per-request context. Footprint accumulator is
-        // disabled for type-resolution requests — they do not collect
-        // semantic-footprint events the way component-meta does.
+        // Construct a per-request context. The footprint-attachment
+        // pipeline plants the per-request accumulator (and workspace VFS
+        // audit sink) so type-resolution requests attach a mined footprint
+        // when `footprint_capture=true` — the same passive-observer scope
+        // the component-meta entry installs.
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        let footprint_scope = crate::typeinfo::footprint_attach::TypeinfoFootprintScope::install(
+            self,
+            request_id,
+            footprint_capture,
+        );
         let ctx = RequestContext::with_kind_and_timing(
             request_id,
             Arc::<str>::from(canonical_hint),
             RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
-            None,
+            footprint_scope.accumulator(),
         );
 
         // BEFORE installing the TLS guard: construct the registration.
@@ -377,6 +387,12 @@ impl VerterHost {
             None
         };
 
+        // Finalise the footprint through the shared miner (drain +
+        // per-file attribution + deterministic mine). `(None, [])` when
+        // capture is off.
+        let (footprint, files) =
+            crate::typeinfo::footprint_attach::mine_typeinfo_footprint(self, &ctx);
+
         let record = RequestAuditRecord {
             request_id,
             canonical_id: canonical_hint.to_string(),
@@ -386,9 +402,9 @@ impl VerterHost {
             timings,
             memory,
             store,
-            footprint: None,
+            footprint,
             scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
+            files,
             waits,
             kind_payload: RequestKindPayload::TypeResolution(payload),
             capture_state: verter_audit::AuditCaptureState::ActiveStored,
@@ -471,7 +487,8 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::ContextualTypeAt { .. }
         // LowerLocator is the fixed locator-shape lowering — mode-free by
         // design (no projection demand to consume a budget).
-        | SemanticQueryKey::LowerLocator { .. } => ProjectionMode::Identity,
+        | SemanticQueryKey::LowerLocator { .. }
+        | SemanticQueryKey::ClassifyBroadRuntime { .. } => ProjectionMode::Identity,
     }
 }
 
@@ -514,6 +531,7 @@ mod request_error_classification_tests {
     fn decl_placeholder_is_not_a_request_fault() {
         let err = QueryError::DeclPlaceholder {
             canonical_id: Arc::from("/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: Arc::from("Foo"),
             whole_hash: Default::default(),
         };

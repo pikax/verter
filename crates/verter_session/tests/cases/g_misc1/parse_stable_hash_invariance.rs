@@ -22,11 +22,6 @@ use verter_session::parse_stable_hash::compute_parse_stable_hash;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
-fn empty_external(
-) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
-}
-
 /// Build a real `IndexedReady` from authored source through the
 /// service-backed construction path. `parse_stable_hash` walks ONLY the
 /// shallow inventory, so the raw source rides along untouched.
@@ -37,7 +32,6 @@ fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
         shallow,
         Arc::from(source),
         Arc::from(source),
-        empty_external(),
     ))
 }
 

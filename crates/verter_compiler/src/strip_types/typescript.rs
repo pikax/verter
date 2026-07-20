@@ -30,6 +30,30 @@ pub fn strip_typescript_types<'a>(
         code_transform,
         base_offset,
         source: script_source,
+        skip_imports: false,
+    };
+    stripper.visit_program(program);
+}
+
+/// Strip TypeScript from a program **without touching import declarations**.
+///
+/// The `<script setup>` force_js flow rewrites imports itself (type-only
+/// removal, value/mixed reconstruction + hoisting) in `generate_script`. This
+/// body strip therefore owns everything EXCEPT imports — annotations, casts,
+/// generics, type declarations (interfaces/type aliases lowered/removed, enums
+/// → runtime IIFE), and exports — so a setup import is edited exactly once and
+/// never double-overwritten (which corrupts the transform).
+pub fn strip_typescript_body_types<'a>(
+    program: &Program,
+    code_transform: &mut CodeTransform<'a>,
+    base_offset: u32,
+    script_source: &'a str,
+) {
+    let mut stripper = TypeStripper {
+        code_transform,
+        base_offset,
+        source: script_source,
+        skip_imports: true,
     };
     stripper.visit_program(program);
 }
@@ -55,6 +79,7 @@ pub fn strip_typescript_from_expression<'a>(
         code_transform,
         base_offset,
         source: expression_source,
+        skip_imports: false,
     };
     stripper.visit_expression(expression);
 }
@@ -73,6 +98,7 @@ pub fn strip_typescript_from_statement<'a>(
         code_transform,
         base_offset,
         source: script_source,
+        skip_imports: false,
     };
     stripper.visit_statement(statement);
 }
@@ -81,6 +107,9 @@ struct TypeStripper<'a, 'ct> {
     code_transform: &'ct mut CodeTransform<'a>,
     base_offset: u32,
     source: &'a str,
+    /// When true, leave import declarations untouched (the `<script setup>`
+    /// force_js flow owns imports; the body strip must not double-edit them).
+    skip_imports: bool,
 }
 
 impl<'a, 'ct> TypeStripper<'a, 'ct> {
@@ -111,6 +140,30 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
             }
         }
         self.remove(start, ta.span.end);
+    }
+
+    /// Remove `[start, span_end)` plus any trailing whitespace and a single `;`.
+    /// Used to delete a whole statement (TS overload / declare signature) that
+    /// would otherwise leave a dangling terminator.
+    fn remove_with_trailing_semi(&mut self, start: u32, span_end: u32) {
+        let bytes = self.source.as_bytes();
+        let mut end = span_end as usize;
+        while end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t') {
+            end += 1;
+        }
+        let end = if end < bytes.len() && bytes[end] == b';' {
+            (end + 1) as u32
+        } else {
+            span_end
+        };
+        self.remove(start, end);
+    }
+
+    /// Remove a body-less function declaration — a TypeScript overload signature
+    /// or an ambient `declare function` — including any trailing `;`. A bare
+    /// `function f(args)` header (or a lone `declare function f()`) is invalid JS.
+    fn remove_bodyless_function_decl(&mut self, func: &Function) {
+        self.remove_with_trailing_semi(func.span.start, func.span.end);
     }
 
     // =========================================================================
@@ -208,7 +261,13 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.visit_statement(&l.body);
             }
             Statement::FunctionDeclaration(func) => {
-                self.visit_function(func);
+                if func.body.is_none() {
+                    // TS overload signature or ambient `declare function` — no
+                    // body. A bare `function f(args)` header is invalid JS.
+                    self.remove_bodyless_function_decl(func);
+                } else {
+                    self.visit_function(func);
+                }
             }
             Statement::ClassDeclaration(class) => {
                 self.visit_class(class);
@@ -275,7 +334,11 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.visit_variable_declaration(var_decl);
             }
             Declaration::FunctionDeclaration(func) => {
-                self.visit_function(func);
+                if func.body.is_none() {
+                    self.remove_bodyless_function_decl(func);
+                } else {
+                    self.visit_function(func);
+                }
             }
             Declaration::ClassDeclaration(class) => {
                 self.visit_class(class);
@@ -703,8 +766,18 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                     self.remove(param_start, pattern_start);
                 }
             }
-            // Type annotation is on FormalParameter, not BindingPattern
-            if let Some(ta) = &param.type_annotation {
+            // Optional `?` marker (TypeScript-only). Handled independently of
+            // the type annotation — comment/whitespace-aware — so `(a?)`,
+            // `(a /*c*/?)`, and `(a?: T)` all lower to valid JS. When an
+            // annotation is present, strip only its `: Type` part (the `?` is
+            // removed here) to avoid an overlapping double-remove.
+            if param.optional {
+                self.strip_optional_marker_after(param.pattern.span().end);
+                if let Some(ta) = &param.type_annotation {
+                    self.remove(ta.span.start, ta.span.end);
+                }
+            } else if let Some(ta) = &param.type_annotation {
+                // Type annotation is on FormalParameter, not BindingPattern
                 self.remove_type_annotation(ta);
             }
             self.visit_binding_pattern(&param.pattern);
@@ -714,6 +787,41 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 self.remove_type_annotation(ta);
             }
             self.visit_binding_pattern(&rest.rest.argument);
+        }
+    }
+
+    /// Remove the TypeScript optional `?` that follows a formal-parameter binding
+    /// pattern, skipping intervening whitespace AND comments (block `/* */` and
+    /// line `//`). Fail-closed: if the next non-trivia byte is not `?`, leave the
+    /// source unchanged rather than risk corrupting valid JS.
+    fn strip_optional_marker_after(&mut self, pattern_end: u32) {
+        let bytes = self.source.as_bytes();
+        let mut i = pattern_end as usize;
+        loop {
+            if i >= bytes.len() {
+                return;
+            }
+            match bytes[i] {
+                b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'?' => {
+                    self.remove(i as u32, (i + 1) as u32);
+                    return;
+                }
+                _ => return,
+            }
         }
     }
 
@@ -914,6 +1022,9 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
     // =========================================================================
 
     fn visit_import_declaration(&mut self, import: &ImportDeclaration) {
+        if self.skip_imports {
+            return;
+        }
         if import.import_kind.is_type() {
             self.remove(import.span.start, import.span.end);
             return;
@@ -966,6 +1077,29 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
     fn visit_export_named(&mut self, export: &ExportNamedDeclaration) {
         if export.export_kind.is_type() {
             self.remove(export.span.start, export.span.end);
+            return;
+        }
+
+        // Body-less exported function = TS overload / ambient declare signature.
+        // Remove the whole `export … function f(): T;` (incl. the `export`
+        // keyword and trailing `;`) — stripping only the inner function span
+        // leaves a dangling `export ;`.
+        if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
+            if func.body.is_none() {
+                self.remove_with_trailing_semi(export.span.start, export.span.end);
+                return;
+            }
+        }
+
+        // `export enum` → drop the `export` keyword and lower to the runtime
+        // IIFE. A bare `export var E; …` inside a setup() wrapper is invalid JS,
+        // and Vue disallows `export` in <script setup>; the enum stays a
+        // module-local runtime value.
+        if let Some(Declaration::TSEnumDeclaration(ts_enum)) = &export.declaration {
+            if export.span.start < ts_enum.span.start {
+                self.remove(export.span.start, ts_enum.span.start);
+            }
+            self.convert_enum(ts_enum);
             return;
         }
 

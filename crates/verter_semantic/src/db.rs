@@ -664,6 +664,7 @@ mod tests {
         let mut snapshot = ScriptAnalysisSnapshot::default();
         snapshot.macros = vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -728,6 +729,7 @@ mod tests {
         let mut child_snap = ScriptAnalysisSnapshot::default();
         child_snap.macros = vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -763,6 +765,7 @@ mod tests {
         let mut parent_snap = ScriptAnalysisSnapshot::default();
         parent_snap.imports = vec![AnalyzedImport {
             source: "./child.vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Child".into(),
@@ -1077,6 +1080,7 @@ mod tests {
         let mut child_snap = ScriptAnalysisSnapshot::default();
         child_snap.macros = vec![AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -1114,6 +1118,7 @@ mod tests {
         let mut parent_snap = ScriptAnalysisSnapshot::default();
         parent_snap.imports = vec![AnalyzedImport {
             source: "./child.vue".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Child".into(),

@@ -80,6 +80,7 @@ mod tests {
     fn make_import(source: &str, bindings: Vec<AnalyzedImportBinding>) -> AnalyzedImport {
         AnalyzedImport {
             source: source.to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
             bindings,
             span: Span::new(0, 50),

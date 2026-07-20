@@ -4110,6 +4110,7 @@ defineProps<Props>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/GateIndex.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Props",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4232,6 +4233,7 @@ defineProps<Props>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/CtorRoot.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Props",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4278,6 +4280,7 @@ defineProps<Root>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/IdxKind.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4287,6 +4290,7 @@ defineProps<Root>()
     assert!(
         !resolver_host.owner_local_macro_root_has_surface(
             "/IdxKind.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineEmits,
         ),
@@ -4332,6 +4336,7 @@ defineProps<Root>()
     assert!(
         resolver_host.owner_local_macro_root_has_surface(
             "/CallRoot.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineProps,
         ),
@@ -4341,11 +4346,64 @@ defineProps<Root>()
     assert!(
         !resolver_host.owner_local_macro_root_has_surface(
             "/CallRoot.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
             "Root",
             AnalyzedMacroKind::DefineExpose,
         ),
         "a call-signature-only root MUST NOT read as a non-empty expose surface — expose \
          publishes named members only",
+    );
+}
+
+#[test]
+fn owner_local_macro_root_authority_gate_isolates_same_name_module_and_instance_roots() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OwnerGateIsolation.vue",
+            r#"<script lang="ts">
+type Root = { moduleOnly: string }
+</script>
+<script setup lang="ts">
+type Root = { (): void }
+defineProps<Root>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/OwnerGateIsolation.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(resolver_host.owner_local_macro_root_has_surface(
+        "/OwnerGateIsolation.vue",
+        verter_type_expr::TopLevelOwnerId::module(0),
+        "Root",
+        AnalyzedMacroKind::DefineExpose,
+    ));
+    assert!(resolver_host.owner_local_macro_root_has_surface(
+        "/OwnerGateIsolation.vue",
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "Root",
+        AnalyzedMacroKind::DefineProps,
+    ));
+    assert!(
+        !resolver_host.owner_local_macro_root_has_surface(
+            "/OwnerGateIsolation.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "Root",
+            AnalyzedMacroKind::DefineExpose,
+        ),
+        "the instance gate must not read the same-name module member surface",
     );
 }
 
@@ -5358,6 +5416,55 @@ defineExpose({ shown })
 }
 
 #[test]
+fn evaluate_types_expose_bindings_follow_validated_owner_visibility() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/OwnerBindings.vue",
+            r#"<script lang="ts">
+const shared: string = 'module'
+const moduleOnly: boolean = true
+</script>
+
+<script setup lang="ts">
+const shared: number = 1
+defineExpose({ shared, moduleOnly })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let evaluated = project
+        .host()
+        .evaluate_types("/OwnerBindings.vue")
+        .expect("evaluated types should exist");
+    let binding_type = |name: &str| {
+        let field = evaluated
+            .bindings
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("missing exposed binding {name}"));
+        crate::test_only::semantic_source_probe::demand_type_expr(
+            project.host(),
+            "/OwnerBindings.vue",
+            field.r#type.present().expect("present binding source"),
+        )
+        .unwrap_or_else(|| panic!("binding {name} must demand-materialize"))
+    };
+
+    assert_eq!(
+        binding_type("shared"),
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the setup-local binding shadows the same-name module binding"
+    );
+    assert_eq!(
+        binding_type("moduleOnly"),
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "an instance exposure may see its sole validated module parent"
+    );
+}
+
+#[test]
 fn get_component_meta_resolves_workspace_only_barrel_dependencies_for_define_props() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -6267,6 +6374,7 @@ defineSlots<OpenMappedSlots<T>>()
             crate::semantic_query::InstantiateKey::new(
                 crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                     Arc::from("/OpenMappedSlots.vue"),
+                    verter_type_expr::TopLevelOwnerId::module(0),
                     Arc::from("OpenMappedSlots"),
                 ),
                 Arc::from(vec![t_param].into_boxed_slice()),
@@ -10530,6 +10638,72 @@ defineProps<LinkProps>()
 }
 
 #[test]
+fn resolve_component_meta_registry_preserves_module_owner_with_same_name_instance_helper() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+interface Shared {
+  moduleOnly: string
+  moduleSibling: boolean
+}
+
+export interface ModuleProps {
+  value?: Shared['moduleOnly']
+}
+</script>
+<script setup lang="ts">
+interface Shared {
+  instanceOnly: number
+}
+
+defineProps<ModuleProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let shared = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Shared")
+        .expect("the module-owned Shared route root should be published");
+    let shared_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(shared.type_source.present().expect("present source")),
+        "module-owned Shared registry entry",
+    );
+    let TypeExpr::Object(shape) = &shared_ty else {
+        panic!("module-owned Shared should publish a route-scoped object, got {shared_ty:?}");
+    };
+    let member_names: Vec<&str> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        member_names,
+        ["moduleOnly"],
+        "the exact Module owner and requested route must win over the same-name Instance helper"
+    );
+    assert!(
+        !member_names.contains(&"instanceOnly") && !member_names.contains(&"moduleSibling"),
+        "owner isolation and non-Whole route precision must exclude unrelated members, got {member_names:?}"
+    );
+}
+
+#[test]
 fn resolve_component_meta_evaluates_owner_local_registry_aliases_against_imported_generic_helpers()
 {
     let project = make_project();
@@ -12903,6 +13077,56 @@ defineProps<ButtonProps>()
             |member| matches!(member, ObjectMember::Property(property) if property.name == "slot"),
         ),
         "LocalConfig should keep its slot member, got {local_config_ty:?}"
+    );
+}
+
+#[test]
+fn resolve_component_meta_registry_declines_ambiguous_same_target_local_aliases() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/helpers.ts",
+            r#"type WithChildren<T> = {
+  slot: ComponentConfig<T>
+}
+
+export type ComponentConfig<T> = WithChildren<T>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig as First } from './helpers'
+import type { ComponentConfig as Second } from './helpers'
+
+export interface ButtonProps {
+  slot?: First<string>['slot']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    assert!(
+        resolved.resolved_type_registry.iter().all(|entry| {
+            !matches!(entry.name.as_str(), "First" | "Second" | "ComponentConfig")
+        }),
+        "an ambiguous reverse import identity must not publish an arbitrary local alias: {:?}",
+        resolved
+            .resolved_type_registry
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -16438,7 +16662,11 @@ defineSlots<ButtonSlots>()
 
     let theme = project
         .host()
-        .prepared_value_decl("/src/theme.ts", "theme")
+        .prepared_value_decl_in(
+            "/src/theme.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "theme",
+        )
         .expect("theme should have a prepared value declaration");
     assert!(
         theme.type_annotation.classification
@@ -19179,8 +19407,8 @@ const props = defineProps<ButtonProps>()
     );
 }
 
-/// The JSDoc enrichment path for imported props goes through the host-
-/// cached parsed program + cached external type analysis. The
+/// The JSDoc enrichment path for imported props goes through the retained
+/// parsed program and cache-owned declaration facts. The
 /// enrichment path must NOT fall back to a raw-source reparse helper
 /// (which would allocate a fresh oxc arena and reparse dependency
 /// source). That architectural guarantee is enforced statically by
@@ -21714,6 +21942,26 @@ defineProps<WidgetProps>()
             )
         })
     };
+    let extraction = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            host,
+            "/src/Widget.vue",
+            cached.state.as_ref(),
+            true,
+            ctx,
+        )
+    });
+    assert!(
+        extraction
+            .fallthrough_fact_versions
+            .as_deref()
+            .is_some_and(|facts| facts.iter().any(|fact| matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, .. }
+                    if canonical_id == "/src/utils.ts"
+            ))),
+        "fallthrough extraction MUST publish the exact runtime root-spread dependency facts"
+    );
     assert!(
         roots_file("/src/types.ts"),
         "cached fact signature MUST root the macro type dependency \
@@ -26298,6 +26546,7 @@ defineEmits<{ change: [value: number]; close: [] }>()
             verter_type_expr::locators::MacroPayloadLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::from("/App.vue"),
+                    owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: Arc::from("default"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
@@ -26462,6 +26711,7 @@ fn authored_decl_body_source(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::from(canonical),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: Arc::from(symbol),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
@@ -27446,6 +27696,7 @@ fn missing_interior_slot() -> verter_type_expr::locators::TypeBodySlot {
     verter_type_expr::locators::TypeBodySlot {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: Arc::from("/definitely-missing.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from("NoSuchType"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Type,
         },
@@ -27552,6 +27803,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
                 .into_boxed_slice(),
             ),
             return_ty: None,
+            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,
@@ -27665,6 +27917,7 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
                 .into_boxed_slice(),
             ),
             return_ty: None, // deliberately absent synthetic return slot
+            return_inference: tf::ReturnInferenceCompleteness::NotInferred,
             has_implementation_body: false,
             spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
                 SourceSynthetic,
@@ -28970,6 +29223,42 @@ defineEmits<{ save: [id: number] }>()
 /// cross-file call-signature emit resolved through a SESSION (overlay
 /// upserts + the fixed-view output path — the flow the native bindings
 /// drive) publishes the same real payload tuple as the base-host scalar.
+#[test]
+fn cross_file_call_signature_emit_analysis_retains_the_session_overlay_context() {
+    let project = make_project();
+    let session = project.open_session_batch().expect("batch session");
+    session
+        .upsert(
+            "/events.ts",
+            "export interface Events { (e: 'save', value: number): void }\n".to_string(),
+        )
+        .unwrap();
+    session
+        .upsert(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let analysis = session
+        .get_component_meta("/App.vue")
+        .expect("the session-overlay analysis query succeeds")
+        .expect("the overlay-only component resolves");
+    assert!(
+        analysis.events.iter().any(|event| event.name == "save"),
+        "macro DTO extraction must retain the session view while resolving the exact \
+         overlay-only `/events.ts` `Events` declaration"
+    );
+}
+
+/// OUTPUT parity for the same overlay-only callable declaration. The analysis
+/// extraction and the later payload materialization must remain bound to the
+/// same session view and fixed store capture.
 #[test]
 fn cross_file_call_signature_emit_payload_replays_under_a_session_overlay() {
     let project = make_project();
@@ -30984,11 +31273,14 @@ defineProps<Props>()
         .host()
         .prepared_decl_bundle("/inner.ts")
         .expect("the inner dependency materializes a prepared-decl bundle");
+    let inner_scope = inner_bundle
+        .owner_scope(verter_type_expr::TopLevelOwnerId::ordinary_file())
+        .expect("ordinary TypeScript file has a module-zero declaration scope");
     assert!(
-        inner_bundle.scope_type_names.contains("Real"),
+        inner_scope.scope_type_names.contains("Real"),
         "the non-carrier inner file keeps its type inventory (never \
          script-scanned); got {:?}",
-        inner_bundle.scope_type_names
+        inner_scope.scope_type_names
     );
 
     let output = project

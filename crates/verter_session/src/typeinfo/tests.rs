@@ -996,6 +996,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         .expect("shallow state for /types.ts");
     let key = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from("/types.ts"),
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("ColorModeSelectProps"),
     );
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
@@ -1176,6 +1177,7 @@ fn classify_dispatch_error_routes_miss_to_ok_fallback() {
         classify_dispatch_error(
             &QueryError::DeclPlaceholder {
                 canonical_id: Arc::from("/a.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: Arc::from("Foo"),
                 whole_hash: Default::default(),
             },

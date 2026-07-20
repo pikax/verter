@@ -61,6 +61,15 @@ impl CompileTarget {
         self.intersects(Self::SCRIPT | Self::TEMPLATE | Self::TEMPLATE_DATA)
     }
 
+    /// Whether compilation consumes authoritative runtime macro semantics.
+    ///
+    /// Runtime codegen needs the DTO shapes themselves. IDE codegen consumes
+    /// the same DTO's public prop names to assign template binding ownership;
+    /// it must not rediscover those names from authored type syntax.
+    pub fn needs_runtime_macro_semantics(self) -> bool {
+        self.needs_script() || self.needs_tsx()
+    }
+
     /// Whether VDOM/Vapor/SSR template codegen should run.
     pub fn needs_template_codegen(self) -> bool {
         self.intersects(Self::TEMPLATE)
@@ -79,6 +88,44 @@ impl CompileTarget {
     /// Whether raw template data extraction should run.
     pub fn needs_template_data(self) -> bool {
         self.intersects(Self::TEMPLATE_DATA)
+    }
+}
+
+/// Authoritative Vue macro semantics supplied by the session boundary.
+///
+/// Runtime and TSC projections are independent demands. `Unavailable` is an
+/// explicit state: targets that encounter a type-based macro without the
+/// corresponding bundle emit a typed diagnostic and fail closed.
+#[derive(Debug, Clone, Default)]
+pub enum VueMacroSemanticInput {
+    #[default]
+    Unavailable,
+    Runtime(std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>),
+    Tsc(std::sync::Arc<verter_macro_dto::MacroTscBundle>),
+    RuntimeAndTsc {
+        runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+        tsc: std::sync::Arc<verter_macro_dto::MacroTscBundle>,
+    },
+}
+
+impl VueMacroSemanticInput {
+    #[must_use]
+    pub fn runtime(&self) -> Option<&verter_macro_dto::MacroRuntimeBundle> {
+        match self {
+            Self::Runtime(bundle)
+            | Self::RuntimeAndTsc {
+                runtime: bundle, ..
+            } => Some(bundle),
+            Self::Unavailable | Self::Tsc(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn tsc(&self) -> Option<&verter_macro_dto::MacroTscBundle> {
+        match self {
+            Self::Tsc(bundle) | Self::RuntimeAndTsc { tsc: bundle, .. } => Some(bundle),
+            Self::Unavailable | Self::Runtime(_) => None,
+        }
     }
 }
 
@@ -103,6 +150,10 @@ pub struct CodegenOptions {
     pub filename: Option<String>,
     /// Production mode — affects component ID generation and optimizations.
     pub is_production: bool,
+    /// Compile the SFC as a Vue custom element. This is an explicit script
+    /// runtime-prop policy axis and is unrelated to template tag matching in
+    /// [`Self::custom_elements`].
+    pub custom_element: bool,
     /// Custom component ID (overrides auto-generation from filename).
     pub component_id: Option<String>,
     /// Controls which compilation steps run.
@@ -165,6 +216,12 @@ impl CodegenOptions {
 
     pub fn with_production(mut self, is_production: bool) -> Self {
         self.is_production = is_production;
+        self
+    }
+
+    /// Select Vue's custom-element runtime-prop policy explicitly.
+    pub fn with_custom_element(mut self, custom_element: bool) -> Self {
+        self.custom_element = custom_element;
         self
     }
 
@@ -245,8 +302,8 @@ pub struct CustomBlock {
 
 /// Verter-specific compilation options, layered on top of [`CodegenOptions`].
 ///
-/// Controls Vapor-mode output, TypeScript stripping, source map generation,
-/// and cross-file type resolution for macros like `defineProps<ExternalType>()`.
+/// Controls compilation policy only. Semantic macro inputs are supplied
+/// independently to `compile`/`compile_from_parsed`.
 #[derive(Default)]
 pub struct VerterCompileOptions {
     /// When true, force Vapor mode output regardless of template attributes,
@@ -264,16 +321,6 @@ pub struct VerterCompileOptions {
     /// the instance proxy (`_ctx.*`); it does not set `__ssrInlineRender`
     /// (that flag is only for setup-returned render functions).
     pub ssr: bool,
-    /// Pre-resolved external types for cross-file type resolution.
-    ///
-    /// Keyed by type name (e.g., `"BadgeProps"`), value is the resolved type elements.
-    /// These are merged into the type resolution context alongside companion `<script>`
-    /// types, enabling `defineProps<ExternalType>()` to resolve types from other files.
-    ///
-    /// The host is responsible for resolving these from its file store before compilation.
-    pub external_types: Option<
-        rustc_hash::FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements>,
-    >,
     /// Deprecated: use `CodegenOptions::target` with `CompileTarget::TEMPLATE_DATA`.
     /// Kept for backward-compatibility with direct `compile()` callers.
     /// When true, ORs `CompileTarget::TEMPLATE_DATA` into the active target.

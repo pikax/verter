@@ -300,16 +300,29 @@ fn c2_barrel_value_reexport_peels_to_final_source_in_oracle_and_graph_native() {
         .expect("graph-native must resolve the barrel export target");
 
     assert_eq!(
-        (oracle.canonical_id.as_str(), oracle.name.as_str()),
+        (
+            oracle.canonical_id.as_str(),
+            oracle.owner,
+            oracle.name.as_str()
+        ),
         (
             graph_native.canonical_id.as_str(),
+            graph_native.owner,
             graph_native.name.as_str()
         ),
         "C2 barrel terminal divergence: oracle={oracle:?} graph_native={graph_native:?}"
     );
     assert_eq!(
-        (oracle.canonical_id.as_str(), oracle.name.as_str()),
-        ("/dep.ts", "themeImpl"),
+        (
+            oracle.canonical_id.as_str(),
+            oracle.owner,
+            oracle.name.as_str()
+        ),
+        (
+            "/dep.ts",
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "themeImpl"
+        ),
         "the barrel re-export must resolve to the FINAL defining (./dep, themeImpl), \
          not the intermediate barrel binding"
     );
@@ -334,15 +347,20 @@ fn c2_typeof_alias_cycle_terminates_identically_in_oracle_and_graph_native() {
          export const b: typeof a = 0 as unknown as { v: 1 }\n",
     );
 
-    let oracle = host.peel_value_decl_alias_for_test("/cyc.ts", "a");
-    let graph_native = host.peel_value_decl_alias_graph_native_for_test("/cyc.ts", "a");
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let oracle = host.peel_value_decl_alias_for_test("/cyc.ts", owner, "a");
+    let graph_native = host.peel_value_decl_alias_graph_native_for_test("/cyc.ts", owner, "a");
     assert_eq!(
         oracle, graph_native,
         "C2 cycle terminal divergence: oracle={oracle:?} graph_native={graph_native:?}"
     );
     assert_eq!(
         oracle,
-        ("/cyc.ts".to_string(), "a".to_string()),
+        crate::resolver_core::ValueDeclIdentity {
+            canonical_id: "/cyc.ts".to_string(),
+            owner,
+            name: "a".to_string(),
+        },
         "the typeof cycle must terminate at its origin `a` (visited-set guard), got {oracle:?}"
     );
 }
@@ -498,7 +516,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     upsert_rune_module(&host, "/r.svelte.ts", "export const c = $state(0)\n");
     for rune in ["$state", "$derived", "$effect", "$inspect"] {
         assert!(
-            host.dependency_value_symbol_graph_native("/r.svelte.ts", rune)
+            host.dependency_value_symbol_graph_native_for_test("/r.svelte.ts", rune)
                 .is_some(),
             "the rune module must expose the ambient `{rune}` through the \
              graph-native value-symbol reader (the surviving path the re-home \
@@ -506,7 +524,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
         );
     }
     assert!(
-        host.dependency_value_symbol_graph_native("/r.svelte.ts", "c")
+        host.dependency_value_symbol_graph_native_for_test("/r.svelte.ts", "c")
             .is_some(),
         "the rune module's own `c` must be visible through the graph-native reader"
     );
@@ -517,7 +535,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     upsert_ts(&plain_host, "/plain.ts", "export const c = 0\n");
     assert!(
         plain_host
-            .dependency_value_symbol_graph_native("/plain.ts", "$state")
+            .dependency_value_symbol_graph_native_for_test("/plain.ts", "$state")
             .is_none(),
         "a plain `.ts` must NOT expose the ambient `$state` through the \
          graph-native reader (per-file scoping); a global injection would leak it"
@@ -533,7 +551,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
         "export const $derived: { mine: 1 } = { mine: 1 }\nexport const c = $state(0)\n",
     );
     let user_derived = user_host
-        .dependency_value_symbol_graph_native("/u.svelte.ts", "$derived")
+        .dependency_value_symbol_graph_native_for_test("/u.svelte.ts", "$derived")
         .expect("user `$derived` must be visible through the graph-native reader");
     let annotation_source = user_derived
         .type_annotation
@@ -567,7 +585,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     for rune in ["$state", "$derived", "$effect", "$inspect"] {
         let oracle_has = oracle_env.value_symbols.contains_key(rune);
         let graph_native_has = host
-            .dependency_value_symbol_graph_native("/r.svelte.ts", rune)
+            .dependency_value_symbol_graph_native_for_test("/r.svelte.ts", rune)
             .is_some();
         assert_eq!(
             oracle_has, graph_native_has,

@@ -359,6 +359,7 @@ const model = defineModel<ModelValue>()
             verter_type_expr::locators::SymbolBodyLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: Arc::clone(&identity.canonical_id),
+                    owner: identity.owner,
                     symbol: Arc::clone(&identity.decl_name),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },

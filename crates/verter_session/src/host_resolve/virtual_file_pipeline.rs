@@ -26,6 +26,13 @@ use verter_compiler::framework_common::{
     CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
 };
 
+pub(crate) fn vue_macro_output_matches_revision(
+    output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+    expected: verter_semantic::analysis::types::Hash16,
+) -> bool {
+    output.origin_whole_hash == Some(expected)
+}
+
 /// The render-only `Main` output of the
 /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane: the
 /// assembled `_sfc_main` module bytes, its optional source map, and the
@@ -172,6 +179,24 @@ pub(crate) struct CompileServe {
     /// flag (never the diagnostic-code prefix) to turn a requested-but-absent `Main`
     /// into an explicit `RuntimeSurfaceRefused`.
     pub(crate) runtime_surface_refused: bool,
+}
+
+/// BY-VALUE observation of what
+/// [`VerterHost::prefetch_compile_tier_observation_targets`] consumed.
+///
+/// The prefetch runs OUTSIDE the compile fact tracer (deliberately — load /
+/// index mutations must not fold into the consumer's observed read set), so
+/// its fenced-serve consumption can never reach the tracer's
+/// `note_non_cacheable_read_fan_out` chokepoint on its own. The Session
+/// cold-compile branch replays this value INTO its tracer scope so the
+/// session-slot admission consults ONE rail (`non_cacheable_read_observed`)
+/// for both the in-scope and the prefetch-consumed fenced serves.
+#[derive(Debug, Clone, Copy, Default)]
+struct CompileTierPrefetchObservation {
+    /// Whether ANY `IndexedReady` serve the prefetch consumed was FENCED
+    /// (ReturnOnly, `store_published == false`) — a payload basis the
+    /// read-side fact rail cannot reject.
+    fenced_serve_observed: bool,
 }
 
 impl VerterHost {
@@ -360,7 +385,7 @@ impl VerterHost {
         script_imports: &[verter_semantic::analysis::AnalyzedImport],
         macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
         external_requests: &[ExternalSourceRequest],
-    ) {
+    ) -> CompileTierPrefetchObservation {
         // Test/debug-only invocation count. The cold-compute path gates
         // this prefetch to `Session`; the per-host counter lets a routing
         // test observe that gate without a fact-rail side channel.
@@ -368,11 +393,29 @@ impl VerterHost {
         self.compile_tier_prefetch_invocations
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Fenced-serve consumption, collected BY VALUE across every
+        // `IndexedReady` serve this prefetch consumes. The prefetch runs
+        // OUTSIDE the compile fact tracer (so load/index mutations are not
+        // folded into the observed read set), which means a FENCED
+        // (ReturnOnly, `store_published == false`) serve consumed here can
+        // never reach the tracer's `note_non_cacheable_read_fan_out`
+        // chokepoint — yet the compile's payload is derived from the
+        // prefetch-populated state. The caller replays this flag INTO the
+        // Session tracer scope so the session-slot admission declines
+        // (ReturnOnly never publishes).
+        let mut fenced_serve_observed = false;
+        let mut note_serve =
+            |serve: &Option<crate::host_manage::prepared_decl::IndexedReadyServe>| {
+                if let Some(serve) = serve {
+                    fenced_serve_observed |= !serve.store_published;
+                }
+            };
+
         // Owner's indexed-ready must be present so the tracer can
         // resolve owner-relative import surfaces; the owner's own
         // FileArtifactStore entry is also a producer-side dependency
         // of route observation (R26).
-        let _ = self.ensure_indexed_ready_serve(owner_canonical);
+        note_serve(&self.ensure_indexed_ready_serve(owner_canonical));
 
         let workspace = self.workspace();
         let mut resolved_deps = std::collections::BTreeSet::<String>::new();
@@ -540,7 +583,11 @@ impl VerterHost {
         // is published before the tracer queries fact hashes. Calls
         // are idempotent / cache-hit on warm reads.
         for dep_canonical in resolved_deps {
-            let _ = self.ensure_indexed_ready_serve(&dep_canonical);
+            note_serve(&self.ensure_indexed_ready_serve(&dep_canonical));
+        }
+
+        CompileTierPrefetchObservation {
+            fenced_serve_observed,
         }
     }
 
@@ -1542,14 +1589,16 @@ impl VerterHost {
         // macro-type collection, dep sync) is produced independently by
         // `compile_entry`, so running the prefetch for those modes would
         // be load + index work nobody records.
-        if actual_mode == CompileCacheMode::Session {
+        let prefetch_observation = if actual_mode == CompileCacheMode::Session {
             self.prefetch_compile_tier_observation_targets(
                 &canonical_id,
                 &compile_input.script_imports,
                 &compile_input.macro_type_deps,
                 &compile_input.external_requests,
-            );
-        }
+            )
+        } else {
+            CompileTierPrefetchObservation::default()
+        };
 
         // Compile, routed by the actual cache mode.
         //
@@ -1563,6 +1612,17 @@ impl VerterHost {
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
             let (result, fact_read_set) = self.with_fact_tracer(|| {
+                // Replay the prefetch's BY-VALUE fenced-serve consumption
+                // into THIS tracer scope: the compile's payload derives from
+                // the prefetch-populated state, so a fenced serve consumed
+                // there taints this compile exactly as an in-scope fenced
+                // serve would — one admission rail
+                // (`non_cacheable_read_observed`), consulted below.
+                if prefetch_observation.fenced_serve_observed {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    );
+                }
                 crate::compile_fact_emission::observe_compile_tier_dependencies(
                     self,
                     &canonical_id,
@@ -2042,8 +2102,12 @@ impl VerterHost {
     /// defineProps/Emits/Slots/Model/Expose/Options)
     /// and generates a `ComponentPublicInstance`-based declaration.
     ///
-    /// Returns `None` if the file is not in the host or not a Vue SFC.
-    pub fn get_public_api(&self, canonical_id: &str) -> Option<TscResponse> {
+    /// Returns `Ok(None)` if the file is not in the host or exposes no
+    /// framework public-API carrier. Projection failures remain typed errors.
+    pub fn get_public_api(
+        &self,
+        canonical_id: &str,
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         self.get_public_api_with_mode(canonical_id, PublicApiMode::Public, None)
     }
 
@@ -2065,7 +2129,10 @@ impl VerterHost {
     /// on-demand `ensure_indexed_ready_serve` / `ensure_loaded` path against
     /// globally-published artifacts. Default `Public` mode / no profile — the
     /// scalar surface verter-tsc consumes.
-    pub fn get_public_api_batch(&self, canonical_ids: &[&str]) -> Vec<Option<TscResponse>> {
+    pub fn get_public_api_batch(
+        &self,
+        canonical_ids: &[&str],
+    ) -> Vec<Result<Option<TscResponse>, crate::PublicApiProjectionError>> {
         if canonical_ids.is_empty() {
             return Vec::new();
         }
@@ -2083,7 +2150,9 @@ impl VerterHost {
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
             .into_iter()
-            .map(|projection| projection.map(|projection| projection.response))
+            .map(|projection| {
+                projection.map(|projection| projection.map(|projection| projection.response))
+            })
             .collect()
     }
 
@@ -2102,7 +2171,12 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
         view: &dyn crate::session_view::SessionView,
-    ) -> Vec<Option<crate::framework::api_projector::ComponentApiProjection>> {
+    ) -> Vec<
+        Result<
+            Option<crate::framework::api_projector::ComponentApiProjection>,
+            crate::PublicApiProjectionError,
+        >,
+    > {
         canonical_ids
             .iter()
             .map(|canonical_id| {
@@ -2114,12 +2188,21 @@ impl VerterHost {
                 // api-projector leg projects no public-API surface — a `None`
                 // slot (the pre-registry non-Vue behavior).
                 let canonical = self.resolve_alias_or_canonical(canonical_id);
-                let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
-                    snap.downcast_data::<crate::host_executor::HostSourceData>()
-                        .map(|hd| hd.file_language.clone())
-                })?;
-                let adapter_id = file_language.adapter_id()?;
-                let projector = self.framework_registry().api_projector_for(adapter_id)?;
+                let Some(file_language) =
+                    self.scheduler.try_get_source(&canonical).and_then(|snap| {
+                        snap.downcast_data::<crate::host_executor::HostSourceData>()
+                            .map(|hd| hd.file_language.clone())
+                    })
+                else {
+                    return Ok(None);
+                };
+                let Some(adapter_id) = file_language.adapter_id() else {
+                    return Ok(None);
+                };
+                let Some(projector) = self.framework_registry().api_projector_for(adapter_id)
+                else {
+                    return Ok(None);
+                };
                 projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
                     host: self,
                     resolved_canonical: &canonical,
@@ -2128,7 +2211,7 @@ impl VerterHost {
                     profile,
                     render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
                         cold_seed: fixed.cold_seed(),
-                        session_view: view,
+                        view,
                     }),
                 })
             })
@@ -2177,7 +2260,7 @@ impl VerterHost {
         canonical_id: &str,
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
-    ) -> Option<TscResponse> {
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         // `N=1` of the batch body. Capture ONE `BatchFixedView` and thread its
         // shared cold seed + the base session view through the shared per-item
         // render path ([`Self::render_public_api_items`], which dispatches
@@ -2186,26 +2269,55 @@ impl VerterHost {
         // Scalar == batch BY CONSTRUCTION (both are `render_public_api_items`),
         // and the render takes ZERO per-call store-view reads. The host method
         // stays the single entry every consumer calls. The host-level
-        // public-API path carries no session overlay, so the base `HostViewRef`
-        // is the session view (an empty-overlay capture).
-        //
-        // CAVEAT (see `get_public_api_batch`): the base host view is correct
-        // ONLY because there is no session-scoped public-API entry; a future
-        // session-scoped entry must thread the real overlay/session view (and
-        // likely a `SessionResolverContext`), not this base view.
+        // A profile-owned content override is represented as one immutable
+        // source overlay and captured through the same fixed-view mechanism.
+        // The projector then threads that exact view into a
+        // `SessionResolverContext`; a profile with no content override uses the
+        // base `HostViewRef` capture.
+        let render = |fixed: &crate::resolver_store::BatchFixedView,
+                      view: &dyn crate::session_view::SessionView| {
+            self.render_public_api_items(
+                std::slice::from_ref(&canonical_id),
+                mode,
+                profile,
+                fixed,
+                view,
+            )
+            .into_iter()
+            .next()
+            .unwrap_or(Ok(None))
+            .map(|projection| projection.map(|projection| projection.response))
+        };
+
+        if let Some(profile) = profile {
+            let canonical = self.resolve_alias_or_canonical(canonical_id);
+            let profile_hash = compile_profile_hash(profile);
+            let content_override = self.compile_cache().get(&canonical).and_then(|cache| {
+                cache
+                    .content_overrides
+                    .get(&profile_hash)
+                    .map(|state| (state.source.clone(), state.parse.whole_hash))
+            });
+            if let Some((source, whole_hash)) = content_override {
+                let mut overlays = FxHashMap::default();
+                overlays.insert(canonical.clone(), source);
+                let mut overlay_hashes = FxHashMap::default();
+                overlay_hashes.insert(canonical, whole_hash);
+                let tombstones = std::collections::HashSet::new();
+                let view = crate::session_view::OverlaidViewRef::new(
+                    self,
+                    &overlays,
+                    &overlay_hashes,
+                    &tombstones,
+                );
+                let fixed = self.capture_batch_fixed_view(&view);
+                return render(&fixed, &view);
+            }
+        }
+
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
-        self.render_public_api_items(
-            std::slice::from_ref(&canonical_id),
-            mode,
-            profile,
-            &fixed,
-            &view,
-        )
-        .into_iter()
-        .next()
-        .flatten()
-        .map(|projection| projection.response)
+        render(&fixed, &view)
     }
 
     /// Generate the public declaration and its framework-owned structured
@@ -2218,7 +2330,10 @@ impl VerterHost {
     pub fn get_public_api_projection(
         &self,
         canonical_id: &str,
-    ) -> Option<crate::framework::api_projector::ComponentApiProjection> {
+    ) -> Result<
+        Option<crate::framework::api_projector::ComponentApiProjection>,
+        crate::PublicApiProjectionError,
+    > {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(
@@ -2230,16 +2345,16 @@ impl VerterHost {
         )
         .into_iter()
         .next()
-        .flatten()
+        .unwrap_or(Ok(None))
     }
 
     /// The Vue public-API extraction body — the EXEMPT legacy producer the
     /// `vue` component-API projector leg delegates to.
     ///
     /// Consumes deep pipeline internals (`cached_tsc_extract` /
-    /// `extract_tsc_state` / `generate_tsc_from_state` /
-    /// `collect_external_types_from_loaded_files` /
-    /// `sync_transitive_macro_type_dependencies`) so it stays in this module.
+    /// `extract_tsc_state` / `generate_tsc_from_state` / the request-local
+    /// TypeInfo macro producer / `sync_transitive_macro_type_dependencies`) so
+    /// it stays in this module.
     /// Both [`Self::get_public_api_with_mode`] and the registry's `vue`
     /// component-API projector leg
     /// ([`crate::framework::api_projectors::VueComponentApiProjector`])
@@ -2253,17 +2368,22 @@ impl VerterHost {
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
         render_seed: Option<crate::framework::api_projector::PublicApiRenderSeed<'_>>,
-    ) -> Option<TscResponse> {
+    ) -> Result<Option<TscResponse>, crate::PublicApiProjectionError> {
         // Already alias-resolved by the caller; own it for the body's
         // existing `&canonical` / `.clone()` consumers without re-resolving.
         let canonical = resolved_canonical.to_string();
         let profile_hash = profile.map(compile_profile_hash);
+        let has_content_override = profile_hash.is_some_and(|profile_hash| {
+            self.compile_cache()
+                .get(&canonical)
+                .is_some_and(|cache| cache.content_overrides.contains_key(&profile_hash))
+        });
 
         if self.is_canonical_evicted(&canonical) {
-            return None;
+            return Ok(None);
         }
 
-        let (source, macro_type_deps, script_imports, cached_extract, whole_hash) = {
+        let Some((source, cached_extract, whole_hash)) = (|| {
             let efs = self.effective_file_state(&canonical, profile_hash)?;
             // Require the source to be loaded — the rest of the flow reads
             // its derived state. (Framework classification is decided once,
@@ -2275,22 +2395,22 @@ impl VerterHost {
                     .map(|hd| hd.file_language.clone())
             })?;
             // cached_tsc_extract lives on DerivedRawState (D48 split).
-            let cached = self.derived_raw_cache().get(&canonical).and_then(|cc| {
-                cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
-                    if *hash == efs.whole_hash {
-                        Some(Arc::clone(extract))
-                    } else {
-                        None
-                    }
+            let cached = if has_content_override {
+                None
+            } else {
+                self.derived_raw_cache().get(&canonical).and_then(|cc| {
+                    cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
+                        if *hash == efs.whole_hash {
+                            Some(Arc::clone(extract))
+                        } else {
+                            None
+                        }
+                    })
                 })
-            });
-            (
-                efs.source,
-                efs.script_analysis.macro_type_deps.clone(),
-                efs.script_analysis.imports.clone(),
-                cached,
-                efs.whole_hash,
-            )
+            };
+            Some((efs.source, cached, efs.whole_hash))
+        })() else {
+            return Ok(None);
         };
 
         // Derive component name from canonical_id: last path segment, strip .vue extension.
@@ -2300,46 +2420,61 @@ impl VerterHost {
             .unwrap_or(&canonical)
             .trim_end_matches(".vue")
             .to_string();
-        // External-macro-type collection. The collector iterates only
-        // `macro_type_deps`; with none, it returns `(None, vec![],
-        // empty_set)`, so skip building the resolver context + collector
-        // entirely and substitute the empty result. The transitive set
-        // is then EMPTY, which the sync below clears unconditionally.
-        let (external_types, transitive_macro_type_deps) = if macro_type_deps.is_empty() {
-            (None, std::collections::BTreeSet::<String>::new())
-        } else {
-            // The batch-shared cold seed + session view from the ctx carrier —
-            // NO per-call store-view read on this path (the O(N²) cliff
-            // collapse). Production ALWAYS threads a seed (scalar `N=1` / batch
-            // both capture one fixed view up front); a macro-bearing render
-            // reaching here without one is a wiring error — fail closed (return
-            // `None` via `?`) rather than re-introduce a per-call
-            // `resolver_store_view_read()`.
-            let seed = render_seed.as_ref()?;
+        // Produce one terminal TSC bundle for this public-API request. Batch
+        // callers share their captured cold seed; direct callers create one
+        // coherent seed through the producer helper.
+        let macro_output = if let Some(seed) = render_seed.as_ref() {
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-                self,
-                seed.cold_seed,
-                overlay,
-            );
-            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-            // Session-aware collection threading the active view (NEVER `None`
-            // on the render path).
-            let (external_types, _, transitive) = self
-                .collect_external_types_from_loaded_files_with_view(
-                    ctx,
-                    &canonical,
-                    &macro_type_deps,
-                    &script_imports,
-                    profile_hash,
-                    Some(seed.session_view),
+            if seed.view.overlay_content_hash_for(&canonical).is_some() {
+                let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+                    self,
+                    seed.view,
+                    seed.cold_seed,
+                    overlay,
                 );
-            (external_types, transitive)
+                self.produce_vue_macro_codegen_with_ctx(
+                    &session_ctx,
+                    &canonical,
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                )
+            } else {
+                let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                    self,
+                    seed.cold_seed,
+                    overlay,
+                );
+                self.produce_vue_macro_codegen_with_ctx(
+                    &host_ctx,
+                    &canonical,
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                )
+            }
+        } else {
+            self.produce_vue_macro_codegen(
+                &canonical,
+                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+            )
         };
+        if !vue_macro_output_matches_revision(&macro_output, whole_hash) {
+            return Ok(None);
+        }
+        // The syntax extract/source and semantic bundle must describe the same
+        // indexed revision. Producing the semantic closure may overlap an edit;
+        // fail closed instead of joining compatible-looking macro ordinals from
+        // different source revisions.
+        if self
+            .effective_file_state(&canonical, profile_hash)
+            .is_none_or(|current| current.whole_hash != whole_hash)
+        {
+            return Ok(None);
+        }
+        let transitive_macro_type_deps =
+            macro_output.transitive_canonicals.iter().cloned().collect();
         // Unconditional: `replace_semantic_transitive(canonical, {})`
         // CLEARS the semantic axis when the set is empty (closes F15).
         self.sync_transitive_macro_type_dependencies(&canonical, &transitive_macro_type_deps);
+        let macro_tsc = macro_output.tsc;
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_compiler::tsc::TscMode::Public,
             PublicApiMode::Testing => verter_compiler::tsc::TscMode::Testing,
@@ -2357,7 +2492,7 @@ impl VerterHost {
             },
         ) {
             let arc = Arc::new(fresh);
-            {
+            if !has_content_override {
                 // cached_tsc_extract lives on DerivedRawState (D48 split).
                 let mut derived_ref = self
                     .derived_raw_cache()
@@ -2375,35 +2510,40 @@ impl VerterHost {
                 &verter_compiler::tsc::TscGenOptions {
                     conditional_root_narrowing: false,
                     filename: Some(canonical.clone()),
-                    external_types,
                     mode: tsc_mode,
                 },
-            );
-            return Some(TscResponse {
+                macro_tsc.as_deref().map_or(
+                    verter_compiler::tsc::MacroTscInput::NotRequired,
+                    verter_compiler::tsc::MacroTscInput::Authoritative,
+                ),
+            )?;
+            return Ok(Some(TscResponse {
                 code: Arc::from(tsc_out.code),
                 source_map: if tsc_out.source_map.is_empty() {
                     None
                 } else {
                     Some(Arc::from(tsc_out.source_map))
                 },
-            });
+            }));
         };
 
         let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
             &extract,
-            &source,
             &component_name,
             tsc_mode,
-            external_types.as_ref(),
-        );
-        Some(TscResponse {
+            macro_tsc.as_deref().map_or(
+                verter_compiler::tsc::MacroTscInput::NotRequired,
+                verter_compiler::tsc::MacroTscInput::Authoritative,
+            ),
+        )?;
+        Ok(Some(TscResponse {
             code: Arc::from(tsc_out.code),
             source_map: if tsc_out.source_map.is_empty() {
                 None
             } else {
                 Some(Arc::from(tsc_out.source_map))
             },
-        })
+        }))
     }
 
     /// Store diagnostics from a failed compile without triggering recompilation.
@@ -2490,90 +2630,43 @@ impl VerterHost {
 
         let alloc = Allocator::new();
 
-        let mut unresolved_macro_type_diags = Vec::new();
-        let profile_hash = compile_profile_hash(profile);
-
-        // External-macro-type collection. The collector iterates only
-        // `macro_type_deps`; with none, it returns `(None, vec![],
-        // empty_set)`, so skip building the resolver context + collector
-        // entirely and substitute the empty result. The transitive set
-        // is then EMPTY, which the sync below clears unconditionally.
-        let (external_types, missing_macro_type_diags, transitive_macro_type_deps) =
-            if snapshot.macro_type_deps.is_empty() {
-                (
-                    None,
-                    Vec::new(),
-                    std::collections::BTreeSet::<String>::new(),
-                )
-            } else {
-                // Cold external-type collection context (compile-prep): seed
-                // from the cold-seed's inner view; nested probes fail closed
-                // on a stale seed.
-                // Test-only observables: the resolver store-view read and the
-                // resolver-context construction the RuntimeRender lane
-                // performs ONLY for a cross-file-macro file (non-empty
-                // `macro_type_deps`), never for a simple file. See
-                // `VerterHost::wrapper_store_view_read_count` /
-                // `wrapper_resolver_ctx_construction_count`.
-                #[cfg(test)]
-                self.test_force
-                    .wrapper_store_view_read_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let store_view = self.resolver_store_view_read().into_cold_seed_view();
-                let overlay =
-                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                #[cfg(test)]
-                self.test_force
-                    .wrapper_resolver_ctx_construction_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-                    self,
-                    &store_view,
-                    overlay,
-                );
-                let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-                self.collect_external_types_from_loaded_files(
-                    ctx,
+        let macro_output = self
+            .language_classifier()
+            .classify(&snapshot.canonical_id)
+            .is_vue()
+            .then(|| {
+                self.produce_vue_macro_codegen(
                     &snapshot.canonical_id,
-                    &snapshot.macro_type_deps,
-                    &snapshot.script_imports,
-                    Some(profile_hash),
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
                 )
-            };
-        // Unconditional: `replace_semantic_transitive(canonical, {})`
-        // CLEARS the semantic axis when the set is empty (closes F15).
+            });
+        let macro_dependency_diagnostics = macro_output
+            .as_ref()
+            .map(|output| super::vue_macro_dependency_diagnostics::collect(self, snapshot, output))
+            .unwrap_or_default();
+        let transitive_macro_type_deps = macro_output
+            .as_ref()
+            .map(|output| output.transitive_canonicals.iter().cloned().collect())
+            .unwrap_or_default();
         self.sync_transitive_macro_type_dependencies(
             &snapshot.canonical_id,
             &transitive_macro_type_deps,
         );
-        unresolved_macro_type_diags.extend(missing_macro_type_diags);
-
-        // Tiered routing: a MEMBER-position missing macro type dep arrives as
-        // a WARNING (the compiler degrades that member's runtime type to
-        // `null`) — it surfaces on the successful compile and never aborts.
-        // Error-severity collector diagnostics (surface-position misses,
-        // resolution budget exhaustion) stay fatal.
-        let (fatal_macro_type_diags, soft_macro_type_diags): (Vec<_>, Vec<_>) =
-            unresolved_macro_type_diags
-                .into_iter()
-                .partition(|d| d.severity == HostSeverity::Error);
-        if !soft_macro_type_diags.is_empty() {
-            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(soft_macro_type_diags));
-        }
-        if !fatal_macro_type_diags.is_empty() {
-            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(fatal_macro_type_diags));
+        if !macro_dependency_diagnostics.is_empty() {
+            diagnostics =
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(macro_dependency_diagnostics));
             return Err(diagnostics);
         }
 
         let scope = self.config.effective_scope();
 
         // The host-resolved Vue cross-file inputs ride opaquely on the neutral
-        // options' `framework_extras` slot — Vue's eager type-surface output
-        // type stays OUT of the cross-framework carrier contract. A non-Vue
-        // carrier ignores the extras; Vue downcasts them.
+        // options' `framework_extras` slot, keeping Vue's typed macro DTO out
+        // of the cross-framework carrier contract. A non-Vue carrier ignores
+        // the extras; Vue downcasts them.
         let vue_extras: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
             verter_compiler::framework_common::vue_bridge::VueRuntimeCompileExtras {
-                external_types,
+                macro_runtime: macro_output.and_then(|output| output.runtime),
                 prop_constness_overrides: None, // populated by the cross-file optimizer
                 style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
             },
@@ -2590,6 +2683,7 @@ impl VerterHost {
                 .clone()
                 .or_else(|| Some(snapshot.canonical_id.clone())),
             is_production: profile.is_production,
+            custom_element: profile.custom_element,
             source_map: profile.source_map,
             ssr: profile.ssr,
             runtime_module_name: profile.runtime_module_name.clone(),
@@ -2930,8 +3024,8 @@ impl VerterHost {
     /// `Main` bytes through the SAME shared substrate (`compile_bundle`) and
     /// the SAME host-side [`assemble_vue_main_module`], WITHOUT the per-file
     /// session-wrapper overhead. Returns the assembled `Main` code, its
-    /// optional source map, and the soft (warning-severity) diagnostics of a
-    /// SUCCESSFUL render.
+    /// optional source map, and warning-severity diagnostics of a successful
+    /// render.
     ///
     /// Differences from `compile_entry` (the DECIDED drop list):
     /// - (a) the source is borrowed (`&*snapshot.source`) for the common
@@ -2942,13 +3036,8 @@ impl VerterHost {
     ///   dependency/semantic-transitive axis. The axis is authoritatively
     ///   reset by the Stage-B upsert and re-populated by whichever
     ///   HostBacked/type-resolution request needs it.
-    /// - (f) the external-macro-type collector runs CONDITIONALLY — exactly
-    ///   the existing `macro_type_deps.is_empty()` gate — through the ONE
-    ///   shared resolver, so cross-file-macro `external_types` (a codegen
-    ///   input) is produced and the render output stays byte-identical.
-    ///   Simple / local-macro files skip it (where the overhead lives).
-    /// - the imported-macro-resolution fatality (site 2) is SOFTENED to a
-    ///   warning; every other fatal site stays hard.
+    /// - (f) one request-local runtime macro bundle is produced from TypeInfo;
+    ///   the render lane does not retain it or mutate dependency state.
     fn compile_entry_runtime_render(
         &self,
         snapshot: &CompileInput,
@@ -3017,98 +3106,16 @@ impl VerterHost {
         // call.
         let alloc = Allocator::new();
 
-        let profile_hash = compile_profile_hash(profile);
-
-        // (f) NARROWED: the external-macro-type collector runs CONDITIONALLY,
-        // exactly the existing `macro_type_deps.is_empty()` gate. A simple /
-        // local-macro file (empty deps) substitutes the empty result and
-        // skips the store-view / overlay / resolver-context construction
-        // entirely (where the overhead lives). A cross-file-macro file runs
-        // the collector through the ONE shared resolver so `external_types`
-        // (a byte-affecting codegen input) is produced. The collector is
-        // READ-ONLY: unlike `compile_entry`, this lane NEVER calls
-        // `sync_transitive_macro_type_dependencies` (drop (e)), so the
-        // transitive set it returns is intentionally discarded.
-        let (external_types, missing_macro_type_diags) = if snapshot.macro_type_deps.is_empty() {
-            (None, Vec::new())
-        } else {
-            let store_view = self.resolver_store_view_read().into_cold_seed_view();
-            let overlay =
-                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-                self,
-                &store_view,
-                overlay,
-            );
-            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-            let (external_types, missing_macro_type_diags, _transitive) = self
-                .collect_external_types_from_loaded_files(
-                    ctx,
-                    &snapshot.canonical_id,
-                    &snapshot.macro_type_deps,
-                    &snapshot.script_imports,
-                    Some(profile_hash),
-                );
-            (external_types, missing_macro_type_diags)
-        };
-
-        // Soft-macro contract — STRUCTURAL, per-diagnostic, imported-macro-
-        // RESOLUTION only. On the RuntimeRender lane an imported macro type
-        // that could not be RESOLVED (the dependency is absent) does NOT
-        // abort: the compiler degrades the type to `Unknown` (renders as
-        // `null`), so the resolution diagnostic is surfaced as a WARNING on
-        // the successful output. EVERY OTHER diagnostic stays FATAL — keyed
-        // on its structured code, never a whole-file flag:
-        //   - collector `HOST_MISSING_MACRO_TYPE_DEP` = the softenable
-        //     unresolved-import case (MEMBER-position misses already arrive
-        //     as warnings from the tiered collector; SURFACE-position misses
-        //     arrive as errors and are softened here — the render lane's
-        //     bundler contract);
-        //   - collector `HOST_EXTERNAL_TYPE_DEPTH_LIMIT` /
-        //     `HOST_EXTERNAL_TYPE_STEP_LIMIT` = resolution RESOURCE
-        //     exhaustion (a pathological/too-deep type), which stays FATAL —
-        //     it is not "the import is missing" and must not be silently
-        //     erased;
-        //   - compiler `XUnresolvedImportedMacroType` = the same
-        //     unresolved-import case surfaced from `compile_bundle` (the
-        //     compiler continues + degrades to `Unknown`), softened;
-        //   - compiler `XInvalidMacroType` = a RESOLVED-but-wrong-shape type
-        //     (a genuine local misuse), which stays FATAL.
-        // Each collector diagnostic is routed independently, so a file with
-        // one missing import AND one wrong-shape/budget failure keeps the
-        // latter fatal.
-        let mut soft_warnings: Vec<HostDiagnostic> = Vec::new();
-        let mut fatal_collector_diags: Vec<HostDiagnostic> = Vec::new();
-        for d in missing_macro_type_diags {
-            if d.code == "HOST_MISSING_MACRO_TYPE_DEP" {
-                soft_warnings.push(HostDiagnostic {
-                    severity: HostSeverity::Warning,
-                    code: d.code,
-                    message: d.message,
-                    span: d.span,
-                });
-            } else {
-                fatal_collector_diags.push(d);
-            }
-        }
-        // A collector diagnostic that is NOT the softenable unresolved-import
-        // case (e.g. a resolution budget overflow) stays FATAL on the render
-        // lane, exactly as on HostBacked.
-        if !fatal_collector_diags.is_empty() {
-            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(fatal_collector_diags));
-            return Err(HostError::CompileError(CompileFailure {
-                diagnostics,
-                requested_mode: profile.requested_mode,
-                actual_mode: profile.requested_mode,
-                downgrade_reason: None,
-            }));
-        }
+        let macro_output = self.produce_vue_macro_codegen(
+            &snapshot.canonical_id,
+            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
+        );
 
         let scope = self.config.effective_scope();
 
         let vue_extras: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
             verter_compiler::framework_common::vue_bridge::VueRuntimeCompileExtras {
-                external_types,
+                macro_runtime: macro_output.runtime,
                 prop_constness_overrides: None,
                 style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
             },
@@ -3126,6 +3133,7 @@ impl VerterHost {
                 .clone()
                 .or_else(|| Some(snapshot.canonical_id.clone())),
             is_production: profile.is_production,
+            custom_element: profile.custom_element,
             source_map: profile.source_map,
             ssr: profile.ssr,
             runtime_module_name: profile.runtime_module_name.clone(),
@@ -3248,44 +3256,25 @@ impl VerterHost {
         };
 
         // Lift the bundle's framework-neutral diagnostics into the host
-        // snapshot. Soft-macro contract, compiler layer: the compiler emits a
-        // DISTINCT `XUnresolvedImportedMacroType` code for an imported type
-        // that could not be RESOLVED (it continues and degrades the type to
-        // `Unknown`). On the render lane THAT code — and only that code — is
-        // downgraded to a WARNING (moved onto the soft output). Every OTHER
-        // compiler diagnostic stays FATAL, decided PER-DIAGNOSTIC on its own
-        // code — including `XInvalidMacroType`, which is now ONLY a
-        // RESOLVED-but-wrong-shape type (a genuine local misuse). There is no
-        // whole-file flag: a file with one unresolved import AND one
-        // wrong-shape macro keeps the wrong-shape error fatal. HostBacked
-        // never reaches this path (it aborts at the collector site first).
+        // snapshot. Semantic producer failures fail closed on every compile
+        // lane; there is no render-only degradation policy.
         let mut compile_diags = diagnostics.clone();
-        let mut fatal_compiled_diags: Vec<HostDiagnostic> = Vec::new();
+        let mut compiled_diags: Vec<HostDiagnostic> = Vec::new();
         for d in &compiled.diagnostics {
             let severity = match d.severity {
                 RuntimeDiagnosticSeverity::Error => HostSeverity::Error,
                 RuntimeDiagnosticSeverity::Warning => HostSeverity::Warning,
                 RuntimeDiagnosticSeverity::Info => HostSeverity::Info,
             };
-            if d.code == "XUnresolvedImportedMacroType" {
-                soft_warnings.push(HostDiagnostic {
-                    severity: HostSeverity::Warning,
-                    code: d.code.clone(),
-                    message: d.message.clone(),
-                    span: d.span,
-                });
-            } else {
-                fatal_compiled_diags.push(HostDiagnostic {
-                    severity,
-                    code: d.code.clone(),
-                    message: d.message.clone(),
-                    span: d.span,
-                });
-            }
+            compiled_diags.push(HostDiagnostic {
+                severity,
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span: d.span,
+            });
         }
-        if !fatal_compiled_diags.is_empty() {
-            compile_diags =
-                compile_diags.merge(DiagnosticsSnapshot::from_vec(fatal_compiled_diags));
+        if !compiled_diags.is_empty() {
+            compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(compiled_diags));
         }
 
         // Site 6 (`compile_diags.has_errors`: syntax, CodeTransform failures,
@@ -3338,7 +3327,11 @@ impl VerterHost {
             code: Arc::from(main_code),
             source_map: main_source_map,
             lang: Some(main_lang),
-            diagnostics: soft_warnings,
+            diagnostics: compile_diags
+                .diagnostics
+                .into_iter()
+                .filter(|diagnostic| diagnostic.severity != HostSeverity::Error)
+                .collect(),
         })
     }
 }

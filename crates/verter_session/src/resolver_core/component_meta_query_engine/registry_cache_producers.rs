@@ -83,9 +83,14 @@ impl ComponentMetaQueryEngine<'_> {
     pub fn resolve_imported_registry_symbol(
         &mut self,
         canonical_id: &str,
+        source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
     ) -> Option<super::ResolvedImportedRegistrySymbol> {
-        let key = (canonical_id.to_string(), exported_name.to_string());
+        let key = (
+            canonical_id.to_string(),
+            source_owner,
+            exported_name.to_string(),
+        );
         if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
             return cached;
         }
@@ -106,6 +111,7 @@ impl ComponentMetaQueryEngine<'_> {
         // block on the slot condvar and reuse its published candidate.
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_id),
+            source_owner,
             std::sync::Arc::<str>::from(exported_name),
         );
         // Bind the resolver context to a local `Copy` reference so the
@@ -230,6 +236,7 @@ impl ComponentMetaQueryEngine<'_> {
                     self,
                     ctx,
                     canonical_id,
+                    source_owner,
                     exported_name,
                     observed_keyed_hash,
                 )
@@ -250,6 +257,7 @@ impl ComponentMetaQueryEngine<'_> {
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
+        source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
         observed_keyed_hash: Option<crate::types::Hash16>,
     ) -> crate::cache_runtime::singleflight::ComputeAdmission<
@@ -290,6 +298,7 @@ impl ComponentMetaQueryEngine<'_> {
             match resolve_imported_registry_symbol_with_budget(
                 ctx,
                 canonical_id,
+                source_owner,
                 exported_name,
                 || self.allow_wildcard_route(),
             ) {
@@ -358,7 +367,7 @@ impl ComponentMetaQueryEngine<'_> {
     /// [`Self::resolve_imported_registry_symbol`].
     fn finish_imported_registry_lookup(
         &mut self,
-        key: (String, String),
+        key: (String, verter_type_expr::TopLevelOwnerId, String),
         host_value: Option<Option<std::sync::Arc<super::ResolvedImportedRegistrySymbol>>>,
     ) -> Option<super::ResolvedImportedRegistrySymbol> {
         let result = match host_value {
@@ -384,14 +393,20 @@ impl ComponentMetaQueryEngine<'_> {
     pub fn resolve_type_declaration(
         &mut self,
         canonical_source: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> super::ResolvedTypeDeclaration {
-        let key = (canonical_source.to_string(), requested_name.to_string());
+        let key = (
+            canonical_source.to_string(),
+            owner,
+            requested_name.to_string(),
+        );
         if let Some(cached) = self.declarations.borrow().get(&key).cloned() {
             return cached;
         }
         let arc_key = (
             std::sync::Arc::<str>::from(canonical_source),
+            owner,
             std::sync::Arc::<str>::from(requested_name),
         );
         let host_db = self.ctx.project_type_store().declaration_db();
@@ -420,10 +435,17 @@ impl ComponentMetaQueryEngine<'_> {
             let host_value =
                 host_db.get_or_compute(&arc_key, self.ctx, prepare, |observed_keyed_hash| {
                     let computed = self
-                        .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
+                        .resolve_direct_prepared_type_declaration(
+                            canonical_source,
+                            owner,
+                            requested_name,
+                        )
                         .unwrap_or_else(|| {
-                            self.ctx
-                                .resolve_type_declaration_for_dep(canonical_source, requested_name)
+                            self.ctx.resolve_type_declaration_for_dep(
+                                canonical_source,
+                                owner,
+                                requested_name,
+                            )
                         });
                     // Every arm below KEEPS the freshly-resolved declaration:
                     // returning a bare `None` would discard it and force the arm
@@ -470,10 +492,17 @@ impl ComponentMetaQueryEngine<'_> {
                 // result revalidate stale and recompute WHOLE. Pinned by
                 // `declaration_lookup_straddling_compute_is_not_served_to_the_winner`.
                 None => self
-                    .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
+                    .resolve_direct_prepared_type_declaration(
+                        canonical_source,
+                        owner,
+                        requested_name,
+                    )
                     .unwrap_or_else(|| {
-                        self.ctx
-                            .resolve_type_declaration_for_dep(canonical_source, requested_name)
+                        self.ctx.resolve_type_declaration_for_dep(
+                            canonical_source,
+                            owner,
+                            requested_name,
+                        )
                     }),
             }
         };
@@ -487,6 +516,7 @@ impl ComponentMetaQueryEngine<'_> {
     pub fn can_resolve_registry_symbol(
         &mut self,
         owner_canonical: &str,
+        source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
         source_hint: Option<&str>,
     ) -> bool {
@@ -496,12 +526,17 @@ impl ComponentMetaQueryEngine<'_> {
         let source_key = source_hint
             .filter(|s| !s.is_empty())
             .unwrap_or(owner_canonical);
-        let key = (source_key.to_string(), exported_name.to_string());
+        let key = (
+            source_key.to_string(),
+            source_owner,
+            exported_name.to_string(),
+        );
         if let Some(cached) = self.resolvable.borrow().get(&key).copied() {
             return cached;
         }
         let arc_key = (
             std::sync::Arc::<str>::from(source_key),
+            source_owner,
             std::sync::Arc::<str>::from(exported_name),
         );
         let host_db = self.ctx.project_type_store().resolvable_db();
@@ -518,12 +553,9 @@ impl ComponentMetaQueryEngine<'_> {
             // refuses the write and returns the computed bool.
             let host_value =
                 host_db.get_or_compute(&arc_key, self.ctx, prepare, |observed_keyed_hash| {
-                    let computed = if self.prepared_type_decl(source_key, exported_name).is_some() {
-                        true
-                    } else {
-                        self.resolve_imported_registry_symbol(source_key, exported_name)
-                            .is_some()
-                    };
+                    let computed = self
+                        .resolve_imported_registry_symbol(source_key, source_owner, exported_name)
+                        .is_some();
                     // If the imported-registry resolution above tripped the
                     // wildcard-route fuse (which marked the request-result
                     // completeness partial), the derived `false` is NOT an
@@ -571,14 +603,9 @@ impl ComponentMetaQueryEngine<'_> {
                 // retry-on-mid-flight-change — so the caller never sees a
                 // spurious `false` and nothing torn is admitted. See
                 // `resolve_type_declaration`'s `None` arm for the full rationale.
-                None => {
-                    if self.prepared_type_decl(source_key, exported_name).is_some() {
-                        true
-                    } else {
-                        self.resolve_imported_registry_symbol(source_key, exported_name)
-                            .is_some()
-                    }
-                }
+                None => self
+                    .resolve_imported_registry_symbol(source_key, source_owner, exported_name)
+                    .is_some(),
             }
         };
         self.resolvable.borrow_mut().insert(key, resolved);
@@ -604,13 +631,16 @@ impl ComponentMetaQueryEngine<'_> {
     pub fn owner_collection_expr(
         &mut self,
         owner_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<verter_type_expr::locators::AuthoredBodyLocator> {
-        if let Some(cached) = self.owner_collection_exprs.borrow().get(name).cloned() {
+        let key = (owner_canonical.to_string(), owner, name.to_string());
+        if let Some(cached) = self.owner_collection_exprs.borrow().get(&key).cloned() {
             return cached;
         }
         let arc_key = (
             std::sync::Arc::<str>::from(owner_canonical),
+            owner,
             std::sync::Arc::<str>::from(name),
         );
         let ctx = self.ctx;
@@ -625,7 +655,7 @@ impl ComponentMetaQueryEngine<'_> {
             // is fetched through the view-aware `prepared_decl_bundle`
             // accessor). This read is INSIDE the scope: it is the lease-miss
             // consumption point (see the method docs).
-            let prepare = || self.observed_prepared_type_decl(owner_canonical, name);
+            let prepare = || self.observed_prepared_type_decl(owner_canonical, owner, name);
             let host_value = host_db.get_or_compute(&arc_key, ctx, prepare, |observed| {
                 // No prepared-decl bundle at all: there is no value to serve and
                 // none to publish.
@@ -666,13 +696,13 @@ impl ComponentMetaQueryEngine<'_> {
                 // never receives one read across a mutation. See
                 // `resolve_type_declaration`'s `None` arm for the full rationale.
                 None => self
-                    .prepared_type_decl(owner_canonical, name)
+                    .prepared_type_decl(owner_canonical, owner, name)
                     .map(|prepared| prepared_decl_authored_body_locator(&prepared)),
             }
         };
         self.owner_collection_exprs
             .borrow_mut()
-            .insert(name.to_string(), body.clone());
+            .insert(key, body.clone());
         body
     }
 
@@ -718,6 +748,7 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn observed_prepared_type_decl(
         &mut self,
         canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<super::ObservedPreparedTypeDecl> {
         let bundle = self.ctx.prepared_decl_bundle(canonical_id)?;
@@ -727,10 +758,28 @@ impl ComponentMetaQueryEngine<'_> {
         // `LeaseMiss`) from an honest absence. The nested scope observes only:
         // the mark still fans out to every enclosing tracer, so the producer's
         // outer scope keeps refusing the shared-cache write.
-        let (decl, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
+        let (decl_result, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
             self.ctx.host_for_fact_tracer_install(),
-            |_probe| bundle.prepared_type_decls.get(symbol_name),
+            |_probe| {
+                let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
+                if let Err(failure) = &result {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                    );
+                    tracing::error!(
+                        canonical_id,
+                        ?owner,
+                        symbol_name,
+                        ?failure,
+                        "prepared type declaration observation failed; refusing cache admission"
+                    );
+                }
+                result
+            },
         );
+        let Ok(decl) = decl_result else {
+            return None;
+        };
         // Mirror the bundle decl into the engine's per-request read-through
         // cache so a later `prepared_type_decl` call for the same
         // `(canonical_id, symbol_name)` hits the warm scratch entry instead of
@@ -740,7 +789,7 @@ impl ComponentMetaQueryEngine<'_> {
         // absence for the rest of this engine's scope.
         if decl.is_some() || !non_cacheable {
             self.prepared_type_decls.insert(
-                (canonical_id.to_string(), symbol_name.to_string()),
+                (canonical_id.to_string(), owner, symbol_name.to_string()),
                 decl.clone(),
             );
         }

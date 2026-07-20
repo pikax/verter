@@ -18,7 +18,13 @@ fn compile_sfc(source: &str) -> VerterCompileResult {
         force_js: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(
+        source,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &alloc,
+    )
 }
 
 /// Assert that at least one diagnostic has the given code string.
@@ -571,6 +577,49 @@ fn no_error_x_v_slot_duplicate_slot_names_on_valid() {
     let src = r#"<template><MyComp><template #header>h</template><template #footer>f</template></MyComp></template>"#;
     let result = compile_sfc(src);
     assert_no_error(&result, "XVSlotDuplicateSlotNames");
+}
+
+/// Same slot name on exclusive `v-if` / `v-else` siblings is valid Vue
+/// (official `@vue/compiler-sfc` accepts it): only one branch is ever active.
+#[test]
+fn no_error_x_v_slot_duplicate_slot_names_on_exclusive_if_else() {
+    let src = r#"<template>
+  <MyComp>
+    <template v-if="isPublic" #trigger>public</template>
+    <template v-else #trigger>private</template>
+  </MyComp>
+</template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVSlotDuplicateSlotNames");
+}
+
+/// A full if / else-if / else chain may reuse the same slot name.
+#[test]
+fn no_error_x_v_slot_duplicate_slot_names_on_if_else_if_else_chain() {
+    let src = r#"<template>
+  <MyComp>
+    <template v-if="a" #item>a</template>
+    <template v-else-if="b" #item>b</template>
+    <template v-else #item>c</template>
+  </MyComp>
+</template>"#;
+    let result = compile_sfc(src);
+    assert_no_error(&result, "XVSlotDuplicateSlotNames");
+}
+
+/// Two INDEPENDENT `v-if` branches with the same slot name are still
+/// duplicates — both conditions can be true, so it is not an exclusive chain.
+#[test]
+fn error_x_v_slot_duplicate_slot_names_on_independent_v_if() {
+    let src = r#"<template>
+  <MyComp>
+    <template v-if="a" #item>a</template>
+    <template v-if="b" #item>b</template>
+  </MyComp>
+</template>"#;
+    let result = compile_sfc(src);
+    assert_has_error(&result, "XVSlotDuplicateSlotNames");
+    assert_error_severity(&result, "XVSlotDuplicateSlotNames");
 }
 
 #[test]

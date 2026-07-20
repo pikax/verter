@@ -13,7 +13,8 @@
 //! observe identity through the content-pinned accessors
 //! (`get_for_current_content` / `indexed().get(canonical, hash)` /
 //! `observe_materialize_scope` / `parse_fact_ref_for_observed_current_content`)
-//! or the `current_route_surface_hash` helper.
+//! or the edge-currency-gated store-view Route derivation
+//! (`hash_route_surface` inside the snapshot builders).
 //!
 //! This guard extracts each producer/helper's brace-balanced body and
 //! asserts it calls NONE of the banned permissive-read tokens. A
@@ -154,13 +155,32 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
             file: "component_meta_caches.rs",
             signature: "fn ref_cycle_read_set(",
         },
+        // Route-fact production moved from the retired
+        // `current_route_surface_hash` helper onto the store-view
+        // snapshot builders: the base builder (`HostStoreView::build`)
+        // and the session-overlay builder (the `mut self`
+        // `with_session_overlay`) both derive the Route hash through the
+        // edge-currency gate + `hash_route_surface`, and the digest
+        // itself must stay permissive-read-free.
         Scanned {
-            file: "host_resolve/route_surface.rs",
-            signature: "pub(crate) fn current_route_surface_hash(",
+            file: "resolver_store.rs",
+            signature: "fn build(host: &VerterHost",
+        },
+        Scanned {
+            file: "resolver_store.rs",
+            signature: "pub(crate) fn with_session_overlay(\n        mut self,",
+        },
+        Scanned {
+            file: "resolver_store.rs",
+            signature: "pub(crate) fn hash_route_surface(",
+        },
+        Scanned {
+            file: "resolver_store.rs",
+            signature: "fn hash_route_surface_uncached(",
         },
         Scanned {
             file: "host_resolve/frontier_engine.rs",
-            signature: "fn append_route_participant_fact_versions(",
+            signature: "fn append_route_participant_fact_versions_with_context(",
         },
     ];
 
@@ -175,7 +195,7 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
                  baking a stale content hash into a fact signature / route-fact oracle. \
                  Observe identity through a content-pinned accessor \
                  (`get_for_current_content` / `indexed().get(canonical, hash)` / \
-                 `observe_materialize_scope`) or `current_route_surface_hash` instead. \
+                 `observe_materialize_scope`) or the edge-currency-gated snapshot Route derivation instead. \
                  Body:\n{body}",
                 item.signature,
                 item.file,
@@ -255,8 +275,7 @@ fn get_any_scanner_discriminates() {
         "materialize_structure_read_set must be present",
     );
     assert!(
-        read_session_source("host_resolve/route_surface.rs")
-            .contains("pub(crate) fn current_route_surface_hash("),
-        "current_route_surface_hash must be present",
+        read_session_source("resolver_store.rs").contains("pub(crate) fn hash_route_surface("),
+        "hash_route_surface must be present",
     );
 }

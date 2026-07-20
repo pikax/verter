@@ -241,6 +241,7 @@ fn parity_opaque_errors_and_raw_fallback() {
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
         name: Arc::from("Pending"),
         canonical_id: Arc::from("/w/p.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
     }));
     assert_classifier_parity(&host, placeholder, "opaque-decl-placeholder");
@@ -607,6 +608,7 @@ fn parity_lazy_carriers() {
     let declref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/d.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: Arc::from("Foo"),
         },
@@ -621,6 +623,7 @@ fn parity_lazy_carriers() {
     let instref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/w/d.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: Arc::from("Box"),
         },
@@ -637,6 +640,7 @@ fn parity_lazy_carriers() {
     let instref_miss_arg = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
             canonical_id: Arc::from("/w/d.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             decl_name: Arc::from("Box"),
         },
@@ -672,6 +676,7 @@ fn parity_lazy_carriers() {
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/m.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("factory"),
@@ -1071,11 +1076,13 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     // raise to the SAME `Ref { name: "T" }` (BareRef drops scope on raise).
     let scope_a = NodeScopeId::File {
         canonical_id: Arc::from("/w/a.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: Some(1),
     };
     let scope_b = NodeScopeId::File {
         canonical_id: Arc::from("/w/b.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: Some(2),
     };
@@ -1109,6 +1116,7 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     let declref_a = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [1u8; 16],
             decl_name: Arc::from("Same"),
         },
@@ -1116,6 +1124,7 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     let declref_b = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/b.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [2u8; 16],
             decl_name: Arc::from("Same"),
         },
@@ -1136,6 +1145,7 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
         name: Arc::from("Same"),
         canonical_id: Arc::from("/w/c.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [3u8; 16],
     }));
     assert_eq_nodes_parity(&host, placeholder, declref_a, "placeholder-vs-declref");
@@ -1149,6 +1159,7 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     let declref_other = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [1u8; 16],
             decl_name: Arc::from("Different"),
         },
@@ -1216,6 +1227,7 @@ fn discrimination_equality_is_not_node_id_equality() {
     let declref_a = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [1u8; 16],
             decl_name: Arc::from("Same"),
         },
@@ -1223,6 +1235,7 @@ fn discrimination_equality_is_not_node_id_equality() {
     let declref_b = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
             canonical_id: Arc::from("/w/b.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [9u8; 16],
             decl_name: Arc::from("Same"),
         },
@@ -1610,6 +1623,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/m.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("factory"),
@@ -1634,6 +1648,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
         ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/m.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
             },
             name: Arc::from("factory"),
@@ -2032,6 +2047,7 @@ fn object_surface(props: &[(&str, SemanticNodeId)]) -> SurfaceView {
 fn decl_identity_unscoped(canonical_id: &str, name: &str) -> DeclIdentity {
     DeclIdentity {
         canonical_id: Arc::from(canonical_id),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         decl_name: Arc::from(name),
     }
@@ -2442,6 +2458,7 @@ fn publication_score_corpus(
                 ValueRootKey {
                     scope: ScopeId {
                         canonical_id: Arc::from("/m.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
                     },
                     name: Arc::from("factory"),

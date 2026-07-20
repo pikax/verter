@@ -319,6 +319,7 @@ const outerLabel = 'outer'
 
     let child_api = host
         .get_public_api(child_id)
+        .expect("child public API projection")
         .expect("child public API should exist");
     let parent_ide = host
         .get_ide(parent_id, &profile)
@@ -511,6 +512,7 @@ const outerLabel = 'outer'
 
     let child_api = host
         .get_public_api(child_id)
+        .expect("child public API projection")
         .expect("child public API should exist");
     let parent_ide = host
         .get_ide(parent_id, &profile)
@@ -667,12 +669,14 @@ const outerLabel = 'outer'
 
     let child_api = host
         .get_public_api(child_id)
+        .expect("child public API projection")
         .expect("child public API should exist");
     let child_ide = host
         .get_ide(child_id, &profile)
         .expect("child IDE output should exist");
     let parent_api = host
         .get_public_api(parent_id)
+        .expect("parent public API projection")
         .expect("parent public API should exist");
     let parent_ide = host
         .get_ide(parent_id, &profile)

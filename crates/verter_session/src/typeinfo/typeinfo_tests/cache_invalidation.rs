@@ -107,7 +107,6 @@ fn assert_basic_surface_has_v_property(expr: &TypeExpr, expected_v: f64, expecte
 /// `IndexedReady` must rebuild and re-enter the second request's
 /// loaded-file set.
 #[test]
-#[ignore = "typeinfo currently does not propagate a selected-leaf `upsert_ts` edit through the barrel into the owner's published `Surface`: after bumping the leaf's content hash from V1 to V2 the owner still resolves `Selected.v` as `1` instead of `2`, indicating `OwnerImportSurfaceDb` / `RouteDb` are not revalidating the leaf's new content hash on the second request; keep as the future selected-leaf edit-propagation contract"]
 fn cache_invalidation_basic_selected_leaf_edit_flips_published_surface() {
     let host = make_host_with_footprint();
     install_basic_fixture(&host, SELECTED_BASIC_V1_SRC, UNUSED_BASIC_V1_SRC);
@@ -146,7 +145,6 @@ fn cache_invalidation_basic_selected_leaf_edit_flips_published_surface() {
 /// reached by the owner: warm reads must reuse the original published
 /// `Surface`, perform zero VFS reads, and incur zero RouteDb misses.
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that editing an unreferenced barrel sibling must NOT invalidate any cache participant reached by the owner — warm reads must reuse the original published `Surface`, perform zero VFS reads, and incur zero RouteDb misses with the footprint still attached. Keep as the future unselected-sibling-isolation contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn cache_invalidation_unselected_leaf_edit_keeps_warm_cache() {
     let host = make_host_with_footprint();
     install_basic_fixture(&host, SELECTED_BASIC_V1_SRC, UNUSED_BASIC_V1_SRC);
@@ -227,7 +225,6 @@ fn assert_route_surface_is_leaf_b(expr: &TypeExpr) {
 /// — the V2 result must reflect the new leaf and the V2 footprint must
 /// include the new leaf canonical.
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the contract is that editing a barrel re-export target must invalidate the route fact for (owner, \"Item\") — the V2 result must reflect the new leaf and the V2 footprint must include the new leaf canonical. Keep as the future barrel-route-redirect contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn cache_invalidation_barrel_edit_redirects_route_to_new_leaf() {
     let host = make_host_with_footprint();
     install_route_fixture(&host, BARREL_ROUTE_V1_SRC);
@@ -249,7 +246,6 @@ fn cache_invalidation_barrel_edit_redirects_route_to_new_leaf() {
 /// out of the V2 footprint entirely — the redirected barrel no longer
 /// routes to it. This is the path-precise invalidation guarantee.
 #[test]
-#[ignore = "typeinfo currently fails to attach a request footprint on this resolver path under the audit-passive-observer footprint-attachment pipeline; the strict promise is that leaf_a drops out of the V2 footprint entirely — the redirected barrel no longer routes to it (path-precise invalidation guarantee). Keep as the future barrel-route-drop contract once the footprint-attachment pipeline is wired into this resolver path."]
 fn cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint() {
     let host = make_host_with_footprint();
     install_route_fixture(&host, BARREL_ROUTE_V1_SRC);
@@ -279,7 +275,6 @@ fn install_aug_fixture(host: &VerterHost, patch_src: &str) {
 /// `Surface`. The owner imports the patch via side-effect so the
 /// augmentation is in scope.
 #[test]
-#[ignore = "verter currently does not discover module augmentations contributed by a side-effect-imported patch file (the canonical Vue/Vite augmentation pattern). The existing module_features test characterises the same gap on the cold path; cache_invalidation re-characterises it across an edit cycle. Keep as the future augmentation-on-edit contract (CLAUDE.md `Cache Architecture`: `augmentation_index` lookup by `AugmentationTargetKey`)."]
 fn cache_invalidation_aug_patch_edit_surfaces_augmented_shape() {
     let host = make_host_with_footprint();
     install_aug_fixture(&host, PATCH_AUG_V1_SRC);
@@ -431,7 +426,7 @@ fn cache_invalidation_package_dts_v2_publishes_v2_shape() {
 /// canonical "node_modules type update" scenario covered by
 /// `Cache Architecture` R21 (project-source invalidation).
 #[test]
-#[ignore = "verter currently does not flip the owner's published surface after an in-place `MemoryWorkspace::inject_file` re-injection of a node_modules d.ts. The first query warms the route fact for the bare module specifier `synthetic-cache-invalidation`; the second `inject_file` bumps `content_generation` and the host's `package_manifest` invalidation fires, but the warm `RouteDb` entry for the owner's import continues to surface the V1 leaf body — indicating the route fact's `fact_dep_signature` revalidation does not consult the package-backed leaf's new content hash. Keep as the future package-source-change invalidation contract (CLAUDE.md `Canonical Dependency Cache Rule`: VFS is the authority; route invalidation is not file-hash-only and tsconfig / vite alias / workspace graph / package target changes must invalidate affected route facts)."]
+#[ignore = "verter currently does not flip the owner's published surface after an in-place `MemoryWorkspace::inject_file` re-injection of a node_modules d.ts. Diagnosed root cause (distinct from the OwnerImportSurfaceDb / RouteDb warm-hit fact-observation discipline, which is landed): the package leaf is SCHEDULER-TRACKED (loaded via `ensure_loaded` on the first query), and a workspace-side `inject_file` records the leaf's content transition in the per-canonical ledger (`last_content_transition_generation` advances) WITHOUT re-loading the scheduler node — so `HostStoreView::build` keeps snapshotting the stale scheduler whole-hash, the warm memo entry's `FileWholeHash{V1}` fact still validates, and `ensure_loaded`'s fast path keeps serving the stale source. Closing it needs the scheduler-tracked content-supersession rail: a per-canonical loaded-at content-generation stamp (captured at upsert-commit / `integrate_scheduler_snapshot`), a snapshot-build supersession check against the workspace transition ledger, `validates`/`validates_self_root_whole_hash` rejection for superseded canonicals, and an `ensure_loaded` reload gate — the artifact-only lane's `artifact_only_candidate_is_fresh` rail extended to the scheduler-tracked lane (CLAUDE.md `Canonical Dependency Cache Rule`: VFS is the authority for file-change invalidation)."]
 fn cache_invalidation_in_place_package_edit_flips_published_surface() {
     let (host, workspace) = make_package_host_with_workspace(SYNTHETIC_PACKAGE_DTS_V1);
     upsert_ts(&host, PACKAGE_OWNER, PACKAGE_OWNER_SRC);

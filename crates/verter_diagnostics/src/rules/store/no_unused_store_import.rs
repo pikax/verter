@@ -117,6 +117,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "@/stores/user".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "useUserStore".to_string(),
@@ -151,6 +152,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             imports: vec![AnalyzedImport {
                 source: "vue-router".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "useRouter".to_string(),

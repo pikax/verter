@@ -17,6 +17,12 @@ use verter_type_expr::locators::{
 /// The canonical id every fixture memo in this module is keyed on.
 const FIXTURE_CANONICAL: &str = "/ws/fixture.ts";
 
+fn has_dependency(decl: &LoweredTypeDecl, name: &str) -> bool {
+    decl.dependency_paths
+        .iter()
+        .any(|dependency| dependency.legacy_dotted_name() == name)
+}
+
 /// Build a TYPE-space decl-body locator anchored on this fixture's canonical.
 fn type_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
     type_body_locator_on(FIXTURE_CANONICAL, symbol, path)
@@ -31,6 +37,7 @@ fn type_body_locator_on(
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -43,6 +50,7 @@ fn value_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBody
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Value,
         },
@@ -55,6 +63,7 @@ fn namespace_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> Authored
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Namespace,
         },
@@ -72,6 +81,7 @@ fn aug_type_locator(
     AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
         anchor: AuthoredAnchor {
             canonical_id: Arc::from(FIXTURE_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: Arc::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
@@ -125,7 +135,12 @@ fn demand_lowers_only_the_demanded_statement() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
     assert_eq!(bodies(&provenance), 0, "construction lowers nothing");
 
-    let decl = memo.type_decl("Unrelated").expect("Unrelated exists");
+    let decl = memo
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Unrelated",
+        )
+        .expect("Unrelated exists");
     assert!(matches!(decl.kind, TypeDeclKind::Alias));
     assert_eq!(
         bodies(&provenance),
@@ -134,7 +149,12 @@ fn demand_lowers_only_the_demanded_statement() {
     );
 
     // Re-demand: served from the entry, no re-lowering.
-    let again = memo.type_decl("Unrelated").expect("still exists");
+    let again = memo
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Unrelated",
+        )
+        .expect("still exists");
     assert!(Arc::ptr_eq(&decl, &again), "the cached entry is returned");
     assert_eq!(bodies(&provenance), 1, "a warm demand lowers nothing");
 }
@@ -143,7 +163,11 @@ fn demand_lowers_only_the_demanded_statement() {
 fn distinct_demands_share_one_retained_parse() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
     for name in ["Unrelated", "Var0", "Var1"] {
-        assert!(memo.type_decl(name).is_some(), "{name} must lower");
+        assert!(
+            memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), name)
+                .is_some(),
+            "{name} must lower"
+        );
     }
     assert_eq!(
         parses(&provenance),
@@ -158,7 +182,9 @@ fn merged_interface_demand_folds_all_contributors() {
     let (memo, provenance) = memo_for(
         "interface Merged { a: string }\ntype Unrelated = { u: 1 };\ninterface Merged { b: number }\n",
     );
-    let decl = memo.type_decl("Merged").expect("Merged exists");
+    let decl = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Merged")
+        .expect("Merged exists");
     assert!(
         decl.body.is_merged(),
         "two same-name interface contributors fold into the Merged carrier"
@@ -171,16 +197,50 @@ fn merged_interface_demand_folds_all_contributors() {
          unrelated statement does not"
     );
     assert!(
-        memo.type_decl("Unrelated").is_some(),
+        memo.type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Unrelated"
+        )
+        .is_some(),
         "the unrelated symbol still lowers on ITS OWN demand"
     );
     assert_eq!(bodies(&provenance), 3);
 }
 
 #[test]
+fn demanded_type_decl_copies_exact_vue_ignored_heritage_facts_from_headers() {
+    use verter_type_expr::facts::VueIgnoredHeritageFact;
+
+    let (memo, _) = memo_for(
+        "interface Props extends /* @vue-ignore */ Imported<string>, Kept { own: number }\n\
+         interface Props extends First, /* @vue-ignore */ Pick<Model, 'id'> {}\n",
+    );
+    let decl = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Props")
+        .expect("Props exists");
+
+    assert_eq!(
+        decl.vue_ignored_heritage.as_ref(),
+        [
+            VueIgnoredHeritageFact {
+                contributor_ordinal: 0,
+                intersection_arm_ordinal: 0,
+            },
+            VueIgnoredHeritageFact {
+                contributor_ordinal: 1,
+                intersection_arm_ordinal: 1,
+            },
+        ],
+        "lazy lowering must copy the typed header fact without rescanning comments"
+    );
+}
+
+#[test]
 fn class_statement_backfills_its_value_sibling() {
     let (memo, provenance) = memo_for("class K { a: number }\ntype Other = { o: 1 };\n");
-    let type_side = memo.type_decl("K").expect("class type side");
+    let type_side = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "K")
+        .expect("class type side");
     assert!(matches!(type_side.kind, TypeDeclKind::Class));
     // One class statement lowers BOTH its type and value declarations.
     assert_eq!(bodies(&provenance), 2);
@@ -200,15 +260,20 @@ fn class_statement_backfills_its_value_sibling() {
 }
 
 #[test]
-fn dependency_names_ride_on_the_lowered_entry() {
+fn dependency_paths_ride_on_the_lowered_entry() {
     let (memo, _) = memo_for(
         "import { Ext } from './dep';\ntype WithDeps = { a: Ext; b: Local };\ntype Local = { v: 1 };\n",
     );
-    let decl = memo.type_decl("WithDeps").expect("WithDeps exists");
-    assert!(decl.dep_names.contains("Ext"));
-    assert!(decl.dep_names.contains("Local"));
+    let decl = memo
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "WithDeps",
+        )
+        .expect("WithDeps exists");
+    assert!(has_dependency(&decl, "Ext"));
+    assert!(has_dependency(&decl, "Local"));
     assert!(
-        !decl.dep_names.contains("WithDeps"),
+        !has_dependency(&decl, "WithDeps"),
         "self is not a dependency"
     );
 }
@@ -224,17 +289,24 @@ fn default_class_declared_name_and_alias_both_carry_heritage_dep() {
     let (memo, _) = memo_for(
         "import { Imported } from './dep';\nexport default class Props extends Imported {}\n",
     );
-    let declared = memo.type_decl("Props").expect("declared-name type side");
+    let declared = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Props")
+        .expect("declared-name type side");
     assert!(
-        declared.dep_names.contains("Imported"),
+        has_dependency(&declared, "Imported"),
         "the default class's declared-name body must carry its heritage dep; got {:?}",
-        declared.dep_names
+        declared.dependency_paths
     );
-    let aliased = memo.type_decl("default").expect("default alias");
+    let aliased = memo
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "default",
+        )
+        .expect("default alias");
     assert!(
-        aliased.dep_names.contains("Imported"),
+        has_dependency(&aliased, "Imported"),
         "the `default` alias body must carry its heritage dep; got {:?}",
-        aliased.dep_names
+        aliased.dependency_paths
     );
 }
 
@@ -248,11 +320,13 @@ fn namespaced_type_alias_carries_its_dep_under_qualified_name() {
     let (memo, _) = memo_for(
         "import { Imported } from './dep';\nexport namespace N { export type T = Imported }\n",
     );
-    let decl = memo.type_decl("N.T").expect("namespaced type symbol N.T");
+    let decl = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "N.T")
+        .expect("namespaced type symbol N.T");
     assert!(
-        decl.dep_names.contains("Imported"),
+        has_dependency(&decl, "Imported"),
         "namespaced `N.T` body must carry its dep `Imported`; got {:?}",
-        decl.dep_names
+        decl.dependency_paths
     );
 }
 
@@ -264,12 +338,15 @@ fn nested_namespace_type_alias_carries_dep_under_double_qualified_name() {
         "import { Imported } from './dep';\nnamespace Outer { export namespace Inner { export type T = Imported } }\n",
     );
     let decl = memo
-        .type_decl("Outer.Inner.T")
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Outer.Inner.T",
+        )
         .expect("nested namespaced type symbol");
     assert!(
-        decl.dep_names.contains("Imported"),
+        has_dependency(&decl, "Imported"),
         "nested `Outer.Inner.T` body must carry its dep `Imported`; got {:?}",
-        decl.dep_names
+        decl.dependency_paths
     );
 }
 
@@ -283,12 +360,35 @@ fn jsdoc_typedef_carries_its_dep() {
     let (memo, _) = memo_for(
         "import { Imported } from './dep';\n/** @typedef {Imported} Alias */\ntype Real = { r: 1 };\n",
     );
-    let decl = memo.type_decl("Alias").expect("typedef must lower");
+    let decl = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Alias")
+        .expect("typedef must lower");
     assert!(
-        decl.dep_names.contains("Imported"),
+        has_dependency(&decl, "Imported"),
         "the JSDoc typedef body must carry its dep `Imported`; got {:?}",
-        decl.dep_names
+        decl.dependency_paths
     );
+}
+
+#[test]
+fn jsdoc_typedef_preserves_qualified_nullable_dependency_paths() {
+    let (memo, _) = memo_for(
+        "import * as NS from './dep';\n\
+         /** @typedef {NS.Value} Plain */\n\
+         /** @typedef {?NS.Value} Nullable */\n\
+         /** @typedef {!NS.Value} NonNullable */\n",
+    );
+
+    for name in ["Plain", "Nullable", "NonNullable"] {
+        let declaration = memo
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), name)
+            .unwrap();
+        assert!(
+            has_dependency(&declaration, "NS.Value"),
+            "{name} lost its qualified JSDoc dependency: {:?}",
+            declaration.dependency_paths,
+        );
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -302,7 +402,11 @@ fn concurrent_first_touch_lowers_once() {
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            memo.type_decl("Unrelated").is_some()
+            memo.type_decl_in(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Unrelated",
+            )
+            .is_some()
         }));
     }
     for handle in handles {
@@ -339,7 +443,9 @@ fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
 
         // Pin the lease with one successful demand, then break the retained
         // snapshot out-of-band so every subsequent demand lease-misses.
-        assert!(memo.type_decl("Var0").is_some());
+        assert!(memo
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var0")
+            .is_some());
         memo.release_retained_snapshot_for_test();
 
         const THREADS: usize = 32;
@@ -352,7 +458,10 @@ fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
                 barrier.wait();
                 // Demand a DIFFERENT, not-yet-lowered symbol so the demand
                 // actually runs and lease-misses (rather than a warm hit).
-                match memo.type_decl_outcome("Var1") {
+                match memo.type_decl_outcome_in(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "Var1",
+                ) {
                     DemandOutcome::LeaseMiss => 0u8,
                     DemandOutcome::Ready(None) => 1u8,
                     DemandOutcome::Ready(Some(_)) => 2u8,
@@ -404,7 +513,12 @@ fn whole_env_is_a_memoized_whole_file_demand() {
 fn jsdoc_typedef_lowers_on_demand() {
     let (memo, provenance) =
         memo_for("/** @typedef {{a: number}} FromDoc */\ntype Real = { r: 1 };\n");
-    let decl = memo.type_decl("FromDoc").expect("typedef must lower");
+    let decl = memo
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "FromDoc",
+        )
+        .expect("typedef must lower");
     assert!(matches!(decl.kind, TypeDeclKind::Alias));
     assert_eq!(
         bodies(&provenance),
@@ -424,7 +538,11 @@ type FileScope = { f: 1 };
     let (memo, provenance) = memo_for(source);
     let scope = AugmentationScopeKind::Module("vue".to_string());
     let decl = memo
-        .augmentation_type_decl(&scope, "ComponentCustomProperties")
+        .augmentation_type_decl_in(
+            &scope,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "ComponentCustomProperties",
+        )
         .expect("augmentation entry exists");
     assert!(matches!(decl.kind, TypeDeclKind::Interface));
     // The block statement lowers both its inner declarations (type +
@@ -454,10 +572,19 @@ type FileScope = { f: 1 };
 #[test]
 fn unknown_names_are_none_without_lowering() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
-    assert!(memo.type_decl("Missing").is_none());
+    assert!(memo
+        .type_decl_in(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Missing"
+        )
+        .is_none());
     assert!(memo.value_decl("Missing").is_none());
     assert!(memo
-        .augmentation_type_decl(&AugmentationScopeKind::Global, "Missing")
+        .augmentation_type_decl_in(
+            &AugmentationScopeKind::Global,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Missing",
+        )
         .is_none());
     assert_eq!(bodies(&provenance), 0, "a miss lowers nothing");
     assert_eq!(parses(&provenance), 0, "a miss parses nothing");
@@ -545,31 +672,37 @@ declare module "ext" {
 
     // PARITY — every indexed header symbol demand-resolves through its
     // matching accessor.
-    for name in header_index.type_headers.keys() {
+    for key in header_index.type_headers.keys() {
         assert!(
-            memo.type_decl(name).is_some(),
-            "type header `{name}` must demand-resolve through type_decl"
+            memo.type_decl_in(key.owner, key.name.as_ref()).is_some(),
+            "type header `{}` must demand-resolve through type_decl",
+            key.name,
         );
     }
-    for name in header_index.value_headers.keys() {
+    for key in header_index.value_headers.keys() {
         assert!(
-            memo.value_decl(name).is_some(),
-            "value header `{name}` must demand-resolve through value_decl"
+            memo.value_decl_in(key.owner, key.name.as_ref()).is_some(),
+            "value header `{}` must demand-resolve through value_decl",
+            key.name,
         );
     }
     for (scope, names) in &header_index.augmentation_type_headers {
-        for name in names.keys() {
+        for key in names.keys() {
             assert!(
-                memo.augmentation_type_decl(scope, name).is_some(),
-                "augmentation type header `{name}` in {scope:?} must demand-resolve"
+                memo.augmentation_type_decl_in(scope, key.owner, key.name.as_ref())
+                    .is_some(),
+                "augmentation type header `{}` in {scope:?} must demand-resolve",
+                key.name,
             );
         }
     }
     for (scope, names) in &header_index.augmentation_value_headers {
-        for name in names.keys() {
+        for key in names.keys() {
             assert!(
-                memo.augmentation_value_decl(scope, name).is_some(),
-                "augmentation value header `{name}` in {scope:?} must demand-resolve"
+                memo.augmentation_value_decl_in(scope, key.owner, key.name.as_ref())
+                    .is_some(),
+                "augmentation value header `{}` in {scope:?} must demand-resolve",
+                key.name,
             );
         }
     }
@@ -613,7 +746,9 @@ fn merged_same_name_enum_resolves_all_members_in_both_spaces_through_the_memo() 
     // BOTH contributor body slots (a last-wins `merged_body()` fold would
     // collapse to one slot and drop the first declaration's `A`/`B` arms
     // from the value-derived projected union).
-    let ty = memo.type_decl("E").expect("enum type body resolves");
+    let ty = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "E")
+        .expect("enum type body resolves");
     assert_eq!(
         ty.body.contributors().len(),
         2,
@@ -663,8 +798,6 @@ fn raw_surfaces_merge_overload_groups_for_the_demanded_name() {
 /// `lowered_type_decl_from_group` (see `seeded_non_enum_merged_type_cell_fails_loudly`).
 fn seeded_memo_for(source: &str) -> DeclBodyMemo {
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
-    let analysis =
-        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default();
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let header_index = Arc::new(
@@ -677,7 +810,6 @@ fn seeded_memo_for(source: &str) -> DeclBodyMemo {
             parse_env_hash: [0u8; 16],
         },
         &env,
-        &analysis,
         header_index,
     )
 }
@@ -693,8 +825,12 @@ fn seeded_memo_matches_lazy_fold() {
     let seeded = seeded_memo_for(source);
     let (lazy, _) = memo_for(source);
 
-    let seeded_decl = seeded.type_decl("E").expect("seeded enum type entry");
-    let lazy_decl = lazy.type_decl("E").expect("lazy enum type entry");
+    let seeded_decl = seeded
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "E")
+        .expect("seeded enum type entry");
+    let lazy_decl = lazy
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "E")
+        .expect("lazy enum type entry");
     assert_eq!(
         seeded_decl.body_hash, lazy_decl.body_hash,
         "enum seed-time fingerprint (UnresolvedLens) must equal the lazy \
@@ -909,7 +1045,8 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 let ok = if type_side {
-                    memo.type_decl(&name).is_some()
+                    memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), &name)
+                        .is_some()
                 } else {
                     memo.value_decl(&name).is_some()
                 };
@@ -948,7 +1085,8 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
 /// Discrimination (RED against the pre-change tree, GREEN after): the
 /// pre-change `type_decl` / `whole_env` / `raw_surfaces_for` lease-miss arms
 /// PANICKED in this (debug_assertions) build, so the direct
-/// `memo.type_decl("Var1")` call below would abort the test — RED. Post-change
+/// `memo.type_decl_in(ordinary_file(), "Var1")` call below would abort the test — RED.
+/// Post-change
 /// each arm returns cleanly AND leaves its cell UNCOMMITTED (the
 /// `*_materialized` probes), while the work / parse counters stay flat: a
 /// silently-memoized wrong-empty entry (the release defect) would flip a
@@ -958,7 +1096,9 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
 
     // First demand pins the lease and lowers the demanded body.
-    assert!(memo.type_decl("Var0").is_some());
+    assert!(memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var0")
+        .is_some());
     assert_eq!(parses(&provenance), 1, "the lease acquisition parses once");
     let lowered_before = bodies(&provenance);
 
@@ -975,7 +1115,8 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     // 1. Per-symbol body demand (`lower_demanded`): ReturnOnly — a CLEAN None
     //    (no panic), and NO body-less warm entry is admitted for `Var1`.
     assert!(
-        memo.type_decl("Var1").is_none(),
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var1")
+            .is_none(),
         "a body demand with a broken lease must fail CLOSED to None via ReturnOnly \
          (never a panic, never a transient re-parse)"
     );
@@ -1036,7 +1177,9 @@ fn broken_lease_locator_deref_returns_lease_miss_not_unknown_symbol() {
     let (memo, _) = memo_for(FIVE_DECLS);
     // Pin the lease with one successful demand, then break the retained
     // snapshot out-of-band so every subsequent demand lease-misses.
-    assert!(memo.type_decl("Var0").is_some());
+    assert!(memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Var0")
+        .is_some());
     memo.release_retained_snapshot_for_test();
 
     // Deref a DIFFERENT, not-yet-lowered TYPE symbol so the demand actually
@@ -1077,7 +1220,9 @@ fn partial_contributor_batch_does_not_backfill_merged_sibling() {
     // The TYPE side has TWO contributors (interface + class). The
     // class statement alone must not have pre-filled it: the type
     // demand must still fold the full Merged carrier.
-    let ty = memo.type_decl("Foo").expect("type side");
+    let ty = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Foo")
+        .expect("type side");
     assert!(
         ty.body.is_merged(),
         "interface+class must fold into the Merged carrier even when \
@@ -1440,7 +1585,9 @@ fn wrong_memo_deref_returns_canonical_mismatch() {
     let (memo_b, _) = memo_for_canonical("/ws/b.ts", "type Shared = { b: 2 };\n");
     // Control: A resolves its own `Shared`.
     assert!(
-        memo_a.type_decl("Shared").is_some(),
+        memo_a
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Shared",)
+            .is_some(),
         "memo A must declare the shared symbol"
     );
 
@@ -1769,7 +1916,9 @@ fn merged_interface_with_type_params_leading_bound() {
     let (memo, _) =
         memo_for("interface Bar<T extends string> { a: T }\ninterface Bar<T> { b: number }\n");
     // Control: `Bar` is a merged decl.
-    let decl = memo.type_decl("Bar").expect("Bar exists");
+    let decl = memo
+        .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Bar")
+        .expect("Bar exists");
     assert!(decl.body.is_merged(), "two same-name interfaces merge");
 
     let derefed = memo

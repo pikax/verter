@@ -110,6 +110,7 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn evaluate_fallthrough_value_node(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         expression: &str,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
@@ -133,10 +134,11 @@ impl ComponentMetaQueryEngine<'_> {
         // (2) Runtime-value env substitution. A changed shape is already a
         // concrete value type; lower it to a node directly (Navigate).
         if let Some(env) = env {
-            let substituted = structural_substitute_typeof_refs(&lowered, env);
+            let substituted = structural_substitute_typeof_refs(&lowered, scope_owner, env);
             if substituted != lowered {
-                return dispatch.lower_type_expr_in_scope_with_mode(
+                return dispatch.lower_type_expr_in_owner_scope_with_mode(
                     scope_canonical_id,
+                    scope_owner,
                     &substituted,
                     ProjectionMode::Navigate,
                 );
@@ -148,6 +150,7 @@ impl ComponentMetaQueryEngine<'_> {
             self.ctx,
             Some(self),
             scope_canonical_id,
+            scope_owner,
             &lowered,
         ) {
             return Some(admitted.node());
@@ -159,8 +162,9 @@ impl ComponentMetaQueryEngine<'_> {
         // exposes its exact spread keys. Lower the expression eagerly and let
         // the node-domain readers decide what the node statically exposes —
         // a shape with no static key surface still reads as unknown.
-        dispatch.lower_type_expr_in_scope_with_mode(
+        dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,
+            scope_owner,
             &lowered,
             ProjectionMode::Expanded,
         )
@@ -172,12 +176,18 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn known_spread_keys_for_value_expression(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         expression: &str,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Option<KnownSpreadKeys> {
-        let node =
-            self.evaluate_fallthrough_value_node(scope_canonical_id, expression, env, overrides)?;
+        let node = self.evaluate_fallthrough_value_node(
+            scope_canonical_id,
+            scope_owner,
+            expression,
+            env,
+            overrides,
+        )?;
         known_spread_keys_from_node(self.ctx, node)
     }
 
@@ -187,14 +197,19 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn dynamic_root_candidates_for_value_expression(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         expression: &str,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
         imports: &[AnalyzedImport],
     ) -> Vec<DynamicRootCandidate> {
-        let Some(node) =
-            self.evaluate_fallthrough_value_node(scope_canonical_id, expression, env, overrides)
-        else {
+        let Some(node) = self.evaluate_fallthrough_value_node(
+            scope_canonical_id,
+            scope_owner,
+            expression,
+            env,
+            overrides,
+        ) else {
             return Vec::new();
         };
         collect_dynamic_root_candidates_from_node(self.ctx, node, imports)
@@ -207,6 +222,7 @@ impl ComponentMetaQueryEngine<'_> {
     pub(crate) fn value_expression_override_node(
         &mut self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         prop: &TemplatePropUsage,
         env: Option<&EvalEnv>,
         overrides: Option<&FallthroughPropOverrideSet>,
@@ -220,32 +236,40 @@ impl ComponentMetaQueryEngine<'_> {
                 Some(expression) => TypeExpr::string_literal(expression.clone()),
                 None => TypeExpr::boolean_literal(true),
             };
-            return self.lower_value_literal_node(scope_canonical_id, &literal);
+            return self.lower_value_literal_node(scope_canonical_id, scope_owner, &literal);
         }
 
         if let Some(expression) = &prop.expression {
-            if let Some(node) =
-                self.evaluate_fallthrough_value_node(scope_canonical_id, expression, env, overrides)
-            {
+            if let Some(node) = self.evaluate_fallthrough_value_node(
+                scope_canonical_id,
+                scope_owner,
+                expression,
+                env,
+                overrides,
+            ) {
                 return Some(node);
             }
             if let Some(parsed) =
                 verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)
             {
-                return self.lower_value_literal_node(scope_canonical_id, &parsed);
+                return self.lower_value_literal_node(scope_canonical_id, scope_owner, &parsed);
             }
         }
 
         if prop.is_shorthand {
-            if let Some(node) =
-                self.evaluate_fallthrough_value_node(scope_canonical_id, &prop.name, env, overrides)
-            {
+            if let Some(node) = self.evaluate_fallthrough_value_node(
+                scope_canonical_id,
+                scope_owner,
+                &prop.name,
+                env,
+                overrides,
+            ) {
                 return Some(node);
             }
             if let Some(parsed) =
                 verter_semantic::analysis::type_eval_build::parse_value_expression_type(&prop.name)
             {
-                return self.lower_value_literal_node(scope_canonical_id, &parsed);
+                return self.lower_value_literal_node(scope_canonical_id, scope_owner, &parsed);
             }
         }
 
@@ -257,10 +281,12 @@ impl ComponentMetaQueryEngine<'_> {
     fn lower_value_literal_node(
         &self,
         scope_canonical_id: &str,
+        scope_owner: verter_type_expr::TopLevelOwnerId,
         expr: &TypeExpr,
     ) -> Option<SemanticNodeId> {
-        ProjectSemanticDispatch::new(self.ctx).lower_type_expr_in_scope_with_mode(
+        ProjectSemanticDispatch::new(self.ctx).lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,
+            scope_owner,
             expr,
             ProjectionMode::Navigate,
         )

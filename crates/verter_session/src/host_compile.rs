@@ -123,12 +123,11 @@ pub struct CompileBatchEntry {
     pub lang: Option<String>,
     pub errors: Vec<String>,
     /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
-    /// compile, kept separate from the fatal `errors`. Populated by the
-    /// [`CompileManyTarget::RuntimeRender`] lane's soft-macro contract: an
-    /// unresolved imported macro type renders successfully (the compiler
-    /// degrades the type to `Unknown`) and reports the diagnostic here
-    /// instead of aborting. Always empty on the `HostBacked` lane and on
-    /// any fatal outcome.
+    /// compile, kept separate from the fatal `errors`. RuntimeRender uses this
+    /// for closed row-local degradation (for example, an unavailable member
+    /// type rendered as `null`). An unavailable authoritative macro root stays
+    /// fatal and never produces partial code. Always empty on the `HostBacked`
+    /// lane and on any fatal outcome.
     pub diagnostics: Vec<HostDiagnostic>,
     pub duration_ms: f64,
     pub cache_hit: bool,
@@ -174,6 +173,9 @@ pub struct CompileBatchRenderProfile {
     pub filename: Option<String>,
     /// Production codegen — strips dev-only code (`__file`, HMR).
     pub is_production: bool,
+    /// Vue custom-element script policy. Required explicitly on the render
+    /// lane and independent of template `custom_elements`.
+    pub custom_element: bool,
     /// Server-side render function selection.
     pub ssr: bool,
     /// TS type-stripping (plain-JS output).
@@ -236,10 +238,10 @@ pub struct CompileBatchOptions {
 ///   drops the per-file wrapper overhead (source re-clone, cache-mode
 ///   classification, the unconditional dependency/semantic-axis sync, and
 ///   the store-view/overlay/resolver-context construction on simple
-///   files). Cross-file-macro files still resolve `external_types`
-///   through the ONE shared resolver so their render output stays
-///   byte-identical. An unresolved imported macro type degrades to a
-///   warning instead of a fatal error on this lane.
+///   files). Cross-file-macro files still produce request-local semantic
+///   DTOs through the shared TypeInfo dispatch so their render output stays
+///   byte-identical. Authoritative macro-root failures retain the same typed
+///   fatal outcome; row-local runtime-type degradation may surface warnings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
@@ -256,14 +258,13 @@ pub enum CompileManyTarget {
 }
 
 /// Bundler-default compile profile preset: production codegen, no SSR, no
-/// HMR. This is the EXPLICIT fallback the `RuntimeRender` lane uses when
-/// [`CompileBatchOptions::render_profile`] is `None` — it is NOT hidden
-/// policy for every `compile_many` call. When a caller supplies a
-/// [`CompileBatchRenderProfile`], the lane builds its profile from that
-/// instead (see [`render_base_profile`]).
+/// HMR, and non-custom-element script policy. The HostBacked batch lane uses
+/// this explicit preset. RuntimeRender instead requires and projects a
+/// [`CompileBatchRenderProfile`] through [`render_base_profile`].
 pub fn compile_profile_for_bundler() -> CompileProfile {
     CompileProfile {
         is_production: true,
+        custom_element: false,
         ssr: false,
         ..CompileProfile::default()
     }
@@ -293,6 +294,7 @@ fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),
         is_production: rp.is_production,
+        custom_element: rp.custom_element,
         ssr: rp.ssr,
         force_js: rp.force_js,
         force_vapor: rp.force_vapor,
@@ -756,11 +758,10 @@ impl VerterHost {
                     source_map: response.source_map,
                     lang: response.lang,
                     errors,
-                    // HostBacked never softens a diagnostic to a warning
-                    // here — its warnings ride in the response diagnostics
-                    // and are not re-surfaced as a distinct success-warning
-                    // list. Only the RuntimeRender soft-macro lane populates
-                    // `diagnostics`.
+                    // HostBacked warnings ride in the response diagnostics and
+                    // are not re-surfaced as a distinct success-warning list.
+                    // RuntimeRender exposes successful row-local degradation
+                    // warnings through `diagnostics`.
                     diagnostics: Vec::new(),
                     duration_ms,
                     cache_hit: response.cache_hit,

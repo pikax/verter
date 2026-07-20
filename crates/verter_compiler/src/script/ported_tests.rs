@@ -4,22 +4,28 @@
 //! Each test calls `compile()` directly and checks the appropriate result block
 //! (script, template, or diagnostics).
 
-use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
+use crate::compile::{
+    compile, CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
+};
 use oxc_allocator::Allocator;
-use rustc_hash::FxHashMap;
 
-fn make_external_types(
-    type_name: &str,
-    dep_source: &str,
-) -> FxHashMap<String, crate::utils::oxc::script::type_surface::ResolvedElements> {
-    let alloc = Allocator::default();
-    let resolved = crate::utils::oxc::script::type_surface::resolve_external_type(
-        type_name, dep_source, &alloc,
+fn compile_force_js_with_runtime(
+    input: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> VerterCompileResult {
+    let allocator = Allocator::new();
+    let options = CodegenOptions::new().with_filename("test.vue");
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+    compile(
+        input,
+        &options,
+        &verter_opts,
+        &VueMacroSemanticInput::Runtime(runtime),
+        &allocator,
     )
-    .expect("failed to resolve external type");
-    let mut map = FxHashMap::default();
-    map.insert(type_name.to_string(), resolved);
-    map
 }
 
 // =========================================================================
@@ -44,7 +50,13 @@ export default { name: 'MyComponent' }
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let has_code = result.script.as_ref().is_some_and(|s| !s.code.is_empty());
     assert!(
         has_code || !result.errors.is_empty(),
@@ -68,7 +80,13 @@ const b = 2
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     assert!(
         !result.errors.is_empty(),
         "Duplicate <script setup> should produce error diagnostics, got none"
@@ -89,7 +107,13 @@ fn test_script_setup_basic_dev() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __sfc__ = {"),
@@ -137,7 +161,13 @@ fn test_script_setup_prod_template() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     assert!(
         result.template.is_none(),
         "production inlines the render into setup — no template block"
@@ -159,7 +189,13 @@ fn test_component_name_from_filename() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("__name: 'MyComponent'"),
@@ -178,7 +214,13 @@ fn test_script_no_setup() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("<script>"),
@@ -215,7 +257,13 @@ fn test_define_props_object_arg() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -227,13 +275,17 @@ fn test_define_props_object_arg() {
 #[test]
 fn test_define_props_typed_inline() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "title",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -260,13 +312,17 @@ fn test_define_props_typed_inline() {
 #[test]
 fn test_define_props_typed_optional() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ count?: number }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "count",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Number],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("count:"),
@@ -283,13 +339,17 @@ fn test_define_props_typed_optional() {
 #[test]
 fn test_define_props_string_literal_union() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ view?: 'list' | 'board' | 'calendar' }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "view",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("String"),
@@ -301,13 +361,17 @@ fn test_define_props_string_literal_union() {
 #[test]
 fn test_define_props_inline_no_stale_delimiters() {
     let input = "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "title",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("defineProps<"),
@@ -329,13 +393,24 @@ fn test_define_props_inline_no_stale_delimiters() {
 #[test]
 fn test_define_props_interface_ref() {
     let input = "<script setup lang=\"ts\">\ninterface Props { title: string; count?: number }\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "title",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "count",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -357,13 +432,17 @@ fn test_define_props_interface_ref() {
 #[test]
 fn test_define_props_type_alias_ref() {
     let input = "<script setup lang=\"ts\">\ntype MyProps = { message: string }\ndefineProps<MyProps>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "message",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -389,7 +468,13 @@ fn test_define_props_unresolvable_type() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("defineProps<"),
@@ -415,7 +500,13 @@ fn test_define_props_empty_type_literal() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("defineProps"),
@@ -427,88 +518,32 @@ fn test_define_props_empty_type_literal() {
 #[test]
 fn test_define_props_unresolvable_type_reports_error() {
     let input = "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
-    // An UNRESOLVABLE imported type surfaces the resolution-failure code
-    // `XUnresolvedImportedMacroType` (distinct from the `XInvalidMacroType`
-    // a resolved-but-wrong-shape type emits — only the former is softened on
-    // the render-only bundler lane).
+    let runtime = crate::test_helpers::runtime_bundle([verter_macro_dto::MacroRuntimeEntry {
+        syntax_index: 0,
+        macro_index: 0,
+        outcome: verter_macro_dto::MacroRuntimeOutcome::Unresolved(
+            verter_macro_dto::MacroFailure::new(
+                verter_macro_dto::UnresolvedReason::MissingDependency,
+                Some("imported props dependency is unavailable".to_owned()),
+            ),
+        ),
+    }]);
+    let result = compile_force_js_with_runtime(input, runtime);
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| error.code == "XUnavailableMacroSemanticResult")
+        .expect("unresolvable imported props type should surface a typed compiler error");
+    assert!(diagnostic.message.contains("unresolved"), "{diagnostic:?}");
     assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.code == "XUnresolvedImportedMacroType"),
-        "unresolvable imported props type should surface a compiler error, got: {:?}",
-        result.errors
-    );
-}
-
-#[test]
-fn test_define_emits_invalid_imported_type_reports_error() {
-    let input = "<script setup lang=\"ts\">\nimport type { ExternalEmits } from './types'\ndefineEmits<ExternalEmits>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        external_types: Some(make_external_types(
-            "ExternalEmits",
-            "export type ExternalEmits = string",
-        )),
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
-
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.code == "XInvalidMacroType"),
-        "invalid imported emits type should surface a compiler error, got: {:?}",
-        result.errors
+        diagnostic.message.contains("missing-dependency"),
+        "{diagnostic:?}"
     );
     assert!(
-        result.errors.iter().any(|error| error
+        diagnostic
             .message
-            .contains("defineEmits() type argument 'ExternalEmits'")),
-        "diagnostic should mention the invalid defineEmits import, got: {:?}",
-        result.errors
-    );
-}
-
-#[test]
-fn test_define_props_invalid_imported_type_reports_error() {
-    let input = "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        external_types: Some(make_external_types(
-            "ExternalProps",
-            "export type ExternalProps = string",
-        )),
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
-
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.code == "XInvalidMacroType"),
-        "invalid imported props type should surface a compiler error, got: {:?}",
-        result.errors
-    );
-    assert!(
-        result.errors.iter().any(|error| error
-            .message
-            .contains("defineProps() type argument 'ExternalProps'")),
-        "diagnostic should mention the invalid defineProps import, got: {:?}",
-        result.errors
+            .contains("imported props dependency is unavailable"),
+        "{diagnostic:?}"
     );
 }
 
@@ -521,7 +556,13 @@ fn test_define_props_replaced_with_props() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("__props"),
@@ -537,13 +578,20 @@ fn test_define_props_replaced_with_props() {
 #[test]
 fn test_with_defaults_typed_inline() {
     let input = "<script setup lang=\"ts\">\nconst props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' })\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [crate::test_helpers::runtime_prop(
+            "foo",
+            true,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -565,13 +613,27 @@ fn test_with_defaults_typed_inline() {
 #[test]
 fn test_with_defaults_interface_ref() {
     let input = "<script setup lang=\"ts\">\ninterface Props { foo?: string; bar?: number }\nconst props = withDefaults(defineProps<Props>(), { foo: 'hello' })\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "foo",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "bar",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -602,13 +664,24 @@ fn test_with_defaults_interface_ref() {
 #[test]
 fn test_define_props_export_interface_resolves() {
     let input = "<script setup lang=\"ts\">\nexport interface Props {\n  foo: string\n  bar?: number\n}\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.foo }}</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "foo",
+                false,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "bar",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -639,13 +712,17 @@ fn test_define_props_export_interface_resolves() {
 #[test]
 fn test_define_props_export_type_alias_resolves() {
     let input = "<script setup lang=\"ts\">\nexport type Props = {\n  bar: number\n}\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop_at_macro_argument(
+            "bar",
+            false,
+            [verter_macro_dto::RuntimeConstructor::Number],
+        )],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -671,13 +748,27 @@ fn test_define_props_export_type_alias_resolves() {
 #[test]
 fn test_with_defaults_export_interface() {
     let input = "<script setup lang=\"ts\">\nexport interface Props {\n  size?: number\n  color?: string\n}\nconst props = withDefaults(defineProps<Props>(), {\n  size: 16,\n  color: 'red',\n})\n</script>\n<template><div>{{ props.size }}</div></template>";
-    let allocator = Allocator::new();
-    let options = CodegenOptions::new().with_filename("test.vue");
-    let verter_opts = VerterCompileOptions {
-        force_js: true,
-        ..Default::default()
-    };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        1,
+        verter_macro_dto::PropsDefaultsAssociation::WithDefaults {
+            payload_macro_index: 0,
+            defaults_macro_index: 1,
+        },
+        [
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "size",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+            crate::test_helpers::runtime_prop_at_macro_argument(
+                "color",
+                true,
+                [verter_macro_dto::RuntimeConstructor::String],
+            ),
+        ],
+    )]);
+    let result = compile_force_js_with_runtime(input, runtime);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -719,7 +810,13 @@ fn test_define_emits_array() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("emits:"),
@@ -745,7 +842,13 @@ fn test_define_emits_no_declarator() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("emits:"),
@@ -768,7 +871,13 @@ fn test_define_model_basic() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("_useModel"),
@@ -791,7 +900,13 @@ fn test_define_model_named() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("\"count\"") || script.code.contains("'count'"),
@@ -811,7 +926,13 @@ fn test_define_model_with_props_merge() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("props:"),
@@ -838,7 +959,13 @@ fn test_define_expose() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("__expose("),
@@ -865,7 +992,13 @@ fn test_define_options() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("inheritAttrs: false"),
@@ -900,7 +1033,13 @@ const emit = defineEmits<LabelEmits>()
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("defineOptions("),
@@ -928,7 +1067,13 @@ fn test_define_slots() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("_useSlots"),
@@ -951,7 +1096,13 @@ fn test_ts_uses_define_component() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("_defineComponent("),
@@ -972,7 +1123,13 @@ fn test_js_uses_plain_object_without_define_component() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __sfc__ = {"),
@@ -999,7 +1156,13 @@ fn test_import_hoisted() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     let import_pos = script.code.find("import { ref }");
     let export_pos = script.code.find("export default");
@@ -1024,7 +1187,13 @@ fn test_type_import_stripped() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("import type"),
@@ -1042,7 +1211,13 @@ fn test_declarations_in_return() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("count") && script.code.contains("increment"),
@@ -1064,7 +1239,13 @@ fn test_script_setup_empty() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __sfc__"),
@@ -1082,7 +1263,13 @@ fn test_script_setup_comment_only() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("setup(__props"),
@@ -1103,7 +1290,13 @@ fn test_prod_return_bindings() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("msg"),
@@ -1128,7 +1321,13 @@ import MyComp from './MyComp.vue'
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __returned__ = {"),
@@ -1163,7 +1362,13 @@ const x = SOME_CONST
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
@@ -1202,7 +1407,13 @@ const x = 1
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("Ref"),
@@ -1224,7 +1435,13 @@ const localVar = 'hello'
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
@@ -1261,7 +1478,13 @@ function increment() {}
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
@@ -1308,7 +1531,13 @@ const x = CONST_VAL
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
@@ -1350,7 +1579,13 @@ fn test_prod_template_has_render_function() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     assert!(
         result.template.is_none(),
         "production inlines the render — no template block"
@@ -1376,7 +1611,13 @@ fn test_prod_template_before_script() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     assert!(
         result.template.is_none(),
         "production inlines the render — no template block"
@@ -1403,7 +1644,13 @@ fn test_dev_template_before_script() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     // Both blocks should exist
     assert!(result.script.is_some(), "Should have script block");
     assert!(result.template.is_some(), "Should have template block");
@@ -1423,7 +1670,13 @@ fn test_prod_script_has_return_statement() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("__returned__"),
@@ -1448,7 +1701,13 @@ fn test_prod_options_api_uses_function_render() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let template = result
         .template
         .as_ref()
@@ -1474,7 +1733,13 @@ fn test_prod_script_setup_template_has_render() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     assert!(
         result.template.is_none(),
         "production inlines the render — no template block"
@@ -1507,7 +1772,13 @@ const themeColor = ref('red')
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("_useCssVars"),
@@ -1535,7 +1806,13 @@ fn test_scoped_style_uses_sfc_variable() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __sfc__ = {"),
@@ -1576,7 +1853,13 @@ const msg = 'hi'
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("export default __sfc__"),
@@ -1604,7 +1887,13 @@ fn test_regular_script_scoped_style() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __sfc__ ="),
@@ -1639,7 +1928,13 @@ fn test_non_scoped_setup_uses_sfc_variable() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("const __sfc__ = {"),
@@ -1684,7 +1979,13 @@ const hasAccess = computed(() => props.codes.length > 0);
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("interface"),
@@ -1707,7 +2008,13 @@ const status: Status = 'active';
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("type Status"),
@@ -1737,7 +2044,13 @@ const dir = Direction.Up;
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         script.code.contains("Direction"),
@@ -1770,7 +2083,13 @@ const user = { name: 'test', age: 25 };
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("interface User"),
@@ -1799,7 +2118,13 @@ const x = 1;
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("declare"),
@@ -1824,7 +2149,13 @@ const x = 1;
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("interface"),
@@ -1847,7 +2178,13 @@ const x = 1;
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("type MyType"),
@@ -1874,7 +2211,13 @@ const x = 1;
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let script = result.script.as_ref().expect("should have script block");
     assert!(
         !script.code.contains("namespace"),
@@ -1896,7 +2239,13 @@ fn test_template_only_component_has_no_script_block() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     assert!(
         result.script.is_none(),
         "Template-only component should have no script block"
@@ -1920,7 +2269,13 @@ fn test_template_only_component_has_render_function() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     let template = result
         .template
         .as_ref()
@@ -1944,7 +2299,13 @@ fn test_template_only_component_scoped_style() {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(input, &options, &verter_opts, &allocator);
+    let result = compile(
+        input,
+        &options,
+        &verter_opts,
+        &crate::compile::VueMacroSemanticInput::Unavailable,
+        &allocator,
+    );
     // Template-only with scoped style should still have template block
     assert!(
         result.template.is_some(),

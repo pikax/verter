@@ -5,9 +5,18 @@
 
 use oxc_allocator::Allocator;
 
-use crate::compile::{compile, CodegenOptions, VerterCompileOptions, VerterCompileResult};
+use crate::compile::{
+    compile, CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
+};
 
 fn compile_sfc_ssr(source: &str) -> VerterCompileResult {
+    compile_sfc_ssr_with_semantics(source, &VueMacroSemanticInput::Unavailable)
+}
+
+fn compile_sfc_ssr_with_semantics(
+    source: &str,
+    macro_semantics: &VueMacroSemanticInput,
+) -> VerterCompileResult {
     let alloc = Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -18,12 +27,24 @@ fn compile_sfc_ssr(source: &str) -> VerterCompileResult {
         ssr: true,
         ..Default::default()
     };
-    compile(source, &options, &verter_opts, &alloc)
+    compile(source, &options, &verter_opts, macro_semantics, &alloc)
 }
 
 /// Helper: compile and return the template code, asserting no errors.
 fn gen_ssr_template(source: &str) -> String {
     let result = compile_sfc_ssr(source);
+    ssr_template_code(result)
+}
+
+fn gen_ssr_template_with_runtime(
+    source: &str,
+    runtime: std::sync::Arc<verter_macro_dto::MacroRuntimeBundle>,
+) -> String {
+    let result = compile_sfc_ssr_with_semantics(source, &VueMacroSemanticInput::Runtime(runtime));
+    ssr_template_code(result)
+}
+
+fn ssr_template_code(result: VerterCompileResult) -> String {
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -39,6 +60,10 @@ fn gen_ssr_template(source: &str) -> String {
 /// Helper: compile and return the script code, asserting no errors.
 fn gen_ssr_script(source: &str) -> String {
     let result = compile_sfc_ssr(source);
+    ssr_script_code(result)
+}
+
+fn ssr_script_code(result: VerterCompileResult) -> String {
     assert!(
         result.errors.is_empty(),
         "compile errors: {:?}",
@@ -2072,11 +2097,22 @@ const msg = ref('hello')
 /// @ai-generated — SSR props use _ctx. (non-inline ssrRender).
 #[test]
 fn ssr_props_dot_notation() {
-    let code = gen_ssr_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "msg",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let code = gen_ssr_template_with_runtime(
         r#"<script setup>
 defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
+        runtime,
     );
     assert!(
         code.contains("_ctx.msg"),
@@ -3799,13 +3835,24 @@ const cards = [1, 2]
 /// `:cards` must still appear when combined with `v-bind="props"` (spread).
 #[test]
 fn ssr_component_same_name_shorthand_with_vbind_spread() {
-    let code = gen_ssr_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "x",
+            true,
+            [verter_macro_dto::RuntimeConstructor::Number],
+        )],
+    )]);
+    let code = gen_ssr_template_with_runtime(
         r#"<script setup>
 import Child from './Child.vue'
 const props = defineProps<{ x?: number }>()
 const cards = [1]
 </script>
 <template><Child :cards v-bind="props" /></template>"#,
+        runtime,
     );
     assert!(
         code.contains("cards: _ctx.cards") || code.contains("cards:"),
@@ -3821,7 +3868,24 @@ const cards = [1]
 /// Destructuring defineProps + `:invert` / `:brightness` same-name shorthands.
 #[test]
 fn ssr_component_same_name_shorthand_destructured_props() {
-    let code = gen_ssr_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [
+            crate::test_helpers::runtime_prop(
+                "invert",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Boolean],
+            ),
+            crate::test_helpers::runtime_prop(
+                "brightness",
+                true,
+                [verter_macro_dto::RuntimeConstructor::Number],
+            ),
+        ],
+    )]);
+    let code = gen_ssr_template_with_runtime(
         r#"<script setup lang="ts">
 import Child from './Child.vue'
 const { invert = false, brightness = 0 } = defineProps<{
@@ -3830,6 +3894,7 @@ const { invert = false, brightness = 0 } = defineProps<{
 }>()
 </script>
 <template><Child :invert :brightness /></template>"#,
+        runtime,
     );
     // Official resolves destructured props through _ctx./bindings — pin the
     // resolved VALUE expression, not key presence: a regression emitting a
@@ -6036,11 +6101,22 @@ const items = ref([])
 #[test]
 fn ssr_no_fragment_markers_for_text_only_root() {
     // A template with only text/interpolation at root should NOT have fragment markers
-    let code = gen_ssr_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "name",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let code = gen_ssr_template_with_runtime(
         r#"<template> Hello {{ name }}! </template>
 <script setup>
 const props = defineProps<{ name: string }>()
 </script>"#,
+        runtime,
     );
     assert!(
         !code.contains("<!--[-->"),
@@ -8568,7 +8644,17 @@ fn test_ssr_no_scope_id_without_scoped_style() {
 /// runtime ReferenceError under Vue's server renderer (plugin-vue drop-in proof).
 #[test]
 fn ssr_non_inline_emits_no_free_setup_binding() {
-    let code = gen_ssr_template(
+    let runtime = crate::test_helpers::runtime_bundle([crate::test_helpers::runtime_props_entry(
+        0,
+        0,
+        verter_macro_dto::PropsDefaultsAssociation::None,
+        [crate::test_helpers::runtime_prop(
+            "msg",
+            false,
+            [verter_macro_dto::RuntimeConstructor::String],
+        )],
+    )]);
+    let code = gen_ssr_template_with_runtime(
         r#"<script setup>
 import { ref } from 'vue'
 import Child from './Child.vue'
@@ -8582,6 +8668,7 @@ const props = defineProps<{ msg: string }>()
     <p v-if="n > 0">pos</p>
   </div>
 </template>"#,
+        runtime,
     );
     assert!(
         code.contains("function ssrRender(_ctx, _push, _parent, _attrs)"),

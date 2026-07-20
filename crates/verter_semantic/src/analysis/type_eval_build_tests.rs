@@ -2,7 +2,7 @@ use super::type_eval::*;
 use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
     expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
-    MacroExpansionScope, PathSegment,
+    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_DEPTH, MAX_SEMANTIC_INFERENCE_WORK,
 };
 use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
 use crate::analysis::types::{
@@ -11,7 +11,9 @@ use crate::analysis::types::{
 };
 use std::sync::Arc;
 use verter_type_expr::facts::{
-    ClosedTypeFact, EnumPrimitiveDomain, EnumScalar, LeafTypeFact, SemanticTypeSource,
+    ClosedTypeFact, EnumPrimitiveDomain, EnumScalar, FunctionSignatureFact,
+    InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact, ObjectShapeFact,
+    ReturnInferenceCompleteness, ReturnInferenceUnsupported, SemanticTypeSource,
     ValueAnnotationClass,
 };
 use verter_type_expr::locators::{
@@ -34,6 +36,151 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
     assert!(!parsed.panicked, "fixture must parse: {source}");
     let statement = parsed.program.body.first().expect("one statement fixture");
     crate::analysis::type_eval_build::lower_svelte_runes_statement_parts(statement, source)
+}
+
+#[test]
+fn owner_aware_eval_env_keeps_setup_and_module_locators_distinct() {
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
+
+    let source = r#"
+interface Shared { module: string }
+interface Shared { setup: number }
+namespace Ns { export class C { value!: string } }
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(!parsed.panicked, "fixture must parse");
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance, instance],
+    )
+    .expect("validated owner table");
+    let context = crate::analysis::type_eval_build::BuildEvalEnvContext::new("/src/App.vue");
+    let env = crate::analysis::type_eval_build::build_eval_env_with_owners(
+        &parsed.program,
+        source,
+        &context,
+        &owners,
+    );
+
+    let module_group = env
+        .type_symbols
+        .get(&DeclBindingKey::new(module, "Shared"))
+        .expect("module Shared");
+    let instance_group = env
+        .type_symbols
+        .get(&DeclBindingKey::new(instance, "Shared"))
+        .expect("instance Shared");
+    assert_eq!(module_group.contributors().len(), 1);
+    assert_eq!(instance_group.contributors().len(), 1);
+    assert_eq!(module_group.primary().body.anchor.owner, module);
+    assert_eq!(instance_group.primary().body.anchor.owner, instance);
+    assert_ne!(module_group.primary().body, instance_group.primary().body);
+
+    let namespaced = DeclBindingKey::new(instance, "Ns.C");
+    assert_eq!(
+        env.type_symbols
+            .get(&namespaced)
+            .expect("Ns.C type")
+            .primary()
+            .body
+            .anchor
+            .owner,
+        instance
+    );
+    assert!(env.value_symbols.contains_key(&namespaced));
+}
+
+#[test]
+fn jsdoc_typedef_bodies_lower_by_exact_owner_qualified_comment() {
+    use crate::analysis::decl_headers::build_decl_header_index_with_owners;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
+
+    let source = r#"
+/** @typedef {string} Shared */
+const moduleMarker = 0;
+/** @typedef {number} Shared */
+const instanceMarker = 0;
+"#;
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let owners = TopLevelOwnerTable::try_from_statement_owners(
+        parsed.program.body.len(),
+        [module, instance],
+    )
+    .expect("validated owner table");
+    let context = crate::analysis::type_eval_build::BuildEvalEnvContext::new("/src/App.vue");
+    let env = crate::analysis::type_eval_build::build_eval_env_with_owners(
+        &parsed.program,
+        source,
+        &context,
+        &owners,
+    );
+    assert_eq!(
+        env.type_symbols[&DeclBindingKey::new(module, "Shared")]
+            .primary()
+            .body
+            .anchor
+            .owner,
+        module
+    );
+    assert_eq!(
+        env.type_symbols[&DeclBindingKey::new(instance, "Shared")]
+            .primary()
+            .body
+            .anchor
+            .owner,
+        instance
+    );
+
+    let headers = build_decl_header_index_with_owners(&parsed.program, source, &owners);
+    let module_comment = headers.type_headers[&DeclBindingKey::new(module, "Shared")]
+        .jsdoc_typedef
+        .expect("module typedef locator")
+        .comment_span
+        .start;
+    let instance_comment = headers.type_headers[&DeclBindingKey::new(instance, "Shared")]
+        .jsdoc_typedef
+        .expect("instance typedef locator")
+        .comment_span
+        .start;
+    let mut module_env = EvalEnv::new();
+    let module_body = crate::analysis::type_eval_build::lower_jsdoc_typedef_at_comment(
+        &parsed.program.comments,
+        source,
+        "Shared",
+        module,
+        module_comment,
+        &context,
+        &mut module_env,
+    )
+    .expect("module typedef body")
+    .body;
+    let mut instance_env = EvalEnv::new();
+    let instance_body = crate::analysis::type_eval_build::lower_jsdoc_typedef_at_comment(
+        &parsed.program.comments,
+        source,
+        "Shared",
+        instance,
+        instance_comment,
+        &context,
+        &mut instance_env,
+    )
+    .expect("instance typedef body")
+    .body;
+    assert_ne!(module_body, instance_body);
 }
 
 // =============================================================================
@@ -845,9 +992,12 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
 
     let key_intrinsic = (
         AugmentationScopeKind::Global,
-        "JSX.IntrinsicElements".to_string(),
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.IntrinsicElements"),
     );
-    let key_element = (AugmentationScopeKind::Global, "JSX.Element".to_string());
+    let key_element = (
+        AugmentationScopeKind::Global,
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.Element"),
+    );
 
     assert!(
         env.augmentation_scopes.contains_key(&key_intrinsic),
@@ -948,7 +1098,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
 
     let key = (
         AugmentationScopeKind::Global,
-        "JSX.IntrinsicElements".to_string(),
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.IntrinsicElements"),
     );
     let group = &env.augmentation_scopes[&key];
     assert_eq!(
@@ -1044,7 +1194,10 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
         "#;
     let env = parse_and_build_env(source);
 
-    let key = (AugmentationScopeKind::Global, "JSX.VERSION".to_string());
+    let key = (
+        AugmentationScopeKind::Global,
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.VERSION"),
+    );
 
     // (a) registers in the global VALUE-augmentation scope, with the const's
     //     authored annotation classified + carried as its decl-body source.
@@ -1099,7 +1252,7 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
     let mut env_value_aug: Vec<(String, &str)> = env
         .augmentation_value_scopes
         .keys()
-        .map(|(scope, name)| (format!("{scope:?}"), name.as_str()))
+        .map(|(scope, key)| (format!("{scope:?}"), key.name.as_ref()))
         .collect();
     let mut index_value_aug: Vec<(String, &str)> = index
         .augmentation_value_headers
@@ -1107,7 +1260,7 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
         .flat_map(|(scope, names)| {
             names
                 .keys()
-                .map(move |name| (format!("{scope:?}"), name.as_str()))
+                .map(move |key| (format!("{scope:?}"), key.name.as_ref()))
         })
         .collect();
     env_value_aug.sort();
@@ -1238,6 +1391,480 @@ fn empty_implementation_infers_void_without_fabricating_an_authored_slot() {
         stored.return_ty.is_some(),
         "the inferred void result remains replayable through the semantic body locator"
     );
+}
+
+#[test]
+fn return_inference_flow_if_without_else_includes_fallthrough_undefined() {
+    let source = "function choose(flag: boolean, value: string) { if (flag) return value; }";
+    let parts = lowered(source);
+    let signature = &parts
+        .value_decl("choose")
+        .expect("lowered choose")
+        .signatures[0];
+    assert_eq!(
+        signature.return_type,
+        Some(TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+        ]))
+    );
+    assert_eq!(
+        signature.return_inference,
+        ReturnInferenceCompleteness::Complete {
+            can_fall_through: true,
+        }
+    );
+
+    let env = parse_and_build_env(source);
+    let fact = &env.value_symbols["choose"].primary().signatures[0];
+    assert_eq!(fact.return_inference, signature.return_inference);
+    assert!(
+        fact.return_ty.is_some(),
+        "complete inference stays replayable"
+    );
+}
+
+#[test]
+fn return_inference_flow_if_else_and_following_return_close_every_path() {
+    let if_else = lowered(
+        "function choose(flag: boolean, yes: string, no: number) { \
+         if (flag) return yes; else return no; }",
+    );
+    let if_else = &if_else
+        .value_decl("choose")
+        .expect("lowered if/else")
+        .signatures[0];
+    assert_eq!(
+        if_else.return_type,
+        Some(TypeExpr::union(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Primitive(PrimitiveName::Number),
+        ]))
+    );
+    assert_eq!(
+        if_else.return_inference,
+        ReturnInferenceCompleteness::Complete {
+            can_fall_through: false,
+        }
+    );
+
+    let following = lowered(
+        "function choose(flag: boolean, yes: string, no: number) { \
+         if (flag) return yes; return no; }",
+    );
+    let following = &following
+        .value_decl("choose")
+        .expect("lowered following return")
+        .signatures[0];
+    assert_eq!(following.return_type, if_else.return_type);
+    assert_eq!(following.return_inference, if_else.return_inference);
+}
+
+#[test]
+fn return_inference_flow_bare_return_is_complete_undefined() {
+    let source = "function stop() { return; }";
+    let parts = lowered(source);
+    let signature = &parts.value_decl("stop").expect("lowered stop").signatures[0];
+    assert_eq!(
+        signature.return_type,
+        Some(TypeExpr::Primitive(PrimitiveName::Undefined))
+    );
+    assert_eq!(
+        signature.return_inference,
+        ReturnInferenceCompleteness::Complete {
+            can_fall_through: false,
+        }
+    );
+}
+
+#[test]
+fn return_inference_flow_rejects_unsupported_instead_of_narrowing() {
+    let cases = [
+        (
+            "function choose(value: number) { switch (value) { case 1: return 'a'; default: return 'b'; } }",
+            ReturnInferenceUnsupported::Switch,
+        ),
+        (
+            "function choose() { while (true) { return 'a'; } }",
+            ReturnInferenceUnsupported::Loop,
+        ),
+        (
+            "function choose() { try { return 'a'; } finally {} }",
+            ReturnInferenceUnsupported::Try,
+        ),
+    ];
+
+    for (source, unsupported) in cases {
+        let parts = lowered(source);
+        let signature = &parts
+            .value_decl("choose")
+            .expect("lowered unsupported function")
+            .signatures[0];
+        assert_eq!(
+            signature.return_type, None,
+            "unsupported flow must not narrow"
+        );
+        assert_eq!(
+            signature.return_inference,
+            ReturnInferenceCompleteness::Unsupported(unsupported)
+        );
+
+        let env = parse_and_build_env(source);
+        let fact = &env.value_symbols["choose"].primary().signatures[0];
+        assert_eq!(
+            fact.return_ty, None,
+            "unsupported inference has no replay slot"
+        );
+        assert_eq!(fact.return_inference, signature.return_inference);
+    }
+}
+
+#[test]
+fn return_inference_flow_keeps_nested_unsafe_shape_visible_to_typeinfo() {
+    let source = "function nested() { return { values: [] }; }";
+    let parts = lowered(source);
+    let signature = &parts
+        .value_decl("nested")
+        .expect("lowered nested")
+        .signatures[0];
+    assert_eq!(
+        signature.return_inference,
+        ReturnInferenceCompleteness::Complete {
+            can_fall_through: false,
+        }
+    );
+    let TypeExpr::Object(object) = signature.return_type.as_ref().expect("inferred object") else {
+        panic!("expected inferred object return")
+    };
+    let ObjectMember::Property(values) = &object.properties[0] else {
+        panic!("expected values property")
+    };
+    assert!(matches!(
+        &values.ty,
+        TypeExpr::Array {
+            element,
+            readonly: false,
+        } if matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::Any))
+    ));
+}
+
+#[test]
+fn return_inference_flow_class_method_fact_uses_exact_member_address() {
+    let source = "class Service { choose(flag: boolean, value: string) { if (flag) return value; } unsupported() { while (true) { return 1; } } }";
+    let env = parse_and_build_env(source);
+    let declaration = env.type_symbols["Service"].primary();
+    let member_origin = |owner, contributor_index, ordinal| {
+        verter_type_expr::span_origins::FunctionSpansOrigin::Member {
+            anchor: verter_type_expr::span_origins::DeclContributorAnchor {
+                contributor_index,
+                owner,
+                owner_local_ordinal: 0,
+            },
+            member_path: Arc::from(vec![ordinal]),
+        }
+    };
+    let ordinary = TopLevelOwnerId::ordinary_file();
+
+    assert_eq!(
+        declaration.return_inference_for_member(&member_origin(ordinary, 0, 0)),
+        Some(ReturnInferenceCompleteness::Complete {
+            can_fall_through: true,
+        })
+    );
+    assert_eq!(
+        declaration.return_inference_for_member(&member_origin(ordinary, 0, 1)),
+        Some(ReturnInferenceCompleteness::Unsupported(
+            ReturnInferenceUnsupported::Loop,
+        ))
+    );
+    assert_eq!(
+        declaration.return_inference_for_member(&member_origin(ordinary, 0, 2)),
+        None,
+        "member lookup is path-exact"
+    );
+    assert_eq!(
+        declaration.return_inference_for_member(&member_origin(ordinary, 1, 0)),
+        None,
+        "member lookup is contributor-exact"
+    );
+    assert_eq!(
+        declaration.return_inference_for_member(&member_origin(TopLevelOwnerId::module(1), 0, 0)),
+        None,
+        "member lookup is owner-exact"
+    );
+    assert_eq!(
+        declaration.return_inference_for_member(
+            &verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
+                verter_type_expr::span_origins::SourceSynthetic,
+            )
+        ),
+        None,
+        "a missing member origin cannot fall back to shape matching"
+    );
+}
+
+fn static_class_method_fact<'a>(
+    env: &'a EvalEnv,
+    class_name: &str,
+    method_name: &str,
+) -> &'a FunctionSignatureFact {
+    let shape = env.value_symbols[class_name]
+        .primary()
+        .object_shape
+        .as_ref()
+        .expect("class constructor shape");
+    shape
+        .members
+        .iter()
+        .find_map(|member| match member {
+            ObjectMemberFact::Method(method) if method.name == method_name => {
+                Some(&method.function)
+            }
+            _ => None,
+        })
+        .expect("static method fact")
+}
+
+#[test]
+fn static_class_method_return_inference_normal_control_is_exact() {
+    let env = parse_and_build_env(
+        "class Service { static choose(flag: boolean, value: string) { if (flag) return value; } }",
+    );
+    let fact = static_class_method_fact(&env, "Service", "choose");
+
+    assert_eq!(
+        fact.return_inference,
+        ReturnInferenceCompleteness::Complete {
+            can_fall_through: true,
+        }
+    );
+    assert!(fact.return_ty.is_some());
+    assert_eq!(
+        fact.spans_origin,
+        verter_type_expr::span_origins::FunctionSpansOrigin::Member {
+            anchor: verter_type_expr::span_origins::DeclContributorAnchor {
+                contributor_index: 0,
+                owner: TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
+            },
+            member_path: Arc::from(vec![1]),
+        }
+    );
+}
+
+#[test]
+fn static_class_method_return_inference_budget_unavailable_is_exact() {
+    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    let env = parse_and_build_env(&format!(
+        "class Service {{ static deep() {{ return {expression}; }} }}"
+    ));
+    let fact = static_class_method_fact(&env, "Service", "deep");
+
+    assert_eq!(fact.return_ty, None);
+    assert_eq!(
+        fact.return_inference,
+        ReturnInferenceCompleteness::Unavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
+    );
+}
+
+#[test]
+fn static_class_method_return_inference_unsupported_is_exact() {
+    let env = parse_and_build_env(
+        "class Service { static unsupported() { while (true) { return 1; } } }",
+    );
+    let fact = static_class_method_fact(&env, "Service", "unsupported");
+
+    assert_eq!(fact.return_ty, None);
+    assert_eq!(
+        fact.return_inference,
+        ReturnInferenceCompleteness::Unsupported(ReturnInferenceUnsupported::Loop)
+    );
+}
+
+#[test]
+fn static_class_method_return_inference_same_name_instance_collision_stays_surface_exact() {
+    use std::hash::{Hash, Hasher};
+
+    let env = parse_and_build_env(
+        "class Collision { pad = 0; collide() { while (true) { return 1; } } static collide() { return 1; } }",
+    );
+    let instance = env.type_symbols["Collision"].primary();
+    let shared_origin = verter_type_expr::span_origins::FunctionSpansOrigin::Member {
+        anchor: verter_type_expr::span_origins::DeclContributorAnchor {
+            contributor_index: 0,
+            owner: TopLevelOwnerId::ordinary_file(),
+            owner_local_ordinal: 0,
+        },
+        member_path: Arc::from(vec![1]),
+    };
+    assert_eq!(
+        instance.return_inference_for_member(&shared_origin),
+        Some(ReturnInferenceCompleteness::Unsupported(
+            ReturnInferenceUnsupported::Loop,
+        ))
+    );
+    assert_eq!(
+        instance.return_inference_for_member_path(&[1]),
+        Some(ReturnInferenceCompleteness::Unsupported(
+            ReturnInferenceUnsupported::Loop,
+        )),
+        "path lookup is valid only after selecting the exact type contributor"
+    );
+
+    let static_fact = static_class_method_fact(&env, "Collision", "collide");
+    assert_eq!(static_fact.spans_origin, shared_origin);
+    assert_eq!(
+        static_fact.return_inference,
+        ReturnInferenceCompleteness::Complete {
+            can_fall_through: false,
+        },
+        "the value-side static verdict must not name-rematch the type-side instance verdict"
+    );
+
+    let shape = env.value_symbols["Collision"]
+        .primary()
+        .object_shape
+        .as_ref()
+        .expect("static shape");
+    let encoded = serde_json::to_vec(shape).expect("serialize exact static shape");
+    let decoded: ObjectShapeFact =
+        serde_json::from_slice(&encoded).expect("deserialize exact static shape");
+    assert_eq!(&decoded, shape);
+
+    let mut changed = shape.clone();
+    let ObjectMemberFact::Method(method) = Arc::make_mut(&mut changed.members)
+        .iter_mut()
+        .find(
+            |member| matches!(member, ObjectMemberFact::Method(method) if method.name == "collide"),
+        )
+        .expect("static collision method")
+    else {
+        unreachable!("matched method")
+    };
+    method.function.return_inference =
+        ReturnInferenceCompleteness::Unsupported(ReturnInferenceUnsupported::Switch);
+    assert_ne!(serde_json::to_vec(&changed).unwrap(), encoded);
+
+    let fingerprint = |shape: &ObjectShapeFact| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        shape.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(fingerprint(&changed), fingerprint(shape));
+}
+
+fn nested_object_expression(depth: usize) -> String {
+    let mut expression = "1".to_string();
+    for index in 0..depth {
+        expression = format!("{{ level_{index}: {expression} }}");
+    }
+    expression
+}
+
+fn nested_array_expression(depth: usize) -> String {
+    let mut expression = "1".to_string();
+    for _ in 0..depth {
+        expression = format!("[{expression}]");
+    }
+    expression
+}
+
+fn nested_arrow_expression(depth: usize) -> String {
+    let mut expression = "1".to_string();
+    for _ in 0..depth {
+        expression = format!("() => ({expression})");
+    }
+    expression
+}
+
+fn assert_initializer_inference_unavailable(source: &str, name: &str) {
+    let parts = lowered(source);
+    let declaration = parts.value_decl(name).expect("lowered value");
+    assert_eq!(declaration.type_annotation, None);
+    assert_eq!(
+        declaration.inference_unavailable,
+        Some(InferenceUnavailableReason::DepthBudgetExceeded)
+    );
+
+    let env = parse_and_build_env(source);
+    assert_eq!(
+        env.value_symbols[name]
+            .primary()
+            .type_annotation
+            .classification,
+        ValueAnnotationClass::InferenceUnavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
+    );
+    assert!(
+        env.value_symbols[name]
+            .primary()
+            .type_annotation
+            .annotation
+            .is_none(),
+        "unavailable inference must not publish a narrowed source"
+    );
+}
+
+#[test]
+fn semantic_inference_budget_rejects_deep_object_initializer() {
+    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+}
+
+#[test]
+fn semantic_inference_budget_rejects_deep_array_initializer() {
+    let expression = nested_array_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+}
+
+#[test]
+fn semantic_inference_budget_rejects_deep_function_initializer() {
+    let expression = nested_arrow_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    assert_initializer_inference_unavailable(&format!("const deep = {expression};"), "deep");
+}
+
+#[test]
+fn semantic_inference_budget_rejects_deep_return_expression() {
+    let expression = nested_object_expression(MAX_SEMANTIC_INFERENCE_DEPTH + 8);
+    let source = format!("function deep() {{ return {expression}; }}");
+    let parts = lowered(&source);
+    let signature = &parts
+        .value_decl("deep")
+        .expect("lowered function")
+        .signatures[0];
+    assert_eq!(signature.return_type, None);
+    assert_eq!(
+        signature.return_inference,
+        ReturnInferenceCompleteness::Unavailable(InferenceUnavailableReason::DepthBudgetExceeded,)
+    );
+}
+
+#[test]
+fn semantic_inference_budget_rejects_excessive_work() {
+    let expression = std::iter::repeat("0")
+        .take(MAX_SEMANTIC_INFERENCE_WORK + 8)
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!("const wide = [{expression}];");
+    let parts = lowered(&source);
+    let declaration = parts.value_decl("wide").expect("lowered wide value");
+    assert_eq!(declaration.type_annotation, None);
+    assert_eq!(
+        declaration.inference_unavailable,
+        Some(InferenceUnavailableReason::WorkBudgetExceeded)
+    );
+}
+
+#[test]
+fn semantic_inference_budget_preserves_normal_depth_control() {
+    let expression = nested_object_expression(8);
+    let source = format!("const normal = {expression};");
+    let parts = lowered(&source);
+    let declaration = parts.value_decl("normal").expect("lowered normal value");
+    assert!(matches!(
+        declaration.type_annotation,
+        Some(TypeExpr::Object(_))
+    ));
+    assert_eq!(declaration.inference_unavailable, None);
 }
 
 #[test]
@@ -2473,6 +3100,7 @@ fn synth_payload(field_index: u32) -> verter_type_expr::locators::MacroPayloadLo
     verter_type_expr::locators::MacroPayloadLocator {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: std::sync::Arc::from(""),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: std::sync::Arc::from("default"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
@@ -2541,6 +3169,7 @@ fn make_synth_macro(
 ) -> AnalyzedMacro {
     AnalyzedMacro {
         kind,
+        owner: TopLevelOwnerId::ordinary_file(),
         is_type_based: true,
         type_references: Vec::new(),
         binding_name: None,

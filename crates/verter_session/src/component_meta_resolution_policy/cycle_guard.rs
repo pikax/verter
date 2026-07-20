@@ -171,10 +171,12 @@ fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> Norm
         // otherwise fall back to a structural hash so the cycle guard still
         // discriminates by name.
         if let Some(DeclLookup {
-            canonical_source, ..
+            canonical_source,
+            owner,
+            ..
         }) = ctx.locate_declaration(name.as_str())
         {
-            let identity = ctx.decl_identity_for(&canonical_source, name.as_str());
+            let identity = ctx.decl_identity_for(&canonical_source, owner, name.as_str());
             // A resolved head keeps its EXACT `DeclIdentity`; its positional
             // type arguments are folded in structurally so distinct nested
             // instantiations stay distinct. An arg-free ref stays the exact
@@ -562,6 +564,7 @@ mod tests {
     fn scope() -> NodeScopeId {
         NodeScopeId::File {
             canonical_id: Arc::from("/fixture/owner.vue"),
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             local_scope: None,
         }
@@ -736,6 +739,7 @@ mod tests {
         // nested literal argument.
         let wrapper_base = DeclIdentity {
             canonical_id: Arc::from("/wrapper.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
             decl_name: Arc::from("Wrapper"),
         };
@@ -778,6 +782,7 @@ mod tests {
                 declaration_id: None,
                 resolved_name: "Wrapper".to_string(),
                 canonical_source: "/wrapper.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 span: verter_span::Span::default(),
                 kind: ResolvedDeclarationKind::TypeAlias,
                 text: None,
@@ -792,6 +797,7 @@ mod tests {
                 registry: &policy_registry,
                 engine: &mut engine,
                 owner_canonical: "/owner.vue",
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 host: &host,
                 macro_participating_idents: &empty_idents,
                 active_refs: FxHashSet::default(),

@@ -22,7 +22,7 @@ use verter_type_expr::facts::{
     PreparedKeyRemapShapeFact, PreparedMemberFact, PreparedProjectionClassFact,
     PreparedSurfaceModifiersFact, PreparedTypeBodyFacts, PreparedValueMemberFact,
     PreparedValueRuleShapeFact, PreparedWrapperKindFact, PreparedWrapperShapeFact, TypeBodyClass,
-    ValueAnnotationClass, ValueTypeAnnotationFact,
+    ValueAnnotationClass, ValueTypeAnnotationFact, VueIgnoredHeritageFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, LocatorSymbolSpace, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
@@ -36,6 +36,7 @@ fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) 
         // The identity fields are shared `Arc<str>` — the anchor reuses the
         // same allocations instead of copying.
         canonical_id: Arc::clone(&root_identity.canonical_id),
+        owner: root_identity.owner,
         symbol: Arc::clone(&root_identity.symbol_name),
         space,
     }
@@ -132,6 +133,11 @@ pub struct PreparedTypeDecl {
     /// bodies.
     pub type_parameters: Vec<NarrowTypeParam>,
 
+    /// Exact authored interface heritage arms suppressed only by Vue runtime
+    /// props/emits projection. All ordinary semantic projections preserve
+    /// these arms.
+    pub vue_ignored_heritage: Arc<[VueIgnoredHeritageFact]>,
+
     /// The narrowed body FACTS: classification + the content-free body slot
     /// locator + ordered merged-contributor slots. The authored body is NOT
     /// stored — the shared dispatch lowers it on demand from the locator.
@@ -211,10 +217,66 @@ pub struct PreparedTypeDecl {
 }
 
 /// A cross-file dependency reference in a prepared declaration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
 pub struct PreparedExternalDep {
     pub canonical_id: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
     pub symbol_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthoredOrdinalOverflow {
+    pub count: usize,
+}
+
+impl std::fmt::Display for AuthoredOrdinalOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "authored item count {} exceeds the u32 ordinal domain",
+            self.count
+        )
+    }
+}
+
+impl std::error::Error for AuthoredOrdinalOverflow {}
+
+#[cfg(test)]
+mod prepared_external_dep_owner_tests {
+    use super::PreparedExternalDep;
+    use std::collections::HashSet;
+    use verter_type_expr::TopLevelOwnerId;
+
+    #[test]
+    fn external_dependency_identity_discriminates_owner_in_memo_and_serde() {
+        let make = |owner| PreparedExternalDep {
+            canonical_id: "/src/dep.vue".to_string(),
+            owner,
+            symbol_name: "Shared".to_string(),
+        };
+        let module = make(TopLevelOwnerId::module(0));
+        let instance = make(TopLevelOwnerId::instance(0));
+        assert_ne!(module, instance);
+        assert_eq!(HashSet::from([module.clone(), instance.clone()]).len(), 2);
+        assert_ne!(
+            serde_json::to_string(&module).unwrap(),
+            serde_json::to_string(&instance).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<PreparedExternalDep>(&serde_json::to_string(&module).unwrap())
+                .unwrap(),
+            module
+        );
+    }
 }
 
 /// Provenance metadata for a prepared declaration.
@@ -407,6 +469,7 @@ impl PreparedTypeDecl {
             exported_name: None,
             kind,
             type_parameters: Vec::new(),
+            vue_ignored_heritage: Arc::from([]),
             body_facts,
             member_index: FxHashMap::default(),
             local_deps: Vec::new(),
@@ -426,23 +489,33 @@ impl PreparedTypeDecl {
     /// and flips the body classification to
     /// [`TypeBodyClass::MergedInterface`]. A zero count resets to the
     /// non-merged state.
-    pub fn set_merged_contributors(&mut self, count: usize) {
+    pub fn set_merged_contributors(&mut self, count: usize) -> Result<(), AuthoredOrdinalOverflow> {
         if count == 0 {
             self.body_facts.merged_contributor_slots = Arc::from([]);
-            return;
+            self.body_facts.classification = match self.kind {
+                TypeDeclKind::Alias => TypeBodyClass::Alias,
+                TypeDeclKind::Interface => TypeBodyClass::Interface,
+                TypeDeclKind::Class => TypeBodyClass::Class,
+            };
+            return Ok(());
         }
-        self.body_facts.merged_contributor_slots = (0..count)
+        u32::try_from(count).map_err(|_| AuthoredOrdinalOverflow { count })?;
+        let Some(slots) = (0..count)
             .map(|ordinal| {
-                decl_slot(
+                let ordinal = u32::try_from(ordinal).ok()?;
+                Some(decl_slot(
                     &self.root_identity,
                     LocatorSymbolSpace::Type,
-                    vec![TypeBodyPathStep::MergedContributor {
-                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    }],
-                )
+                    vec![TypeBodyPathStep::MergedContributor { ordinal }],
+                ))
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Err(AuthoredOrdinalOverflow { count });
+        };
+        self.body_facts.merged_contributor_slots = slots.into();
         self.body_facts.classification = TypeBodyClass::MergedInterface;
+        Ok(())
     }
 
     /// Build a member index from the TRANSIENT object-like authored body.
@@ -521,7 +594,9 @@ impl PreparedTypeDecl {
             // the `Member` step derefs. Nameless call / construct / index
             // signatures occupy their positions, so a named member after one
             // does NOT compact down.
-            let ordinal = u32::try_from(raw_index).unwrap_or(u32::MAX);
+            let Ok(ordinal) = u32::try_from(raw_index) else {
+                break;
+            };
             let member_value_path = || {
                 let mut path = path_prefix.to_vec();
                 path.push(TypeBodyPathStep::Member { ordinal });
@@ -612,9 +687,10 @@ impl PreparedTypeDecl {
                 // Right-to-left visit order (last arm wins the name-keyed
                 // entry); each arm's PATH step carries its raw source index.
                 for (arm_index, part) in parts.iter().enumerate().rev() {
-                    path_prefix.push(TypeBodyPathStep::IntersectionArm {
-                        ordinal: u32::try_from(arm_index).unwrap_or(u32::MAX),
-                    });
+                    let Ok(ordinal) = u32::try_from(arm_index) else {
+                        continue;
+                    };
+                    path_prefix.push(TypeBodyPathStep::IntersectionArm { ordinal });
                     Self::index_transparent_object_members(
                         member_index,
                         part,
@@ -713,6 +789,7 @@ pub fn collect_heritage_base_facts(
         .iter()
         .enumerate()
         .filter_map(|(arm, part)| {
+            let ordinal = u32::try_from(arm).ok()?;
             let TypeExpr::Ref {
                 name,
                 type_arguments,
@@ -722,17 +799,18 @@ pub fn collect_heritage_base_facts(
             };
             let mut path: Vec<TypeBodyPathStep> = Vec::with_capacity(path_prefix.len() + 1);
             path.extend_from_slice(path_prefix);
-            path.push(TypeBodyPathStep::IntersectionArm {
-                ordinal: u32::try_from(arm).unwrap_or(u32::MAX),
-            });
+            path.push(TypeBodyPathStep::IntersectionArm { ordinal });
             let path: Arc<[TypeBodyPathStep]> = path.into();
             let type_args: Arc<[TypeArgLocator]> = (0..type_arguments.len())
-                .map(|arg_index| TypeArgLocator {
-                    anchor: anchor.clone(),
-                    path: Arc::clone(&path),
-                    arg_index: u32::try_from(arg_index).unwrap_or(u32::MAX),
+                .map(|arg_index| {
+                    Some(TypeArgLocator {
+                        anchor: anchor.clone(),
+                        path: Arc::clone(&path),
+                        arg_index: u32::try_from(arg_index).ok()?,
+                    })
                 })
-                .collect();
+                .collect::<Option<Vec<_>>>()?
+                .into();
             Some(HeritageBaseFact {
                 name: name.to_string(),
                 type_args,
@@ -779,11 +857,11 @@ pub fn collect_key_domain_closedness_fact(
         bodies
             .iter()
             .enumerate()
-            .map(|(ordinal, body)| {
+            .filter_map(|(ordinal, body)| {
                 let mut path = vec![TypeBodyPathStep::MergedContributor {
-                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                    ordinal: u32::try_from(ordinal).ok()?,
                 }];
-                closedness_recipe_of(root_identity, body, &mut path)
+                Some(closedness_recipe_of(root_identity, body, &mut path))
             })
             .collect()
     } else {
@@ -900,11 +978,11 @@ fn collect_all_arms(
     let recipes: Vec<ClosednessRecipe> = arms
         .iter()
         .enumerate()
-        .map(|(ordinal, arm)| {
-            path.push(step(u32::try_from(ordinal).unwrap_or(u32::MAX)));
+        .filter_map(|(ordinal, arm)| {
+            path.push(step(u32::try_from(ordinal).ok()?));
             let recipe = closedness_recipe_of(root_identity, arm, path);
             path.pop();
-            recipe
+            Some(recipe)
         })
         .collect();
     ClosednessRecipe::AllArms(recipes.into())
@@ -1200,12 +1278,15 @@ fn extract_forward_payload(
                 target_name: name.to_string(),
                 forwarding_kind,
                 target_args: (0..type_arguments.len())
-                    .map(|arg_index| TypeArgLocator {
-                        anchor: decl_anchor(root_identity, LocatorSymbolSpace::Type),
-                        path: Vec::new().into(),
-                        arg_index: u32::try_from(arg_index).unwrap_or(u32::MAX),
+                    .map(|arg_index| {
+                        Some(TypeArgLocator {
+                            anchor: decl_anchor(root_identity, LocatorSymbolSpace::Type),
+                            path: Vec::new().into(),
+                            arg_index: u32::try_from(arg_index).ok()?,
+                        })
                     })
-                    .collect(),
+                    .collect::<Option<Vec<_>>>()?
+                    .into(),
             })
         }
         TypeExpr::Parenthesized(inner) => {
@@ -1428,6 +1509,8 @@ mod tests {
             &body,
             Some(DeclContributorAnchor {
                 contributor_index: 3,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 3,
             }),
         );
 
@@ -1438,7 +1521,9 @@ mod tests {
             label.span_origin,
             MemberSpansOrigin::Authored {
                 anchor: DeclContributorAnchor {
-                    contributor_index: 3
+                    contributor_index: 3,
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    owner_local_ordinal: 3,
                 },
                 member_path: Arc::from(vec![0u32]),
             },
@@ -1456,7 +1541,9 @@ mod tests {
             greet.span_origin,
             MemberSpansOrigin::Authored {
                 anchor: DeclContributorAnchor {
-                    contributor_index: 3
+                    contributor_index: 3,
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    owner_local_ordinal: 3,
                 },
                 member_path: Arc::from(vec![1u32]),
             },
@@ -1591,7 +1678,7 @@ mod tests {
             ResolvedRootIdentity::new("/types.ts", "Merged"),
             TypeDeclKind::Interface,
         );
-        decl.set_merged_contributors(2);
+        decl.set_merged_contributors(2).unwrap();
 
         assert_eq!(
             decl.body_facts.classification,
@@ -1608,7 +1695,27 @@ mod tests {
             );
         }
 
-        decl.set_merged_contributors(0);
+        decl.set_merged_contributors(0).unwrap();
+        assert!(decl.body_facts.merged_contributor_slots.is_empty());
+        assert_eq!(decl.body_facts.classification, TypeBodyClass::Interface);
+    }
+
+    #[test]
+    fn merged_contributor_count_overflow_is_typed_and_non_mutating() {
+        if usize::BITS <= u32::BITS {
+            return;
+        }
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Merged"),
+            TypeDeclKind::Interface,
+        );
+        let original = decl.body_facts.classification;
+        let count = u32::MAX as usize + 1;
+        assert_eq!(
+            decl.set_merged_contributors(count),
+            Err(AuthoredOrdinalOverflow { count })
+        );
+        assert_eq!(decl.body_facts.classification, original);
         assert!(decl.body_facts.merged_contributor_slots.is_empty());
     }
 
@@ -1871,6 +1978,8 @@ mod tests {
             &body,
             Some(DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             }),
         );
 
@@ -1882,7 +1991,9 @@ mod tests {
             p.span_origin,
             MemberSpansOrigin::Authored {
                 anchor: DeclContributorAnchor {
-                    contributor_index: 0
+                    contributor_index: 0,
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    owner_local_ordinal: 0,
                 },
                 member_path: Arc::from(vec![1u32]),
             },
@@ -1949,6 +2060,8 @@ mod tests {
             &body,
             Some(DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             }),
         );
 
@@ -1985,13 +2098,17 @@ mod tests {
             &plain,
             Some(DeclContributorAnchor {
                 contributor_index: 0,
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                owner_local_ordinal: 0,
             }),
         );
         assert_eq!(
             plain_decl.member("a").expect("a indexed").span_origin,
             MemberSpansOrigin::Authored {
                 anchor: DeclContributorAnchor {
-                    contributor_index: 0
+                    contributor_index: 0,
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    owner_local_ordinal: 0,
                 },
                 member_path: Arc::from(vec![0u32]),
             },

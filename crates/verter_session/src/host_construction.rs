@@ -896,6 +896,7 @@ impl VerterHost {
             module_region,
             framework_mode_hint,
             source_type,
+            state.decl_bodies().owner_table(),
         );
         let cx = crate::framework::synth::ComponentDefaultSynthCtx {
             canonical_id,

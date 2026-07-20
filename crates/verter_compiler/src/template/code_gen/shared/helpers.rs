@@ -72,6 +72,7 @@ pub const CREATE_SLOT: &str = "_createSlot";
 pub const CREATE_COMPONENT: &str = "_createComponent";
 pub const VAPOR_TO_DISPLAY_STRING: &str = "_toDisplayString";
 pub const WITH_MEMO: &str = "_withMemo";
+pub const IS_MEMO_SAME: &str = "_isMemoSame";
 pub const APPLY_V_SHOW: &str = "_applyVShow";
 pub const APPLY_TEXT_MODEL: &str = "_applyTextModel";
 pub const APPLY_CHECKBOX_MODEL: &str = "_applyCheckboxModel";
@@ -140,6 +141,8 @@ pub enum VdomHelper {
     NormalizeProps = 1 << 30,
     GuardReactiveProps = 1 << 31,
     ToHandlers = 1 << 32,
+    WithMemo = 1 << 33,
+    IsMemoSame = 1 << 34,
 }
 
 impl VdomHelper {
@@ -180,12 +183,14 @@ impl VdomHelper {
             Self::NormalizeProps => NORMALIZE_PROPS,
             Self::GuardReactiveProps => GUARD_REACTIVE_PROPS,
             Self::ToHandlers => TO_HANDLERS,
+            Self::WithMemo => WITH_MEMO,
+            Self::IsMemoSame => IS_MEMO_SAME,
         }
     }
 }
 
 /// Ordered lookup table for `VdomHelperFlags::to_imports()`.
-const ALL_VDOM: [VdomHelper; 33] = [
+const ALL_VDOM: [VdomHelper; 35] = [
     VdomHelper::CreateElementVNode,
     VdomHelper::CreateElementBlock,
     VdomHelper::CreateVNode,
@@ -219,6 +224,8 @@ const ALL_VDOM: [VdomHelper; 33] = [
     VdomHelper::NormalizeProps,
     VdomHelper::GuardReactiveProps,
     VdomHelper::ToHandlers,
+    VdomHelper::WithMemo,
+    VdomHelper::IsMemoSame,
 ];
 
 /// Bitflag set of VDOM runtime helpers. Wraps a `u64` with O(1) add/has.
@@ -650,6 +657,28 @@ pub fn is_builtin_component(tag: &str) -> Option<(u8, &'static str)> {
     }
 }
 
+/// Built-ins whose children are RAW VNode arrays, not component slot objects.
+///
+/// Official Vue routes `Teleport` and `KeepAlive` children through the normal
+/// element children path (a VNode array), not the component-slot builder:
+/// ```js
+/// (_openBlock(), _createBlock(_Teleport, { to: "body" }, [ /* children */ ]))
+/// ```
+/// Slot-object children (`{ default: _withCtx(...), _: 3 }`) break these
+/// built-ins' dedicated runtime handling (e.g. VTU teleport stubs stringify a
+/// slot object as `[object Object]`). Suspense / Transition keep normal slots.
+#[inline]
+pub fn is_raw_children_builtin(tag: &str) -> bool {
+    matches!(tag, "Teleport" | "teleport" | "KeepAlive" | "keep-alive")
+}
+
+/// True for the `<KeepAlive>` built-in (PascalCase or kebab-case). KeepAlive
+/// carries the `DYNAMIC_SLOTS` (1024) patch flag in official Vue output.
+#[inline]
+pub fn is_keep_alive(tag: &str) -> bool {
+    matches!(tag, "KeepAlive" | "keep-alive")
+}
+
 // ======================== String case conversion ========================
 
 /// Convert a kebab-case or camelCase string to PascalCase.
@@ -847,6 +876,11 @@ pub const PATCH_UNKEYED_FRAGMENT: u32 = 256;
 pub const PATCH_NEED_PATCH: u32 = 512;
 /// Component needs force update (has dynamic slots).
 pub const PATCH_DYNAMIC_SLOTS: u32 = 1024;
+/// Dev-only root fragment: a root Fragment created only because comments (or
+/// other non-element root nodes) sit beside a SINGLE logical root. The runtime
+/// filters to that real root for fallthrough / HMR
+/// (`PatchFlags.DEV_ROOT_FRAGMENT`; combined with STABLE_FRAGMENT yields 2112).
+pub const PATCH_DEV_ROOT_FRAGMENT: u32 = 2048;
 
 /// Format a patch flag with dev-mode comment.
 /// Returns a bump-allocated string like `1 /* TEXT */`.
@@ -900,6 +934,7 @@ pub fn format_patch_flag<'a>(
             (PATCH_UNKEYED_FRAGMENT, "UNKEYED_FRAGMENT"),
             (PATCH_NEED_PATCH, "NEED_PATCH"),
             (PATCH_DYNAMIC_SLOTS, "DYNAMIC_SLOTS"),
+            (PATCH_DEV_ROOT_FRAGMENT, "DEV_ROOT_FRAGMENT"),
         ];
         for &(mask, name) in FLAG_NAMES {
             if flag & mask != 0 {

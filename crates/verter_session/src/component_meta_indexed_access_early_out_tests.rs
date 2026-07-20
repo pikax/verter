@@ -226,6 +226,7 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
             crate::semantic_query::ResolveDeclKey {
                 scope: crate::semantic_query::ScopeId {
                     canonical_id: Arc::from("/workspace/src/button-types.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                 },
                 name: Arc::from("ButtonSlots"),

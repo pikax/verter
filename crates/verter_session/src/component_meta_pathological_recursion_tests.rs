@@ -149,6 +149,7 @@ fn pathological_self_shadowing_userland_pick() {
                 .expect("/A.vue must have shallow file state");
             let pick_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/A.vue"),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("Pick"),
             );
             // Use synthetic placeholder args (interned `Primitive`
@@ -279,6 +280,7 @@ fn pathological_exclude_self_recursive() {
                 .expect("/A.vue must have shallow file state");
             let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/A.vue"),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("R"),
             );
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
@@ -486,6 +488,7 @@ fn pathological_template_literal_key_recursion() {
                 .expect("/A.vue must have shallow file state");
             let r_identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/A.vue"),
+                verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("R"),
             );
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(

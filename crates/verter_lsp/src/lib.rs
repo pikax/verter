@@ -56,6 +56,226 @@ use verter_session::VerterHost;
 
 use type_provider::traits::TypeProvider;
 
+fn public_api_projection_subject_json(
+    subject: verter_session::PublicApiProjectionSubject,
+) -> serde_json::Value {
+    match subject {
+        verter_session::PublicApiProjectionSubject::Macro { syntax_index } => {
+            serde_json::json!({ "kind": "macro", "syntaxIndex": syntax_index })
+        }
+        verter_session::PublicApiProjectionSubject::ScriptSetupAttrs { source_range } => {
+            serde_json::json!({
+                "kind": "scriptSetupAttrs",
+                "sourceRange": { "start": source_range.start, "end": source_range.end },
+            })
+        }
+    }
+}
+
+/// Emit every stable field of a public-API failure instead of collapsing it
+/// into the ordinary `None` path.
+pub(crate) fn report_public_api_projection_error(
+    context: &'static str,
+    canonical_id: &str,
+    error: &verter_session::PublicApiProjectionError,
+) {
+    let unavailable_outcome = error.unavailable_outcome();
+    tracing::error!(
+        context,
+        canonical_id,
+        code = error.code(),
+        detail_code = error.detail_code(),
+        subject = ?error.subject(),
+        declaration_shape_reason = ?error.declaration_shape_reason().map(|reason| reason.code()),
+        member_ordinal = ?error.member_ordinal(),
+        outcome_kind = ?unavailable_outcome.map(|outcome| outcome.kind_code()),
+        outcome_reason = ?unavailable_outcome.map(|outcome| outcome.reason_code()),
+        outcome_diagnostic = ?unavailable_outcome.and_then(|outcome| outcome.diagnostic()),
+        "public API projection failed"
+    );
+}
+
+/// Preserve a public-API projection failure on the JSON-RPC transport rail.
+pub(crate) fn public_api_projection_jsonrpc_error(
+    context: &'static str,
+    canonical_id: &str,
+    error: verter_session::PublicApiProjectionError,
+) -> tower_lsp_server::jsonrpc::Error {
+    report_public_api_projection_error(context, canonical_id, &error);
+    let unavailable_outcome = error.unavailable_outcome();
+    tower_lsp_server::jsonrpc::Error {
+        code: tower_lsp_server::jsonrpc::ErrorCode::InternalError,
+        message: std::borrow::Cow::Owned(format!("{context}: public API projection failed")),
+        data: Some(serde_json::json!({
+            "code": error.code(),
+            "detailCode": error.detail_code(),
+            "subject": public_api_projection_subject_json(error.subject()),
+            "declarationShapeReason": error
+                .declaration_shape_reason()
+                .map(|reason| reason.code()),
+            "memberOrdinal": error.member_ordinal(),
+            "outcomeKind": unavailable_outcome.map(|outcome| outcome.kind_code()),
+            "outcomeReason": unavailable_outcome.map(|outcome| outcome.reason_code()),
+            "outcomeDiagnostic": unavailable_outcome.and_then(|outcome| outcome.diagnostic()),
+        })),
+    }
+}
+
+#[cfg(test)]
+mod public_api_projection_transport_tests {
+    use super::*;
+    use verter_compiler::tsc::{
+        TscFailureSubject, TscGenerationError, TscInvalidOutcome, TscUnavailableOutcome,
+    };
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroPartialReason, UnresolvedReason, UnsupportedReason,
+    };
+    use verter_session::{FileLanguage, HostConfig, PublicApiMode, UpsertRequest};
+
+    #[test]
+    fn jsonrpc_projection_error_preserves_every_stable_field() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _update = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
+                input_id: "/src/UnsafeEnum.vue".to_string(),
+                source: Arc::from(
+                    r#"<script setup lang="ts">
+enum Unsafe { Value = Math.random() }
+defineProps<{ value: Unsafe }>()
+</script>"#,
+                ),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert unsafe enum");
+        let projection_error = host
+            .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
+            .expect_err("unsafe enum projection");
+        let error = public_api_projection_jsonrpc_error(
+            "getVirtualFiles",
+            "/src/UnsafeEnum.vue",
+            projection_error,
+        );
+
+        assert_eq!(
+            error.code,
+            tower_lsp_server::jsonrpc::ErrorCode::InternalError
+        );
+        assert_eq!(
+            error.message,
+            "getVirtualFiles: public API projection failed"
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "code": "tsc-generation",
+                "detailCode": "unsupported-declaration-shape",
+                "subject": { "kind": "macro", "syntaxIndex": 0 },
+                "declarationShapeReason": "unsupported-enum-shape",
+                "memberOrdinal": null,
+                "outcomeKind": null,
+                "outcomeReason": null,
+                "outcomeDiagnostic": null,
+            }))
+        );
+    }
+
+    #[test]
+    fn jsonrpc_projection_error_preserves_all_unavailable_outcome_arms() {
+        let cases = [
+            (
+                TscUnavailableOutcome::Partial(MacroFailure::new(
+                    MacroPartialReason::IncompleteTraversal,
+                    Some("partial detail".to_string()),
+                )),
+                "partial",
+                "incomplete-traversal",
+                "partial detail",
+            ),
+            (
+                TscUnavailableOutcome::Unresolved(MacroFailure::new(
+                    UnresolvedReason::AmbiguousReference,
+                    Some("unresolved detail".to_string()),
+                )),
+                "unresolved",
+                "ambiguous-reference",
+                "unresolved detail",
+            ),
+            (
+                TscUnavailableOutcome::Unsupported(MacroFailure::new(
+                    UnsupportedReason::SemanticConstruct,
+                    Some("unsupported detail".to_string()),
+                )),
+                "unsupported",
+                "semantic-construct",
+                "unsupported detail",
+            ),
+            (
+                TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(MacroFailure::new(
+                    MacroInvalidReason::NonObjectRoot,
+                    Some("invalid detail".to_string()),
+                ))),
+                "invalid",
+                "non-object-root",
+                "invalid detail",
+            ),
+        ];
+
+        for (syntax_index, (outcome, kind, reason, diagnostic)) in cases.into_iter().enumerate() {
+            let error = public_api_projection_jsonrpc_error(
+                "hover",
+                "/src/Unavailable.vue",
+                TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::Macro {
+                        syntax_index: syntax_index as u32,
+                    },
+                    outcome,
+                }
+                .into(),
+            );
+
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({
+                    "code": "tsc-generation",
+                    "detailCode": "unavailable-outcome",
+                    "subject": { "kind": "macro", "syntaxIndex": syntax_index },
+                    "declarationShapeReason": null,
+                    "memberOrdinal": null,
+                    "outcomeKind": kind,
+                    "outcomeReason": reason,
+                    "outcomeDiagnostic": diagnostic,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn jsonrpc_projection_error_preserves_script_setup_attrs_subject() {
+        let error = public_api_projection_jsonrpc_error(
+            "hover",
+            "/src/MalformedAttrs.vue",
+            TscGenerationError::UnavailableOutcome {
+                subject: TscFailureSubject::ScriptSetupAttrs {
+                    source_range: verter_span::Span::new(31, 37),
+                },
+                outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(
+                    verter_compiler::tsc::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+                )),
+            }
+            .into(),
+        );
+        assert_eq!(
+            error.data.expect("structured data")["subject"],
+            serde_json::json!({
+                "kind": "scriptSetupAttrs",
+                "sourceRange": { "start": 31, "end": 37 },
+            })
+        );
+    }
+}
+
 /// Which TypeScript type provider backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeProviderKind {

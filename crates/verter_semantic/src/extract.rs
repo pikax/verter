@@ -476,6 +476,7 @@ mod tests {
     fn make_props_macro(props: Vec<AnalyzedPropField>) -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -545,6 +546,7 @@ mod tests {
     fn extracts_events_from_define_emits() {
         let mac = AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
                 AnalyzedEmitField {
                     name: "update".to_string(),
@@ -716,6 +718,7 @@ mod tests {
         ]);
         let defaults_mac = AnalyzedMacro {
             kind: AnalyzedMacroKind::WithDefaults,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
             type_references: Vec::new(),
             binding_name: None,
@@ -757,6 +760,7 @@ mod tests {
     fn multiple_define_emits_merged() {
         let mac = AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineEmits,
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
                 AnalyzedEmitField {
                     name: "change".into(),
@@ -929,6 +933,7 @@ mod tests {
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
             source: "./types".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![
                 AnalyzedImportBinding {
@@ -981,6 +986,7 @@ mod tests {
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
             source: "./App.vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "App".to_string(),
@@ -1012,6 +1018,7 @@ mod tests {
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
             source: "external-pkg".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "ext".to_string(),
@@ -1045,6 +1052,7 @@ mod tests {
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
             source: "vue".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
             bindings: vec![AnalyzedImportBinding {
                 name: "Vue".to_string(),
@@ -1074,6 +1082,7 @@ mod tests {
         // Declaration-level type-only: `import type { Foo } from "..."`
         snapshot.imports = vec![AnalyzedImport {
             source: "./types".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: true,
             bindings: vec![AnalyzedImportBinding {
                 name: "Props".to_string(),
@@ -1101,6 +1110,7 @@ mod tests {
         // `import { type Foo, bar } from "..."`
         snapshot.imports = vec![AnalyzedImport {
             source: "./mixed".to_string(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false, // declaration NOT type-only
             bindings: vec![
                 AnalyzedImportBinding {
@@ -1141,6 +1151,7 @@ mod tests {
         snapshot.imports = vec![
             AnalyzedImport {
                 source: "./a".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "A".to_string(),
@@ -1155,6 +1166,7 @@ mod tests {
             },
             AnalyzedImport {
                 source: "./b".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
                 bindings: vec![AnalyzedImportBinding {
                     name: "B".to_string(),

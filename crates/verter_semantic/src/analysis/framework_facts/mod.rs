@@ -247,6 +247,8 @@ pub struct ScriptCandidateCx<'a> {
     pub source: &'a str,
     /// The OXC program for the file's (combined) script.
     pub program: &'a Program<'a>,
+    /// Validated neutral owner coordinates for every top-level statement.
+    pub top_level_owners: &'a crate::analysis::top_level_owners::TopLevelOwnerTable,
     /// The byte range of the MODULE script block (`<script module>` /
     /// `context="module"`) in `source`, when the carrier has one. A carrier
     /// whose producer records script-region KINDS supplies it so a provider can
@@ -372,7 +374,9 @@ pub fn capture_script_candidates(
     source: &str,
     program: &Program<'_>,
 ) -> FrameworkScriptCandidateSet {
-    capture_script_candidates_with_module_region(active_providers, source, program, None)
+    let owners =
+        crate::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(program.body.len());
+    capture_script_candidates_with_context(active_providers, source, program, None, None, &owners)
 }
 
 /// As [`capture_script_candidates`], but supplies the module-script byte region
@@ -385,6 +389,7 @@ pub fn capture_script_candidates_with_module_region(
     source: &str,
     program: &Program<'_>,
     module_script_region: Option<(u32, u32)>,
+    top_level_owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
 ) -> FrameworkScriptCandidateSet {
     capture_script_candidates_with_context(
         active_providers,
@@ -392,6 +397,7 @@ pub fn capture_script_candidates_with_module_region(
         program,
         module_script_region,
         None,
+        top_level_owners,
     )
 }
 
@@ -408,7 +414,13 @@ pub fn capture_script_candidates_with_context(
     program: &Program<'_>,
     module_script_region: Option<(u32, u32)>,
     framework_mode_hint: Option<FrameworkScriptModeHint>,
+    top_level_owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
 ) -> FrameworkScriptCandidateSet {
+    assert_eq!(
+        top_level_owners.len(),
+        program.body.len(),
+        "validated owner table must cover framework candidate program exactly"
+    );
     if active_providers.is_empty() {
         return FrameworkScriptCandidateSet::default();
     }
@@ -417,6 +429,7 @@ pub fn capture_script_candidates_with_context(
         let cx = ScriptCandidateCx {
             source,
             program,
+            top_level_owners,
             module_script_region,
             framework_mode_hint,
         };
