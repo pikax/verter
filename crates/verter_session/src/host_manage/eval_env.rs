@@ -177,7 +177,7 @@ impl VerterHost {
             .map(|ordinal| (ordinal as u64) + 1)
     }
 
-    fn peel_value_decl_alias_in(
+    fn peel_value_decl_alias(
         &self,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -238,8 +238,7 @@ impl VerterHost {
         // so there is no rune-module exception.
         #[cfg(debug_assertions)]
         {
-            let graph_native =
-                self.peel_value_decl_alias_graph_native_in(canonical_id, owner, name);
+            let graph_native = self.peel_value_decl_alias_graph_native(canonical_id, owner, name);
             debug_assert_eq!(
                 current, graph_native,
                 "graph-native consumer-reader readiness: graph-native C2 peeler diverged from the oracle for \
@@ -250,7 +249,7 @@ impl VerterHost {
         current
     }
 
-    /// Bounded, graph-native sibling of [`Self::peel_value_decl_alias_in`].
+    /// Bounded, graph-native sibling of [`Self::peel_value_decl_alias`].
     ///
     /// Walks the same single-segment `typeof` alias chain, but per hop
     /// reads exactly the ONE demanded value symbol's lowered body via
@@ -271,7 +270,7 @@ impl VerterHost {
     /// oracle's `whole_env()` folds in. So a `typeof $rune` hop terminates
     /// identically here and in the oracle; there is no rune-module
     /// exception.
-    fn peel_value_decl_alias_graph_native_in(
+    fn peel_value_decl_alias_graph_native(
         &self,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -350,7 +349,7 @@ impl VerterHost {
     /// is overwritten downstream when the alias takes the importing
     /// binding's name. The `name` is the demanded `source_name`,
     /// matching the oracle's `dep_group.primary().name`.
-    pub(crate) fn dependency_value_symbol_graph_native_in(
+    pub(crate) fn dependency_value_symbol_graph_native(
         &self,
         source: &ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
@@ -373,13 +372,14 @@ impl VerterHost {
         })
     }
 
+    /// Test-only `(canonical, name)` view of the C4 graph-native reader.
     #[cfg(test)]
-    pub(crate) fn dependency_value_symbol_graph_native(
+    pub(crate) fn dependency_value_symbol_graph_native_for_test(
         &self,
         source_canonical_id: &str,
         source_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        self.dependency_value_symbol_graph_native_in(&ValueDeclIdentity {
+        self.dependency_value_symbol_graph_native(&ValueDeclIdentity {
             canonical_id: source_canonical_id.to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: source_name.to_string(),
@@ -394,7 +394,7 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> ValueDeclIdentity {
-        self.peel_value_decl_alias_in(canonical_id, owner, name)
+        self.peel_value_decl_alias(canonical_id, owner, name)
     }
 
     /// Test-only exact-identity view of the graph-native peeler.
@@ -405,7 +405,7 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> ValueDeclIdentity {
-        self.peel_value_decl_alias_graph_native_in(canonical_id, owner, name)
+        self.peel_value_decl_alias_graph_native(canonical_id, owner, name)
     }
 
     pub(crate) fn resolve_value_export_target(
@@ -414,7 +414,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
         let target = self.resolve_value_export_route_identity(dep_canonical_id, imported_name)?;
-        Some(self.peel_value_decl_alias_in(&target.canonical_id, target.owner, &target.name))
+        Some(self.peel_value_decl_alias(&target.canonical_id, target.owner, &target.name))
     }
 
     /// Bounded, graph-native sibling of [`Self::resolve_value_export_target`].
@@ -422,9 +422,9 @@ impl VerterHost {
     /// Resolves the same export target through the graph-native export
     /// walk (`resolve_named_export` already walks the export graph, never
     /// the whole env), then peels the value alias chain through
-    /// [`Self::peel_value_decl_alias_graph_native_in`] (per-symbol value
+    /// [`Self::peel_value_decl_alias_graph_native`] (per-symbol value
     /// memo + header PRESENCE) instead of the legacy
-    /// [`Self::peel_value_decl_alias_in`] (which materialises
+    /// [`Self::peel_value_decl_alias`] (which materialises
     /// `base_eval_env_arc`/`whole_env()`). NEVER materialises a
     /// dependency's whole env.
     pub(crate) fn resolve_value_export_target_graph_native(
@@ -433,7 +433,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
         let target = self.resolve_value_export_route_identity(dep_canonical_id, imported_name)?;
-        Some(self.peel_value_decl_alias_graph_native_in(
+        Some(self.peel_value_decl_alias_graph_native(
             &target.canonical_id,
             target.owner,
             &target.name,
@@ -485,7 +485,7 @@ impl VerterHost {
     /// correct if the integration ordering ever changes.
     ///
     /// Two graph-native sub-walks, both whole-env-free; NEVER routes through
-    /// `peel_value_decl_alias_in` / `base_eval_env_arc` / `whole_env()`:
+    /// `peel_value_decl_alias` / `base_eval_env_arc` / `whole_env()`:
     ///
     /// 1. The re-export CHAIN walk reuses
     ///    [`Self::build_named_type_export_route_entry`] — the shared
@@ -502,7 +502,7 @@ impl VerterHost {
     ///    that an eval-dependency alias collapses onto the barrel is reported
     ///    identically by both rails (parity; no spurious cross-file divergence).
     /// 2. The terminal value `typeof`-alias is peeled graph-native via
-    ///    [`Self::peel_value_decl_alias_graph_native_in`] (per-symbol value memo +
+    ///    [`Self::peel_value_decl_alias_graph_native`] (per-symbol value memo +
     ///    header PRESENCE). The peeled identity is the final defining value.
     ///
     /// `view` carries the request boundary, symmetric with the type rail's
@@ -541,7 +541,7 @@ impl VerterHost {
             .unwrap_or_else(|| final_canonical.to_string());
         // Peel the terminal value alias graph-native (no whole-env). A pure
         // `export const V` terminal peels to itself.
-        let identity = self.peel_value_decl_alias_graph_native_in(
+        let identity = self.peel_value_decl_alias_graph_native(
             final_canonical.as_str(),
             final_owner,
             final_name,

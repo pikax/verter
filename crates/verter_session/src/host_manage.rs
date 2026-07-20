@@ -1223,7 +1223,7 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
         &self,
         source: &ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        self.host.dependency_value_symbol_graph_native_in(source)
+        self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(

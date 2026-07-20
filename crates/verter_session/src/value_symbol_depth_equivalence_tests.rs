@@ -181,7 +181,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
 
         // Graph-native per-symbol reader on the same defining file.
         let graph = host
-            .dependency_value_symbol_graph_native("/dep.ts", name)
+            .dependency_value_symbol_graph_native_for_test("/dep.ts", name)
             .unwrap_or_else(|| panic!("graph-native reader must know `{name}` in /dep.ts"));
 
         assert_eq!(graph.name, oracle.name, "name must match for `{name}`");
@@ -215,7 +215,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     // single-body enum with members and no annotation; `single` is a
     // single-signature function with no object_shape.
     let cfg = host
-        .dependency_value_symbol_graph_native("/dep.ts", "cfg")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "cfg")
         .expect("cfg present");
     assert_eq!(
         cfg.kind,
@@ -237,7 +237,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
 
     let color = host
-        .dependency_value_symbol_graph_native("/dep.ts", "Color")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "Color")
         .expect("Color present");
     assert_eq!(
         color.kind,
@@ -259,7 +259,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
 
     let single = host
-        .dependency_value_symbol_graph_native("/dep.ts", "single")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "single")
         .expect("single present");
     assert_eq!(
         single.kind,
@@ -282,7 +282,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     // Miss case: a non-existent name resolves to `None` on the graph-native
     // reader (the negative).
     assert!(
-        host.dependency_value_symbol_graph_native("/dep.ts", "doesNotExist")
+        host.dependency_value_symbol_graph_native_for_test("/dep.ts", "doesNotExist")
             .is_none(),
         "a non-existent value name must resolve to None on the graph-native reader"
     );
@@ -340,7 +340,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         let peeled_canonical = oracle_pair.canonical_id.as_str();
         let peeled_name = oracle_pair.name.as_str();
         let routed_graph = host
-            .dependency_value_symbol_graph_native(peeled_canonical, peeled_name)
+            .dependency_value_symbol_graph_native_for_test(peeled_canonical, peeled_name)
             .unwrap_or_else(|| {
                 panic!("graph-native body reader must know the peeled ({peeled_canonical}, {peeled_name})")
             });
@@ -485,7 +485,7 @@ fn cross_file_value_symbol_depth_pins_multi_contributor_divergence() {
 
     // --- Multi-overload `signatures` divergence ---
     let graph_over = host
-        .dependency_value_symbol_graph_native("/dep.ts", "over")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "over")
         .expect("graph-native reader must know `over`");
     let oracle_over = oracle_env
         .value_symbols
@@ -527,7 +527,7 @@ fn cross_file_value_symbol_depth_pins_multi_contributor_divergence() {
 
     // --- Declaration-merged-enum `enum_members` divergence ---
     let graph_merged = host
-        .dependency_value_symbol_graph_native("/dep.ts", "Merged")
+        .dependency_value_symbol_graph_native_for_test("/dep.ts", "Merged")
         .expect("graph-native reader must know `Merged`");
     let oracle_merged = oracle_env
         .value_symbols

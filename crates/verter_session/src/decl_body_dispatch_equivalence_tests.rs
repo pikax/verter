@@ -516,7 +516,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     upsert_rune_module(&host, "/r.svelte.ts", "export const c = $state(0)\n");
     for rune in ["$state", "$derived", "$effect", "$inspect"] {
         assert!(
-            host.dependency_value_symbol_graph_native("/r.svelte.ts", rune)
+            host.dependency_value_symbol_graph_native_for_test("/r.svelte.ts", rune)
                 .is_some(),
             "the rune module must expose the ambient `{rune}` through the \
              graph-native value-symbol reader (the surviving path the re-home \
@@ -524,7 +524,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
         );
     }
     assert!(
-        host.dependency_value_symbol_graph_native("/r.svelte.ts", "c")
+        host.dependency_value_symbol_graph_native_for_test("/r.svelte.ts", "c")
             .is_some(),
         "the rune module's own `c` must be visible through the graph-native reader"
     );
@@ -535,7 +535,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     upsert_ts(&plain_host, "/plain.ts", "export const c = 0\n");
     assert!(
         plain_host
-            .dependency_value_symbol_graph_native("/plain.ts", "$state")
+            .dependency_value_symbol_graph_native_for_test("/plain.ts", "$state")
             .is_none(),
         "a plain `.ts` must NOT expose the ambient `$state` through the \
          graph-native reader (per-file scoping); a global injection would leak it"
@@ -551,7 +551,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
         "export const $derived: { mine: 1 } = { mine: 1 }\nexport const c = $state(0)\n",
     );
     let user_derived = user_host
-        .dependency_value_symbol_graph_native("/u.svelte.ts", "$derived")
+        .dependency_value_symbol_graph_native_for_test("/u.svelte.ts", "$derived")
         .expect("user `$derived` must be visible through the graph-native reader");
     let annotation_source = user_derived
         .type_annotation
@@ -585,7 +585,7 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     for rune in ["$state", "$derived", "$effect", "$inspect"] {
         let oracle_has = oracle_env.value_symbols.contains_key(rune);
         let graph_native_has = host
-            .dependency_value_symbol_graph_native("/r.svelte.ts", rune)
+            .dependency_value_symbol_graph_native_for_test("/r.svelte.ts", rune)
             .is_some();
         assert_eq!(
             oracle_has, graph_native_has,

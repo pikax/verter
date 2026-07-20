@@ -116,7 +116,10 @@ fn import_backed_surface_arm_is_missing(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> bool {
-    let Some(indexed) = host.ensure_indexed_ready(owner_canonical) else {
+    let Some(indexed) = host
+        .ensure_indexed_ready_serve(owner_canonical)
+        .map(|serve| serve.indexed)
+    else {
         return false;
     };
     let Some(analysis) = indexed.script_analysis.as_ref() else {
@@ -166,7 +169,10 @@ fn export_surface_verdict(
     if crate::resolver_core::ResolverContext::workspace_is_package_backed(host, canonical) {
         return ExportSurfaceVerdict::Unknowable;
     }
-    let Some(indexed) = host.ensure_indexed_ready(canonical) else {
+    let Some(indexed) = host
+        .ensure_indexed_ready_serve(canonical)
+        .map(|serve| serve.indexed)
+    else {
         return ExportSurfaceVerdict::Unknowable;
     };
     let Some(exports) = indexed.export_signatures.as_ref() else {
