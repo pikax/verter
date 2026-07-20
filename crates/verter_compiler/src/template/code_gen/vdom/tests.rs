@@ -488,6 +488,71 @@ fn dev_root_fragment_comment_plus_single_component_root() {
     );
 }
 
+/// Official Vue ALWAYS blockifies a dynamic component — a multi-root
+/// `<component :is>` child emits `(_openBlock(), _createBlock(_resolveDynamicComponent(...)))`
+/// even without v-if/v-for (oracle: the nested cell in the official
+/// `built-ins/keep-alive` corpus golden). A bare
+/// `_createVNode(_resolveDynamicComponent(...))` skips the block boundary the
+/// runtime needs when the target resolves to a Fragment/variable-shape
+/// subtree — dynamicChildren tracking breaks and fragment anchors null out on
+/// update/unmount (the reka-ui CheckboxRoot "nextSibling of null" crash class).
+#[test]
+fn multi_root_dynamic_component_uses_create_block() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <component :is="tag"><slot /></component>
+  <span v-if="show" />
+</template>
+<script setup>
+const tag = 'div'
+const show = true
+</script>"#,
+    );
+    assert!(
+        code.contains("(_openBlock(), _createBlock(_resolveDynamicComponent"),
+        "multi-root <component :is> must use (_openBlock(), _createBlock(_resolveDynamicComponent(...))), got:\n{code}"
+    );
+    // NEGATIVE: the bare non-block form must be absent.
+    assert!(
+        !code.contains("_createVNode(_resolveDynamicComponent"),
+        "multi-root <component :is> must NOT use _createVNode, got:\n{code}"
+    );
+}
+
+/// Scope guard for dynamic-component blockification: a PLAIN component beside
+/// a root comment stays a `_createVNode` fragment child (official Vue emits
+/// `_createVNode(Comp)` inside the DEV_ROOT_FRAGMENT) — blockification is a
+/// dynamic-`<component :is>` rule, never a blanket multi-root-component rule.
+/// A bare `_createBlock(Comp)` without `_openBlock` leaves fragment anchors
+/// null → `nextSibling` crash on unmount/update (reka-ui `_NoScopeCheckbox`).
+#[test]
+fn root_comment_plus_component_uses_create_vnode_not_bare_create_block() {
+    let code = gen_vdom_template(
+        r#"<template>
+  <!-- no scoped styles -->
+  <CheckboxRoot name="test" />
+</template>
+<script setup>
+import CheckboxRoot from './CheckboxRoot.vue'
+</script>"#,
+    );
+    assert!(
+        code.contains("2112") || code.contains("DEV_ROOT_FRAGMENT"),
+        "comment + component root must use DEV_ROOT_FRAGMENT, got:\n{code}"
+    );
+    assert!(
+        code.contains("_createVNode("),
+        "component next to root comment must use _createVNode (multi-root child), got:\n{code}"
+    );
+    // NEGATIVE: no `_createBlock(` anywhere — a plain component in this shape
+    // must not be blockified (the root fragment itself is _createElementBlock,
+    // which this substring check deliberately does not match).
+    assert!(
+        !code.contains("_createBlock("),
+        "component next to root comment must NOT use _createBlock (would lack openBlock), got:\n{code}"
+    );
+}
+
 /// F13: sibling v-if/v-else chains under one parent get a GLOBAL running branch
 /// key (0,1 then 2,3), never a per-chain reset (0,1,0,1). Duplicate keys break
 /// Vue's keyed patching and log "Duplicate keys".

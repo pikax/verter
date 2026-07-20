@@ -467,6 +467,109 @@ fn exclude_only_carries_the_default_include() {
     }
 }
 
+/// A package leaf that only adds `compilerOptions.paths` and `extends` an
+/// exclude-only monorepo base must synthesize its default include under the
+/// **package** directory — not inherit a monorepo-wide `**/*` baked at the
+/// base's frame. TypeScript's implicit default include is a property of the
+/// FINAL config file's directory, never of an `extends` ancestor's; the old
+/// mid-chain synthesis made every paths-only package leaf claim the whole
+/// repo and win `@/*` path resolution with the wrong (repo-root) package
+/// root.
+#[test]
+fn package_leaf_extending_exclude_only_base_gets_package_local_default_include() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("tsconfig.json"),
+        r#"{ "exclude": ["dist", "node_modules"] }"#,
+    )
+    .unwrap();
+    let pkg = root.join("packages/icons");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("tsconfig.json"),
+        r#"{
+          "extends": "../../tsconfig.json",
+          "compilerOptions": {
+            "paths": { "@/*": ["./src/*"] }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let leaf = pkg
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let pkg_root = pkg.to_string_lossy().replace('\\', "/");
+    let membership = load_project_membership(&ws, &leaf);
+    match membership {
+        ProjectMembership::IncludeExclude {
+            include, exclude, ..
+        } => {
+            assert!(
+                !include.is_empty(),
+                "paths-only leaf must still get a default include"
+            );
+            // Every include path is under the package directory (not monorepo root).
+            for g in &include {
+                assert!(
+                    g.starts_with(&pkg_root),
+                    "include entry {g} must be under package root {pkg_root}, \
+                     not the extends ancestor's directory"
+                );
+            }
+            // The base's excludes still subtract (declared at the base frame,
+            // resolved against the base's directory).
+            assert!(
+                !exclude.is_empty(),
+                "the inherited exclude entries are preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("paths-only leaf inheriting exclude should be IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+/// Deliberate-decision pin: a chain that declares NO membership key anywhere
+/// (`files`/`include`/`exclude` all absent — here a paths-only leaf extending
+/// a compilerOptions-only base) stays `MatchAll`. The leaf default-include
+/// synthesis is keyed on membership INTENT (an exclude declared somewhere in
+/// the chain), so moving it to the leaf frame must not flip the key-less
+/// chain out of `MatchAll` (downstream, `membership_to_spec` already scopes
+/// `MatchAll` to the project root with the TS default excludes).
+#[test]
+fn key_less_extends_chain_stays_match_all() {
+    let membership = membership_from_extends(
+        r#"{ "compilerOptions": { "strict": true } }"#,
+        r#"{ "extends": "./base.json", "compilerOptions": { "paths": { "@/*": ["./src/*"] } } }"#,
+    );
+    assert!(
+        matches!(membership, ProjectMembership::MatchAll),
+        "a chain with no files/include/exclude anywhere must stay MatchAll, got {membership:?}"
+    );
+}
+
+/// Deliberate-decision pin: a missing/unreadable tsconfig keeps the blanket
+/// `MatchAll` fallback (nothing declared anywhere — same contract as before
+/// the leaf-scoped default-include move; `membership_to_spec` scopes it to
+/// the project root downstream).
+#[test]
+fn missing_config_membership_stays_match_all() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let membership = load_project_membership(&ws, "/nonexistent/tsconfig.json");
+    assert!(
+        matches!(membership, ProjectMembership::MatchAll),
+        "a missing config must stay MatchAll, got {membership:?}"
+    );
+}
+
 #[test]
 fn explicit_empty_files_does_not_synthesize_default_include() {
     // FIX 1 distinction: an EXPLICIT `"files": []` (solution-style, owns

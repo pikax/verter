@@ -1,0 +1,83 @@
+{
+  "schema": 2,
+  "caseId": "components/dynamic-multi-root",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/dynamic-multi-root.vue",
+    "sha256": "65ca3f43f6eb6f7dd05ca7863fe98bb2adba7448eb44b386e6484bc0c8b2f5fb"
+  },
+  "options": {
+    "sha256": "86e4ae30ef24b8ecb128e4ab7540a28c1ea0a7fa6587aaab66c0eaa0c493d324",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/components/dynamic-multi-root.vue",
+      "id": "components/dynamic-multi-root",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/components/dynamic-multi-root.js",
+      "sha256": "f66dfe70d3190efa0d05bb93c8e0eac81d623fb7c99b686b3029ec1591c9d5e7",
+      "bytes": 809
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/components/dynamic-multi-root.map.json",
+      "sha256": "754c883c41356be29f7de2d371510e187469b6b57b8a033bc6e5162bd3708a81"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "Fragment",
+      "alias": "_Fragment"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "renderSlot",
+      "alias": "_renderSlot"
+    },
+    {
+      "imported": "resolveDynamicComponent",
+      "alias": "_resolveDynamicComponent"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}
