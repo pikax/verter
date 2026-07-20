@@ -1441,18 +1441,7 @@ fn build_single_style_analysis(
 
     let analysis_lang = match style.lang {
         Some(verter_compiler::parser::types::StyleLang::Css) | None => {
-            let analysis = verter_semantic::analysis::build_css_style_analysis(
-                css_content,
-                vue_input,
-                style.scoped,
-                style.module,
-                module_name.as_deref(),
-                content_offset,
-            );
-            if let Some(css) = &analysis.css {
-                css.debug_assert_valid_spans(sfc_source_len);
-            }
-            return analysis;
+            verter_semantic::analysis::StyleAnalysisLang::Css
         }
         Some(verter_compiler::parser::types::StyleLang::Scss) => {
             verter_semantic::analysis::StyleAnalysisLang::Scss
@@ -1470,14 +1459,22 @@ fn build_single_style_analysis(
             verter_semantic::analysis::StyleAnalysisLang::Unknown
         }
     };
-    verter_semantic::analysis::build_preprocessor_style_analysis(
+    // CSS, SCSS and Less run the brace-based scanner (dialect-aware) so class
+    // and selector facts exist for every brace-based style block; indented
+    // languages (Sass, Stylus) keep the Vue-features-only analysis.
+    let analysis = verter_semantic::analysis::build_scanned_style_analysis(
         analysis_lang,
+        css_content,
         vue_input,
         style.scoped,
         style.module,
         module_name.as_deref(),
         content_offset,
-    )
+    );
+    if let Some(css) = &analysis.css {
+        css.debug_assert_valid_spans(sfc_source_len);
+    }
+    analysis
 }
 
 /// Run a closure with panic safety, returning a warning diagnostic if it panics.
@@ -2954,6 +2951,49 @@ watch(count, (value, oldValue) => {
             "content should contain '.a {{ .b', got: {}",
             req.content
         );
+    }
+
+    /// SCSS style blocks scan to full CSS facts (classes with exact
+    /// SFC-absolute spans, rule body spans) — the class-intelligence
+    /// features light up for `lang="scss"` blocks.
+    #[test]
+    fn scss_style_block_produces_scanned_css_facts() {
+        let source = "<template><div class=\"card\">x</div></template>\n<style lang=\"scss\" scoped>\n.card {\n  .title { color: red; }\n}\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        assert_eq!(snap.style_analyses.len(), 1);
+        let style = &snap.style_analyses[0];
+        assert_eq!(
+            style.lang,
+            verter_semantic::analysis::StyleAnalysisLang::Scss
+        );
+        let css = style
+            .css
+            .as_ref()
+            .expect("scss block must carry scanned CSS facts");
+        let title = css
+            .classes
+            .iter()
+            .find(|c| c.name == "title")
+            .expect("nested scss class extracted");
+        assert_eq!(
+            &source[title.span.start as usize..title.span.end as usize],
+            "title",
+            "nested class span is SFC-absolute and exact"
+        );
+        assert!(
+            css.selectors.iter().all(|s| s.rule_body_span.is_some()),
+            "closed rules carry body spans"
+        );
+    }
+
+    /// Indented Sass stays fail-closed: Vue features only, no scanned CSS.
+    #[test]
+    fn sass_style_block_stays_unscanned() {
+        let source =
+            "<template><div>x</div></template>\n<style lang=\"sass\">\n.a\n  color: red\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        assert_eq!(snap.style_analyses.len(), 1);
+        assert!(snap.style_analyses[0].css.is_none());
     }
 
     /// @ai-generated - preprocessor request for custom block with lang

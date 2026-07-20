@@ -173,12 +173,17 @@ pub struct AnalyzedSelector {
     pub span: Span,
     /// Parsed selector structure for matching. `None` for unparseable selectors.
     pub structure: Option<StructuredSelector>,
+    /// SFC-absolute byte span of the rule's declaration block, including both
+    /// braces (`{ ... }`). `None` when the rule's block was never closed.
+    pub rule_body_span: Option<Span>,
 }
 
 impl serde::Serialize for AnalyzedSelector {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let count = 4 + usize::from(self.structure.is_some());
+        let count = 4
+            + usize::from(self.structure.is_some())
+            + 2 * usize::from(self.rule_body_span.is_some());
         let mut s = serializer.serialize_struct("AnalyzedSelector", count)?;
         s.serialize_field("text", &self.text)?;
         s.serialize_field("specificity", &self.specificity)?;
@@ -186,6 +191,10 @@ impl serde::Serialize for AnalyzedSelector {
         s.serialize_field("spanEnd", &self.span.end)?;
         if self.structure.is_some() {
             s.serialize_field("structure", &self.structure)?;
+        }
+        if let Some(body) = self.rule_body_span {
+            s.serialize_field("ruleBodyStart", &body.start)?;
+            s.serialize_field("ruleBodyEnd", &body.end)?;
         }
         s.end()
     }
@@ -204,6 +213,10 @@ impl<'de> serde::Deserialize<'de> for AnalyzedSelector {
             span_end: u32,
             #[serde(default)]
             structure: Option<StructuredSelector>,
+            #[serde(default)]
+            rule_body_start: Option<u32>,
+            #[serde(default)]
+            rule_body_end: Option<u32>,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
@@ -211,6 +224,10 @@ impl<'de> serde::Deserialize<'de> for AnalyzedSelector {
             specificity: w.specificity,
             span: Span::new(w.span_start, w.span_end),
             structure: w.structure,
+            rule_body_span: match (w.rule_body_start, w.rule_body_end) {
+                (Some(start), Some(end)) => Some(Span::new(start, end)),
+                _ => None,
+            },
         })
     }
 }
@@ -322,15 +339,23 @@ pub struct AnalyzedCssClass {
     pub name: String,
     /// SFC-absolute byte span of the class name (after `.`).
     pub span: Span,
+    /// Index into `CssAnalysis.selectors` for the comma-part selector this
+    /// class occurrence belongs to. `None` when the join was not derivable
+    /// (comment-degraded selector text).
+    pub selector_index: Option<u32>,
 }
 
 impl serde::Serialize for AnalyzedCssClass {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("AnalyzedCssClass", 3)?;
+        let count = 3 + usize::from(self.selector_index.is_some());
+        let mut s = serializer.serialize_struct("AnalyzedCssClass", count)?;
         s.serialize_field("name", &self.name)?;
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
+        if self.selector_index.is_some() {
+            s.serialize_field("selectorIndex", &self.selector_index)?;
+        }
         s.end()
     }
 }
@@ -345,11 +370,14 @@ impl<'de> serde::Deserialize<'de> for AnalyzedCssClass {
             span_start: u32,
             #[serde(default)]
             span_end: u32,
+            #[serde(default)]
+            selector_index: Option<u32>,
         }
         let w = Wire::deserialize(deserializer)?;
         Ok(Self {
             name: w.name,
             span: Span::new(w.span_start, w.span_end),
+            selector_index: w.selector_index,
         })
     }
 }
@@ -523,14 +551,74 @@ pub fn build_css_style_analysis(
     module_name: Option<&str>,
     content_offset: u32,
 ) -> StyleBlockAnalysis {
-    let css = scan_css(css_content, content_offset);
+    build_scanned_style_analysis(
+        StyleAnalysisLang::Css,
+        css_content,
+        vue_input,
+        scoped,
+        is_module,
+        module_name,
+        content_offset,
+    )
+}
+
+/// Build style analysis for a brace-based style block, scanning with the
+/// dialect matching `lang`.
+///
+/// `Css`, `Scss`, and `Less` blocks run the byte-level scanner (SCSS/Less get
+/// `//` line-comment awareness and SCSS `#{...}` interpolation fail-closed
+/// handling); indentation-based languages (`Sass`, `Stylus`) and `Unknown`
+/// store only Vue features (`css: None`), same as
+/// [`build_preprocessor_style_analysis`].
+///
+/// Vue special pseudos (`:deep`, `:global`, `:slotted`) discovered by the
+/// scanner are merged with any pseudos supplied on `vue_input`.
+pub fn build_scanned_style_analysis(
+    lang: StyleAnalysisLang,
+    css_content: &str,
+    vue_input: VueStyleInput,
+    scoped: bool,
+    is_module: bool,
+    module_name: Option<&str>,
+    content_offset: u32,
+) -> StyleBlockAnalysis {
+    let dialect = match lang {
+        StyleAnalysisLang::Css => CssScanDialect::Css,
+        StyleAnalysisLang::Scss => CssScanDialect::Scss,
+        StyleAnalysisLang::Less => CssScanDialect::Less,
+        StyleAnalysisLang::Sass | StyleAnalysisLang::Stylus | StyleAnalysisLang::Unknown => {
+            return build_preprocessor_style_analysis(
+                lang,
+                vue_input,
+                scoped,
+                is_module,
+                module_name,
+                content_offset,
+            );
+        }
+    };
+
+    let (css, scanned_pseudos) = match scan_css_dialect(css_content, content_offset, dialect) {
+        Some((css, pseudos)) => (Some(css), pseudos),
+        None => (None, Vec::new()),
+    };
 
     let v_binds = convert_v_binds(&vue_input);
-    let special_pseudos = convert_special_pseudos(&vue_input);
+    let mut special_pseudos = convert_special_pseudos(&vue_input);
+    // Merge scanner-discovered pseudos, skipping duplicates of caller-supplied
+    // entries (same kind + span).
+    for scanned in scanned_pseudos {
+        let duplicate = special_pseudos
+            .iter()
+            .any(|p| p.kind == scanned.kind && p.start == scanned.start && p.end == scanned.end);
+        if !duplicate {
+            special_pseudos.push(scanned);
+        }
+    }
     let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, css.as_ref());
 
     StyleBlockAnalysis {
-        lang: StyleAnalysisLang::Css,
+        lang,
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
@@ -1237,15 +1325,35 @@ pub fn compute_structured_specificity(selector: &StructuredSelector) -> (u32, u3
 
 /// Scan CSS content with a byte-level scanner and extract analysis data.
 /// Returns `None` only for completely empty input.
-fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
+/// Scanner dialect — which brace-based CSS flavor the byte scanner is reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CssScanDialect {
+    Css,
+    Scss,
+    Less,
+}
+
+impl CssScanDialect {
+    /// Whether `//` line comments are part of the dialect.
+    fn line_comments(self) -> bool {
+        matches!(self, Self::Scss | Self::Less)
+    }
+}
+
+fn scan_css_dialect(
+    css_content: &str,
+    content_offset: u32,
+    dialect: CssScanDialect,
+) -> Option<(CssAnalysis, Vec<AnalyzedSpecialPseudo>)> {
     let bytes = css_content.as_bytes();
     let len = bytes.len();
 
     if len == 0 {
-        return Some(CssAnalysis::default());
+        return Some((CssAnalysis::default(), Vec::new()));
     }
 
     let mut analysis = CssAnalysis::default();
+    let mut scanned_pseudos: Vec<AnalyzedSpecialPseudo> = Vec::new();
     let mut i = 0;
     let mut in_string = false;
     let mut string_char = b'"';
@@ -1263,8 +1371,11 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
     let mut last_statement_end: usize = 0;
     // Track the selector index for the current rule block (for linking custom properties)
     let mut current_selector_index: Option<u32> = None;
-    // At-rule depth stack: at_rule_entry_depths[i] = brace_depth where the at-rule block began
-    // This lets us know when we're inside an at-rule block (not at selector level)
+    // One frame per open brace. `Some((first_selector, count, open_brace_pos))`
+    // for a regular rule; `None` for at-rules / keyframes / selector-less braces.
+    let mut rule_frames: Vec<Option<(u32, u32, usize)>> = Vec::new();
+    // SCSS `#{...}` interpolation spans (byte ranges in css_content).
+    let mut interpolation_spans: Vec<(usize, usize)> = Vec::new();
     let mut pending_at_rule: Option<(AtRuleKind, String)> = None;
 
     while i < len {
@@ -1298,6 +1409,45 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
             in_comment = true;
             i += 2;
+            continue;
+        }
+
+        // Line comment (SCSS/Less only)
+        if dialect.line_comments() && b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            let comment_start = i;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            // When nothing but whitespace accumulated for the pending selector,
+            // advance the selector start past the comment so selector spans
+            // stay exact (a leading `// note` line never degrades spans).
+            let pending_from = selector_start.max(last_statement_end.min(comment_start));
+            if pending_from <= comment_start
+                && css_content[pending_from..comment_start].trim().is_empty()
+            {
+                selector_start = i;
+                if brace_depth > 0 {
+                    last_statement_end = i;
+                }
+            }
+            continue;
+        }
+
+        // SCSS `#{...}` interpolation: consume it whole so its braces never
+        // reach the depth tracker; the containing selector fails closed.
+        if dialect == CssScanDialect::Scss && b == b'#' && i + 1 < len && bytes[i + 1] == b'{' {
+            let interp_start = i;
+            i += 2;
+            let mut depth = 1usize;
+            while i < len && depth > 0 {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            interpolation_spans.push((interp_start, i));
             continue;
         }
 
@@ -1348,104 +1498,141 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
             };
             let selector_text = &css_content[effective_start..i];
             let trimmed = selector_text.trim();
+            // One frame per `{`; regular rules overwrite it below.
+            let mut frame: Option<(u32, u32, usize)> = None;
 
             if !trimmed.is_empty() {
                 if let Some(at_rule) = try_parse_at_rule(trimmed) {
                     // At-rule with block
-                    match at_rule.0 {
-                        AtRuleKind::Keyframes => {
-                            keyframes_depth += 1;
-                            keyframes_entry_depths.push(brace_depth);
-                            analysis.at_rules.push(AnalyzedAtRule {
-                                kind: at_rule.0,
-                                name: at_rule.1,
-                            });
-                        }
-                        AtRuleKind::FontFace | AtRuleKind::Property => {
-                            // These at-rules have declaration blocks, not nested rules
-                            analysis.at_rules.push(AnalyzedAtRule {
-                                kind: at_rule.0,
-                                name: at_rule.1,
-                            });
-                        }
-                        _ => {
-                            // Block at-rules that can contain nested rules (@media, @supports, etc.)
-                            analysis.at_rules.push(AnalyzedAtRule {
-                                kind: at_rule.0,
-                                name: at_rule.1,
-                            });
-                        }
+                    if at_rule.0 == AtRuleKind::Keyframes {
+                        keyframes_depth += 1;
+                        keyframes_entry_depths.push(brace_depth);
                     }
+                    analysis.at_rules.push(AnalyzedAtRule {
+                        kind: at_rule.0,
+                        name: at_rule.1,
+                    });
                     pending_at_rule = None;
                 } else if keyframes_depth == 0 {
                     // Regular style rule — extract selectors
                     analysis.rule_count += 1;
 
+                    // A selector containing SCSS interpolation has no static
+                    // name — fail closed (no classes/ids, no structure).
+                    let has_interpolation = dialect == CssScanDialect::Scss
+                        && interpolation_spans
+                            .iter()
+                            .any(|&(s, e)| s < i && e > effective_start);
+
                     // Strip CSS comments from selector text before parsing.
                     // This prevents comments like `.a /* comment */ > .b`
                     // from corrupting selector structure.
                     let clean_selector;
-                    let selector_for_parse = if let Some(cleaned) = strip_css_comments(trimmed) {
-                        clean_selector = cleaned;
-                        clean_selector.trim()
-                    } else {
-                        trimmed
-                    };
+                    let selector_for_parse =
+                        if let Some(cleaned) = strip_css_comments_dialect(trimmed, dialect) {
+                            clean_selector = cleaned;
+                            clean_selector.trim()
+                        } else {
+                            trimmed
+                        };
+                    let is_clean = std::ptr::eq(
+                        selector_for_parse.as_bytes().as_ptr(),
+                        trimmed.as_bytes().as_ptr(),
+                    );
 
                     // Split comma-separated selectors
                     let css_base = css_content.as_ptr() as usize;
+                    let first_new_selector = analysis.selectors.len();
                     let individual_selectors = split_selector_list(selector_for_parse);
                     for sel_text in &individual_selectors {
                         let sel_trimmed = sel_text.trim();
-                        if !sel_trimmed.is_empty() {
-                            // If we're using the original (no comments), pointer
-                            // arithmetic gives exact span. Otherwise, use the
-                            // whole selector range as a fallback.
-                            let sel_offset = if std::ptr::eq(
-                                selector_for_parse.as_bytes().as_ptr(),
-                                trimmed.as_bytes().as_ptr(),
-                            ) {
-                                (sel_trimmed.as_ptr() as usize - css_base) as u32
-                            } else {
-                                (trimmed.as_ptr() as usize - css_base) as u32
-                            };
-                            let structure = parse_selector(sel_trimmed);
-                            let specificity = if let Some(ref s) = structure {
-                                compute_structured_specificity(s)
-                            } else {
-                                compute_specificity_from_text(sel_trimmed)
-                            };
-                            analysis.selectors.push(AnalyzedSelector {
-                                text: sel_trimmed.to_string(),
-                                specificity,
-                                span: Span::new(
-                                    content_offset + sel_offset,
-                                    content_offset + sel_offset + sel_trimmed.len() as u32,
-                                ),
-                                structure,
-                            });
+                        if sel_trimmed.is_empty() {
+                            continue;
+                        }
+                        // If we're using the original (no comments), pointer
+                        // arithmetic gives exact span. Otherwise, use the
+                        // whole selector range as a fallback.
+                        let sel_offset = if is_clean {
+                            (sel_trimmed.as_ptr() as usize - css_base) as u32
+                        } else {
+                            (trimmed.as_ptr() as usize - css_base) as u32
+                        };
+                        // `&` (SCSS parent / CSS nesting) and interpolated
+                        // selectors have no self-contained structure — matching
+                        // them against elements would be unsound. Fail closed.
+                        let structure = if has_interpolation || sel_trimmed.contains('&') {
+                            None
+                        } else {
+                            parse_selector(sel_trimmed)
+                        };
+                        let specificity = if let Some(ref s) = structure {
+                            compute_structured_specificity(s)
+                        } else {
+                            compute_specificity_from_text(sel_trimmed)
+                        };
+                        let sel_index = analysis.selectors.len() as u32;
+                        analysis.selectors.push(AnalyzedSelector {
+                            text: sel_trimmed.to_string(),
+                            specificity,
+                            span: Span::new(
+                                content_offset + sel_offset,
+                                content_offset + sel_offset + sel_trimmed.len() as u32,
+                            ),
+                            structure,
+                            rule_body_span: None,
+                        });
+                        // Per-comma-part class/ID extraction with an exact
+                        // class → selector join (clean text only).
+                        if is_clean && !has_interpolation {
+                            let part_offset = sel_trimmed.as_ptr() as usize - css_base;
+                            extract_classes_and_ids_from_selector(
+                                sel_trimmed,
+                                part_offset,
+                                content_offset,
+                                Some(sel_index),
+                                dialect,
+                                &mut analysis,
+                            );
                         }
                     }
 
-                    // Extract class/ID names from selector text with spans
-                    let selector_offset =
-                        (selector_text.as_ptr() as usize) - (css_content.as_ptr() as usize);
-                    extract_classes_and_ids_from_selector(
-                        selector_text,
-                        selector_offset,
-                        content_offset,
-                        &mut analysis,
-                    );
+                    if !is_clean && !has_interpolation {
+                        // Comment-degraded selector text: extract over the raw
+                        // text (comment-skipping) without a selector join.
+                        let selector_offset =
+                            (selector_text.as_ptr() as usize) - (css_content.as_ptr() as usize);
+                        extract_classes_and_ids_from_selector(
+                            selector_text,
+                            selector_offset,
+                            content_offset,
+                            None,
+                            dialect,
+                            &mut analysis,
+                        );
+                    }
 
-                    // Record the first selector index for this rule block
-                    // (for linking custom properties back to their selector)
-                    if !analysis.selectors.is_empty() {
-                        current_selector_index =
-                            Some((analysis.selectors.len() - individual_selectors.len()) as u32);
+                    // Vue special pseudos (`:deep` / `:global` / `:slotted`)
+                    // with exact spans, from the raw selector text.
+                    {
+                        let selector_offset =
+                            (selector_text.as_ptr() as usize) - (css_content.as_ptr() as usize);
+                        extract_special_pseudos(
+                            selector_text,
+                            selector_offset,
+                            content_offset,
+                            &mut scanned_pseudos,
+                        );
+                    }
+
+                    let count = (analysis.selectors.len() - first_new_selector) as u32;
+                    if count > 0 {
+                        frame = Some((first_new_selector as u32, count, i));
+                        current_selector_index = Some(first_new_selector as u32);
                     }
                 }
             }
 
+            rule_frames.push(frame);
             brace_depth += 1;
             decl_block_start = i + 1;
             selector_start = i + 1;
@@ -1463,6 +1650,7 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
                     decl_block_start as u32,
                     content_offset,
                     current_selector_index,
+                    dialect,
                     &mut analysis,
                 );
             }
@@ -1472,7 +1660,26 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
                 keyframes_entry_depths.pop();
                 keyframes_depth = keyframes_depth.saturating_sub(1);
             }
-            current_selector_index = None;
+            // Assign the closed rule's declaration-block span to its selectors.
+            if let Some(Some((first, count, open_pos))) = rule_frames.pop() {
+                let body_span = Span::new(
+                    content_offset + open_pos as u32,
+                    content_offset + i as u32 + 1,
+                );
+                for sel in analysis
+                    .selectors
+                    .iter_mut()
+                    .skip(first as usize)
+                    .take(count as usize)
+                {
+                    sel.rule_body_span = Some(body_span);
+                }
+            }
+            // Restore the enclosing rule's selector index (nested rules).
+            current_selector_index = rule_frames
+                .iter()
+                .rev()
+                .find_map(|f| f.map(|(first, _, _)| first));
             selector_start = i + 1;
             decl_block_start = i + 1;
             i += 1;
@@ -1520,7 +1727,105 @@ fn scan_css(css_content: &str, content_offset: u32) -> Option<CssAnalysis> {
         analysis.at_rules.push(AnalyzedAtRule { kind, name });
     }
 
-    Some(analysis)
+    Some((analysis, scanned_pseudos))
+}
+
+/// Extract Vue special pseudos (`:deep()` / `:global()` / `:slotted()`, plus
+/// the legacy `::v-deep()` / `::v-global()` / `::v-slotted()` forms) from raw
+/// selector text, recording SFC-absolute spans and the inner selector text.
+///
+/// Bare (paren-less) `:global` / `::v-deep` forms are recorded with a
+/// name-only span and no inner text.
+fn extract_special_pseudos(
+    selector_text: &str,
+    offset_in_css: usize,
+    content_offset: u32,
+    out: &mut Vec<AnalyzedSpecialPseudo>,
+) {
+    const FORMS: &[(&str, SpecialPseudoKind)] = &[
+        ("::v-deep", SpecialPseudoKind::Deep),
+        ("::v-global", SpecialPseudoKind::Global),
+        ("::v-slotted", SpecialPseudoKind::Slotted),
+        (":deep", SpecialPseudoKind::Deep),
+        (":global", SpecialPseudoKind::Global),
+        (":slotted", SpecialPseudoKind::Slotted),
+    ];
+
+    let bytes = selector_text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut string_char = b'"';
+
+    'outer: while i < len {
+        let b = bytes[i];
+
+        if in_string {
+            if b == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if b == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            in_string = true;
+            string_char = b;
+            i += 1;
+            continue;
+        }
+        // Skip block comments.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+
+        if b == b':' {
+            for (form, kind) in FORMS {
+                let form_bytes = form.as_bytes();
+                if i + form_bytes.len() <= len && &bytes[i..i + form_bytes.len()] == form_bytes {
+                    let after = i + form_bytes.len();
+                    // Reject a longer ident continuing the token (e.g. `:globalx`).
+                    if after < len && is_css_ident_char(bytes[after]) {
+                        continue;
+                    }
+                    let abs = |local: usize| content_offset + (offset_in_css + local) as u32;
+                    if after < len && bytes[after] == b'(' {
+                        let consumed = find_matching_paren(&selector_text[after..]);
+                        if consumed >= 2 {
+                            let inner = selector_text[after + 1..after + consumed - 1].trim();
+                            out.push(AnalyzedSpecialPseudo {
+                                kind: *kind,
+                                start: abs(i),
+                                end: abs(after + consumed),
+                                inner: (!inner.is_empty()).then(|| inner.to_string()),
+                            });
+                            i = after + consumed;
+                            continue 'outer;
+                        }
+                    }
+                    // Bare form (`::v-deep .x` / Svelte-style bare `:global`).
+                    out.push(AnalyzedSpecialPseudo {
+                        kind: *kind,
+                        start: abs(i),
+                        end: abs(after),
+                        inner: None,
+                    });
+                    i = after;
+                    continue 'outer;
+                }
+            }
+        }
+
+        i += 1;
+    }
 }
 
 /// Try to parse an at-rule from trimmed text before `{`.
@@ -1651,19 +1956,21 @@ fn extract_quoted_string(s: &str) -> Option<String> {
     None
 }
 
-/// Strip CSS block comments (`/* ... */`) from selector text.
+/// Strip CSS block comments (`/* ... */`) — and, for line-comment dialects,
+/// `// ...` line comments — from selector text.
 ///
 /// Returns `None` if no comments were found (original string is clean),
-/// or `Some(cleaned)` with comments replaced by a single space.
-fn strip_css_comments(text: &str) -> Option<String> {
+/// or `Some(cleaned)` with each comment replaced by a single space.
+fn strip_css_comments_dialect(text: &str, dialect: CssScanDialect) -> Option<String> {
     let bytes = text.as_bytes();
     let len = bytes.len();
+    let line_comments = dialect.line_comments();
     let mut i = 0;
     let mut has_comment = false;
 
     // Quick scan — avoid allocation if no comments
     while i + 1 < len {
-        if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+        if bytes[i] == b'/' && (bytes[i + 1] == b'*' || (line_comments && bytes[i + 1] == b'/')) {
             has_comment = true;
             break;
         }
@@ -1687,6 +1994,12 @@ fn strip_css_comments(text: &str) -> Option<String> {
                 i += 2; // skip */
             }
             result.push(' '); // replace comment with single space
+        } else if line_comments && i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            // Skip to end of line (the newline itself is kept)
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            result.push(' ');
         } else {
             result.push(bytes[i] as char);
             i += 1;
@@ -1929,11 +2242,13 @@ fn compute_specificity_from_text(selector: &str) -> (u32, u32, u32) {
 }
 
 /// Extract `.class` and `#id` occurrences from selector text, recording
-/// SFC-absolute byte spans.
+/// SFC-absolute byte spans and the owning selector index (when derivable).
 fn extract_classes_and_ids_from_selector(
     selector_text: &str,
     offset_in_css: usize,
     content_offset: u32,
+    selector_index: Option<u32>,
+    dialect: CssScanDialect,
     analysis: &mut CssAnalysis,
 ) {
     let bytes = selector_text.as_bytes();
@@ -1961,6 +2276,23 @@ fn extract_classes_and_ids_from_selector(
             in_string = true;
             string_char = b;
             i += 1;
+            continue;
+        }
+
+        // Skip block comments — a `.ghost` inside `/* ... */` is not a class.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        // Skip line comments in line-comment dialects.
+        if dialect.line_comments() && b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
             continue;
         }
 
@@ -1993,6 +2325,7 @@ fn extract_classes_and_ids_from_selector(
                     analysis.classes.push(AnalyzedCssClass {
                         name: name.to_string(),
                         span: Span::new(abs_start, abs_end),
+                        selector_index,
                     });
                 } else {
                     analysis.ids.push(AnalyzedCssId {
@@ -2023,6 +2356,7 @@ fn scan_declarations(
     decl_block_offset: u32,
     content_offset: u32,
     selector_index: Option<u32>,
+    dialect: CssScanDialect,
     analysis: &mut CssAnalysis,
 ) {
     let bytes = decl_content.as_bytes();
@@ -2063,6 +2397,14 @@ fn scan_declarations(
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
             in_comment = true;
             i += 2;
+            continue;
+        }
+
+        // Line comment (SCSS/Less): skip to end of line.
+        if dialect.line_comments() && b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
             continue;
         }
 

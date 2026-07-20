@@ -688,10 +688,12 @@ mod tests {
                         AnalyzedCssClass {
                             name: "container".to_string(),
                             span: verter_span::Span::new(0, 0),
+                            selector_index: None,
                         },
                         AnalyzedCssClass {
                             name: "title".to_string(),
                             span: verter_span::Span::new(0, 0),
+                            selector_index: None,
                         },
                     ],
                     ..Default::default()

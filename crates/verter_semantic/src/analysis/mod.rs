@@ -88,11 +88,11 @@ pub use routes::{
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};
 pub use style::{
-    build_css_style_analysis, build_preprocessor_style_analysis, compute_structured_specificity,
-    parse_selector, AnalyzedSelector, AttributeOperator, AttributeSelector, CompoundSelector,
-    SelectorCombinator, SelectorPseudoClass, SpecialPseudoInput, SpecialPseudoKind,
-    StructuredSelector, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
-    VueStyleInput,
+    build_css_style_analysis, build_preprocessor_style_analysis, build_scanned_style_analysis,
+    compute_structured_specificity, parse_selector, AnalyzedSelector, AttributeOperator,
+    AttributeSelector, CompoundSelector, CssScanDialect, SelectorCombinator, SelectorPseudoClass,
+    SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
+    StyleAnalysisLang, StyleBlockAnalysis, VBindInput, VueStyleInput,
 };
 pub use template::{
     extract_dynamic_class_names, extract_dynamic_class_names_rich, parse_string_literal_union,
