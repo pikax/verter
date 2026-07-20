@@ -152,6 +152,40 @@ pub(super) fn resolve_component_tag(
     s
 }
 
+/// True when `el` is a `<component>` whose `is` binding resolves through
+/// `_resolveDynamicComponent` — a `v-bind`-family `:is` (with or without a
+/// value; the value-less form is the Vue 3.4 same-name shorthand) or a static
+/// `is="value"` attribute. Mirrors [`resolve_dynamic_component`]'s detection
+/// exactly so blockification and resolution never disagree.
+///
+/// Official Vue ALWAYS treats a dynamic component as a block root
+/// (`(_openBlock(), _createBlock(_resolveDynamicComponent(...)))`) at any
+/// position — including multi-root fragment children that are not themselves
+/// v-if/v-for branches (the reka-ui CheckboxRoot pattern): the resolved
+/// target can be any shape (element/component/Fragment), so the runtime
+/// needs a block boundary for dynamicChildren tracking.
+pub(super) fn is_dynamic_component_tag(el: &ElementNode, source: &str) -> bool {
+    let tag_name = &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+    if tag_name != "component" {
+        return false;
+    }
+    el.props.iter().any(|prop| {
+        if prop.is_directive {
+            let directive_name = &source[prop.start as usize..prop.name_end as usize];
+            super::is_v_bind(directive_name)
+                && matches!(
+                    (prop.arg_start, prop.arg_end),
+                    (Some(arg_start), Some(arg_end))
+                        if &source[arg_start as usize..arg_end as usize] == "is"
+                )
+        } else {
+            &source[prop.start as usize..prop.name_end as usize] == "is"
+                && prop.value_start.is_some()
+                && prop.value_end.is_some()
+        }
+    })
+}
+
 /// Resolve `<component :is="expr">` as `_resolveDynamicComponent(expr)`.
 ///
 /// Returns `Some((resolved_tag, is_prop_index))` if the element is a

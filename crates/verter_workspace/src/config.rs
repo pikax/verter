@@ -423,21 +423,44 @@ fn load_compiler_options_inner(
 }
 
 /// Load project membership (files/include/exclude) from a tsconfig.json.
+///
+/// TypeScript's implicit default include (`**/*` when the fully-merged chain
+/// declares no `files` and no `include`) is a property of the directory of
+/// THIS config file — never of an `extends` ancestor's directory — so it is
+/// synthesized HERE, once, after the whole chain is merged. Synthesizing it
+/// mid-chain baked `{BASE_dir}/**/*` into the inherited state, so a package
+/// leaf that extends an exclude-only monorepo base (e.g. only for
+/// `compilerOptions.paths`) claimed the whole repo and won `@/*` path
+/// resolution with the wrong (repo-root) package root.
+///
+/// The synthesis is keyed on membership INTENT: it runs only when some
+/// membership key was declared in the chain (in practice `exclude`, since a
+/// declared `files`/`include` suppresses the default). An entirely key-less
+/// chain — and a missing/unreadable config — stays [`ProjectMembership::MatchAll`]
+/// (downstream, `membership_to_spec` scopes `MatchAll` to the project root
+/// with the TS default excludes, so both paths stay leaf-dir-scoped).
 pub fn load_project_membership(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> ProjectMembership {
-    load_project_membership_inner(ws, tsconfig_path, 0)
-        .map(ResolvedMembership::into_membership)
-        .unwrap_or(ProjectMembership::MatchAll)
+    let Some(mut resolved) = load_project_membership_inner(ws, tsconfig_path, 0) else {
+        return ProjectMembership::MatchAll;
+    };
+    if resolved.exclude_declared && !resolved.files_declared && !resolved.include_declared {
+        let tsconfig_dir = parent_dir(tsconfig_path);
+        resolved.include = vec![resolve_membership_path(&tsconfig_dir, "**/*", true)];
+    }
+    resolved.into_membership()
 }
 
 /// Internal membership carrier threaded through the `extends` recursion.
 ///
-/// Unlike [`ProjectMembership`], this preserves whether `files`/`include` were
-/// ever DECLARED anywhere in the chain (`files_declared`/`include_declared`) —
-/// distinct from the inherited vectors merely being empty. The default-include
-/// synthesis keys off declared-ness, not emptiness: a no-keys base inherits as
-/// `MatchAll` (both flags false), while a base declaring `"files": []` /
-/// `"include": []` sets the corresponding flag true so the child does NOT
-/// synthesize a default include for a solution-style ancestor.
+/// Unlike [`ProjectMembership`], this preserves whether `files`/`include`/
+/// `exclude` were ever DECLARED anywhere in the chain — distinct from the
+/// inherited vectors merely being empty. The leaf default-include synthesis
+/// in [`load_project_membership`] keys off declared-ness, not emptiness: a
+/// no-keys base inherits as `MatchAll` (all flags false), while a base
+/// declaring `"files": []` / `"include": []` sets the corresponding flag true
+/// so the leaf does NOT synthesize a default include for a solution-style
+/// ancestor, and a declared `exclude` (even `[]`) marks the membership intent
+/// that makes the leaf synthesize its own `{leaf_dir}/**/*` default.
 struct ResolvedMembership {
     files: Vec<String>,
     include: Vec<String>,
@@ -446,6 +469,8 @@ struct ResolvedMembership {
     files_declared: bool,
     /// `true` if an `include` key was present on this config or any ancestor.
     include_declared: bool,
+    /// `true` if an `exclude` key was present on this config or any ancestor.
+    exclude_declared: bool,
 }
 
 impl ResolvedMembership {
@@ -457,20 +482,25 @@ impl ResolvedMembership {
             exclude: Vec::new(),
             files_declared: false,
             include_declared: false,
+            exclude_declared: false,
         }
     }
 
     fn into_membership(self) -> ProjectMembership {
-        // A `MatchAll` carrier is one with no membership keys anywhere AND no
-        // synthesized default include — i.e. all three vectors empty. The
-        // synthesis step below always populates `include` when nothing was
-        // declared, so the only way to reach here empty is genuinely no keys.
-        if !self.files_declared
-            && !self.include_declared
-            && self.files.is_empty()
-            && self.include.is_empty()
-            && self.exclude.is_empty()
-        {
+        // A `MatchAll` carrier is one whose chain declared NO membership key
+        // anywhere (`files`/`include`/`exclude` all absent). Declared-ness is
+        // the sole authority: the recursion only populates a vector under its
+        // declared flag, and the leaf default-include synthesis (see
+        // `load_project_membership`) only runs when `exclude` was declared —
+        // so a genuinely key-less chain reaches here with empty vectors and
+        // stays `MatchAll`, and every declared chain (even one whose vectors
+        // are all empty, e.g. solution-style `"files": []`) is
+        // `IncludeExclude`.
+        if !self.files_declared && !self.include_declared && !self.exclude_declared {
+            debug_assert!(
+                self.files.is_empty() && self.include.is_empty() && self.exclude.is_empty(),
+                "membership vectors must only be populated under their declared flags"
+            );
             return ProjectMembership::MatchAll;
         }
         ProjectMembership::IncludeExclude {
@@ -516,6 +546,7 @@ fn load_project_membership_inner(
         mut exclude,
         mut files_declared,
         mut include_declared,
+        mut exclude_declared,
     } = inherited;
 
     if has_files {
@@ -539,33 +570,29 @@ fn load_project_membership_inner(
             .into_iter()
             .map(|value| resolve_membership_path(&tsconfig_dir, &value, true))
             .collect();
+        exclude_declared = true;
     }
 
-    // Model TypeScript's implicit default include EXPLICITLY: when neither this
-    // config NOR any `extends` ancestor DECLARES `files` or `include`, the
-    // project's include is the default `{dir}/**/*` (filtered to supported
-    // extensions downstream by `membership_to_spec`), and `exclude` subtracts
-    // from it. This is what makes an exclude-only config (`{"exclude":["dist"]}`)
-    // own `{dir}/**` minus the excludes rather than nothing.
-    //
-    // The synthesis keys off DECLARED-ness, not emptiness. The absent-vs-explicit
-    // -empty distinction is preserved across inheritance: an explicit
-    // `"files": []` / `"include": []` — on this config OR any `extends` ancestor —
-    // sets `files_declared` / `include_declared`, so the default include is NOT
-    // synthesized. A solution-style config (here or inherited) keeps an empty
-    // include and owns nothing but its references. (Inheriting the empty VECTORS
-    // alone would be indistinguishable from a no-keys `MatchAll` ancestor — which
-    // is exactly why declared-ness is threaded separately.)
-    if !files_declared && !include_declared {
-        include = vec![resolve_membership_path(&tsconfig_dir, "**/*", true)];
-    }
-
+    // Do NOT synthesize the default include here. TypeScript's implicit
+    // default include is relative to the FINAL config file's directory, so it
+    // is applied once by `load_project_membership` after the whole `extends`
+    // chain is merged. Synthesizing at this frame would bake `{BASE_dir}/**/*`
+    // into the inherited state whenever an intermediate base declares only
+    // `exclude`, making every paths-only package leaf claim the base's whole
+    // tree. The absent-vs-explicit-empty distinction still threads through
+    // inheritance: an explicit `"files": []` / `"include": []` — on this
+    // config OR any ancestor — sets its declared flag so the leaf will NOT
+    // synthesize a default include (solution-style configs own nothing but
+    // their references; inheriting the empty VECTORS alone would be
+    // indistinguishable from a no-keys `MatchAll` ancestor, which is exactly
+    // why declared-ness is threaded separately).
     Some(ResolvedMembership {
         files,
         include,
         exclude,
         files_declared,
         include_declared,
+        exclude_declared,
     })
 }
 
