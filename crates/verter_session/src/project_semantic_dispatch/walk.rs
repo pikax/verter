@@ -2872,7 +2872,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 else {
                     return value;
                 };
-                let Some(symbol) = serve.indexed.shallow_state.value_symbol(exported.as_str())
+                let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
+                    owner,
+                    symbol_name,
+                }) = serve.indexed.shallow_state.exports.get(exported.as_str())
+                else {
+                    return value;
+                };
+                let Some(symbol) = serve
+                    .indexed
+                    .shallow_state
+                    .value_symbol_in(*owner, symbol_name.as_str())
                 else {
                     return value;
                 };
@@ -2881,9 +2891,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 let identity = crate::semantic_query::DeclIdentity {
                     canonical_id: Arc::from(dep_canonical.as_str()),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    owner: *owner,
                     whole_hash: serve.indexed.whole_hash,
-                    decl_name: Arc::from(exported.as_str()),
+                    decl_name: Arc::from(symbol_name.as_str()),
                 };
                 self.graph()
                     .intern_preserving_scope(value, SemanticNodeData::DeclRef { identity })
@@ -2903,7 +2913,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         self.dispatch
             .ctx
             .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
-            .and_then(|serve| serve.indexed.shallow_state.value_symbol("default"))
+            .and_then(|serve| {
+                serve
+                    .indexed
+                    .shallow_state
+                    .value_symbol_in(identity.owner, "default")
+            })
             .is_some_and(|symbol| symbol.is_synthesised_component_default)
     }
 

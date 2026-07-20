@@ -675,7 +675,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .and_then(|indexed| {
                         indexed
                             .shallow_state
-                            .value_symbol("default")
+                            .value_symbol_in(root_identity.owner, "default")
                             .filter(|sym| sym.is_synthesised_component_default)
                             .map(|_| indexed.whole_hash)
                     })
@@ -1152,7 +1152,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .ctx
             .ensure_indexed_ready_serve(decl_canonical.as_ref())?
             .indexed;
-        let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        let default_symbol = indexed
+            .shallow_state
+            .value_symbol_in(decl_owner, "default")?;
         // PROVENANCE gate (prefer-direct-structural-facts-over-heuristics): only
         // the SYNTHESIZED `.vue` public-instance `default` symbol drives this
         // branch. A USERLAND `export default` in a `.vue`'s `<script>` (synthesis
@@ -2364,7 +2366,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `push_instantiate_active`/`pop` discipline below catches same-identity
         // re-entry while the instance shape is lowering.
         if decl_name.as_ref() == "default"
-            && decl_owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
             && args.is_empty()
             && self
                 .ctx
@@ -2373,7 +2374,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .and_then(|indexed| {
                     indexed
                         .shallow_state
-                        .value_symbol("default")
+                        .value_symbol_in(decl_owner, "default")
                         .map(|sym| sym.is_synthesised_component_default)
                 })
                 .unwrap_or(false)

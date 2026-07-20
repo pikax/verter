@@ -1175,7 +1175,10 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     );
     let state = Arc::clone(&serve.indexed.shallow_state);
     assert!(
-        state.decl_bodies().type_decl("Pin").is_some(),
+        state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .is_some(),
         "fixture invariant: the pin demand must acquire the retained-snapshot lease",
     );
     state.decl_bodies().release_retained_snapshot_for_test();
@@ -1184,7 +1187,9 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     let poison_returned = db.get_or_compute_traced_for_test(&poison_key, ctx, || {
         // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
         // funnel-entry check would have run and passed.
-        let leased = state.decl_bodies().type_decl("Probe");
+        let leased = state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Probe");
         assert!(
             leased.is_none(),
             "fixture invariant: the broken lease must actually miss (a `Some` here means the \

@@ -799,11 +799,6 @@ impl DeclBodyMemo {
         });
     }
 
-    /// Demand the lowered body of one file-scope TYPE symbol.
-    pub(crate) fn type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
-        self.type_decl_in(TopLevelOwnerId::ordinary_file(), name)
-    }
-
     pub(crate) fn type_decl_in(
         &self,
         owner: TopLevelOwnerId,
@@ -917,7 +912,16 @@ impl DeclBodyMemo {
     /// the symbol's body (the one lazy lowering) is the only work this read
     /// can trigger.
     pub(crate) fn compat_type_body_hash_input(&self, name: &str) -> Option<HashOutcome> {
-        Some(self.type_decl(name)?.body_hash.clone())
+        self.compat_type_body_hash_input_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    /// Exact-owner form of [`Self::compat_type_body_hash_input`].
+    pub(crate) fn compat_type_body_hash_input_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<HashOutcome> {
+        Some(self.type_decl_in(owner, name)?.body_hash.clone())
     }
 
     pub(crate) fn augmentation_type_decl_in(

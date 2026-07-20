@@ -762,7 +762,8 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     // then break it so the macro-arg transient demand lease-misses.
     let memo = indexed.shallow_state.decl_bodies();
     assert!(
-        memo.type_decl("Local").is_some(),
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Local",)
+            .is_some(),
         "the local type body must lower under a live lease (this pins the retained snapshot)"
     );
     memo.release_retained_snapshot_for_test();
@@ -824,12 +825,15 @@ fn broken_lease_type_decl_accessor_marks_non_cacheability_via_into_option() {
     // Pin the retained parse-snapshot lease with A, then break it so a demand for a
     // DIFFERENT not-yet-lowered symbol (B) lease-misses through `into_option`.
     assert!(
-        memo.type_decl("A").is_some(),
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "A")
+            .is_some(),
         "A's body must lower under a live lease (pins the retained snapshot)"
     );
     memo.release_retained_snapshot_for_test();
 
-    let (result, read_set) = host.with_fact_tracer(|| memo.type_decl("B"));
+    let (result, read_set) = host.with_fact_tracer(|| {
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B")
+    });
     assert!(
         result.is_none(),
         "a broken-lease type_decl demand reads as None (fail-closed)"

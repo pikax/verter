@@ -1521,7 +1521,10 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         .expect("aug1 indexes");
     let aug1_state = Arc::clone(&serve.indexed.shallow_state);
     assert!(
-        aug1_state.decl_bodies().type_decl("Pin1").is_some(),
+        aug1_state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin1")
+            .is_some(),
         "the file-scope pin demand must acquire aug1's retained-snapshot lease"
     );
     aug1_state

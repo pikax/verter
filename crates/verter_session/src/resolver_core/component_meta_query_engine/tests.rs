@@ -3169,7 +3169,10 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     );
     let state = Arc::clone(&serve.indexed.shallow_state);
     assert!(
-        state.decl_bodies().type_decl("Pin").is_some(),
+        state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .is_some(),
         "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
     );
     state.decl_bodies().release_retained_snapshot_for_test();
@@ -3236,7 +3239,10 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
     );
     let state = Arc::clone(&serve.indexed.shallow_state);
     assert!(
-        state.decl_bodies().type_decl("Pin").is_some(),
+        state
+            .decl_bodies()
+            .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .is_some(),
         "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
     );
     state.decl_bodies().release_retained_snapshot_for_test();

@@ -87,26 +87,26 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
         // (no props, no exports) projects no public API.
-        let Some(default_symbol) = shallow.value_symbol("default") else {
-            return Ok(None);
-        };
-        if !default_symbol.is_synthesised_component_default {
-            return Ok(None);
-        }
         let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
             owner: component_owner,
-            ..
+            symbol_name: component_name,
         }) = shallow.exports.get("default")
         else {
             return Ok(None);
         };
         let component_owner = *component_owner;
+        let Some(default_symbol) = shallow.value_symbol_in(component_owner, component_name) else {
+            return Ok(None);
+        };
+        if !default_symbol.is_synthesised_component_default {
+            return Ok(None);
+        }
         // The instance shape rides the synthesized BODY's annotation-borne
         // closed SOURCE (`LoweredValueDecl.type_annotation.annotation` =
         // `Synthesized(Object(members))`); the synth's construct signature
         // deliberately carries no authored return position (`return_ty` is an
         // honest `None`), so the annotation source is the shape authority.
-        let Some(default_body) = shallow.value_decl("default") else {
+        let Some(default_body) = shallow.value_decl_in(component_owner, component_name) else {
             return Ok(None);
         };
         let Some(instance_source) = default_body.type_annotation.annotation.as_ref() else {

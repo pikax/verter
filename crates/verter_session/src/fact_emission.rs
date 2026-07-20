@@ -120,7 +120,7 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
         lens,
         synthesised_value_bodies: shallow
             .synthesised_value_bodies()
-            .map(|(name, body)| (name.to_string(), Arc::clone(body)))
+            .map(|(key, body)| (key.clone(), Arc::clone(body)))
             .collect(),
         computed: Arc::new(DashMap::default()),
     };
@@ -146,7 +146,7 @@ pub(crate) struct LazyBodyFactSource {
     /// Eager synthesised value BODIES (the `.vue` implicit `default`)
     /// — their facts compute from the eager `LoweredValueDecl`, never
     /// the lazy memo.
-    synthesised_value_bodies: FxHashMap<String, Arc<LoweredValueDecl>>,
+    synthesised_value_bodies: FxHashMap<verter_type_expr::DeclKey, Arc<LoweredValueDecl>>,
     computed: Arc<DashMap<FactKey, Fact>>,
 }
 
@@ -158,7 +158,7 @@ impl LazyBodyFactSource {
         // `name` is the backing LOCAL declaration name probed against the
         // body memo; the emitted `Fact.key` stays the original requested
         // key (e.g. `Export(Bar, Type)`), never the backing local key.
-        let (name, space): (&str, SymbolSpace) = match key {
+        let (decl_key, space): (verter_type_expr::DeclKey, SymbolSpace) = match key {
             // The `Export` key answers only for names that resolve to a
             // LOCAL declaration — `export { Foo as Bar }` maps the public
             // `Bar` to the backing local `Foo`; reexports are absent from
@@ -169,7 +169,7 @@ impl LazyBodyFactSource {
                     name.as_ref(),
                 );
                 let backing = self.lens.local_export_targets.get(&key)?;
-                (backing.name.as_ref(), *space)
+                (backing.clone(), *space)
             }
             // `LocalDecl` answers only for non-exported names — mirroring
             // the historical emission's exported-name split, so consistent
@@ -182,7 +182,13 @@ impl LazyBodyFactSource {
                 if self.lens.exported.contains(&key) {
                     return None;
                 }
-                (name.as_ref(), *space)
+                (
+                    verter_type_expr::DeclKey::new(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        name.as_ref(),
+                    ),
+                    *space,
+                )
             }
             _ => return None,
         };
@@ -192,7 +198,15 @@ impl LazyBodyFactSource {
             // lowered bodies through the same shared lens (the fenced
             // output-side body-fact site), never a direct typed-body access
             // and never a re-lowering.
-            SymbolSpace::Type => self.memo.compat_type_body_hash_input(name)?,
+            SymbolSpace::Type => {
+                if decl_key.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+                    self.memo
+                        .compat_type_body_hash_input(decl_key.name.as_ref())?
+                } else {
+                    self.memo
+                        .compat_type_body_hash_input_in(decl_key.owner, decl_key.name.as_ref())?
+                }
+            }
             // No namespace-space declarations are inventoried by the
             // shallow walk — consistent absence.
             SymbolSpace::Namespace => return None,
@@ -200,9 +214,16 @@ impl LazyBodyFactSource {
                 // Keep the synthesised-value-body vs lazy-memo selection HERE,
                 // then read the stored fingerprint through the named compat
                 // producer (the fenced output-side value-body-fact site).
-                let lowered = match self.synthesised_value_bodies.get(name) {
+                let lowered = match self.synthesised_value_bodies.get(&decl_key) {
                     Some(body) => Arc::clone(body),
-                    None => self.memo.value_decl(name)?,
+                    None if decl_key.owner
+                        == verter_type_expr::TopLevelOwnerId::ordinary_file() =>
+                    {
+                        self.memo.value_decl(decl_key.name.as_ref())?
+                    }
+                    None => self
+                        .memo
+                        .value_decl_in(decl_key.owner, decl_key.name.as_ref())?,
                 };
                 compat_value_body_hash_input(&lowered)
             }

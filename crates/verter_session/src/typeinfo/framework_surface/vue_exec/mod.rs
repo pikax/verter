@@ -378,7 +378,17 @@ impl VerterHost {
         // macros, or a `.vue` carrying a USERLAND `export default` (synthesis
         // skipped) returns `None` here.
         let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
-        let default_symbol = indexed.shallow_state.value_symbol("default")?;
+        let crate::resolver_core::shallow_file_state::ExportTarget::Local {
+            owner: default_owner,
+            symbol_name: default_name,
+        } = indexed.shallow_state.exports.get("default")?
+        else {
+            return None;
+        };
+        let default_owner = *default_owner;
+        let default_symbol = indexed
+            .shallow_state
+            .value_symbol_in(default_owner, default_name.as_str())?;
         if !default_symbol.is_synthesised_component_default {
             return None;
         }
@@ -387,7 +397,9 @@ impl VerterHost {
         // header); its absence means no public instance surface. The synth's
         // construct signature deliberately carries no authored return position
         // (`return_ty` is an honest `None`), so the annotation is the gate.
-        let default_body = indexed.shallow_state.value_decl("default")?;
+        let default_body = indexed
+            .shallow_state
+            .value_decl_in(default_owner, default_name.as_str())?;
         default_body.type_annotation.annotation.as_ref()?;
         let _whole_hash = indexed.whole_hash;
 
@@ -409,8 +421,8 @@ impl VerterHost {
             crate::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
                     Arc::from(canonical_id),
-                    verter_type_expr::TopLevelOwnerId::instance(0),
-                    Arc::from("default"),
+                    default_owner,
+                    Arc::from(default_name.as_str()),
                 ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 dispatch.instantiate_context_for(

@@ -753,7 +753,8 @@ fn broken_lease_lower_locator_suppresses_parent_admission() {
         .expect("owner must materialise");
     let memo = indexed.shallow_state.decl_bodies();
     assert!(
-        memo.type_decl("Wide").is_some(),
+        memo.type_decl_in(TopLevelOwnerId::ordinary_file(), "Wide")
+            .is_some(),
         "the unrelated demand must pin the lease"
     );
     memo.release_retained_snapshot_for_test();

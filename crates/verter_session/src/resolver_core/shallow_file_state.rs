@@ -92,13 +92,13 @@ pub struct ShallowFileState {
     /// `default` public-instance shape) — header-only records carrying
     /// the `is_synthesised_component_default` provenance flag. The matching
     /// eager body lives in [`Self::synthesised_value_bodies`].
-    synthesised_value_symbols: FxHashMap<String, Arc<ShallowValueSymbol>>,
+    synthesised_value_symbols: FxHashMap<DeclKey, Arc<ShallowValueSymbol>>,
 
     /// EAGER synthesised value BODIES (the macro-producer-boundary
     /// `LoweredValueDecl` for the `.vue` implicit `default`). Kept in a
     /// dedicated body map rather than hidden inside the header symbol —
     /// `value_decl(name)` routes through it before the lazy memo.
-    synthesised_value_bodies: FxHashMap<String, Arc<LoweredValueDecl>>,
+    synthesised_value_bodies: FxHashMap<DeclKey, Arc<LoweredValueDecl>>,
 
     /// The local value name a CommonJS `export = X` assigns the whole module
     /// to, when present (part of the shallow EXPORT inventory). `typeof
@@ -1054,6 +1054,18 @@ impl ShallowFileState {
             || !self.synthesised_value_symbols.is_empty()
     }
 
+    /// Exact declaration key recorded for an exported synthesized value.
+    /// The route is the authority: this never searches another owner by name.
+    fn synthesised_export_decl_key(&self, exported_name: &str) -> Option<DeclKey> {
+        let ExportTarget::Local { owner, symbol_name } = self.exports.get(exported_name)? else {
+            return None;
+        };
+        let key = DeclKey::new(*owner, symbol_name.as_str());
+        self.synthesised_value_symbols
+            .contains_key(&key)
+            .then_some(key)
+    }
+
     /// The lazy declaration-body memo this state reads from (the body
     /// authority for this content generation).
     pub fn decl_bodies(&self) -> &Arc<crate::decl_body_memo::DeclBodyMemo> {
@@ -1090,23 +1102,20 @@ impl ShallowFileState {
             .chain(
                 self.synthesised_value_symbols
                     .keys()
-                    .map(String::as_str)
-                    .filter(move |name| {
-                        !headers
-                            .contains_key(&DeclKey::new(TopLevelOwnerId::ordinary_file(), *name))
-                    }),
+                    .filter(move |key| !headers.contains_key(*key))
+                    .map(|key| key.name.as_ref()),
             )
     }
 
     /// Every eager synthesised VALUE body (the `.vue` implicit
     /// `default`'s macro-producer [`LoweredValueDecl`]) as
-    /// `(name, body)` pairs. Eager-only: it iterates the synthesised
+    /// `(owner-qualified key, body)` pairs. Eager-only: it iterates the synthesised
     /// inventory directly and never materializes an ordinary value
     /// declaration body through the lazy memo.
-    pub fn synthesised_value_bodies(&self) -> impl Iterator<Item = (&str, &Arc<LoweredValueDecl>)> {
-        self.synthesised_value_bodies
-            .iter()
-            .map(|(name, body)| (name.as_str(), body))
+    pub fn synthesised_value_bodies(
+        &self,
+    ) -> impl Iterator<Item = (&DeclKey, &Arc<LoweredValueDecl>)> {
+        self.synthesised_value_bodies.iter()
     }
 
     /// Header-level kind of a file-scope TYPE symbol (no body lowering).
@@ -1135,7 +1144,10 @@ impl ShallowFileState {
         &self,
         name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclKind> {
-        if let Some(synthesised) = self.synthesised_value_symbols.get(name) {
+        if let Some(synthesised) = self
+            .synthesised_export_decl_key(name)
+            .and_then(|key| self.synthesised_value_symbols.get(&key))
+        {
             return Some(synthesised.kind);
         }
         self.decl_bodies
@@ -1251,7 +1263,8 @@ impl ShallowFileState {
     /// Whether `name` is a file-scope VALUE symbol (header-level,
     /// including synthesised symbols).
     pub fn has_value_symbol(&self, name: &str) -> bool {
-        self.has_value_symbol_in(TopLevelOwnerId::ordinary_file(), name)
+        self.decl_bodies.header_index().value_header(name).is_some()
+            || self.synthesised_export_decl_key(name).is_some()
     }
 
     pub(crate) fn has_value_symbol_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
@@ -1259,8 +1272,9 @@ impl ShallowFileState {
             .header_index()
             .value_header_in(owner, name)
             .is_some()
-            || (owner == TopLevelOwnerId::ordinary_file()
-                && self.synthesised_value_symbols.contains_key(name))
+            || self
+                .synthesised_value_symbols
+                .contains_key(&DeclKey::new(owner, name))
     }
 
     /// Canonical one-way lexical parent for a carrier instance owner.
@@ -1483,12 +1497,35 @@ impl ShallowFileState {
     /// synthesised symbols first (eager macro-producer header records),
     /// then the header index. Header-only (no body lowering).
     pub fn value_symbol(&self, name: &str) -> Option<Arc<ShallowValueSymbol>> {
-        if let Some(synthesised) = self.synthesised_value_symbols.get(name) {
+        if let Some(synthesised) = self
+            .synthesised_export_decl_key(name)
+            .and_then(|key| self.synthesised_value_symbols.get(&key))
+        {
             return Some(Arc::clone(synthesised));
         }
         self.decl_bodies
             .header_index()
             .value_header(name)
+            .map(|header| Arc::new(ShallowValueSymbol::from_header(header)))
+    }
+
+    /// Exact-owner HEADER lookup for a local VALUE declaration. Synthesized
+    /// component defaults participate only under the owner recorded in their
+    /// local export route; a same-name slot under another owner is a miss.
+    pub(crate) fn value_symbol_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<Arc<ShallowValueSymbol>> {
+        if let Some(synthesised) = self
+            .synthesised_value_symbols
+            .get(&DeclKey::new(owner, name))
+        {
+            return Some(Arc::clone(synthesised));
+        }
+        self.decl_bodies
+            .header_index()
+            .value_header_in(owner, name)
             .map(|header| Arc::new(ShallowValueSymbol::from_header(header)))
     }
 
@@ -1520,7 +1557,13 @@ impl ShallowFileState {
     /// synthesised `.vue`-default bodies first, then the lazy memo. A
     /// miss returns `None`.
     pub fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
-        self.value_decl_in(TopLevelOwnerId::ordinary_file(), name)
+        if let Some(body) = self
+            .synthesised_export_decl_key(name)
+            .and_then(|key| self.synthesised_value_bodies.get(&key))
+        {
+            return Some(Arc::clone(body));
+        }
+        self.decl_bodies.value_decl(name)
     }
 
     pub(crate) fn value_decl_in(
@@ -1528,10 +1571,11 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
-        if owner == TopLevelOwnerId::ordinary_file() {
-            if let Some(body) = self.synthesised_value_bodies.get(name) {
-                return Some(Arc::clone(body));
-            }
+        if let Some(body) = self
+            .synthesised_value_bodies
+            .get(&DeclKey::new(owner, name))
+        {
+            return Some(Arc::clone(body));
         }
         self.decl_bodies.value_decl_in(owner, name)
     }
@@ -1541,10 +1585,11 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredValueDecl> {
-        if owner == TopLevelOwnerId::ordinary_file() {
-            if let Some(body) = self.synthesised_value_bodies.get(name) {
-                return DemandOutcome::Ready(Some(Arc::clone(body)));
-            }
+        if let Some(body) = self
+            .synthesised_value_bodies
+            .get(&DeclKey::new(owner, name))
+        {
+            return DemandOutcome::Ready(Some(Arc::clone(body)));
         }
         self.decl_bodies.value_decl_outcome_in(owner, name)
     }
@@ -2261,19 +2306,20 @@ impl ShallowFileState {
         if self.has_value_symbol(name) {
             return;
         }
+        let owner = if self.decl_bodies.framework_parse().is_some() {
+            TopLevelOwnerId::instance(0)
+        } else {
+            TopLevelOwnerId::ordinary_file()
+        };
+        let key = DeclKey::new(owner, name);
         let header = ShallowValueSymbol::synthesised_from_lowered(&lowered);
         self.synthesised_value_symbols
-            .insert(name.to_string(), Arc::new(header));
-        self.synthesised_value_bodies
-            .insert(name.to_string(), Arc::new(lowered));
+            .insert(key.clone(), Arc::new(header));
+        self.synthesised_value_bodies.insert(key, Arc::new(lowered));
         self.exports
             .entry(name.to_string())
             .or_insert_with(|| ExportTarget::Local {
-                owner: if self.decl_bodies.framework_parse().is_some() {
-                    TopLevelOwnerId::instance(0)
-                } else {
-                    TopLevelOwnerId::ordinary_file()
-                },
+                owner,
                 symbol_name: name.to_string(),
             });
     }
