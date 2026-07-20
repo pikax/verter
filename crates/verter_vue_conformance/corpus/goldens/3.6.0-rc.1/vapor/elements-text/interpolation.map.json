@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/elements-text/interpolation.vue"
+  ],
+  "names": [
+    "count",
+    "doubled"
+  ],
+  "mappings": ";;;;;;;mBAOAA;iBACK,UACM,oBAAG,MAAK,IAAG,cAAY,oBAAGC,YAAO,IAAG,YAC3C,oBAAG,kBAAkB,IAAG,WAAS,oBAAG,MAAK",
+  "sourcesContent": [
+    "\n  <p>\n    Count: {{ count }} / Doubled: {{ doubled }} / Upper:\n    {{ \"hi\".toUpperCase() }} / Sign: {{ count > 1 ? \"many\" : \"one\" }}\n  </p>\n"
+  ]
+}

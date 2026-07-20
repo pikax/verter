@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/script-setup/props-emits-runtime.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAaE,oBAAsD,YAA7C,OAAK,EAAE,aAAM,qBAAK,UAAG,IAAG,GAAC,oBAAG,YAAK",
+  "sourcesContent": [
+    "\n  <button @click=\"onSave\">{{ msg }}:{{ level }}</button>\n"
+  ]
+}

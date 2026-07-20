@@ -801,6 +801,7 @@ fn profile_all_fields() {
         force_js: Some(true),
         source_map: Some(true),
         target: Some("ide".to_string()),
+        inline: Some(true),
         strict_slots: Some(true),
         requested_mode: Some("content".to_string()),
     };
@@ -810,6 +811,7 @@ fn profile_all_fields() {
     assert!(result.ssr);
     assert!(result.target.needs_tsx());
     assert!(result.strict_slots);
+    assert_eq!(result.inline, Some(true));
     assert_eq!(result.requested_mode, host::CompileCacheMode::Content);
     assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
     assert_eq!(result.component_id, Some("abc123".to_string()));
@@ -2606,4 +2608,17 @@ fn resolution_less_conversion_reports_typed_unavailable_status_never_silent_succ
     );
     let json = serde_json::to_value(&ffi).expect("serialize");
     assert_eq!(json["resolutionStatus"]["kind"], "resolved");
+}
+
+#[test]
+fn inline_maps_to_host_profile() {
+    let profile = FfiCompileProfile {
+        inline: Some(true),
+        ..Default::default()
+    };
+    let result = ffi_profile_to_host(Some(profile)).unwrap();
+    assert_eq!(result.inline, Some(true));
+
+    let absent = ffi_profile_to_host(Some(FfiCompileProfile::default())).unwrap();
+    assert_eq!(absent.inline, None);
 }

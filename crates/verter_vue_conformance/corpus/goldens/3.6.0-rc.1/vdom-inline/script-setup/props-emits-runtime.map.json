@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/script-setup/props-emits-runtime.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;;;;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AAId,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;AAEb,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AAClB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACxB;;;wBAIE,oBAAsD,YAA7C,OAAK,EAAE,MAAM,qBAAK,WAAG,IAAG,GAAC,oBAAG,aAAK",
+  "sourcesContent": [
+    "<script setup>\nconst props = defineProps({\n  msg: { type: String, default: \"hi\" },\n  level: { type: Number, required: true },\n})\nconst emit = defineEmits([\"save\", \"cancel\"])\n\nfunction onSave() {\n  emit(\"save\", props.msg)\n}\n</script>\n\n<template>\n  <button @click=\"onSave\">{{ msg }}:{{ level }}</button>\n</template>\n"
+  ]
+}

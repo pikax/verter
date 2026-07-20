@@ -1,0 +1,74 @@
+{
+  "schema": 2,
+  "caseId": "script-setup/props-type-withdefaults",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-type-withdefaults.vue",
+    "sha256": "dea7b00c5a9bc412e9c4e2e02d9ef55436a4e827f80e8fc0e14e96b0a0fce377"
+  },
+  "options": {
+    "sha256": "e8f1f6ad4e1a69d64c41b7b656a7038afea5c94d7413934bc00d2fcb1c4aa74d",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/script-setup/props-type-withdefaults.vue",
+      "id": "script-setup/props-type-withdefaults",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-type-withdefaults.js",
+      "sha256": "734e678acb93a5c7cb1207905a230305b1917d7baf64b01ea87c457071b9d7a0",
+      "bytes": 984
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/script-setup/props-type-withdefaults.map.json",
+      "sha256": "2f8f30fa1f94bd1e2d2015a5a0b4dff0e3a6985402ea4bd5fb2f80e0651b0068"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    }
+  ]
+}

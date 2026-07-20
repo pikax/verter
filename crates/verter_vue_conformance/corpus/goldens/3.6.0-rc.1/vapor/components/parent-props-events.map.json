@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/components/parent-props-events.vue"
+  ],
+  "names": [
+    "ChildComp",
+    "onSelect"
+  ],
+  "mappings": ";;;8BAMAA;IACa,KAAK,EAAC,MAAM;IAAE,KAAK,EAAE,CAAC;IAAG,QAAM,QAAEC,aAAQ",
+  "sourcesContent": [
+    "\n  <ChildComp label=\"Pick\" :count=\"3\" @select=\"onSelect\" />\n"
+  ]
+}

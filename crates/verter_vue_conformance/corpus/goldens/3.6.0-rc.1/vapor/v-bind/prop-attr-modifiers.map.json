@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-bind/prop-attr-modifiers.vue"
+  ],
+  "names": [
+    "text",
+    "dataX"
+  ],
+  "mappings": ";;;;;;oBAQQ,cAAY,EAAOA,SAAI;iBAAG,QAAM,EAAOC,UAAK",
+  "sourcesContent": [
+    "\n  <div :text-content.prop=\"text\" :data-x.attr=\"dataX\"></div>\n"
+  ]
+}

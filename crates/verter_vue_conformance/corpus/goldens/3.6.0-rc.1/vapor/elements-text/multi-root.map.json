@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/elements-text/multi-root.vue"
+  ],
+  "names": [],
+  "mappings": "",
+  "sourcesContent": [
+    "\n  <header>Header</header>\n  <main>Body</main>\n  <footer>Footer</footer>\n"
+  ]
+}

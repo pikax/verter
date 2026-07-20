@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/components/component-is.vue"
+  ],
+  "names": [
+    "current"
+  ],
+  "mappings": ";;;4CAQkBA,YAAO,KAAE,KAAK,EAAC,SAAS",
+  "sourcesContent": [
+    "\n  <component :is=\"current\" label=\"Dynamic\" />\n"
+  ]
+}

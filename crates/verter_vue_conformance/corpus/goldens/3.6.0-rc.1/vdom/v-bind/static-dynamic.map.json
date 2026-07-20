@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-bind/static-dynamic.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;wBAQE,oBAAqE;IAA7D,IAAI,EAAC,QAAQ;IAAE,KAAK,EAAE,YAAK;IAAG,QAAQ,EAAE,eAAQ;KAAE,IAAE",
+  "sourcesContent": [
+    "\n  <button type=\"button\" :title=\"title\" :disabled=\"disabled\">Go</button>\n"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-for/object.vue"
+  ],
+  "names": [
+    "scores"
+  ],
+  "mappings": ";;;;;;;+BAQgCA,WAAM;;;sDAAiB,eAAI,IAAG,IAAE,oBAAG,gBAAK;;uBAA1B,IAAI",
+  "sourcesContent": [
+    "\n  <ul>\n    <li v-for=\"(score, name) in scores\" :key=\"name\">{{ name }}: {{ score }}</li>\n  </ul>\n"
+  ]
+}

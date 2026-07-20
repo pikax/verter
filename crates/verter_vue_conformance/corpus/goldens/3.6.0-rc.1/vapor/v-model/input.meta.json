@@ -1,0 +1,63 @@
+{
+  "schema": 2,
+  "caseId": "v-model/input",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-model/input.vue",
+    "sha256": "6635936d0b400a89c66a3868977a4c945fa867588c83e09879dd6b372aea30e7"
+  },
+  "options": {
+    "sha256": "5847a57c0b1ee8157e9785232d667b16748f6b73f2b83692ef46e8172ce50ea9",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-model/input.vue",
+      "id": "v-model/input",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-model/input.js",
+      "sha256": "c470c5f86631d335dabf4154982789606fc0de57928d385d3fd6c4a9587b7198",
+      "bytes": 666
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-model/input.map.json",
+      "sha256": "d58101c34ac2e17ec021f0db59c161f19c07f9751e2cc2c03cd9582153d11e79"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "applyTextModel",
+      "alias": "_applyTextModel"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

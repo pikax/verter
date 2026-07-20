@@ -1,0 +1,67 @@
+{
+  "schema": 2,
+  "caseId": "built-ins/teleport",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/built-ins/teleport.vue",
+    "sha256": "bf18aa1e2d84c9fe8544680584acd7006327c9cecf9ad5ef207df5c04bd5fa7a"
+  },
+  "options": {
+    "sha256": "691035ca7f192bebcb3ec2c343866558b31ecb704bfb86dab847bece4edcf043",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/built-ins/teleport.vue",
+      "id": "built-ins/teleport",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/built-ins/teleport.js",
+      "sha256": "8f2d121ffa134af45ed842c683f030fb9d594be64b0ad36fa03c2f51160314bb",
+      "bytes": 761
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/built-ins/teleport.map.json",
+      "sha256": "52b068b6889d6001a51f3902ddbe569df84d1838953173c5b06ca3e1b3c256a2"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "VaporTeleport",
+      "alias": "_VaporTeleport"
+    }
+  ]
+}

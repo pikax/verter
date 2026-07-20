@@ -1,0 +1,67 @@
+{
+  "schema": 2,
+  "caseId": "elements-text/multi-root",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/multi-root.vue",
+    "sha256": "0ff2a0e0e30c3bcd3851d83fdf7be02e757c1ebe2aa37c56cfd3b8a4f1d1ff8d"
+  },
+  "options": {
+    "sha256": "8a065c20642422c9758366cfbce12d01cc632667c8464df2163a7d032889b7bf",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/elements-text/multi-root.vue",
+      "id": "elements-text/multi-root",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/multi-root.js",
+      "sha256": "6507f3c8a2f1d633739977ccbd38e083ff5e1f25d919503674c406a096ea6c3c",
+      "bytes": 636
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/elements-text/multi-root.map.json",
+      "sha256": "3c80f9fc1698fb3ab7cbeb35ecc6ceea9d164af9b2479d77eccd40e674eab040"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "Fragment",
+      "alias": "_Fragment"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    }
+  ]
+}

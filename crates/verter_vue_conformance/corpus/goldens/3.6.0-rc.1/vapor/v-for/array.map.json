@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-for/array.vue"
+  ],
+  "names": [
+    "items"
+  ],
+  "mappings": ";;;;;;;+BAQuBA,UAAK;;;sDAAiB,gBAAI;;gBAAb,IAAI",
+  "sourcesContent": [
+    "\n  <ul>\n    <li v-for=\"item in items\" :key=\"item\">{{ item }}</li>\n  </ul>\n"
+  ]
+}

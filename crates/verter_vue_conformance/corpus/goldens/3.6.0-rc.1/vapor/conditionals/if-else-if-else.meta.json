@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "caseId": "conditionals/if-else-if-else",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/conditionals/if-else-if-else.vue",
+    "sha256": "e4161885c675cfa4536f3a940b5fd6108d9ca656482a4291a26ad5bdd9f5cca7"
+  },
+  "options": {
+    "sha256": "f8c228b0183090558516393b484d6d5bb693faf99fa0c729263d8eebfaf8b12b",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/conditionals/if-else-if-else.vue",
+      "id": "conditionals/if-else-if-else",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.js",
+      "sha256": "e42d68e89b298219ad6fb497b3b7d6f0fb1e2fa8eefa6e4fad65015e2ea2a777",
+      "bytes": 1239
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/conditionals/if-else-if-else.map.json",
+      "sha256": "30c8b06cbe3063feeb35121af2b3245b17d8b3ddc6067244f4488d9cdf0b0a48"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createIf",
+      "alias": "_createIf"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

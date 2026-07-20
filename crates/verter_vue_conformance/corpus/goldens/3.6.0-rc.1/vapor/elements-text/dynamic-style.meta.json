@@ -1,0 +1,67 @@
+{
+  "schema": 2,
+  "caseId": "elements-text/dynamic-style",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/elements-text/dynamic-style.vue",
+    "sha256": "f007e09cd4373d6dc7285f0371a0f89802b2ee1bb5df5c7f53aed79e033c4590"
+  },
+  "options": {
+    "sha256": "9f3f21f130e6a8ab09a8668431d25c8b4c0dfe1a354ac1c700b06946a6c8560a",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/elements-text/dynamic-style.vue",
+      "id": "elements-text/dynamic-style",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-style.js",
+      "sha256": "2242ec9468ce6e878278d9288e724640420f93c0a8dee840d173c497801405c9",
+      "bytes": 716
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/elements-text/dynamic-style.map.json",
+      "sha256": "cf644540a3b1debe1f0f1c0cd6269390a56b695b52b54310209fef2c3c2363aa"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setStyle",
+      "alias": "_setStyle"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

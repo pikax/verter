@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-bind/same-name-shorthand.vue"
+  ],
+  "names": [
+    "id",
+    "title"
+  ],
+  "mappings": ";;;;;;iBAQQ,IAAE,EAAFA,OAAE;iBAAE,OAAK,EAALC,UAAK",
+  "sourcesContent": [
+    "\n  <div :id :title></div>\n"
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "caseId": "script-setup/props-emits-runtime",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-emits-runtime.vue",
+    "sha256": "e8300a565d35d56de7b1ca2c25fbb4d1e4a0b48ad2fea3b5afc8e63b21eae91a"
+  },
+  "options": {
+    "sha256": "22084672daa0790f9b4c85d63f4c8336218d9f9057dd62ebe023ae76f5d08fd6",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/script-setup/props-emits-runtime.vue",
+      "id": "script-setup/props-emits-runtime",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-emits-runtime.js",
+      "sha256": "edc8ca4e82c6bd004afe625e6d49ea447e51c0c94dc6f0ebc9d225d5e17d8563",
+      "bytes": 1108
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-emits-runtime.map.json",
+      "sha256": "60a5b17a5c5f1a4b50eb60cbdd2b10b886bb292b390677fb67554a91926c8a5c"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createInvoker",
+      "alias": "_createInvoker"
+    },
+    {
+      "imported": "delegateEvents",
+      "alias": "_delegateEvents"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

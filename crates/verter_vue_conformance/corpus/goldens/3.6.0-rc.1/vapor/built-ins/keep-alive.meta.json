@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "caseId": "built-ins/keep-alive",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/built-ins/keep-alive.vue",
+    "sha256": "f8656d432bf8e4314133871d1e264c0a7ffeebc40e763ce1b6d75bfe955966ce"
+  },
+  "options": {
+    "sha256": "fd1ccbaf7896ab7ec82c198ff08b9cb1987c062ee0613264f68121a8d63cf157",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/built-ins/keep-alive.vue",
+      "id": "built-ins/keep-alive",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/built-ins/keep-alive.js",
+      "sha256": "1ed55b03bb193a8cf8d45d06c2a0dd51dd290598486b5d209a820cc72dd115b9",
+      "bytes": 914
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/built-ins/keep-alive.map.json",
+      "sha256": "c9125aa6f21d50eb4dbcc44ce24cf3e3ce05987dd8449ab04c3f0b248e6760c4"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    },
+    {
+      "imported": "createDynamicComponent",
+      "alias": "_createDynamicComponent"
+    },
+    {
+      "imported": "extend",
+      "alias": "_extend"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "VaporKeepAlive",
+      "alias": "_VaporKeepAlive"
+    }
+  ]
+}

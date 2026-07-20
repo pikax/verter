@@ -1,0 +1,59 @@
+{
+  "schema": 2,
+  "caseId": "components/parent-props-events",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/parent-props-events.vue",
+    "sha256": "2fa6376bb5b1a4e614993a255b11541c9592b0f2429e09320920f4be022a4482"
+  },
+  "options": {
+    "sha256": "9c2413f3c98c9db4dd03d091e68f2cf1db8124fcdac71751e30983b79f20c171",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/components/parent-props-events.vue",
+      "id": "components/parent-props-events",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/components/parent-props-events.js",
+      "sha256": "f4b22e3d50b7a6c438bd7dcc310ba484d6f166ec01814bd9c0a21a989e5af6f0",
+      "bytes": 387
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom-inline/components/parent-props-events.map.json",
+      "sha256": "223629260257da27e4c86eac9cac402871d74ddc17f10f97401e939484d2b8fa"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    }
+  ]
+}

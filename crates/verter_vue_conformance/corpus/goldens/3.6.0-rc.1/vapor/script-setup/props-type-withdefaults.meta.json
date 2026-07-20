@@ -1,0 +1,90 @@
+{
+  "schema": 2,
+  "caseId": "script-setup/props-type-withdefaults",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-type-withdefaults.vue",
+    "sha256": "dea7b00c5a9bc412e9c4e2e02d9ef55436a4e827f80e8fc0e14e96b0a0fce377"
+  },
+  "options": {
+    "sha256": "2b35db166c4bd093708fb71eda6359af69329683bd3cbc3d62674185e5e2e8e4",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/script-setup/props-type-withdefaults.vue",
+      "id": "script-setup/props-type-withdefaults",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.js",
+      "sha256": "e1700bc78ee34c1f1a64605d5996d7ba4c0fe645743f50b238b1f9586b7193a3",
+      "bytes": 1337
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/script-setup/props-type-withdefaults.map.json",
+      "sha256": "d9be0f3fb783d2e500b49a56d5d217d1ef8e187716874ef62ce95c1fa5749eff"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createInvoker",
+      "alias": "_createInvoker"
+    },
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "delegateEvents",
+      "alias": "_delegateEvents"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setText",
+      "alias": "_setText"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "toDisplayString",
+      "alias": "_toDisplayString"
+    },
+    {
+      "imported": "txt",
+      "alias": "_txt"
+    }
+  ]
+}

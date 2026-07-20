@@ -1,0 +1,32 @@
+[package]
+name = "verter_vue_conformance"
+version.workspace = true
+edition = "2021"
+publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Hermetic official Vue 3.6 RC compiler conformance goldens: corpus, vendored oracle artifacts, and freshness guards"
+
+[features]
+# Opt-in LIVE guard: re-runs the JS generator (`node
+# packages/vue-conformance-oracle/gen-vue-goldens.mjs --check`) and fails loudly
+# when Node or the pinned RC toolchain is unavailable. OFF by default so the
+# canonical suite stays hermetic (committed goldens only, no Node/Vue runtime).
+vue-oracle-live = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4.3"
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_semantic = { workspace = true }
+oxc_span = { workspace = true }
+
+[dev-dependencies]
+verter_compiler = { path = "../verter_compiler" }
+verter_session = { path = "../verter_session" }

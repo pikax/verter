@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "caseId": "v-model/select",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-model/select.vue",
+    "sha256": "14c2faeb03bf6b1eac521bc7e347213d5f1e9d747146da3be22530c7ce66a070"
+  },
+  "options": {
+    "sha256": "cdea744c053852c97d41e620512b9890b9e77b439f6f588ba15a734e9d772e62",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/v-model/select.vue",
+      "id": "v-model/select",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-model/select.js",
+      "sha256": "42f94ba9974e6af1edc08549918a526e2e087ef8cbb9eb941e387f7d08f89c68",
+      "bytes": 1038
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vdom/v-model/select.map.json",
+      "sha256": "1d56ded509ea57f82db782823565a7a11f7cc8dc3415725d075280a59764b2c0"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "vModelSelect",
+      "alias": "_vModelSelect"
+    },
+    {
+      "imported": "withDirectives",
+      "alias": "_withDirectives"
+    }
+  ]
+}

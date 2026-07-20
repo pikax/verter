@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/v-on/modifiers.vue"
+  ],
+  "names": [],
+  "mappings": ";;;wBAOE,oBAGM;IAHA,OAAK,iBAAO,WAAI;;IACpB,oBAAiD;MAAxC,OAAK,iBAAe,UAAG;OAAE,QAAM;IACxC,oBAAgD;MAA7C,IAAI,EAAC,IAAI;0BAAsB,WAAI;OAAE,MAAI",
+  "sourcesContent": [
+    "\n  <div @click.self=\"save\">\n    <button @click.stop.prevent=\"del\">Delete</button>\n    <a href=\"/x\" @click.once.capture=\"open\">Open</a>\n  </div>\n"
+  ]
+}

@@ -43,8 +43,8 @@ fn test_dev_function_render() {
     );
 }
 
-/// @ai-generated — Production mode: template-only always uses function render(),
-/// script setup also uses function render() in the new pipeline (inline not yet implemented).
+/// @ai-generated — Production mode: template-only always uses function render();
+/// script setup INLINES the render into setup() (official production default).
 #[test]
 fn test_prod_render_fn() {
     // Template-only: no script setup, so no inline mode even in production
@@ -69,7 +69,8 @@ fn test_prod_render_fn() {
         template.code
     );
 
-    // With script setup: new pipeline uses function render() (inline not yet implemented)
+    // With script setup: official production default is INLINE — the render
+    // is a setup-returned closure, no separate template block.
     let allocator = Allocator::new();
     let options = CodegenOptions::new()
         .with_filename("test.vue")
@@ -87,11 +88,15 @@ const msg = 'hi'
         &verter_opts,
         &allocator,
     );
-    let template = result.template.as_ref().expect("should have template");
     assert!(
-        template.code.contains("function render("),
-        "Script setup in prod should emit function render, got:\n{}",
-        template.code
+        result.template.is_none(),
+        "script setup in prod inlines the render — no template block"
+    );
+    let script = result.script.as_ref().expect("should have script");
+    assert!(
+        script.code.contains("return (_ctx,_cache) => {"),
+        "script setup in prod inlines the render into setup, got:\n{}",
+        script.code
     );
 }
 

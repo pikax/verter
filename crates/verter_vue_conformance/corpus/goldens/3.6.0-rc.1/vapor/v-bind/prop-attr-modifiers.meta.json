@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "caseId": "v-bind/prop-attr-modifiers",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 3
+  },
+  "versions": {
+    "vue": "3.6.0-rc.1",
+    "@vue/compiler-dom": "3.6.0-rc.1",
+    "@vue/compiler-sfc": "3.6.0-rc.1",
+    "@vue/compiler-vapor": "3.6.0-rc.1",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-bind/prop-attr-modifiers.vue",
+    "sha256": "712af041a6caff7ca85409e551dbe6707e2b708e53e4fc4ff3565b4001b3e2e3"
+  },
+  "options": {
+    "sha256": "4a4bd50756525caa2ff17bf48798ba72ccfaeaaddf91ee8961a65af71670e5d8",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/v-bind/prop-attr-modifiers.vue",
+      "id": "v-bind/prop-attr-modifiers",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-bind/prop-attr-modifiers.js",
+      "sha256": "1afb427aad7b2fe2ef67bb5cf62190aa24a19b9c1c84da4fae44c650cfc1ac18",
+      "bytes": 773
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.1/vapor/v-bind/prop-attr-modifiers.map.json",
+      "sha256": "980a2f8ee129c1348896a88c6feaf7eae687ecd4cc01982d123e554df04f5c14"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "renderEffect",
+      "alias": "_renderEffect"
+    },
+    {
+      "imported": "setAttr",
+      "alias": "_setAttr"
+    },
+    {
+      "imported": "setDOMProp",
+      "alias": "_setDOMProp"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}
