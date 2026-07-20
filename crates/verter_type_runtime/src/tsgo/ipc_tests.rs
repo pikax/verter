@@ -120,6 +120,7 @@ async fn initialized_non_owning_transport_pulls_diagnostics_strictly() {
 /// Create an `LspTransport` for tests using a single channel for all priority lanes.
 fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
     LspTransport {
+        control_tx: mpsc::unbounded_channel().0,
         interactive_tx: stdin_tx.clone(),
         normal_tx: stdin_tx.clone(),
         background_tx: stdin_tx,
@@ -137,6 +138,7 @@ fn test_transport_with_pending(
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
 ) -> LspTransport {
     LspTransport {
+        control_tx: mpsc::unbounded_channel().0,
         interactive_tx: stdin_tx.clone(),
         normal_tx: stdin_tx.clone(),
         background_tx: stdin_tx,
@@ -2423,7 +2425,7 @@ async fn test_read_loop_exits_on_eof() {
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    let (_stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
     // The read_loop should exit quickly on EOF, not hang
@@ -2432,7 +2434,7 @@ async fn test_read_loop_exits_on_eof() {
         pending,
         diagnostics_cache,
         contents_cache,
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
     ));
@@ -2502,7 +2504,7 @@ async fn test_provider_operations_fail_after_process_death() {
         Arc::clone(&pending),
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
     ));
@@ -2590,7 +2592,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         Arc::clone(&pending),
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
     ));
@@ -3195,22 +3197,36 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Set up the channel-based writer
+    // Set up the multi-lane writer: the read loop's auto-responses to the child's
+    // server→client requests ride the UNBOUNDED control lane, and client requests
+    // ride the interactive lane — both drained by one writer to the mock's stdin.
+    let (control_tx, control_rx) = mpsc::unbounded_channel::<StdinMessage>();
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
-    tokio::spawn(stdin_writer_loop_single(mock_stdin_reader, stdin_rx));
+    let (_normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(64);
+    let (_background_tx, background_rx) = mpsc::channel::<StdinMessage>(64);
+    tokio::spawn(stdin_writer_loop(
+        mock_stdin_reader,
+        control_rx,
+        stdin_rx,
+        normal_rx,
+        background_rx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+    ));
 
     let transport = Arc::new(test_transport_with_pending(
         stdin_tx.clone(),
         Arc::clone(&pending),
     ));
 
-    // Start the read loop
+    // Start the read loop — server→client auto-responses go through control_tx.
     tokio::spawn(read_loop(
         client_stdout_reader,
         Arc::clone(&pending),
         diagnostics_cache,
         contents_cache,
-        stdin_tx,
+        control_tx,
         None,
         Arc::new(AtomicBool::new(false)),
     ));
@@ -3518,7 +3534,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         Arc::from("const x = 1;"),
     );
 
-    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    let (_stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(
         tokio::io::duplex(1024).1,
         stdin_rx,
@@ -3529,7 +3545,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         pending,
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
     ));
@@ -4517,5 +4533,140 @@ fn jsonrpc_body_omits_null_params_and_keeps_real_params() {
     assert!(
         hover.get("params").is_some(),
         "real params must be preserved, got {hover}"
+    );
+}
+
+// ===========================================================================
+// B12 — bidirectional stdio-pipe deadlock repro (wedge acceptance evidence).
+//
+// These build an `LspTransport` over a duplex whose "child" side NEVER reads,
+// with a tiny lane capacity, so the writer's `write_all` stalls exactly as a
+// busy managed tsgo does. Pre-B12 these WEDGE (the interactive request parked
+// on the full lane BEFORE its response timeout, and the writer parked silently
+// with no watchdog); post-B12 every request resolves within its deadline and
+// the stalled writer fires `crash_notify`.
+// ===========================================================================
+
+/// T1 — an interactive request must be bounded even when the stdin writer is
+/// stalled on a busy child and the interactive lane is full. Pre-fix the lane
+/// send was unbounded and parked ahead of the response timeout, so the overflow
+/// requests never resolved and this join timed out.
+#[tokio::test]
+async fn t1_interactive_request_is_bounded_when_writer_stalled_on_full_lane() {
+    // 16-byte duplex + a child that never reads → the writer's first `write_all`
+    // parks immediately; the interactive lane (capacity 2) then fills.
+    let (provider_side, child_side) = tokio::io::duplex(16);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let _child_side = child_side; // held open, never read → writer stalls
+
+    let crash_notify = std::sync::Arc::new(Notify::new());
+    let provider = std::sync::Arc::new(TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        Some(std::sync::Arc::clone(&crash_notify)),
+        2,                                  // tiny interactive lane
+        std::time::Duration::from_secs(30), // long watchdog: NOT the escape hatch here
+    ));
+
+    // Register the crash-notify waiter BEFORE firing requests. `notify_waiters()`
+    // wakes only already-registered waiters (it stores no permit), exactly as the
+    // resilient crash monitor awaits it in production; `enable()` registers now so
+    // a later fire is not lost to a poll-after-notify race.
+    let crash = crash_notify.notified();
+    tokio::pin!(crash);
+    crash.as_mut().enable();
+
+    // Fire more concurrent interactive requests than the lane can hold. Each
+    // carries a 1s per-request budget; every one MUST resolve (with an error)
+    // within a bounded window, never park forever.
+    let mut handles = Vec::new();
+    for i in 0..8u32 {
+        let transport = std::sync::Arc::clone(&provider.transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .request_with_priority(
+                    "textDocument/hover",
+                    serde_json::json!({
+                        "textDocument": { "uri": "file:///w/a.tsx" },
+                        "position": { "line": 0, "character": i }
+                    }),
+                    1,
+                    ProviderPriority::Interactive,
+                )
+                .await
+        }));
+    }
+
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        let mut out = Vec::new();
+        for h in handles {
+            out.push(h.await.expect("request task panicked"));
+        }
+        out
+    })
+    .await;
+
+    let results =
+        joined.expect("every interactive request must resolve within its deadline even when the writer is stalled behind a full lane (pre-B12: WEDGE)");
+    assert_eq!(results.len(), 8);
+    for r in results {
+        assert!(
+            r.is_err(),
+            "a stalled child answers nothing — each request must fail closed, got {r:?}"
+        );
+    }
+    // A stdin-enqueue stall must count toward hang detection just like a response
+    // timeout: with 8 failures over HANG_THRESHOLD, the restart signal fires.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), crash)
+            .await
+            .is_ok(),
+        "consecutive send/response failures past HANG_THRESHOLD must fire crash_notify"
+    );
+    assert!(
+        provider
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed)
+            >= HANG_THRESHOLD,
+        "send/response stalls must increment the hang-detection counter"
+    );
+}
+
+/// T6 — the writer-stall watchdog fires `crash_notify` when the child stops
+/// reading its stdin. Pre-fix the writer parked in `write_all` silently and the
+/// resilient restart never triggered.
+#[tokio::test]
+async fn t6_writer_stall_watchdog_fires_crash_notify_when_child_stops_reading() {
+    let (provider_side, child_side) = tokio::io::duplex(16);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let _child_side = child_side; // held open, never read → stdin fills, writer stalls
+
+    let crash_notify = std::sync::Arc::new(Notify::new());
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        Some(std::sync::Arc::clone(&crash_notify)),
+        4,
+        std::time::Duration::from_millis(200), // short watchdog for a fast test
+    );
+
+    // Register the waiter before triggering the stall (notify_waiters stores no
+    // permit).
+    let crash = crash_notify.notified();
+    tokio::pin!(crash);
+    crash.as_mut().enable();
+
+    // Enqueue a frame far larger than the 16-byte duplex buffer so the writer's
+    // `write_all` cannot complete against a child that never reads.
+    let big = "x".repeat(8192);
+    let _ = provider.update_file("/w/a.tsx", &big).await;
+
+    let fired = tokio::time::timeout(std::time::Duration::from_secs(3), crash).await;
+    assert!(
+        fired.is_ok(),
+        "the writer-stall watchdog must fire crash_notify when the child stops reading stdin (pre-B12: silent park)"
     );
 }

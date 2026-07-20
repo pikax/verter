@@ -66,153 +66,229 @@ enum StdinMessage {
     Shutdown,
 }
 
+/// Per-lane bounded-channel capacity for the Interactive / Normal / Background
+/// stdin lanes. The Control lane is unbounded (never blocks the read loop).
+const DEFAULT_LANE_CAPACITY: usize = 1024;
+
 /// Maximum number of Normal-priority frames to flush before checking Interactive.
 const NORMAL_BATCH_CAP: usize = 5;
 /// Maximum number of Background-priority frames to flush before checking higher lanes.
 const BACKGROUND_BATCH_CAP: usize = 3;
 
-/// Dedicated task that owns the stdin writer and drains three priority lanes.
+/// Writer-stall watchdog window. A `stdin.write_all` that does not complete
+/// within this window means the child process has stopped reading its stdin —
+/// the write side of a bidirectional stdio-pipe deadlock. When it trips, the
+/// writer fires `crash_notify` (unless a deliberate teardown is in flight) so
+/// the `ResilientTypeProvider` restart machinery (kill, backoff, respawn,
+/// replay) recovers the session, and the writer task ends. Generous by design:
+/// a child not draining stdin for this long is wedged, not merely busy.
+const WRITER_STALL_TIMEOUT_SECS: u64 = 10;
+
+/// Flush `buffer` to `stdin` under the writer-stall watchdog.
 ///
-/// Priority order: Interactive > Normal > Background.
+/// Returns `true` when the caller may continue draining lanes, `false` when the
+/// writer loop must stop (I/O error or a stall that tripped the watchdog). On a
+/// stall the child is not reading stdin, so `crash_notify` is fired (unless a
+/// deliberate teardown is in flight) to trigger the resilient restart.
+async fn flush_stdin_guarded<W>(
+    stdin: &mut W,
+    buffer: &mut Vec<u8>,
+    writer_stall: std::time::Duration,
+    crash_notify: &Option<Arc<Notify>>,
+    teardown_intent: &AtomicBool,
+) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if buffer.is_empty() {
+        return true;
+    }
+    match tokio::time::timeout(writer_stall, stdin.write_all(buffer)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return false,
+        Err(_) => {
+            if teardown_intent.load(Ordering::SeqCst) {
+                tracing::debug!(
+                    "TSGO stdin write stalled during deliberate teardown — not a crash"
+                );
+            } else {
+                tracing::error!(
+                    "TSGO stdin write stalled for {writer_stall:?} — child is not reading stdin; \
+                     signalling restart"
+                );
+                if let Some(notify) = crash_notify {
+                    notify.notify_waiters();
+                }
+            }
+            return false;
+        }
+    }
+    let _ = tokio::time::timeout(writer_stall, stdin.flush()).await;
+    buffer.clear();
+    true
+}
+
+/// Dedicated task that owns the stdin writer and drains four priority lanes.
+///
+/// Priority order: Control > Interactive > Normal > Background.
+/// - Control: drained fully (unbounded) at top priority. Carries the read
+///   loop's auto-responses to the child's server→client requests (which must
+///   never wait behind feature traffic, or the child blocks) and the `Shutdown`
+///   signal. An unbounded lane so the read loop's enqueue is lossless and can
+///   NEVER block on a full lane — the structural break in the stdout-read /
+///   stdin-write deadlock cycle.
 /// - Interactive: drained fully (unbounded) before checking lower lanes.
-/// - Normal: drained up to `NORMAL_BATCH_CAP` frames, then back to check Interactive.
+/// - Normal: drained up to `NORMAL_BATCH_CAP` frames, then back to check higher.
 /// - Background: drained up to `BACKGROUND_BATCH_CAP` frames, then back to check higher.
 ///
-/// Each flush is a separate `write_all + flush`. Interactive always preempts.
+/// Every flush routes through [`flush_stdin_guarded`], so a child that stops
+/// reading stdin trips the writer-stall watchdog and fires `crash_notify`
+/// instead of parking the writer (and therefore all lanes) forever.
 ///
 /// Generic over the writer type to support both `ChildStdin` and test `DuplexStream`.
+#[allow(clippy::too_many_arguments)]
 async fn stdin_writer_loop(
     mut stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+    mut control_rx: mpsc::UnboundedReceiver<StdinMessage>,
     mut interactive_rx: mpsc::Receiver<StdinMessage>,
     mut normal_rx: mpsc::Receiver<StdinMessage>,
     mut background_rx: mpsc::Receiver<StdinMessage>,
+    crash_notify: Option<Arc<Notify>>,
+    teardown_intent: Arc<AtomicBool>,
+    writer_stall: std::time::Duration,
 ) {
     let mut buffer = Vec::new();
 
+    // Drain a lane FULLY (unbounded) into `buffer`; evaluates to `true` when a
+    // `Shutdown` was seen (caller flushes then returns).
+    macro_rules! drain_full {
+        ($rx:expr) => {{
+            let mut shutdown = false;
+            loop {
+                match $rx.try_recv() {
+                    Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Ok(StdinMessage::Shutdown) => {
+                        shutdown = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            shutdown
+        }};
+    }
+    // Drain a lane up to `$cap` frames into `buffer`; evaluates to `true` on
+    // `Shutdown`.
+    macro_rules! drain_capped {
+        ($rx:expr, $cap:expr) => {{
+            let mut shutdown = false;
+            for _ in 0..$cap {
+                match $rx.try_recv() {
+                    Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Ok(StdinMessage::Shutdown) => {
+                        shutdown = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            shutdown
+        }};
+    }
+    macro_rules! flush_or_break {
+        () => {
+            if !flush_stdin_guarded(
+                &mut stdin,
+                &mut buffer,
+                writer_stall,
+                &crash_notify,
+                &teardown_intent,
+            )
+            .await
+            {
+                break;
+            }
+        };
+    }
+    macro_rules! flush_and_return {
+        () => {{
+            let _ = flush_stdin_guarded(
+                &mut stdin,
+                &mut buffer,
+                writer_stall,
+                &crash_notify,
+                &teardown_intent,
+            )
+            .await;
+            return;
+        }};
+    }
+
     loop {
-        // Wait for any message from any lane
+        // Wait for any message from any lane. `biased` prefers Control first.
         tokio::select! {
-            biased; // Prefer higher priority
+            biased;
+            msg = control_rx.recv() => {
+                match msg {
+                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
+                }
+            }
             msg = interactive_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Shutdown) | None => break,
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = normal_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Shutdown) | None => break,
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = background_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Shutdown) | None => break,
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
         }
 
-        // Drain Interactive fully (unbounded)
-        loop {
-            match interactive_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        // Control fully, then Interactive fully, then flush.
+        if drain_full!(control_rx) {
+            flush_and_return!();
         }
+        if drain_full!(interactive_rx) {
+            flush_and_return!();
+        }
+        flush_or_break!();
 
-        // Flush Interactive batch
-        if !buffer.is_empty() {
-            if stdin.write_all(&buffer).await.is_err() {
-                break;
-            }
-            let _ = stdin.flush().await;
-            buffer.clear();
+        // Normal (capped); re-check Control + Interactive; flush.
+        if drain_capped!(normal_rx, NORMAL_BATCH_CAP) {
+            flush_and_return!();
         }
+        if drain_full!(control_rx) {
+            flush_and_return!();
+        }
+        if drain_full!(interactive_rx) {
+            flush_and_return!();
+        }
+        flush_or_break!();
 
-        // Drain Normal (capped)
-        for _ in 0..NORMAL_BATCH_CAP {
-            match normal_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        // Background (capped); re-check higher lanes; flush.
+        if drain_capped!(background_rx, BACKGROUND_BATCH_CAP) {
+            flush_and_return!();
         }
-
-        // Check Interactive again before flushing Normal
-        loop {
-            match interactive_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        if drain_full!(control_rx) {
+            flush_and_return!();
         }
-
-        if !buffer.is_empty() {
-            if stdin.write_all(&buffer).await.is_err() {
-                break;
-            }
-            let _ = stdin.flush().await;
-            buffer.clear();
+        if drain_full!(interactive_rx) {
+            flush_and_return!();
         }
-
-        // Drain Background (capped)
-        for _ in 0..BACKGROUND_BATCH_CAP {
-            match background_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        if drain_capped!(normal_rx, NORMAL_BATCH_CAP) {
+            flush_and_return!();
         }
-
-        // Check Interactive + Normal again before flushing Background
-        loop {
-            match interactive_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
-        }
-        loop {
-            match normal_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if !buffer.is_empty() {
-            if stdin.write_all(&buffer).await.is_err() {
-                break;
-            }
-            let _ = stdin.flush().await;
-            buffer.clear();
-        }
+        flush_or_break!();
     }
 }
 
@@ -222,14 +298,31 @@ async fn stdin_writer_loop_single(
     stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
     rx: mpsc::Receiver<StdinMessage>,
 ) {
-    // Create dummy channels for normal and background that never receive
+    // Create dummy channels for the other lanes that never receive.
+    let (_control_tx, control_rx) = mpsc::unbounded_channel();
     let (_normal_tx, normal_rx) = mpsc::channel(1);
     let (_bg_tx, background_rx) = mpsc::channel(1);
-    stdin_writer_loop(stdin, rx, normal_rx, background_rx).await;
+    stdin_writer_loop(
+        stdin,
+        control_rx,
+        rx,
+        normal_rx,
+        background_rx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+    )
+    .await;
 }
 
 /// LSP JSON-RPC transport over a child process's stdio.
 struct LspTransport {
+    /// Unbounded control lane, drained at top priority by the writer. Carries the
+    /// read loop's auto-responses to the child's server→client requests and the
+    /// `Shutdown` signal. Unbounded so the read loop's enqueue is lossless and
+    /// never blocks on a full lane — the structural break in the bidirectional
+    /// stdout-read / stdin-write deadlock cycle.
+    control_tx: mpsc::UnboundedSender<StdinMessage>,
     /// Interactive-priority lane: hover, completion, definition, active-file sync.
     interactive_tx: mpsc::Sender<StdinMessage>,
     /// Normal-priority lane: imported-file warmup, tsconfig config, deferred API.
@@ -316,6 +409,30 @@ impl LspTransport {
         }
     }
 
+    /// Record a request-level failure (response timeout OR a stdin-enqueue stall)
+    /// toward hang detection. At [`HANG_THRESHOLD`] consecutive failures fire
+    /// `crash_notify` so the [`crate::resilient::ResilientTypeProvider`] restart
+    /// machinery recovers the session — unless a deliberate teardown is in flight.
+    ///
+    /// Before B12 only the response-timeout arm counted; a request parked on a
+    /// full lane behind a stalled writer never reached this path, so the wedge
+    /// detector never fired for a stdin-side deadlock.
+    fn note_hang_failure(&self) {
+        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= HANG_THRESHOLD {
+            if self.teardown_intent.load(Ordering::SeqCst) {
+                tracing::debug!("TSGO request failures during deliberate teardown — not a hang");
+            } else {
+                tracing::error!(
+                    "TSGO appears hung ({count} consecutive failures) — triggering restart"
+                );
+                if let Some(notify) = &self.crash_notify {
+                    notify.notify_waiters();
+                }
+            }
+        }
+    }
+
     /// Send an LSP request at Interactive priority and wait for the response.
     async fn request(
         &self,
@@ -358,13 +475,40 @@ impl LspTransport {
                 self.pending.lock().await.insert(id, tx);
 
                 let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-                self.tx_for_priority(priority)
-                    .send(StdinMessage::Frame(frame.into_bytes()))
+                // The lane send and the response wait SHARE one deadline so the
+                // whole round-trip is bounded by `timeout_secs`. The pre-B12 code
+                // did an UNBOUNDED `send().await` here, so a full lane behind a
+                // writer stalled on a busy child parked the request forever —
+                // BEFORE the response timeout even started, and without counting
+                // toward hang detection. Bounding the enqueue closes that gap.
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match self
+                    .tx_for_priority(priority)
+                    .send_timeout(StdinMessage::Frame(frame.into_bytes()), send_budget)
                     .await
-                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                {
+                    Ok(()) => {}
+                    Err(mpsc::error::SendTimeoutError::Closed(_)) => {
+                        self.pending.lock().await.remove(&id);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                    Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
+                        self.pending.lock().await.remove(&id);
+                        self.note_hang_failure();
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!("method={} id={} message=stdin-enqueue-timeout", method, id),
+                        );
+                        return Err(TypeProviderError::new(format!(
+                            "request '{method}' stdin enqueue timed out after {timeout_secs}s"
+                        )));
+                    }
+                }
 
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
+                let rx_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let result = tokio::time::timeout(rx_budget, rx).await;
                 match result {
                     Ok(Ok(val)) => {
                         // Reset consecutive failures on any successful response
@@ -417,21 +561,7 @@ impl LspTransport {
                     Err(_) => {
                         // Timeout — clean up the pending entry to prevent leak
                         self.pending.lock().await.remove(&id);
-                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count >= HANG_THRESHOLD {
-                            if self.teardown_intent.load(Ordering::SeqCst) {
-                                tracing::debug!(
-                                    "TSGO request timeouts during deliberate teardown — not a hang"
-                                );
-                            } else {
-                                tracing::error!(
-                                    "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
-                                );
-                                if let Some(notify) = &self.crash_notify {
-                                    notify.notify_waiters();
-                                }
-                            }
-                        }
+                        self.note_hang_failure();
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!("method={} id={} message=timeout", method, id),
@@ -541,7 +671,7 @@ async fn read_loop(
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
-    interactive_tx: mpsc::Sender<StdinMessage>,
+    control_tx: mpsc::UnboundedSender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
     teardown_intent: Arc<AtomicBool>,
 ) {
@@ -665,9 +795,14 @@ async fn read_loop(
             });
             let body = serde_json::to_string(&reply).unwrap_or_default();
             let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-            let _ = interactive_tx
-                .send(StdinMessage::Frame(frame.into_bytes()))
-                .await;
+            // Enqueue the auto-response on the UNBOUNDED control lane. Before B12
+            // this was a blocking `interactive_tx.send().await` on a bounded lane:
+            // when the interactive lane was full behind a stalled writer, the read
+            // loop parked HERE and stopped draining the child's stdout — the child
+            // then blocked on its own full stdout and could never resume reading
+            // our stdin, a permanent two-pipe deadlock. An unbounded, non-blocking
+            // enqueue keeps stdout reading unconditional and breaks that cycle.
+            let _ = control_tx.send(StdinMessage::Frame(frame.into_bytes()));
             continue;
         }
 
@@ -1551,21 +1686,55 @@ impl TsgoTypeProvider {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        Self::from_transport_parts_configured(
+            read,
+            write,
+            child,
+            crash_notify,
+            DEFAULT_LANE_CAPACITY,
+            std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+        )
+    }
+
+    /// [`Self::from_transport_parts`] with a caller-chosen lane capacity and
+    /// writer-stall watchdog window. Production uses [`DEFAULT_LANE_CAPACITY`]
+    /// and [`WRITER_STALL_TIMEOUT_SECS`]; the deadlock-repro tests inject a tiny
+    /// capacity and a short watchdog so a full lane / stalled child is reachable
+    /// deterministically.
+    fn from_transport_parts_configured<R, W>(
+        read: R,
+        write: W,
+        child: Option<Child>,
+        crash_notify: Option<Arc<Notify>>,
+        lane_capacity: usize,
+        writer_stall: std::time::Duration,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(1024);
-        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(1024);
-        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(1024);
+        let (control_tx, control_rx) = mpsc::unbounded_channel::<StdinMessage>();
+        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
+        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
+        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
+
+        let teardown_intent = Arc::new(AtomicBool::new(false));
         tokio::spawn(stdin_writer_loop(
             write,
+            control_rx,
             interactive_rx,
             normal_rx,
             background_rx,
+            crash_notify.as_ref().map(Arc::clone),
+            Arc::clone(&teardown_intent),
+            writer_stall,
         ));
 
-        let teardown_intent = Arc::new(AtomicBool::new(false));
         let transport = Arc::new(LspTransport {
-            interactive_tx: interactive_tx.clone(),
+            control_tx: control_tx.clone(),
+            interactive_tx,
             normal_tx,
             background_tx,
             pending: Arc::clone(&pending),
@@ -1581,7 +1750,7 @@ impl TsgoTypeProvider {
             pending,
             Arc::clone(&diagnostics_cache),
             Arc::clone(&contents),
-            interactive_tx,
+            control_tx,
             crash_notify,
             Arc::clone(&teardown_intent),
         ));
@@ -3240,8 +3409,10 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let Some(child) = child else {
                 // Non-owning editor attach: close only this local feature bridge.
-                // Never send shutdown/exit onto the editor-owned connection.
-                let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
+                // Never send shutdown/exit onto the editor-owned connection. The
+                // Shutdown signal rides the UNBOUNDED control lane so a crashed /
+                // wedged writer with a full interactive lane cannot block teardown.
+                let _ = transport.control_tx.send(StdinMessage::Shutdown);
                 return Ok(());
             };
             // Best-effort: try shutdown request + exit notification with overall 3s timeout.
@@ -3251,8 +3422,9 @@ impl TypeProvider for TsgoTypeProvider {
                 let _ = transport.notify("exit", serde_json::Value::Null).await;
             })
             .await;
-            // Signal the writer task to stop.
-            let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
+            // Signal the writer task to stop via the UNBOUNDED control lane — never
+            // a bounded lane send that a wedged writer could park on.
+            let _ = transport.control_tx.send(StdinMessage::Shutdown);
 
             let mut child = child
                 .lock()
