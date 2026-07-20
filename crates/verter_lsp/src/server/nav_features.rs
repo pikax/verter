@@ -370,9 +370,8 @@ pub(super) async fn handle_hover(
                         // after the bounded retry the handler returns `None`
                         // (no tooltip), never a fabrication and never a spin.
                         // A persistently failing provider is a provider
-                        // sync/health concern, owned by the transport and sync
-                        // layers — not something hover may paper over with
-                        // invented content.
+                        // sync/health concern, not something hover may paper
+                        // over with invented content.
                         tracing::warn!(
                             "hover type provider error: {} — resyncing and retrying once",
                             e
