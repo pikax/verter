@@ -417,6 +417,7 @@ impl VerterHost {
                 // this source's script analysis with the moved
                 // generation's products.
                 let stored_styles = Arc::new(hd.parse.style_analyses.clone());
+                let stored_markup_tokens = Arc::new(hd.parse.markup_class_tokens.clone());
                 // Generation rail: accept the persisted template only
                 // at THIS branch's own source generation — a late
                 // persist stamped with a superseded generation must
@@ -475,6 +476,7 @@ impl VerterHost {
                     ),
                     macro_usage: script_analysis.macro_usage,
                     style_vbind_roots: script_analysis.style_vbind_roots,
+                    markup_class_tokens: stored_markup_tokens,
                     export_signatures: Arc::new(export_sigs),
                     options_api: script_analysis.options_api,
                     store_usages: Arc::new(script_analysis.store_usages),
@@ -1454,6 +1456,7 @@ impl VerterHost {
             script_binding_occurrences: Arc::clone(&ad.arcs.script_binding_occurrences),
             macro_usage: ad.script_analysis.macro_usage.clone(),
             style_vbind_roots: ad.script_analysis.style_vbind_roots.clone(),
+            markup_class_tokens: Arc::clone(&ad.markup_class_tokens),
             export_signatures: Arc::new(ad.export_signatures.clone()),
             options_api: ad.script_analysis.options_api.clone(),
             store_usages: Arc::clone(&ad.arcs.store_usages),

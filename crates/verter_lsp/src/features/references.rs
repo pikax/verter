@@ -29,7 +29,11 @@ pub fn references_at_position(
 ) -> Option<Vec<Location>> {
     let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
-    let word = word_at_offset(source, offset)?;
+    let Some(word) = word_at_offset(source, offset) else {
+        // No identifier word (e.g. the hyphen of a kebab class token) — the
+        // positional CSS path still owns the position.
+        return css_references_at_position(offset, source, blocks, analysis, line_index);
+    };
 
     // Check if this word is a known binding, import, or macro
     let is_binding = analysis.bindings.iter().any(|b| b.name == word);
@@ -181,20 +185,20 @@ fn css_references_at_position(
         }
     });
 
-    if !in_template && !in_style {
-        return None;
-    }
-
-    let template = analysis.template.as_deref()?;
-
     // Extract the CSS target (class or id name)
-    let target = if in_template {
+    let target = if in_style {
+        find_css_target_in_style_refs(offset, source, analysis)?
+    } else if in_template {
         if is_inside_html_comment(source, offset) {
             return None;
         }
+        let template = analysis.template.as_deref()?;
         find_css_target_in_template_refs(offset, source, template)?
     } else {
-        find_css_target_in_style_refs(offset, source, analysis)?
+        // Carrier markup outside SFC blocks (Svelte root markup): the typed
+        // markup class-token inventory owns the position.
+        let token = markup_class_token_at(offset, analysis)?;
+        CssRefTarget::Class(token.name.clone())
     };
 
     let spans = collect_css_ref_spans(&target, source, analysis);
@@ -208,6 +212,18 @@ fn css_references_at_position(
     } else {
         Some(locations)
     }
+}
+
+/// The markup class token at `offset`, for carriers WITHOUT a template
+/// element IR (Svelte `class="x"` entries and `class:x` directives).
+pub(crate) fn markup_class_token_at(
+    offset: usize,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<&verter_semantic::analysis::MarkupClassToken> {
+    analysis
+        .markup_class_tokens
+        .iter()
+        .find(|t| offset >= t.span.start as usize && offset < t.span.end as usize)
 }
 
 pub(crate) enum CssRefTarget {
@@ -228,6 +244,15 @@ pub(crate) fn collect_css_ref_spans(
     // Collect template attribute references
     if let Some(template) = analysis.template.as_deref() {
         spans.extend(collect_template_css_ref_spans(target, source, template));
+    }
+
+    // Collect markup class tokens (carriers without a template element IR).
+    if let CssRefTarget::Class(name) = target {
+        for token in analysis.markup_class_tokens.iter() {
+            if token.name == *name {
+                spans.push((token.span.start, token.span.end));
+            }
+        }
     }
 
     // Collect style block references

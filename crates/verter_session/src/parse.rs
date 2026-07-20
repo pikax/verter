@@ -602,6 +602,7 @@ fn build_svelte_snapshot_from_eval_source(
         script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
+        markup_class_tokens: Vec::new(),
         preprocessor_requests: Vec::new(),
     };
 
@@ -667,6 +668,12 @@ fn build_svelte_snapshot_from_eval_source(
         custom: Vec::new(),
     };
     snapshot.descriptor = descriptor;
+    // Svelte style + markup class facts — the carrier analog of the Vue
+    // style-analysis / template-element class inventory. Svelte styles are
+    // scoped by default; per-selector `:global(...)` opt-outs are recorded by
+    // the scanner as special pseudos.
+    snapshot.style_analyses = build_svelte_style_analyses(source, &parsed.styles, &style_langs);
+    snapshot.markup_class_tokens = collect_svelte_markup_class_tokens(source, &parsed.template);
     snapshot.meta = FileMeta {
         has_script: false,
         has_template: false,
@@ -680,6 +687,143 @@ fn build_svelte_snapshot_from_eval_source(
     };
     snapshot.preprocessor_requests = preprocessor_requests;
     snapshot
+}
+
+/// Build [`verter_semantic::analysis::StyleBlockAnalysis`] facts for a Svelte
+/// component's `<style>` blocks: scoped-by-default, scanned through the shared
+/// dialect-aware CSS scanner (css/scss/less), carrier-absolute spans.
+pub(crate) fn build_svelte_style_analyses(
+    source: &str,
+    styles: &[verter_compiler::svelte::parser::SvelteStyle],
+    style_langs: &[Option<String>],
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    styles
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, style)| {
+            let span = style.content?;
+            let content = source.get(span.start as usize..span.end as usize)?;
+            let lang = match style_langs.get(idx).and_then(|l| l.as_deref()) {
+                None | Some("css") | Some("postcss") => {
+                    verter_semantic::analysis::StyleAnalysisLang::Css
+                }
+                Some("scss") => verter_semantic::analysis::StyleAnalysisLang::Scss,
+                Some("sass") => verter_semantic::analysis::StyleAnalysisLang::Sass,
+                Some("less") => verter_semantic::analysis::StyleAnalysisLang::Less,
+                Some("stylus") => verter_semantic::analysis::StyleAnalysisLang::Stylus,
+                Some(_) => verter_semantic::analysis::StyleAnalysisLang::Unknown,
+            };
+            let analysis = verter_semantic::analysis::build_scanned_style_analysis(
+                lang,
+                content,
+                verter_semantic::analysis::VueStyleInput::default(),
+                // Svelte styles are component-scoped by default.
+                true,
+                false,
+                None,
+                span.start,
+            );
+            if let Some(css) = &analysis.css {
+                css.debug_assert_valid_spans(source.len() as u32);
+            }
+            Some(analysis)
+        })
+        .collect()
+}
+
+/// Collect resolvable markup class tokens from a Svelte template AST:
+/// whitespace-separated names in static `class="a b"` values and the local
+/// name of every `class:x` directive. Dynamic (`class={expr}`) and mixed
+/// values are skipped — fail closed, never a guessed token.
+pub(crate) fn collect_svelte_markup_class_tokens(
+    source: &str,
+    nodes: &[verter_compiler::svelte::parser::SvelteNode],
+) -> Vec<verter_semantic::analysis::MarkupClassToken> {
+    use verter_compiler::svelte::parser::{
+        SvelteAttributeKind, SvelteAttributeValue, SvelteDirectiveKind, SvelteNode,
+    };
+
+    fn walk(
+        source: &str,
+        nodes: &[SvelteNode],
+        out: &mut Vec<verter_semantic::analysis::MarkupClassToken>,
+    ) {
+        for node in nodes {
+            match node {
+                SvelteNode::Element(el) => {
+                    for attr in &el.attributes {
+                        match &attr.kind {
+                            SvelteAttributeKind::Plain {
+                                name,
+                                value: Some(SvelteAttributeValue::Text(value_span)),
+                                ..
+                            } if name == "class" => {
+                                let Some(text) =
+                                    source.get(value_span.start as usize..value_span.end as usize)
+                                else {
+                                    continue;
+                                };
+                                // Whitespace-split with exact positions.
+                                let bytes = text.as_bytes();
+                                let mut i = 0usize;
+                                while i < bytes.len() {
+                                    if bytes[i].is_ascii_whitespace() {
+                                        i += 1;
+                                        continue;
+                                    }
+                                    let start = i;
+                                    while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                                        i += 1;
+                                    }
+                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                        name: text[start..i].to_string(),
+                                        span: verter_span::Span::new(
+                                            value_span.start + start as u32,
+                                            value_span.start + i as u32,
+                                        ),
+                                        from_directive: false,
+                                    });
+                                }
+                            }
+                            SvelteAttributeKind::Directive(dir)
+                                if dir.kind == SvelteDirectiveKind::Class
+                                    && !dir.local.is_empty() =>
+                            {
+                                // `class:x` — the local name starts right after
+                                // the `class:` prefix of the attribute span.
+                                let start = attr.span.start + "class:".len() as u32;
+                                let end = start + dir.local.len() as u32;
+                                // Verify against the source before trusting the
+                                // arithmetic (fail closed on any drift).
+                                if source.get(start as usize..end as usize)
+                                    == Some(dir.local.as_str())
+                                {
+                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                        name: dir.local.clone(),
+                                        span: verter_span::Span::new(start, end),
+                                        from_directive: true,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    walk(source, &el.children, out);
+                }
+                SvelteNode::Block(block) => {
+                    walk(source, &block.children, out);
+                    for clause in &block.clauses {
+                        walk(source, &clause.children, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(source, nodes, &mut out);
+    out
 }
 
 /// Where a framework carrier snapshot build gets its script PROGRAM from — the
@@ -1300,6 +1444,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         script_analysis: Arc::new(script_analysis),
         export_signatures,
         style_analyses,
+        markup_class_tokens: Vec::new(),
         preprocessor_requests,
     }
 }
@@ -1945,6 +2090,7 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
         script_analysis: Arc::new(script_analysis),
         export_signatures,
         style_analyses: Vec::new(),
+        markup_class_tokens: Vec::new(),
         preprocessor_requests: Vec::new(),
     }
 }
@@ -1984,6 +2130,7 @@ pub(crate) fn parse_non_sfc_snapshot(
             script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            markup_class_tokens: Vec::new(),
             preprocessor_requests: Vec::new(),
         };
     }
@@ -2984,6 +3131,88 @@ watch(count, (value, oldValue) => {
             css.selectors.iter().all(|s| s.rule_body_span.is_some()),
             "closed rules carry body spans"
         );
+    }
+
+    /// Svelte `<style>` blocks scan to scoped-by-default CSS facts with
+    /// carrier-absolute spans, and `:global(...)` selectors are recorded as
+    /// Global special pseudos.
+    #[test]
+    fn svelte_style_analyses_scoped_by_default_with_global_pseudo() {
+        let source = "<script>let x = 1;</script>\n<div class=\"card\"></div>\n<style>\n.card { color: red; }\n:global(.reset) { margin: 0; }\n</style>\n";
+        let parsed = verter_compiler::svelte::parser::parse_svelte(source);
+        let styles = build_svelte_style_analyses(source, &parsed.styles, &[None]);
+        assert_eq!(styles.len(), 1);
+        let style = &styles[0];
+        assert!(style.scoped, "svelte styles are scoped by default");
+        let css = style.css.as_ref().expect("scanned css facts");
+        let card = css.classes.iter().find(|c| c.name == "card").unwrap();
+        assert_eq!(
+            &source[card.span.start as usize..card.span.end as usize],
+            "card",
+            "carrier-absolute exact span"
+        );
+        let global = style
+            .special_pseudos
+            .iter()
+            .find(|p| p.kind == verter_semantic::analysis::SpecialPseudoKind::Global)
+            .expect(":global recorded");
+        assert_eq!(
+            &source[global.start as usize..global.end as usize],
+            ":global(.reset)"
+        );
+        // The .reset class inside :global is still an addressable declaration.
+        assert!(css.classes.iter().any(|c| c.name == "reset"));
+    }
+
+    /// Svelte markup class tokens: `class="a b"` entries split with exact
+    /// spans; `class:x` directives carry the local name span; dynamic values
+    /// are skipped (fail closed).
+    #[test]
+    fn svelte_markup_class_tokens_exact_spans() {
+        let source = "<div class=\"card active\" class:open={cond}>\n  {#if cond}<span class=\"inner\"></span>{/if}\n  <b class={dynamic}></b>\n</div>\n";
+        let parsed = verter_compiler::svelte::parser::parse_svelte(source);
+        let tokens = collect_svelte_markup_class_tokens(source, &parsed.template);
+        let by_name: Vec<(&str, bool)> = tokens
+            .iter()
+            .map(|t| (t.name.as_str(), t.from_directive))
+            .collect();
+        assert_eq!(
+            by_name,
+            vec![
+                ("card", false),
+                ("active", false),
+                ("open", true),
+                ("inner", false),
+            ],
+            "dynamic class={{expr}} yields NO token"
+        );
+        for t in &tokens {
+            assert_eq!(
+                &source[t.span.start as usize..t.span.end as usize],
+                t.name,
+                "token span must cover exactly the authored name"
+            );
+        }
+    }
+
+    /// End-to-end: the svelte snapshot carries style analyses + markup tokens.
+    #[test]
+    fn svelte_snapshot_carries_style_and_markup_class_facts() {
+        // Route through the real carrier snapshot build.
+        let source = "<script>let n = 1;</script>\n<div class=\"card\"></div>\n<style>.card { color: red; }</style>\n";
+        let (snapshot, _artifact) = carrier_parse_snapshot(
+            "test.svelte",
+            source,
+            AnalysisScope::LSP,
+            &verter_language::FileLanguage::svelte(),
+            &crate::types::MetaProvenance::default(),
+        )
+        .expect("svelte carrier dispatch yields a snapshot");
+        assert_eq!(snapshot.style_analyses.len(), 1);
+        assert!(snapshot.style_analyses[0].scoped);
+        assert!(snapshot.style_analyses[0].css.is_some());
+        assert_eq!(snapshot.markup_class_tokens.len(), 1);
+        assert_eq!(snapshot.markup_class_tokens[0].name, "card");
     }
 
     /// Indented Sass stays fail-closed: Vue features only, no scanned CSS.

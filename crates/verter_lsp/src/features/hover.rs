@@ -147,6 +147,16 @@ pub fn hover_at_position(
                     );
                 }
             }
+            // Carrier markup class tokens (Svelte root markup scanned as a
+            // custom block): show the declaring rule(s), fail closed otherwise.
+            if let Some(analysis) = analysis {
+                if let Some(token) =
+                    crate::features::references::markup_class_token_at(offset as usize, analysis)
+                {
+                    return class_css_rule_hover(&token.name.clone(), None, source, analysis)
+                        .map(Into::into);
+                }
+            }
             return None;
         }
         SfcCursorContext::ClosingTag { block_index } => {
@@ -169,6 +179,16 @@ pub fn hover_at_position(
                         analysis.unwrap(),
                         line_index,
                     );
+                }
+            }
+            // Carrier markup class tokens (Svelte root markup — no template
+            // element IR): show the declaring rule(s), fail closed otherwise.
+            if let Some(analysis) = analysis {
+                if let Some(token) =
+                    crate::features::references::markup_class_token_at(offset as usize, analysis)
+                {
+                    return class_css_rule_hover(&token.name.clone(), None, source, analysis)
+                        .map(Into::into);
                 }
             }
             return None;

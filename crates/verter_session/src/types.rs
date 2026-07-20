@@ -1575,6 +1575,11 @@ pub struct FileAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub style_vbind_roots: Vec<String>,
 
+    /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
+    /// template element IR (Svelte). Empty for Vue.
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
+
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
@@ -2065,6 +2070,10 @@ pub(crate) struct ParseSnapshot {
     pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
+    /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
+    /// template element IR (Svelte `class="x"` entries + `class:x` directives).
+    /// Empty for Vue (its template element tree carries class facts).
+    pub(crate) markup_class_tokens: Vec<verter_semantic::analysis::MarkupClassToken>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
 }

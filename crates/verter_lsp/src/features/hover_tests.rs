@@ -1823,3 +1823,93 @@ fn class_token_hover_lists_multiple_rules() {
         "unscoped block is not scoped-labelled: {contents}"
     );
 }
+
+// =====================================================================
+// B4: Svelte markup class-token hover (markup tokens, no template IR)
+// =====================================================================
+
+/// Svelte-shaped snapshot: markup class token + scoped scanned style.
+fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
+    let blocks = scan_sfc_blocks(source);
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let needle = format!("class=\"{token_name}\"");
+    let token_start = source.find(&needle).unwrap() + 7;
+    FileAnalysisSnapshot {
+        template: None,
+        markup_class_tokens: std::sync::Arc::new(vec![
+            verter_semantic::analysis::MarkupClassToken {
+                name: token_name.to_string(),
+                span: verter_span::Span::new(
+                    token_start as u32,
+                    (token_start + token_name.len()) as u32,
+                ),
+                from_directive: false,
+            },
+        ]),
+        styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
+            verter_semantic::analysis::StyleAnalysisLang::Css,
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    }
+}
+
+/// Hover on a svelte `class="card"` token shows the component rule.
+#[test]
+fn svelte_class_token_hover_shows_rule() {
+    let source = "<div class=\"card\"></div>\n<style>\n.card { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = b4_svelte_analysis(source, "card");
+
+    let cursor = source.find("class=\"card\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    )
+    .expect("svelte class token with a rule must hover");
+    let contents = match hover.hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(contents.contains("```css"), "{contents}");
+    assert!(contents.contains(".card { color: red; }"), "{contents}");
+    assert!(
+        contents.contains("(scoped)"),
+        "svelte styles are scoped by default: {contents}"
+    );
+}
+
+/// A svelte class token without a rule produces NO hover.
+#[test]
+fn svelte_class_token_hover_fails_closed_without_rule() {
+    let source = "<div class=\"ghost\"></div>\n<style>\n.real { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = b4_svelte_analysis(source, "ghost");
+
+    let cursor = source.find("class=\"ghost\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let hover = hover_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        false,
+    );
+    assert!(hover.is_none(), "rule-less svelte class token: no hover");
+}

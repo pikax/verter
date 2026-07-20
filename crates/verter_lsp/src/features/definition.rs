@@ -490,6 +490,20 @@ pub fn definition_at_position(
         }
     }
 
+    // Carrier markup class tokens (Svelte `class="x"` / `class:x`) — carriers
+    // without a template element IR. Fail-closed: a token with no declaring
+    // rule yields NO definition.
+    if analysis.template.is_none() {
+        if let Some(token) = crate::features::references::markup_class_token_at(offset, analysis) {
+            return css_rule_definition(
+                &CssRefTarget::Class(token.name.clone()),
+                None,
+                analysis,
+                line_index,
+            );
+        }
+    }
+
     // Check if we're in a style block — navigate from CSS selector to template usage
     let in_style = blocks.iter().any(|b| {
         b.tag_name == "style" && {
@@ -699,13 +713,23 @@ fn css_definition_from_style(
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<GotoDefinitionResponse> {
-    let template = analysis.template.as_deref()?;
-
     // Find which style block contains the cursor and extract the class/id name
     let target = find_css_target_in_style_refs(offset, source, analysis)?;
 
-    let spans =
-        crate::features::references::collect_template_css_ref_spans(&target, source, template);
+    let mut spans: Vec<(u32, u32)> = match analysis.template.as_deref() {
+        Some(template) => {
+            crate::features::references::collect_template_css_ref_spans(&target, source, template)
+        }
+        None => Vec::new(),
+    };
+    // Markup class tokens (carriers without a template element IR).
+    if let CssRefTarget::Class(name) = &target {
+        for token in analysis.markup_class_tokens.iter() {
+            if token.name == *name {
+                spans.push((token.span.start, token.span.end));
+            }
+        }
+    }
     let locations: Vec<Location> = spans
         .into_iter()
         .filter_map(|(start, end)| {

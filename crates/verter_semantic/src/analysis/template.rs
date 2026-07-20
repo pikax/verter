@@ -1236,6 +1236,21 @@ pub struct TemplateAttribute {
     pub value_span: Option<Span>,
 }
 
+/// A resolvable class-name token in carrier markup — the typed usage fact for
+/// carriers WITHOUT a template element IR (Svelte). Each token names one class
+/// with the exact byte span of the authored name (a `class="a b"` value yields
+/// one token per name; a `class:x` directive yields one directive token).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkupClassToken {
+    /// The class name.
+    pub name: String,
+    /// Carrier-absolute byte span of the authored name.
+    pub span: Span,
+    /// `true` for a `class:x` directive token, `false` for a `class="x"` entry.
+    pub from_directive: bool,
+}
+
 // =============================================================================
 // If Chains
 // =============================================================================

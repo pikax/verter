@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
@@ -3181,4 +3181,183 @@ fn css_class_definition_kebab_token_at_hyphen_position() {
         GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
         other => panic!("expected scalar, got {other:?}"),
     }
+}
+
+// =====================================================================
+// B4: Svelte markup class intelligence (markup tokens, no template IR)
+// =====================================================================
+
+/// Build a Svelte-shaped analysis snapshot: no template element IR, markup
+/// class tokens + scoped-by-default scanned styles.
+fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
+    let blocks = scan_sfc_blocks(source);
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+
+    // Markup tokens: every `class="..."` value word + every `class:x` local.
+    let mut tokens = Vec::new();
+    let mut search = 0usize;
+    while let Some(rel) = source[search..].find("class=\"") {
+        let val_start = search + rel + 7;
+        let val_end = val_start + source[val_start..].find('"').unwrap();
+        // Only markup-side tokens (before the style block).
+        if (val_start as u32) < scs {
+            let mut pos = val_start;
+            for word in source[val_start..val_end].split_whitespace() {
+                let ws = source[pos..val_end].find(word).unwrap() + pos;
+                tokens.push(verter_semantic::analysis::MarkupClassToken {
+                    name: word.to_string(),
+                    span: verter_span::Span::new(ws as u32, (ws + word.len()) as u32),
+                    from_directive: false,
+                });
+                pos = ws + word.len();
+            }
+        }
+        search = val_end + 1;
+    }
+    let mut search = 0usize;
+    while let Some(rel) = source[search..].find("class:") {
+        let name_start = search + rel + 6;
+        let name_end = name_start
+            + source[name_start..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(source.len() - name_start);
+        if (name_start as u32) < scs {
+            tokens.push(verter_semantic::analysis::MarkupClassToken {
+                name: source[name_start..name_end].to_string(),
+                span: verter_span::Span::new(name_start as u32, name_end as u32),
+                from_directive: true,
+            });
+        }
+        search = name_end;
+    }
+
+    FileAnalysisSnapshot {
+        template: None,
+        markup_class_tokens: std::sync::Arc::new(tokens),
+        styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
+            verter_semantic::analysis::StyleAnalysisLang::Css,
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true, // svelte: scoped by default
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    }
+}
+
+/// Svelte `class="card"` navigates to the component style rule's class token.
+#[test]
+fn svelte_class_attr_definition_to_style_rule() {
+    let source = "<div class=\"card\"></div>\n<style>\n.card { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find("class=\"card\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("svelte class token must navigate to its rule");
+
+    let expected = source.find(".card {").unwrap() + 1;
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+/// Svelte `class:open` directives navigate to the `.open` rule.
+#[test]
+fn svelte_class_directive_definition_to_style_rule() {
+    let source = "<div class:open={cond}></div>\n<style>\n.open { display: block; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find("class:open").unwrap() + 7;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("svelte class: directive must navigate to its rule");
+
+    let expected = source.find(".open {").unwrap() + 1;
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+/// A svelte class token with no declaring rule fails closed.
+#[test]
+fn svelte_class_token_without_rule_fails_closed() {
+    let source = "<div class=\"ghost\"></div>\n<style>\n.real { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find("class=\"ghost\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
+    assert!(
+        result.is_none(),
+        "rule-less svelte class token: no definition"
+    );
+}
+
+/// From the style side, `.card` navigates to every markup usage token.
+#[test]
+fn svelte_style_class_definition_to_markup_usages() {
+    let source = "<div class=\"card\"></div>\n<span class=\"card\"></span>\n<style>\n.card { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find(".card {").unwrap() + 2;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("style class must navigate to markup usages");
+
+    let locations = match result {
+        GotoDefinitionResponse::Array(locs) => locs,
+        GotoDefinitionResponse::Scalar(loc) => vec![loc],
+        other => panic!("unexpected response {other:?}"),
+    };
+    assert_eq!(locations.len(), 2, "both markup usages are targets");
 }
