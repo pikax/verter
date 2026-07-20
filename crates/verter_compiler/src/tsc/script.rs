@@ -1735,8 +1735,8 @@ fn collect_local_type_inventory(
             render_authored_fragment(
                 &authored,
                 &[DeclarationEdit::Remove {
-                    start: export.start.checked_sub(authored_start).unwrap_or(0),
-                    end: default.end.checked_sub(authored_start).unwrap_or(0),
+                    start: export.start.saturating_sub(authored_start),
+                    end: default.end.saturating_sub(authored_start),
                 }],
             )
         } else {
@@ -2205,9 +2205,7 @@ fn build_class_declaration_plan(
                         let mut targets = vec![ClassInferenceTarget {
                             start: identifier.span.end.checked_sub(authored_start)?,
                             end: parameter_end,
-                            prefix: if parameter.initializer.is_some() {
-                                "?: ".to_owned()
-                            } else if parameter.optional {
+                            prefix: if parameter.initializer.is_some() || parameter.optional {
                                 "?: ".to_owned()
                             } else {
                                 ": ".to_owned()
@@ -2312,9 +2310,7 @@ fn build_class_declaration_plan(
                     });
                 }
                 if property.type_annotation.is_none() {
-                    let Some(name) = class_element_name(element) else {
-                        return None;
-                    };
+                    let name = class_element_name(element)?;
                     let key = (
                         property.r#static,
                         name.clone(),

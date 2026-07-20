@@ -31,6 +31,10 @@ pub struct IntrinsicSurfaceMember {
 
 /// The type slot of an [`IntrinsicSurfaceMember`].
 #[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+// `Resolved` carries the project-resolved semantic source by value; the
+// static-catalog arm is a content-free id by design. Boxing the resolved arm
+// would indirect the common consuming path for a cold-path size win.
+#[allow(clippy::large_enum_variant)]
 pub enum IntrinsicMemberTypeSource {
     /// A generated static-catalog member: the content-free
     /// [`StaticIntrinsicTypeId`]. The type SHAPE stays table-resident and is

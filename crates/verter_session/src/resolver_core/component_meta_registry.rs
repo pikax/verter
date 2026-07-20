@@ -230,6 +230,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
         // `Whole` dominates; otherwise the selected top-level members union
         // deterministically (existing surface order first, then new-only
         // members in candidate order).
+        #[allow(clippy::large_enum_variant)]
         enum RouteCombine {
             /// Both sides are projected surfaces → publish the member union.
             Union(verter_type_expr::facts::SemanticTypeSource),

@@ -132,6 +132,18 @@ struct CheckerInvocation {
     success: bool,
 }
 
+/// The `(virtual stub path, stub source)` rows plus the canonical `.vue` path
+/// → virtual stub path map produced by [`generate_public_api_stubs`].
+type PublicApiStubs = (Vec<(PathBuf, String)>, HashMap<String, PathBuf>);
+
+/// The `(vue_path, tsc_code, tsc_tsx_path)` rows produced by
+/// [`generate_all_tsc`].
+type TscDeclarationRows = Vec<(PathBuf, String, PathBuf)>;
+
+/// Declaration-stage result: remapped diagnostics, emitted `.d.ts` files, and
+/// per-source projection failures.
+type DeclarationStageResult = (Vec<Diagnostic>, Vec<PathBuf>, Vec<PublicApiFailure>);
+
 /// Generate public-API stub carriers for cross-component type resolution.
 ///
 /// For each `.vue` file, generates a stub containing the component's public API
@@ -149,7 +161,7 @@ fn generate_public_api_stubs(
     host: &VerterHost,
     vue_files: &[PathBuf],
     base_dir: &Path,
-) -> PublicApiBatch<(Vec<(PathBuf, String)>, HashMap<String, PathBuf>)> {
+) -> PublicApiBatch<PublicApiStubs> {
     let mut stub_files = Vec::new();
     let mut vue_ts_map = HashMap::new();
     let mut outcomes = Vec::with_capacity(vue_files.len());
@@ -327,7 +339,7 @@ fn generate_all_tsc(
     host: &VerterHost,
     vue_files: &[PathBuf],
     temp_dir: &Path,
-) -> Result<PublicApiBatch<Vec<(PathBuf, String, PathBuf)>>, api_check::TypecheckError> {
+) -> Result<PublicApiBatch<TscDeclarationRows>, api_check::TypecheckError> {
     // ONE batched public-API call for every .vue file (mirrors
     // `generate_public_api_stubs`): the batch captures a single per-batch fixed
     // store view and threads its shared cold seed into every item, collapsing
@@ -755,7 +767,7 @@ fn run_declaration_stage(
     config: &TsConfig,
     tsconfig_path: &Path,
     opts: &EmitOptions,
-) -> Result<(Vec<Diagnostic>, Vec<PathBuf>, Vec<PublicApiFailure>), api_check::TypecheckError> {
+) -> Result<DeclarationStageResult, api_check::TypecheckError> {
     // The temp dir MUST be inside the project root so tsc resolves node_modules
     // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
     let temp_dir = TempDir::new_in(&config.root_dir).map_err(|e| {

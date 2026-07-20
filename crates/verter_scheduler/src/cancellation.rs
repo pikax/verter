@@ -117,7 +117,7 @@ impl CancellationToken {
                     && owner
                         .request
                         .as_ref()
-                        .map_or(true, |request| !request.is_cancelled())
+                        .is_none_or(|request| !request.is_cancelled())
                 {
                     any_live = true;
                 }
@@ -162,7 +162,7 @@ impl CancellationToken {
                 && owner
                     .request
                     .as_ref()
-                    .map_or(true, |request| !request.is_cancelled())
+                    .is_none_or(|request| !request.is_cancelled())
             {
                 any_live = true;
             }

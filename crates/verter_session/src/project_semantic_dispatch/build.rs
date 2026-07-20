@@ -26,6 +26,17 @@ use crate::semantic_query::{
     SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
+/// The effective prepared VALUE-decl identity resolved by
+/// [`ProjectSemanticDispatch::effective_prepared_value_decl`]: the declaring
+/// `(canonical, owner, symbol)` (post value-export-target fallback) plus the
+/// prepared value decl itself.
+pub(super) type EffectivePreparedValueDecl = (
+    Arc<str>,
+    verter_type_expr::TopLevelOwnerId,
+    Arc<str>,
+    Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
+);
+
 /// One folded cross-file augmentation contributor: its version self-root
 /// (`canonical` + the `FileWholeHash` the body was lowered from) TOGETHER
 /// WITH the exact artifact key the contributor's locator-backed body read
@@ -1615,12 +1626,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
-    ) -> Option<(
-        Arc<str>,
-        verter_type_expr::TopLevelOwnerId,
-        Arc<str>,
-        Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
-    )> {
+    ) -> Option<EffectivePreparedValueDecl> {
         if let Some(prepared) = self.ctx.prepared_value_decl(canonical, owner, symbol) {
             return Some((Arc::from(canonical), owner, Arc::from(symbol), prepared));
         }

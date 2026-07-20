@@ -782,7 +782,7 @@ impl ScopedCacheFlight {
 
     fn wait_for_change(&self, timeout: std::time::Duration) {
         let mut state = self.state.lock();
-        if state.terminal.is_none() && !(state.dispatched && !state.builder_claimed) {
+        if state.terminal.is_none() && (!state.dispatched || state.builder_claimed) {
             self.changed.wait_for(&mut state, timeout);
         }
     }

@@ -2274,8 +2274,7 @@ impl ShallowFileState {
         // declaration references a member path such as `NS.Payload`.
         let is_import_local = |name: &str| -> bool {
             self.owner_import_targets
-                .get(&DeclBindingKey::new(owner, name))
-                .is_some()
+                .contains_key(&DeclBindingKey::new(owner, name))
         };
 
         while let Some(current) = pending.pop() {

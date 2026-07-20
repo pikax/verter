@@ -427,7 +427,7 @@ impl<'a> CodeTransform<'a> {
                     }
                 }
                 Chunk::Moved { .. } => 0,
-                Chunk::Overwritten { content, .. } if content.is_empty() => 0,
+                Chunk::Overwritten { content: "", .. } => 0,
                 Chunk::Overwritten { .. } => usize::from(has_source),
                 Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
                     usize::from(!content.is_empty())

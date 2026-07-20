@@ -347,6 +347,7 @@ impl MacroState {
 /// inconsistent span coordinate systems (object-syntax keys are SFC-absolute,
 /// while array-syntax keys are content-relative).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn process_macro_item<'a>(
     mac: &ScriptMacro<'a>,
     syntax_index: u32,

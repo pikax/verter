@@ -1696,6 +1696,7 @@ pub enum ReturnInferenceUnsupported {
     Debug,
     Clone,
     Copy,
+    Default,
     PartialEq,
     Eq,
     Hash,
@@ -1705,16 +1706,13 @@ pub enum ReturnInferenceUnsupported {
     NoStoredSpan,
 )]
 pub enum ReturnInferenceCompleteness {
+    #[default]
     NotInferred,
-    Complete { can_fall_through: bool },
+    Complete {
+        can_fall_through: bool,
+    },
     Unsupported(ReturnInferenceUnsupported),
     Unavailable(InferenceUnavailableReason),
-}
-
-impl Default for ReturnInferenceCompleteness {
-    fn default() -> Self {
-        Self::NotInferred
-    }
 }
 
 /// Exact declaration-member address and return-inference verdict for one
@@ -3252,6 +3250,11 @@ pub enum SemanticSourceFailure {
     NoTypeExpr,
     NoStoredSpan,
 )]
+// `Present` dominates the payload by design: the faithful source carrier IS
+// the common case, and the wire schema round-trips the enum by value — boxing
+// the variant would ripple through every schema constructor for a cold-path
+// size win (same disposition as the `resolver_store` slot enums).
+#[allow(clippy::large_enum_variant)]
 pub enum SourcePosition {
     /// The schema position PROVABLY carries no semantic source.
     Absent(SchemaAbsence),
