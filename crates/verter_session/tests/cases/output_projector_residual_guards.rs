@@ -2252,12 +2252,12 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
             // (`materialize_slot_return_node`, `slot_binding_field`), minting
             // the cap internally at the terminal display renders.
             "crate :: typeinfo :: framework_surface :: vue_exec :: normalize_slots",
-            // The imported-macro-type element projection — a genuine co-sink:
-            // it mints the cap INTERNALLY in its terminal `render_params_text`
-            // display render (mint-once, no decision on the materialized
-            // value), projecting shared-engine macro-surface results into the
-            // legacy compile-facing DTO. NOT a non-sink helper.
-            "crate :: typeinfo :: framework_surface :: vue_exec :: imported_elements",
+            // The former `imported_elements` co-sink (the imported-macro-type
+            // element projection into the legacy compile-facing
+            // `ResolvedElements` DTO) was DELETED with that DTO rail when
+            // type-based macro compilation moved onto the TypeInfo-owned
+            // runtime-shape projection; no replacement sink exists under
+            // this cap.
         ],
     ),
 ];
@@ -2961,10 +2961,11 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
     );
 
     // The real production trees the live guard relies on: vue_exec →
-    // {vue_exec, normalize, imported_elements}; projectors output_sink →
-    // {output_sink} only. (Discriminating: a regression that stopped excluding
-    // `#[cfg(test)]` or stopped resolving an out-of-line child would change
-    // these.)
+    // {vue_exec, normalize, normalize_slots} (the former `imported_elements`
+    // co-sink was DELETED with the legacy `ResolvedElements` rail);
+    // projectors output_sink → {output_sink} only. (Discriminating: a
+    // regression that stopped excluding `#[cfg(test)]` or stopped resolving
+    // an out-of-line child would change these.)
     let (vue, vue_errs) = reachable_production_modules(
         "crate :: typeinfo :: framework_surface :: vue_exec",
         &disk_loader,
@@ -2974,7 +2975,6 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
         "crate :: typeinfo :: framework_surface :: vue_exec",
         "crate :: typeinfo :: framework_surface :: vue_exec :: normalize",
         "crate :: typeinfo :: framework_surface :: vue_exec :: normalize_slots",
-        "crate :: typeinfo :: framework_surface :: vue_exec :: imported_elements",
     ]
     .iter()
     .map(|m| normalize_mod_path(m))
@@ -2982,7 +2982,7 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
     assert_eq!(
         vue, vue_expected,
         "the live vue_exec mint-scope reachable PRODUCTION tree must be EXACTLY {{vue_exec, \
-         normalize, normalize_slots, imported_elements}}"
+         normalize, normalize_slots}}"
     );
 
     let (sink, sink_errs) = reachable_production_modules(
@@ -5096,6 +5096,14 @@ fn type_def_source_files() -> Vec<(String, String)> {
         (
             "../verter_semantic/src/analysis/type_solver/prepared.rs",
             "verter_semantic::analysis::type_solver::prepared",
+        ),
+        // `ResolvedRootIdentity { canonical_id, owner, symbol_name }` is the
+        // content-free root-identity triple (`NoTypeExpr`-derived), returned
+        // by the registry-decl sink `resolve_final_prepared_type_target`;
+        // reading its home lets the closure classify it as non-bearing.
+        (
+            "../verter_semantic/src/analysis/type_solver/host.rs",
+            "verter_semantic::analysis::type_solver::host",
         ),
         // `ResolvedTypeAnalysis { type_expr: TypeExpr, … }` is a TypeExpr-BEARING
         // DTO threaded as a `&mut Vec<…>` out-param of the registry-append sink fn
@@ -12355,10 +12363,9 @@ const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
     // the raised form is transient and discarded, no raw `TypeExpr` enters
     // the DTO (see `object_members_from_typeinfo_surface`'s doc contract).
     "classify_shallow",
-    // The published emit-signature DTO row constructor
-    // (`named_signature_row(name, ResolvedCallPayloadForm)`): stamping a
-    // rendered display text into the published row is publication.
-    "named_signature_row",
+    // (The former `named_signature_row` published emit-signature DTO row
+    // constructor was swept with the deleted `ResolvedElements` /
+    // `imported_elements` rail — no spelling remains.)
     // The wire `GraphBuilder::node_id(&TypeExpr)` snapshot intern (method-arg
     // form): capturing the output wire-graph snapshot at the output boundary
     // is publication — the JSDoc producer discards the `TypeExpr` after it.
@@ -12454,30 +12461,12 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("typeinfo/raise.rs", "render_node_display_with_ctx"),
     ("vue_exec/mod.rs", "raise_member_value"),
-    // The legacy imported-props DTO builder mints each member value for
-    // display publication only. Component-meta native rows use the separate
-    // registered renderer above and never consume this runtime DTO.
-    (
-        "vue_exec/imported_elements.rs",
-        "resolved_elements_from_surface",
-    ),
-    // The imported-emits DTO builder (the imported-macro analogue of
-    // `emits_from_typeinfo_surface` + `property_style_emit_fields` in one
-    // terminal): the event-name / signature / tuple-ness decisions are
-    // node-domain (`CallableNodeView` / `SemanticNodeData::Tuple` via
-    // `node_data_for` on the member NODE); each member value / param display is
-    // minted ONCE (via `raise_member_value` / `render_params_text`) and feeds
-    // only the published `ResolvedProp` / `ResolvedNamedCallSignature` rows.
-    (
-        "vue_exec/imported_elements.rs",
-        "imported_emits_resolved_elements",
-    ),
-    // The params-list display terminal (the params-text twin of
-    // `materialize_payload_tuple`): mints each node-domain `FunctionParam.ty`
-    // ONCE through the sealed Vue output cap and renders it by name; the `...`
-    // / `?` / name come from node-domain flags. ZERO decide on the minted
-    // value; an unrenderable position fails the whole row closed.
-    ("vue_exec/imported_elements.rs", "render_params_text"),
+    // The former `vue_exec/imported_elements.rs` terminal sinks
+    // (`resolved_elements_from_surface`, `imported_emits_resolved_elements`,
+    // `render_params_text`) were DELETED with the legacy `ResolvedElements` /
+    // `ResolvedProp` compile-facing DTO rail — type-based macro compilation
+    // now routes through the TypeInfo-owned runtime-shape projection, which
+    // publishes closed constructor facts instead of rendered display rows.
     ("vue_exec/normalize.rs", "index_signatures_from_surface"),
     ("vue_exec/normalize.rs", "model_prop_fields"),
     // The sealed carrier consuming accessor is the lowest-level sanctioned mint

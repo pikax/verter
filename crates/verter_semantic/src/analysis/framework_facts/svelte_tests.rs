@@ -5,7 +5,7 @@ use super::*;
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 fn capture(src: &str) -> SvelteScriptCandidates {
     capture_with_module_region(src, None)
@@ -48,7 +48,7 @@ fn instance_export(
         exported_name: exported_name.to_string(),
         local_name: local_name.to_string(),
         owner,
-        binding_key: verter_type_expr::DeclKey::new(owner, local_name),
+        binding_key: verter_type_expr::DeclBindingKey::new(owner, local_name),
         source_span,
     }
 }
@@ -59,7 +59,7 @@ fn module_export(exported_name: &str, local_name: &str, source_span: Span) -> Sv
         exported_name: exported_name.to_string(),
         local_name: local_name.to_string(),
         owner,
-        binding_key: verter_type_expr::DeclKey::new(owner, local_name),
+        binding_key: verter_type_expr::DeclBindingKey::new(owner, local_name),
         source_span,
     }
 }
@@ -561,7 +561,7 @@ fn export_owner_role_only_flip_changes_candidate_hash() {
     let mut role_flipped = instance.clone();
     let flipped = &mut role_flipped.instance_exports[0];
     flipped.owner = verter_type_expr::TopLevelOwnerId::module(0);
-    flipped.binding_key = verter_type_expr::DeclKey::new(flipped.owner, "shared");
+    flipped.binding_key = verter_type_expr::DeclBindingKey::new(flipped.owner, "shared");
     assert_ne!(instance_hash, stable_candidate_hash(&role_flipped));
 }
 
@@ -1126,7 +1126,7 @@ fn resolved_facts_persist_same_name_module_and_instance_exports_exactly() {
     assert_eq!(resolved.module_exports[0].owner, TopLevelOwnerId::module(0));
     assert_eq!(
         resolved.module_exports[0].binding_key,
-        DeclKey::new(TopLevelOwnerId::module(0), "module_shared")
+        DeclBindingKey::new(TopLevelOwnerId::module(0), "module_shared")
     );
 
     let persisted = resolved.to_persisted_fact();
@@ -1153,7 +1153,7 @@ fn module_export_role_only_change_moves_hash_and_serde_identity() {
     let mut role_flipped = module.clone();
     role_flipped.module_exports[0].owner = TopLevelOwnerId::instance(0);
     role_flipped.module_exports[0].binding_key =
-        DeclKey::new(TopLevelOwnerId::instance(0), "shared");
+        DeclBindingKey::new(TopLevelOwnerId::instance(0), "shared");
     assert_ne!(module_hash, stable_candidate_hash(&role_flipped));
 
     let resolved_fact = |candidates: SvelteScriptCandidates| {

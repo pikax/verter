@@ -224,7 +224,7 @@ mod tests {
     };
     use verter_semantic::analysis::type_eval::ValueDeclKind;
     use verter_type_expr::locators::{MacroPayloadLocator, MacroPayloadPosition};
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     fn props_payload_ref(macro_index: u32, seed: u8) -> AuthoredTypePayloadRef {
         AuthoredTypePayloadRef {
@@ -362,14 +362,14 @@ mod tests {
                     exported_name: "focus".to_string(),
                     local_name: "focus".to_string(),
                     owner: instance_owner,
-                    binding_key: DeclKey::new(instance_owner, "focus"),
+                    binding_key: DeclBindingKey::new(instance_owner, "focus"),
                     source_span: verter_span::Span::new(0, 5),
                 },
                 SvelteInstanceExport {
                     exported_name: "reset".to_string(),
                     local_name: "reset".to_string(),
                     owner: instance_owner,
-                    binding_key: DeclKey::new(instance_owner, "reset"),
+                    binding_key: DeclBindingKey::new(instance_owner, "reset"),
                     source_span: verter_span::Span::new(6, 11),
                 },
             ],

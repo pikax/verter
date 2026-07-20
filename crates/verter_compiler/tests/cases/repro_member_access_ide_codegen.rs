@@ -553,6 +553,15 @@ fn recovered_define_props_template_resolves_without_dangling_props() {
 /// template) must produce EXACTLY this IDE TSX. Recovery work must never reshape the
 /// clean path; any drift in clean codegen is caught here byte-for-byte (line endings
 /// normalized for cross-platform stability).
+///
+/// Fixture provenance: this direct-compiler invocation carries NO
+/// `VueMacroSemanticInput` bundle, and the Vue Macro Semantic Boundary
+/// requires that typed prop BINDINGS register only from the runtime DTO
+/// (`vmrs_ide_rejects_noncomplete_runtime_semantics_without_registering_bindings`).
+/// The pinned output therefore shows the fail-closed no-DTO shape — the
+/// template's `msg` routes through `___VERTER___instance` rather than a
+/// registered `__props` binding. Host-driven IDE compiles supply the DTO and
+/// register bindings; this golden pins the DIRECT-compiler contract.
 #[test]
 fn clean_script_setup_output_matches_golden() {
     let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n\

@@ -364,8 +364,13 @@ fn vue_tsx_sfc_canonical_state_parses_under_authoritative_source_type() {
     let indexed = host
         .ensure_indexed_ready(canonical)
         .expect("vue canonical must materialise");
+    // Owner-aware probe: a `<script setup>` binding declares under the
+    // setup Instance owner in the owner-aware inventory (the bare-name
+    // probe is the ordinary-file compatibility view only).
     assert!(
-        indexed.shallow_state.has_value_symbol("node"),
+        indexed
+            .shallow_state
+            .has_value_symbol_in(verter_type_expr::TopLevelOwnerId::instance(0), "node"),
         "the INDEXED artifact's shallow value inventory must include the \
          TSX-bodied binding (the canonical artifact was built from a \
          worse env than the resolve-route probe); value_symbols = {:?}",

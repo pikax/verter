@@ -709,6 +709,8 @@ fn finite_deep_alias_chain_is_iterative_and_complete() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let mut subject = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    // bounded-loop: fixed 4,096-iteration fixture constructor — builds the
+    // finite alias chain the classifier must resolve iteratively.
     for _ in 0..4_096 {
         subject = graph.intern_node(SemanticNodeData::Alias(subject));
     }

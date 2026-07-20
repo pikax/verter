@@ -291,8 +291,15 @@ pub(crate) fn expand_generic_project_path_output(
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: base_id,
         path: terminal_path,
+        // Publication demand is Navigate-only (Shallow-by-default): the
+        // projector publishes the terminal path shape shallow and never
+        // eagerly materialises it — a `Published(Expanded)` here re-enters
+        // the giant-tree Instantiate(Expanded) pathology (e.g. eager
+        // `Pick` expansion) that the carrier-stop and the ChatMessages
+        // zero-eager-expansion gate forbid. The terminal materialisation
+        // happens on demand at the sealed sink below.
         context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
+            ProjectionMode::Navigate,
         ),
     });
     match projected {

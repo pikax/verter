@@ -298,14 +298,26 @@ fn ide_virtual_output_for_fixture_sfc_is_byte_stable() {
 
     let content = response.code.clone();
     assert!(!content.is_empty(), "main virtual output must be non-empty");
-    // Byte-identity pin: the full output hash, captured from the Vue-typed carrier tree.
+    // Byte-identity pin: the full output hash of the runtime (`Main`) module.
+    //
+    // Updated when the Vue macro runtime path cut over from the pre-DTO
+    // parser-owned surface to the authoritative `MacroRuntimeBundle` DTO.
+    // The DTO path emits the OFFICIAL Vue dev shape for an OPTIONAL prop —
+    // `count: { type: Number, required: false }` — where the superseded
+    // pre-cutover surface omitted `required: false` entirely
+    // (`count: { type: Number }`), a parity gap. This is the sole byte
+    // difference from the old pin (`11ff99…`), and the new shape is the
+    // ratified one: it matches official `@vue/compiler-sfc` and the
+    // compiler's own `optional_boolean_prop_emits_no_default` /
+    // `optional non-Boolean prop keeps the official dev shape` assertions
+    // in `crates/verter_compiler/src/script/tests.rs`.
     let hash_hex: String = crate::hash::hash_16(content.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
-        hash_hex, "11ff99715569abf0f54064912588ec63",
-        "IDE virtual output drifted byte-wise; content:\n{content}"
+        hash_hex, "fdcc6de32cbf81bc593cdd9c50c47892",
+        "runtime (Main) virtual output drifted byte-wise; content:\n{content}"
     );
 }
 

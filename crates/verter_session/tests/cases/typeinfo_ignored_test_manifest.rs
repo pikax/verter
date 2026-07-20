@@ -411,6 +411,7 @@ semantic_query_names! {
     FlowNarrowingAt,
     ContextualTypeAt,
     LowerLocator,
+    ClassifyBroadRuntime,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -672,7 +673,10 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         ResolveAmbientNamespace => U2ModuleAugmentation,
         FlowNarrowingAt => U6FlowReturnSubstrate,
         ContextualTypeAt => U6ContextualCallback,
-        ResolveMacroPayload => U14MacroAdapter,
+        // The terminal broad-runtime-kind classifier is macro-adapter
+        // work: it exists to give the Vue macro runtime-shape projection
+        // its per-member constructor verdicts through canonical dispatch.
+        ResolveMacroPayload | ClassifyBroadRuntime => U14MacroAdapter,
     }
 }
 

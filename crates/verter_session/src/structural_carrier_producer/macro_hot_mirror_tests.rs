@@ -761,8 +761,10 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     // Pin the retained parse-snapshot lease with one successful decl-body demand,
     // then break it so the macro-arg transient demand lease-misses.
     let memo = indexed.shallow_state.decl_bodies();
+    // The `<script setup>` local type declares under the setup Instance
+    // owner in the owner-aware inventory.
     assert!(
-        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Local",)
+        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::instance(0), "Local",)
             .is_some(),
         "the local type body must lower under a live lease (this pins the retained snapshot)"
     );

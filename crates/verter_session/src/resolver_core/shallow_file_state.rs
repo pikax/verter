@@ -27,7 +27,7 @@ use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
 use verter_span::Span;
 use verter_type_expr::facts::TypeDependencyPathFact;
-use verter_type_expr::{DeclKey, TopLevelOwnerId, TypeExpr};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TypeExpr};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -67,7 +67,7 @@ pub struct ShallowFileState {
 
     /// Authoritative owner-qualified import table. The public string-keyed
     /// table above is the ordinary-file compatibility projection only.
-    pub(crate) owner_import_targets: FxHashMap<DeclKey, ImportTarget>,
+    pub(crate) owner_import_targets: FxHashMap<DeclBindingKey, ImportTarget>,
 
     /// Parser-authored import/export route inventory from the retained
     /// program. Declaration headers and bodies remain owned by
@@ -86,19 +86,19 @@ pub struct ShallowFileState {
     /// edges, never a lowered body product — body data is read through
     /// the lazy memo accessors ([`Self::type_decl`]). Populated only for
     /// names the header inventory knows; a header miss never inserts.
-    type_deps_cache: dashmap::DashMap<DeclKey, Option<Arc<ClassifiedTypeDeps>>>,
+    type_deps_cache: dashmap::DashMap<DeclBindingKey, Option<Arc<ClassifiedTypeDeps>>>,
 
     /// EAGER synthesised value-symbol HEADERS (the `.vue` implicit
     /// `default` public-instance shape) — header-only records carrying
     /// the `is_synthesised_component_default` provenance flag. The matching
     /// eager body lives in [`Self::synthesised_value_bodies`].
-    synthesised_value_symbols: FxHashMap<DeclKey, Arc<ShallowValueSymbol>>,
+    synthesised_value_symbols: FxHashMap<DeclBindingKey, Arc<ShallowValueSymbol>>,
 
     /// EAGER synthesised value BODIES (the macro-producer-boundary
     /// `LoweredValueDecl` for the `.vue` implicit `default`). Kept in a
     /// dedicated body map rather than hidden inside the header symbol —
     /// `value_decl(name)` routes through it before the lazy memo.
-    synthesised_value_bodies: FxHashMap<DeclKey, Arc<LoweredValueDecl>>,
+    synthesised_value_bodies: FxHashMap<DeclBindingKey, Arc<LoweredValueDecl>>,
 
     /// The local value name a CommonJS `export = X` assigns the whole module
     /// to, when present (part of the shallow EXPORT inventory). `typeof
@@ -763,7 +763,7 @@ impl ShallowFileState {
             .iter()
             .map(|(name, target)| {
                 (
-                    DeclKey::new(TopLevelOwnerId::ordinary_file(), name.as_str()),
+                    DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name.as_str()),
                     target.clone(),
                 )
             })
@@ -854,7 +854,7 @@ impl ShallowFileState {
             FxHashSet::with_capacity_and_hasher(binding_count, Default::default());
         let mut import_targets: FxHashMap<String, ImportTarget> =
             FxHashMap::with_capacity_and_hasher(binding_count, Default::default());
-        let mut owner_import_targets: FxHashMap<DeclKey, ImportTarget> =
+        let mut owner_import_targets: FxHashMap<DeclBindingKey, ImportTarget> =
             FxHashMap::with_capacity_and_hasher(route_inventory.imports.len(), Default::default());
         let mut ambiguous_imports = FxHashSet::default();
 
@@ -949,7 +949,7 @@ impl ShallowFileState {
                 is_namespace: matches!(binding.form, RouteImportForm::Namespace),
                 canonical_id,
             };
-            let key = DeclKey::new(binding.owner, binding.local.as_str());
+            let key = DeclBindingKey::new(binding.owner, binding.local.as_str());
             if ambiguous_imports.contains(&key) {
                 continue;
             }
@@ -1056,11 +1056,11 @@ impl ShallowFileState {
 
     /// Exact declaration key recorded for an exported synthesized value.
     /// The route is the authority: this never searches another owner by name.
-    fn synthesised_export_decl_key(&self, exported_name: &str) -> Option<DeclKey> {
+    fn synthesised_export_decl_key(&self, exported_name: &str) -> Option<DeclBindingKey> {
         let ExportTarget::Local { owner, symbol_name } = self.exports.get(exported_name)? else {
             return None;
         };
-        let key = DeclKey::new(*owner, symbol_name.as_str());
+        let key = DeclBindingKey::new(*owner, symbol_name.as_str());
         self.synthesised_value_symbols
             .contains_key(&key)
             .then_some(key)
@@ -1127,7 +1127,7 @@ impl ShallowFileState {
     /// declaration body through the lazy memo.
     pub fn synthesised_value_bodies(
         &self,
-    ) -> impl Iterator<Item = (&DeclKey, &Arc<LoweredValueDecl>)> {
+    ) -> impl Iterator<Item = (&DeclBindingKey, &Arc<LoweredValueDecl>)> {
         self.synthesised_value_bodies.iter()
     }
 
@@ -1204,7 +1204,7 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .enum_headers
-            .get(&DeclKey::new(TopLevelOwnerId::ordinary_file(), name))
+            .get(&DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name))
             .map(|header| header.member_names.as_slice())
     }
 
@@ -1287,7 +1287,7 @@ impl ShallowFileState {
             .is_some()
             || self
                 .synthesised_value_symbols
-                .contains_key(&DeclKey::new(owner, name))
+                .contains_key(&DeclBindingKey::new(owner, name))
     }
 
     /// Canonical one-way lexical parent for a carrier instance owner.
@@ -1316,7 +1316,7 @@ impl ShallowFileState {
         for candidate in self.lexical_owner_chain(owner) {
             if let Some(target) = self
                 .owner_import_targets
-                .get(&DeclKey::new(candidate, name))
+                .get(&DeclBindingKey::new(candidate, name))
             {
                 return Some(LexicalValueBinding::Import(target));
             }
@@ -1340,7 +1340,7 @@ impl ShallowFileState {
         for candidate in self.lexical_owner_chain(owner) {
             if self
                 .owner_import_targets
-                .contains_key(&DeclKey::new(candidate, name))
+                .contains_key(&DeclBindingKey::new(candidate, name))
             {
                 return None;
             }
@@ -1378,7 +1378,7 @@ impl ShallowFileState {
     ) -> impl Iterator<
         Item = (
             &verter_semantic::analysis::type_eval::AugmentationScopeKind,
-            &DeclKey,
+            &DeclBindingKey,
         ),
     > {
         self.decl_bodies
@@ -1532,7 +1532,7 @@ impl ShallowFileState {
     ) -> Option<Arc<ShallowValueSymbol>> {
         if let Some(synthesised) = self
             .synthesised_value_symbols
-            .get(&DeclKey::new(owner, name))
+            .get(&DeclBindingKey::new(owner, name))
         {
             return Some(Arc::clone(synthesised));
         }
@@ -1586,7 +1586,7 @@ impl ShallowFileState {
     ) -> Option<Arc<LoweredValueDecl>> {
         if let Some(body) = self
             .synthesised_value_bodies
-            .get(&DeclKey::new(owner, name))
+            .get(&DeclBindingKey::new(owner, name))
         {
             return Some(Arc::clone(body));
         }
@@ -1600,7 +1600,7 @@ impl ShallowFileState {
     ) -> DemandOutcome<LoweredValueDecl> {
         if let Some(body) = self
             .synthesised_value_bodies
-            .get(&DeclKey::new(owner, name))
+            .get(&DeclBindingKey::new(owner, name))
         {
             return DemandOutcome::Ready(Some(Arc::clone(body)));
         }
@@ -1769,7 +1769,7 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .type_header_in(owner, name)?;
-        let key = DeclKey::new(owner, name);
+        let key = DeclBindingKey::new(owner, name);
         if let Some(hit) = self.type_deps_cache.get(&key) {
             return hit.clone();
         }
@@ -1805,7 +1805,7 @@ impl ShallowFileState {
     #[cfg(test)]
     pub(crate) fn type_deps_cache_has_none_entry(&self, name: &str) -> bool {
         self.type_deps_cache
-            .get(&DeclKey::new(TopLevelOwnerId::ordinary_file(), name))
+            .get(&DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name))
             .is_some_and(|entry| entry.is_none())
     }
 
@@ -1879,7 +1879,7 @@ impl ShallowFileState {
             let root = path.root();
             if let Some(target) = self
                 .owner_import_targets
-                .get(&DeclKey::new(declaration_owner, root))
+                .get(&DeclBindingKey::new(declaration_owner, root))
             {
                 let (imported_name, member_path) = if target.is_namespace {
                     let Some((exported_name, member_path)) = path.member_path().split_first()
@@ -1959,7 +1959,7 @@ impl ShallowFileState {
             for binding_owner in self.lexical_owner_chain(declaration_owner) {
                 if let Some(target) = self
                     .owner_import_targets
-                    .get(&DeclKey::new(binding_owner, root))
+                    .get(&DeclBindingKey::new(binding_owner, root))
                 {
                     let (imported_name, member_path) = if target.is_namespace {
                         let Some((exported_name, member_path)) = path.member_path().split_first()
@@ -2103,7 +2103,10 @@ impl ShallowFileState {
             .chain(lowered.value_position_paths.iter())
         {
             let root = path.root();
-            if let Some(target) = self.owner_import_targets.get(&DeclKey::new(owner, root)) {
+            if let Some(target) = self
+                .owner_import_targets
+                .get(&DeclBindingKey::new(owner, root))
+            {
                 let external = ExternalSymbolRef {
                     local_name: root.to_string(),
                     source_specifier: target.source_specifier.clone(),
@@ -2251,7 +2254,7 @@ impl ShallowFileState {
         // declaration references a member path such as `NS.Payload`.
         let is_import_local = |name: &str| -> bool {
             self.owner_import_targets
-                .get(&DeclKey::new(owner, name))
+                .get(&DeclBindingKey::new(owner, name))
                 .is_some()
         };
 
@@ -2324,7 +2327,7 @@ impl ShallowFileState {
         } else {
             TopLevelOwnerId::ordinary_file()
         };
-        let key = DeclKey::new(owner, name);
+        let key = DeclBindingKey::new(owner, name);
         let header = ShallowValueSymbol::synthesised_from_lowered(&lowered);
         self.synthesised_value_symbols
             .insert(key.clone(), Arc::new(header));
@@ -2344,7 +2347,7 @@ impl ShallowFileState {
 
     pub(crate) fn is_import_local_in(&self, owner: TopLevelOwnerId, name: &str) -> bool {
         self.owner_import_targets
-            .contains_key(&DeclKey::new(owner, name))
+            .contains_key(&DeclBindingKey::new(owner, name))
     }
 
     /// Get the import target for a local import name.
@@ -2358,7 +2361,7 @@ impl ShallowFileState {
         local_name: &str,
     ) -> Option<&ImportTarget> {
         self.owner_import_targets
-            .get(&DeclKey::new(owner, local_name))
+            .get(&DeclBindingKey::new(owner, local_name))
     }
 
     /// Return the unique local import binding in `owner` whose resolved target
@@ -3622,7 +3625,7 @@ export interface Props { child: Inner; data: Local }
         let owner = TopLevelOwnerId::ordinary_file();
         let import_canonicalization = super::super::prepared_decl::ImportCanonicalization {
             final_resolution: FxHashMap::from_iter([(
-                DeclKey::new(owner, "Inner"),
+                DeclBindingKey::new(owner, "Inner"),
                 verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
                     "/resolved/inner.ts",
                     owner,

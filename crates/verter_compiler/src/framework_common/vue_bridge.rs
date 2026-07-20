@@ -254,7 +254,14 @@ pub struct VueRuntimeCompileExtras {
 /// key dimension) and this constant are conceptually distinct — one keys
 /// the store, the other stamps the artifact — and currently agree by
 /// value, so the rehoused dispatch produces byte-identical artifacts.
-pub const VUE_CARRIER_PARSER_VERSION: u32 = 3;
+///
+/// Bumped 3 → 4: carrier script facts and declaration inventories now
+/// retain exact top-level lexical owners, so the carrier artifact's
+/// post-parse shape changed. This mirrors the session's
+/// `LEGACY_PARSER_VERSION` 3 → 4 bump; the two must agree by value so the
+/// rehoused dispatch neither serves nor is spuriously evicted against the
+/// legacy key dimension.
+pub const VUE_CARRIER_PARSER_VERSION: u32 = 4;
 
 /// The Vue carrier compiler — the reference [`CarrierCompiler`].
 ///

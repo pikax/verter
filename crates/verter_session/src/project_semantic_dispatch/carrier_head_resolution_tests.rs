@@ -498,18 +498,17 @@ fn bare_ref_head_resolves_external_module_augmentation() {
 // file `/real.ts` (`DeclRef@/real.ts`), while the eager `name_resolution`
 // fast-path stores the IMMEDIATE barrel target (`DeclRef@/barrel.ts`) and relies
 // on DOWNSTREAM `ResolveDecl`-through-the-barrel to reach `/real.ts`. Both
-// materialise to the same type, but the carrier-MODE published `DeclRef`
-// IDENTITY differs.
+// materialise to the same type AND — since the prepared import
+// canonicalization walks the full re-export chain to the FINAL defining
+// canonical — both publish the SAME `DeclRef` identity.
 //
-// This is a LATENT divergence: NO production path emits `BareRef` carriers today
-// (the structural lowerer is dormant), so it cannot be validated end-to-end
-// here. Converging the two would require EITHER making the carrier path stop at
-// the barrel (dropping the re-export walk `resolve_bare_name_in_scope` needs for
-// the augmentation / cross-owner cases) OR making the eager fast-path walk to
-// the final file (changing the PRODUCTION eager path, risking regression on
-// exercised code) — neither is a clean carrier-local fix. RECORDED for
-// re-validation at the producer flip. This test CHARACTERIZES the current
-// (divergent) behavior so a future change is forced to update it deliberately.
+// The formerly-recorded LATENT divergence (the eager `name_resolution`
+// fast-path stopping at the IMMEDIATE barrel canonical while the carrier
+// walked to the final file) CLOSED at the producer flip: the eager path's
+// name-resolution table now stores the final defining canonical, which is
+// the convergence direction the original recording named. This test now
+// CHARACTERIZES the converged behavior so a regression that re-splits the
+// two identities is forced to surface deliberately.
 #[test]
 fn carrier_head_barrel_reexport_walks_to_final_file_eager_stops_at_barrel() {
     let host = host();
@@ -541,8 +540,10 @@ fn carrier_head_barrel_reexport_walks_to_final_file_eager_stops_at_barrel() {
         "the carrier path walks the re-export chain to the FINAL defining file (recorded          behavior; eager fast-path stops at the barrel — a LATENT divergence to re-validate          at the producer flip)"
     );
 
-    // CHARACTERIZE the eager fast-path stops at the intermediate barrel — proving
-    // the divergence is real (not interning noise).
+    // CHARACTERIZE the eager fast-path CONVERGED onto the final defining file:
+    // the prepared import canonicalization stores the full-chain final
+    // canonical in the `name_resolution` table, so the eager and carrier
+    // identities agree — the pre-flip barrel-stop divergence is closed.
     let eager = eager_resolved_with_name_resolution(
         &dispatch,
         &TypeExpr::Ref {
@@ -557,8 +558,14 @@ fn carrier_head_barrel_reexport_walks_to_final_file_eager_stops_at_barrel() {
         other => panic!("eager barrel head must be a DeclRef; got {other:?}"),
     };
     assert_eq!(
-        eager_canonical, "/barrel.ts",
-        "the eager name_resolution fast-path stores the IMMEDIATE barrel canonical (recorded          behavior). The carrier/eager carrier-mode DeclRef identities differ here — the LATENT          divergence the producer flip must re-validate."
+        eager_canonical, "/real.ts",
+        "the eager name_resolution fast-path stores the FINAL defining canonical (the \
+         full-chain prepared import canonicalization) — it must agree with the carrier \
+         path's DeclRef identity; a re-split of the two identities is a regression"
+    );
+    assert_eq!(
+        carrier_canonical, eager_canonical,
+        "carrier and eager barrel-head DeclRef identities must stay CONVERGED"
     );
 }
 

@@ -5,7 +5,7 @@ use oxc_span::{GetSpan, SourceType};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 use crate::analysis::classify::{
     classify_store_api, classify_vue_api, is_lifecycle_api, is_reactivity_api,
@@ -104,7 +104,7 @@ fn statement_declares_interface_app_config(stmt: &Statement<'_>) -> bool {
 /// The source index refers to the `imports` Vec for zero-copy source access.
 struct ImportBindingMap {
     /// Canonical `(owner, local_name)` binding index.
-    map: FxHashMap<DeclKey, (usize, Option<VueApiClassification>)>,
+    map: FxHashMap<DeclBindingKey, (usize, Option<VueApiClassification>)>,
     /// Ownerless consumers are permitted only when the name has one unique
     /// definition. `None` is an explicit ambiguity marker.
     unambiguous_by_name: FxHashMap<String, Option<(usize, Option<VueApiClassification>)>>,
@@ -122,7 +122,7 @@ impl ImportBindingMap {
     fn register(&mut self, import_idx: usize, import: &AnalyzedImport) {
         for b in &import.bindings {
             self.map.insert(
-                DeclKey::new(import.owner, b.name.as_str()),
+                DeclBindingKey::new(import.owner, b.name.as_str()),
                 (import_idx, b.vue_api),
             );
             self.unambiguous_by_name
@@ -147,7 +147,7 @@ impl ImportBindingMap {
         name: &str,
     ) -> Option<&'a str> {
         self.map
-            .get(&DeclKey::new(owner, name))
+            .get(&DeclBindingKey::new(owner, name))
             .map(|(idx, _)| imports[*idx].source.as_str())
     }
 

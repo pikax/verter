@@ -836,7 +836,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the DEFINING file's per-canonical env
     /// (`type_env_hash` = `T`, `lib_env_hash` = `L`) and folds the project
     /// identity (`J`) from `host_view_project_identity_for`, building the
-    /// slot DIRECTLY (no `DeclKey` ↔ slot adapter). `symbol_space` is
+    /// slot DIRECTLY (no `DeclBindingKey` ↔ slot adapter). `symbol_space` is
     /// always `Type` — an `Instantiate` base / macro owner is a
     /// type-space carrier (interface / type alias / class-type / builtin
     /// utility / synthetic SFC owner). The slot stays content-free (R6);

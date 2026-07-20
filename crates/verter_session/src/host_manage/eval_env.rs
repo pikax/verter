@@ -100,7 +100,13 @@ impl VerterHost {
     /// API cannot choose between two lexical owners, so ambiguity is `None`.
     /// Import bindings never enter this inventory and cannot mask a local
     /// declaration owned by another SFC region.
-    fn unique_local_type_declaration_owner_in(
+    ///
+    /// `pub(crate)`: the owner-agnostic named-symbol entry
+    /// (`typeinfo::resolve_named_symbol`) selects its dispatch scope owner
+    /// through this same header-inventory rule, so a `<script setup>`-local
+    /// declaration resolves under its authored Instance owner instead of
+    /// missing at the ordinary-file view.
+    pub(crate) fn unique_local_type_declaration_owner_in(
         state: &crate::resolver_core::shallow_file_state::ShallowFileState,
         resolved_name: &str,
     ) -> Option<verter_type_expr::TopLevelOwnerId> {
@@ -906,7 +912,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         canonical: &str,
-        requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclKey>,
+        requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclBindingKey>,
     ) -> Vec<verter_semantic::analysis::type_eval_build::BindingExpansionEntry> {
         if requested_bindings.is_empty() {
             return Vec::new();
@@ -927,7 +933,7 @@ impl VerterHost {
             else {
                 continue;
             };
-            admitted.insert(verter_type_expr::DeclKey::new(
+            admitted.insert(verter_type_expr::DeclBindingKey::new(
                 owner,
                 Arc::clone(&demand.name),
             ));

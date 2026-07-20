@@ -1922,6 +1922,31 @@ mod resolver_core_recursion {
     /// must reject allow-list growth that lacks a structural bound.
     pub(super) const ALLOWED_BOUNDED_RECURSIONS: &[(&str, &str, &str)] = &[
         // -----------------------------------------------------------------
+        // bare_name_resolve.rs — the SFC lexical-owner chain re-entry.
+        // -----------------------------------------------------------------
+        (
+            "bare_name_resolve",
+            "resolve_bare_name_in_scope",
+            "bounded by the validated lexical-parent owner chain: \
+             `validated_lexical_parent_owner` yields Some only for an \
+             Instance/setup owner's single validated Module/companion parent \
+             and the reverse edge does not exist, so the re-entry depth is at \
+             most one extra hop before the parent (Module) owner returns None.",
+        ),
+        // -----------------------------------------------------------------
+        // prepared_decl.rs — scanner name-collision, not true recursion:
+        // the `PreparedTypeDeclCache` / `PreparedDeclBundle` delegate
+        // METHODS named `prepare_augmentation_type_decl_outcome_in` call
+        // the same-named module-scope FREE fn (which never calls itself).
+        // -----------------------------------------------------------------
+        (
+            "prepared_decl",
+            "prepare_augmentation_type_decl_outcome_in",
+            "no true self-recursion: the same-named cache/bundle delegate \
+             methods forward to the module-scope free fn, whose body performs \
+             a single lease-aware demand + prepare with no re-entry.",
+        ),
+        // -----------------------------------------------------------------
         // component_meta/projected_type_expr.rs + direct_macro.rs — TypeExpr/text walkers
         // (pre-Tier-2-W5d: both lived inside component_meta.rs)
         // -----------------------------------------------------------------
@@ -5873,6 +5898,11 @@ mod foundations_guards {
         // verter_lsp::workspace_scanner, verter_lsp::server_utils,
         // verter_lsp::documents, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::compile::CompileTarget",
+        // verter_lsp::lib (public-API projection subject on the
+        // profile-aware projection entry) — the dependency-neutral
+        // failure/subject carrier re-exported so adapters do not
+        // depend on verter_protocol internals.
+        "pub use verter_protocol::types::PublicApiProjectionSubject",
         // tests/cases/g_misc0/relative_path_session_parity.rs
         "pub use id::resolve_external",
         // `ReadSetSignature` is the typed return type of the public
@@ -14739,19 +14769,21 @@ mod typed_ir_resolver_guards {
 
     // -----------------------------------------------------------------------
     // Guard 4c: the export-surface probe in
-    // `host_resolve/external_macro_collector.rs` is a diagnostics-only
-    // adjudicator over HOST-INDEXED facts. It must never grow a parser
-    // re-walk (OXC parse of dependency sources) or call the semantic
-    // dispatch — that would make it a second resolver beside the shared
-    // engine. See the module docs ("Export-surface probe ownership").
+    // `host_resolve/vue_macro_dependency_diagnostics.rs` is a
+    // diagnostics-only adjudicator over HOST-INDEXED facts. It must never
+    // grow a parser re-walk (OXC parse of dependency sources) or call the
+    // semantic dispatch — that would make it a second resolver beside the
+    // shared engine. (The probe moved here when its former owner,
+    // `external_macro_collector.rs`, was deleted with the legacy
+    // external-types rail; the invariant is unchanged.)
     // -----------------------------------------------------------------------
     #[test]
     fn export_probe_consumes_indexed_facts_only() {
         let src = fs::read_to_string(
             super::workspace_root()
-                .join("crates/verter_session/src/host_resolve/external_macro_collector.rs"),
+                .join("crates/verter_session/src/host_resolve/vue_macro_dependency_diagnostics.rs"),
         )
-        .expect("read external_macro_collector.rs");
+        .expect("read vue_macro_dependency_diagnostics.rs");
         for needle in [
             "Parser::new",
             "oxc_parser::",
@@ -14762,7 +14794,7 @@ mod typed_ir_resolver_guards {
         ] {
             assert!(
                 !src.contains(needle),
-                "external_macro_collector.rs must adjudicate from indexed facts only; \
+                "vue_macro_dependency_diagnostics.rs must adjudicate from indexed facts only; \
                  found forbidden `{needle}` (a parser re-walk / second resolver path)"
             );
         }

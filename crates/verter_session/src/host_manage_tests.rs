@@ -2847,12 +2847,14 @@ import { unused } from './unused'
         .build_fallthrough_eval_env_lightweight("/src/App.vue", &snapshot, None)
         .expect("fallthrough owner env should build");
 
+    // Owner-aware presence: setup-owner hydration is keyed by the
+    // import's lexical owner, so check by NAME across owners.
     assert!(
-        env.value_symbols.contains_key("used"),
+        env.value_symbols.keys().any(|key| &*key.name == "used"),
         "template-referenced runtime bindings should still be materialized"
     );
     assert!(
-        !env.value_symbols.contains_key("unused"),
+        !env.value_symbols.keys().any(|key| &*key.name == "unused"),
         "unused runtime imports should stay out of the fallthrough owner env"
     );
 }
@@ -2954,12 +2956,16 @@ import Child from './Child.vue'
         )
         .expect("fallthrough owner env should build");
 
+    // Owner-aware presence: setup-owner hydration is keyed by the
+    // import's lexical owner, so check by NAME across owners.
     assert!(
-        env.value_symbols.contains_key("used"),
+        env.value_symbols.keys().any(|key| &*key.name == "used"),
         "root-branch runtime bindings should still be materialized"
     );
     assert!(
-        !env.value_symbols.contains_key("unusedNested"),
+        !env.value_symbols
+            .keys()
+            .any(|key| &*key.name == "unusedNested"),
         "nested non-root component prop bindings should stay out of the root fallthrough env"
     );
 }

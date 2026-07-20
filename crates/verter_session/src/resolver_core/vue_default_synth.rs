@@ -73,6 +73,22 @@ pub const VUE_INSTANCE_SLOTS_MEMBER: &str = "$slots";
 /// re-parse source, does not call into component-meta, and does not
 /// lower any declaration body — so adding it to `ShallowFileState`
 /// construction stays inside the shallow-processing budget.
+/// The EMPTY-instance synthesized `.vue` default: the implicit component
+/// value symbol of a carrier with no type-based macros (scriptless /
+/// options-less SFCs included). Every genuine `.vue` carrier IS a
+/// component, so its shallow surface always publishes a `default` — the
+/// instance shape is simply the empty closed object. The framework synth
+/// leg composes this as the fallback after
+/// [`synthesise_vue_default_value_symbol`] finds no macro-contributed
+/// members; the typeinfo scratch surface deliberately does NOT take this
+/// fallback (a scratch is not a component).
+#[must_use]
+pub fn empty_vue_default_value_symbol() -> LoweredValueDecl {
+    lowered_value_decl_for_synthesised_default(SemanticTypeSource::Synthesized(
+        ResolvedLocalShape::Object(Arc::from(Vec::new().into_boxed_slice())),
+    ))
+}
+
 #[must_use]
 pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<LoweredValueDecl> {
     let mut members: Vec<SynthesizedMemberFact> = Vec::new();

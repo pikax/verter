@@ -5924,9 +5924,13 @@ fn found_macro_type_with_heritage_via_bare_parent_dir_import_compiles() {
 
     // The dep's OWN compile enumerates its own-body member — and must not
     // degrade it to a null runtime type under the bare-specifier route.
+    // `modelValue?: string` is OPTIONAL, so the Vue-parity runtime shape is
+    // `{ type: String, required: false }` (the same shape an inline optional
+    // prop emits — see verter_compiler `optional_boolean_prop_emits_no_default_type_based`);
+    // pin the full member, not the retired leaner `{ type: String }` slice.
     let dep_code = main_node_code(&bare, "/src/Listbox/ListboxFilter.vue");
     assert!(
-        dep_code.contains("modelValue: { type: String }"),
+        dep_code.contains("modelValue: { type: String, required: false }"),
         "dep's own-body member must keep its runtime type under a '..' heritage import:\n{dep_code}"
     );
     assert!(
@@ -5970,9 +5974,11 @@ fn found_macro_type_with_heritage_via_backslash_parent_dir_import_compiles() {
 
     // The dep's OWN compile enumerates its own-body member — and must not
     // degrade it to a null runtime type under the backslash-specifier route.
+    // `modelValue?: string` is optional ⇒ Vue-parity `{ type: String,
+    // required: false }` (not the retired leaner `{ type: String }` slice).
     let dep_code = main_node_code(&backslash, "/src/Listbox/ListboxFilter.vue");
     assert!(
-        dep_code.contains("modelValue: { type: String }"),
+        dep_code.contains("modelValue: { type: String, required: false }"),
         "dep's own-body member must keep its runtime type under a '..\\index' heritage import:\n{dep_code}"
     );
     assert!(
@@ -6011,9 +6017,11 @@ fn macro_type_root_import_via_bare_parent_dir_specifier_compiles() {
     // Positive: the imported root type's member materialises with its real
     // runtime type — proving `'..'` loaded the PARENT index (the decoy
     // `/src/Comp/index.ts` has no `RootProps`).
+    // `title?: string` is optional ⇒ Vue-parity `{ type: String,
+    // required: false }` (not the retired leaner `{ type: String }` slice).
     let code = main_node_code(&host, "/src/Comp/Comp.vue");
     assert!(
-        code.contains("title: { type: String }"),
+        code.contains("title: { type: String, required: false }"),
         "the '..'-imported root type's member must enumerate with its runtime type:\n{code}"
     );
     assert!(
@@ -6038,9 +6046,11 @@ fn macro_type_root_import_via_bare_current_dir_specifier_compiles() {
     );
 
     assert_compiles_without_macro_type_dep_diag(&host, "/src/Comp/Comp.vue");
+    // `title?: string` is optional ⇒ Vue-parity `{ type: String,
+    // required: false }` (not the retired leaner `{ type: String }` slice).
     let code = main_node_code(&host, "/src/Comp/Comp.vue");
     assert!(
-        code.contains("title: { type: String }"),
+        code.contains("title: { type: String, required: false }"),
         "the '.'-imported root type's member must enumerate with its runtime type:\n{code}"
     );
 }

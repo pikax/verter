@@ -68,27 +68,31 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
     // would erase this assertion.
     //
     // The consumer is split into an owned-view
-    // wrapper (`try_get_cached_resolved_meta_for_view_fingerprint`)
-    // and a view-threading implementation
-    // (`try_get_cached_resolved_meta_for_view_fingerprint_with_store_view`).
-    // The wrapper is a thin delegation to the `_with_store_view`
-    // variant; the architecturally meaningful validation lives in the
-    // implementation function. Source-grep the implementation
-    // function so the architectural intent ("fact-signature validation
-    // happens at the warm-hit gate") is asserted against the live
-    // call site.
+    // wrapper (`try_get_cached_resolved_meta_for_view_fingerprint`),
+    // a value-projecting delegate
+    // (`try_get_cached_resolved_meta_for_view_fingerprint_with_store_view`,
+    // a thin `.map(|lookup| lookup.value)`), and the admission-carrying
+    // implementation
+    // (`..._with_store_view_and_admission`) that OWNS the warm-hit
+    // gate. The architecturally meaningful validation lives in the
+    // `_and_admission` implementation (both the primary
+    // `get_if_valid_with_admission` route and the DerivedRawState
+    // legacy-fallback route). Source-grep that implementation so the
+    // architectural intent ("fact-signature validation happens at the
+    // warm-hit gate") is asserted against the live call site.
     let consumer_src = read_session_src("host_manage/component_meta_methods.rs");
-    let consumer_needle = "fn try_get_cached_resolved_meta_for_view_fingerprint_with_store_view(";
+    let consumer_needle =
+        "fn try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission(";
     let cidx = consumer_src.find(consumer_needle).unwrap_or_else(|| {
         panic!("expected `{consumer_needle}` in host_manage/component_meta_methods.rs")
     });
-    let cend = consumer_src[cidx..]
-        .find("\n    }\n")
-        .expect("try_get_cached_resolved_meta_for_view_fingerprint_with_store_view fn close");
+    let cend = consumer_src[cidx..].find("\n    }\n").expect(
+        "try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission fn close",
+    );
     let cwindow = &consumer_src[cidx..cidx + cend];
     assert!(
         cwindow.contains("view.validates_fact_signature(&cached.fact_versions)"),
-        "try_get_cached_resolved_meta_for_view_fingerprint_with_store_view \
+        "try_get_cached_resolved_meta_for_view_fingerprint_with_store_view_and_admission \
          must gate the warm-hit return on `view.validates_fact_signature(...)`. \
          Window:\n{cwindow}"
     );

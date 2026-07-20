@@ -49,7 +49,7 @@ pub trait ImportedRuntimeValueResolver {
 
 pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResolver>(
     imports: &[AnalyzedImport],
-    owner_local_value_names: &FxHashSet<verter_type_expr::DeclKey>,
+    owner_local_value_names: &FxHashSet<verter_type_expr::DeclBindingKey>,
     required_binding_names: Option<&FxHashSet<String>>,
     env: &mut EvalEnv,
     resolver: &R,
@@ -72,7 +72,7 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
             .filter(|binding| {
                 !binding.is_type_only
                     && !matches!(binding.kind, ImportBindingKind::Namespace)
-                    && !owner_local_value_names.contains(&verter_type_expr::DeclKey::new(
+                    && !owner_local_value_names.contains(&verter_type_expr::DeclBindingKey::new(
                         import.owner,
                         binding.name.as_str(),
                     ))
@@ -465,7 +465,7 @@ mod tests {
         });
         materialize_imported_runtime_values_into_env(
             &imports,
-            &FxHashSet::from_iter([verter_type_expr::DeclKey::new(
+            &FxHashSet::from_iter([verter_type_expr::DeclBindingKey::new(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "theme",
             )]),

@@ -146,7 +146,7 @@ pub(crate) struct LazyBodyFactSource {
     /// Eager synthesised value BODIES (the `.vue` implicit `default`)
     /// — their facts compute from the eager `LoweredValueDecl`, never
     /// the lazy memo.
-    synthesised_value_bodies: FxHashMap<verter_type_expr::DeclKey, Arc<LoweredValueDecl>>,
+    synthesised_value_bodies: FxHashMap<verter_type_expr::DeclBindingKey, Arc<LoweredValueDecl>>,
     computed: Arc<DashMap<FactKey, Fact>>,
 }
 
@@ -158,13 +158,13 @@ impl LazyBodyFactSource {
         // `name` is the backing LOCAL declaration name probed against the
         // body memo; the emitted `Fact.key` stays the original requested
         // key (e.g. `Export(Bar, Type)`), never the backing local key.
-        let (decl_key, space): (verter_type_expr::DeclKey, SymbolSpace) = match key {
+        let (decl_key, space): (verter_type_expr::DeclBindingKey, SymbolSpace) = match key {
             // The `Export` key answers only for names that resolve to a
             // LOCAL declaration — `export { Foo as Bar }` maps the public
             // `Bar` to the backing local `Foo`; reexports are absent from
             // the map and so never compute body facts here.
             FactKey::Export { name, space } => {
-                let key = verter_type_expr::DeclKey::new(
+                let key = verter_type_expr::DeclBindingKey::new(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name.as_ref(),
                 );
@@ -175,7 +175,7 @@ impl LazyBodyFactSource {
             // the historical emission's exported-name split, so consistent
             // absence stays consistent.
             FactKey::LocalDecl { name, space } => {
-                let key = verter_type_expr::DeclKey::new(
+                let key = verter_type_expr::DeclBindingKey::new(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name.as_ref(),
                 );
@@ -183,7 +183,7 @@ impl LazyBodyFactSource {
                     return None;
                 }
                 (
-                    verter_type_expr::DeclKey::new(
+                    verter_type_expr::DeclBindingKey::new(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         name.as_ref(),
                     ),
@@ -266,18 +266,19 @@ pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> HashOu
 /// free references.
 #[derive(Debug)]
 pub(crate) struct ShallowLens {
-    locals: FxHashSet<verter_type_expr::DeclKey>,
-    value_locals: FxHashSet<verter_type_expr::DeclKey>,
-    exported: FxHashSet<verter_type_expr::DeclKey>,
+    locals: FxHashSet<verter_type_expr::DeclBindingKey>,
+    value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
+    exported: FxHashSet<verter_type_expr::DeclBindingKey>,
     /// Maps a public exported name to its backing LOCAL declaration name
     /// for `export { Foo as Bar }` / `export { Foo }` (the latter maps a
     /// name to itself). Built ONLY from `ExportTarget::Local` entries —
     /// reexports are excluded, so they never compute body facts through
     /// the lazy path. The lazy `Export(Bar, …)` fact preserves the public
     /// key `Bar` while lowering/hashing the backing local `Foo`.
-    local_export_targets: FxHashMap<verter_type_expr::DeclKey, verter_type_expr::DeclKey>,
+    local_export_targets:
+        FxHashMap<verter_type_expr::DeclBindingKey, verter_type_expr::DeclBindingKey>,
     /// Maps `local_binding_name → source_specifier`.
-    import_targets: FxHashMap<verter_type_expr::DeclKey, Arc<str>>,
+    import_targets: FxHashMap<verter_type_expr::DeclBindingKey, Arc<str>>,
 }
 
 impl ShallowLens {
@@ -305,7 +306,7 @@ impl ShallowLens {
                 .exports
                 .keys()
                 .map(|name| {
-                    verter_type_expr::DeclKey::new(
+                    verter_type_expr::DeclBindingKey::new(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         name.as_str(),
                     )
@@ -316,11 +317,11 @@ impl ShallowLens {
                 .iter()
                 .filter_map(|(public_name, target)| match target {
                     ExportTarget::Local { owner, symbol_name } => Some((
-                        verter_type_expr::DeclKey::new(
+                        verter_type_expr::DeclBindingKey::new(
                             verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             public_name.as_str(),
                         ),
-                        verter_type_expr::DeclKey::new(*owner, symbol_name.as_str()),
+                        verter_type_expr::DeclBindingKey::new(*owner, symbol_name.as_str()),
                     )),
                     ExportTarget::Reexport { .. } => None,
                 })
@@ -351,7 +352,7 @@ impl ShallowLens {
         name: &str,
         space: SymbolSpace,
     ) -> Option<CrossDeclRef> {
-        let key = verter_type_expr::DeclKey::new(owner, name);
+        let key = verter_type_expr::DeclBindingKey::new(owner, name);
         if let Some(specifier) = self.import_targets.get(&key) {
             return Some(CrossDeclRef::ImportRef {
                 specifier: Arc::clone(specifier),
@@ -403,8 +404,9 @@ impl CrossDeclLens for OwnedShallowLens<'_> {
 #[derive(Debug)]
 pub(crate) struct RouteLens {
     canonical_id: Arc<str>,
-    type_symbols: FxHashSet<verter_type_expr::DeclKey>,
-    import_targets: FxHashMap<verter_type_expr::DeclKey, verter_semantic::facts::ImportRouteTarget>,
+    type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
+    import_targets:
+        FxHashMap<verter_type_expr::DeclBindingKey, verter_semantic::facts::ImportRouteTarget>,
 }
 
 impl RouteLens {
@@ -459,13 +461,13 @@ impl verter_semantic::facts::RouteFactLens for OwnedRouteLens<'_> {
     ) -> Option<verter_semantic::facts::ImportRouteTarget> {
         self.base
             .import_targets
-            .get(&verter_type_expr::DeclKey::new(self.owner, local))
+            .get(&verter_type_expr::DeclBindingKey::new(self.owner, local))
             .cloned()
     }
     fn has_type_symbol(&self, name: &str) -> bool {
         self.base
             .type_symbols
-            .contains(&verter_type_expr::DeclKey::new(self.owner, name))
+            .contains(&verter_type_expr::DeclBindingKey::new(self.owner, name))
     }
     fn own_canonical_id(&self) -> Arc<str> {
         Arc::clone(&self.base.canonical_id)

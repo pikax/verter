@@ -349,8 +349,17 @@ pub(super) enum FamilyKey {
         type_args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     },
+    /// Mode-erased terminal broad-runtime-kind classifier identity. The
+    /// SUBJECT payload is BOXED for the same keyspace-size discipline as
+    /// [`FamilyKey::Relate`]: `BroadRuntimeSubjectLocator` embeds the
+    /// env-bearing `ResolvedDeclSlotIdentity` owner slot plus a member
+    /// route, which by value would make this the largest variant and
+    /// inflate EVERY entry key of the hot `FamilyKey → FamilySlots`
+    /// keyspace past the u2b8 128B bound. Hash/Eq semantics are
+    /// unchanged — two classifier keys differing in any subject or env
+    /// axis map to distinct family identities.
     ClassifyBroadRuntime {
-        subject: crate::locator_identity::BroadRuntimeSubjectLocator,
+        subject: Box<crate::locator_identity::BroadRuntimeSubjectLocator>,
         context: crate::semantic_query::BroadRuntimeContext,
     },
     /// DEDICATED, non-aliasing `Relate` family identity carrying the FULL
@@ -1428,7 +1437,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         ),
         SemanticQueryKey::ClassifyBroadRuntime { subject, context } => (
             FamilyKey::ClassifyBroadRuntime {
-                subject: subject.clone(),
+                subject: Box::new(subject.clone()),
                 context: *context,
             },
             ModeSlot::Single,

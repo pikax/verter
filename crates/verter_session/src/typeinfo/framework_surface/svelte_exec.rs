@@ -1256,12 +1256,12 @@ fn instance_export_display_node(
 /// Resolve one exact owner-qualified Svelte value export into the shared named
 /// member DTO. Instance-surface and module-declaration projectors use this
 /// single resolver so aliases preserve their public name while `typeof`
-/// targets the captured local [`verter_type_expr::DeclKey`].
+/// targets the captured local [`verter_type_expr::DeclBindingKey`].
 pub(crate) fn resolve_svelte_value_export_member(
     ctx: &dyn ResolverContext,
     owner: &str,
     exported_name: &str,
-    binding_key: &verter_type_expr::DeclKey,
+    binding_key: &verter_type_expr::DeclBindingKey,
     source_span: Option<verter_span::Span>,
 ) -> crate::typeinfo::framework_surface::results::NamedTypeMember {
     use crate::typeinfo::framework_surface::results::{NamedTypeMember, NamedTypeMemberOutput};

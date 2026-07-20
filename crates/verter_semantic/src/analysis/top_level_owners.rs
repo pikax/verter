@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_no_typeexpr::NoTypeExpr;
 use verter_span::Span;
-use verter_type_expr::{DeclKey, TopLevelOwnerId, TopLevelOwnerKind};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TopLevelOwnerKind};
 
 #[inline]
 pub(crate) fn checked_authored_ordinal(index: usize) -> Option<u32> {
@@ -21,7 +21,7 @@ pub(crate) fn checked_authored_ordinal(index: usize) -> Option<u32> {
 }
 
 /// Key view accepted by [`DeclMap`]. A bare name is explicitly the ordinary
-/// `Module(0)` compatibility view; owner-aware callers pass a [`DeclKey`].
+/// `Module(0)` compatibility view; owner-aware callers pass a [`DeclBindingKey`].
 pub trait DeclMapKey {
     fn owner(&self) -> TopLevelOwnerId;
     fn name(&self) -> &str;
@@ -37,7 +37,7 @@ impl DeclMapKey for str {
     }
 }
 
-impl DeclMapKey for DeclKey {
+impl DeclMapKey for DeclBindingKey {
     fn owner(&self) -> TopLevelOwnerId {
         self.owner
     }
@@ -50,7 +50,7 @@ impl DeclMapKey for DeclKey {
 /// Single-authority declaration map keyed canonically by `(owner, name)`.
 #[derive(Debug, Clone, NoTypeExpr)]
 pub struct DeclMap<V> {
-    entries: FxHashMap<DeclKey, V>,
+    entries: FxHashMap<DeclBindingKey, V>,
 }
 
 impl<V> Default for DeclMap<V> {
@@ -64,11 +64,13 @@ impl<V> Default for DeclMap<V> {
 impl<V> DeclMap<V> {
     #[must_use]
     pub fn get<Q: DeclMapKey + ?Sized>(&self, key: &Q) -> Option<&V> {
-        self.entries.get(&DeclKey::new(key.owner(), key.name()))
+        self.entries
+            .get(&DeclBindingKey::new(key.owner(), key.name()))
     }
 
     pub fn get_mut<Q: DeclMapKey + ?Sized>(&mut self, key: &Q) -> Option<&mut V> {
-        self.entries.get_mut(&DeclKey::new(key.owner(), key.name()))
+        self.entries
+            .get_mut(&DeclBindingKey::new(key.owner(), key.name()))
     }
 
     #[must_use]
@@ -76,27 +78,30 @@ impl<V> DeclMap<V> {
         self.get(key).is_some()
     }
 
-    pub fn entry(&mut self, key: DeclKey) -> std::collections::hash_map::Entry<'_, DeclKey, V> {
+    pub fn entry(
+        &mut self,
+        key: DeclBindingKey,
+    ) -> std::collections::hash_map::Entry<'_, DeclBindingKey, V> {
         self.entries.entry(key)
     }
 
-    pub fn insert(&mut self, key: DeclKey, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: DeclBindingKey, value: V) -> Option<V> {
         self.entries.insert(key, value)
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, DeclKey, V> {
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, DeclBindingKey, V> {
         self.entries.iter()
     }
 
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, DeclKey, V> {
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, DeclBindingKey, V> {
         self.entries.keys()
     }
 
-    pub fn values(&self) -> std::collections::hash_map::Values<'_, DeclKey, V> {
+    pub fn values(&self) -> std::collections::hash_map::Values<'_, DeclBindingKey, V> {
         self.entries.values()
     }
 
-    pub fn values_mut(&mut self) -> std::collections::hash_map::ValuesMut<'_, DeclKey, V> {
+    pub fn values_mut(&mut self) -> std::collections::hash_map::ValuesMut<'_, DeclBindingKey, V> {
         self.entries.values_mut()
     }
 
@@ -112,8 +117,8 @@ impl<V> DeclMap<V> {
 }
 
 impl<'a, V> IntoIterator for &'a DeclMap<V> {
-    type Item = (&'a DeclKey, &'a V);
-    type IntoIter = std::collections::hash_map::Iter<'a, DeclKey, V>;
+    type Item = (&'a DeclBindingKey, &'a V);
+    type IntoIter = std::collections::hash_map::Iter<'a, DeclBindingKey, V>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.entries.iter()
@@ -129,10 +134,10 @@ impl<V> Index<&str> for DeclMap<V> {
     }
 }
 
-impl<V> Index<&DeclKey> for DeclMap<V> {
+impl<V> Index<&DeclBindingKey> for DeclMap<V> {
     type Output = V;
 
-    fn index(&self, key: &DeclKey) -> &Self::Output {
+    fn index(&self, key: &DeclBindingKey) -> &Self::Output {
         self.get(key)
             .unwrap_or_else(|| panic!("declaration `{key:?}` is not indexed"))
     }

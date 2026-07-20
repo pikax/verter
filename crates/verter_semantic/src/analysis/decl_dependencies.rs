@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use oxc_ast::ast::*;
 use verter_type_expr::facts::TypeDependencyPathFact;
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 /// Owner-qualified declaration path. The lexical root and namespace members
 /// remain separate structural segments; consumers never split dotted text.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct DeclarationPath {
-    pub root: DeclKey,
+    pub root: DeclBindingKey,
     members: Arc<[String]>,
 }
 
@@ -27,7 +27,7 @@ impl<'de> serde::Deserialize<'de> for DeclarationPath {
     {
         #[derive(serde::Deserialize)]
         struct Wire {
-            root: DeclKey,
+            root: DeclBindingKey,
             members: Vec<String>,
         }
 
@@ -51,7 +51,7 @@ impl<'de> serde::Deserialize<'de> for DeclarationPath {
 
 impl DeclarationPath {
     #[must_use]
-    pub fn new<I, S>(root: DeclKey, members: I) -> Self
+    pub fn new<I, S>(root: DeclBindingKey, members: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -69,14 +69,14 @@ impl DeclarationPath {
     }
 
     #[must_use]
-    pub fn root(root: DeclKey) -> Self {
+    pub fn root(root: DeclBindingKey) -> Self {
         Self::new(root, std::iter::empty::<String>())
     }
 
     #[must_use]
     pub fn from_dependency(owner: TopLevelOwnerId, path: &TypeDependencyPathFact) -> Self {
         Self::new(
-            DeclKey::new(owner, path.root()),
+            DeclBindingKey::new(owner, path.root()),
             path.member_path().iter().cloned(),
         )
     }
@@ -90,7 +90,7 @@ impl DeclarationPath {
     /// Namespace segments are joined from their structural representation;
     /// consumers never recover structure by splitting dotted text.
     #[must_use]
-    pub fn qualified_key(&self) -> DeclKey {
+    pub fn qualified_key(&self) -> DeclBindingKey {
         if self.members.is_empty() {
             return self.root.clone();
         }
@@ -106,7 +106,7 @@ impl DeclarationPath {
             name.push('.');
             name.push_str(member);
         }
-        DeclKey::new(self.root.owner, name)
+        DeclBindingKey::new(self.root.owner, name)
     }
 
     #[must_use]
@@ -169,11 +169,11 @@ pub fn collect_statement_dependency_names(
 ) -> Vec<(DeclarationPath, DeclDependencyNames)> {
     match stmt {
         Statement::TSTypeAliasDeclaration(type_alias) => vec![(
-            DeclarationPath::root(DeclKey::new(owner, type_alias.id.name.as_str())),
+            DeclarationPath::root(DeclBindingKey::new(owner, type_alias.id.name.as_str())),
             type_alias_dependency_names(type_alias),
         )],
         Statement::TSInterfaceDeclaration(interface) => vec![(
-            DeclarationPath::root(DeclKey::new(owner, interface.id.name.as_str())),
+            DeclarationPath::root(DeclBindingKey::new(owner, interface.id.name.as_str())),
             interface_dependency_names(interface),
         )],
         Statement::ClassDeclaration(class_decl) => class_decl
@@ -181,7 +181,7 @@ pub fn collect_statement_dependency_names(
             .as_ref()
             .map(|id| {
                 vec![(
-                    DeclarationPath::root(DeclKey::new(owner, id.name.as_str())),
+                    DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
                     class_dependency_names(class_decl),
                 )]
             })
@@ -212,22 +212,34 @@ pub fn collect_statement_dependency_names(
                 match &class_decl.id {
                     Some(id) => vec![
                         (
-                            DeclarationPath::root(DeclKey::new(owner, id.name.as_str())),
+                            DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
                             deps.clone(),
                         ),
-                        (DeclarationPath::root(DeclKey::new(owner, "default")), deps),
+                        (
+                            DeclarationPath::root(DeclBindingKey::new(owner, "default")),
+                            deps,
+                        ),
                     ],
-                    None => vec![(DeclarationPath::root(DeclKey::new(owner, "default")), deps)],
+                    None => vec![(
+                        DeclarationPath::root(DeclBindingKey::new(owner, "default")),
+                        deps,
+                    )],
                 }
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
                 let deps = interface_dependency_names(interface);
                 vec![
                     (
-                        DeclarationPath::root(DeclKey::new(owner, interface.id.name.as_str())),
+                        DeclarationPath::root(DeclBindingKey::new(
+                            owner,
+                            interface.id.name.as_str(),
+                        )),
                         deps.clone(),
                     ),
-                    (DeclarationPath::root(DeclKey::new(owner, "default")), deps),
+                    (
+                        DeclarationPath::root(DeclBindingKey::new(owner, "default")),
+                        deps,
+                    ),
                 ]
             }
             _ => Vec::new(),
@@ -250,7 +262,7 @@ fn collect_module_dependencies(
 ) {
     let namespace = match &module.id {
         TSModuleDeclarationName::Identifier(id) => parent.map_or_else(
-            || DeclarationPath::root(DeclKey::new(owner, id.name.as_str())),
+            || DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
             |parent| parent.appended(id.name.as_str()),
         ),
         TSModuleDeclarationName::StringLiteral(_) => return,
@@ -347,11 +359,11 @@ fn collect_declaration_dependencies(
 ) -> Vec<(DeclarationPath, DeclDependencyNames)> {
     match declaration {
         Declaration::TSTypeAliasDeclaration(type_alias) => vec![(
-            DeclarationPath::root(DeclKey::new(owner, type_alias.id.name.as_str())),
+            DeclarationPath::root(DeclBindingKey::new(owner, type_alias.id.name.as_str())),
             type_alias_dependency_names(type_alias),
         )],
         Declaration::TSInterfaceDeclaration(interface) => vec![(
-            DeclarationPath::root(DeclKey::new(owner, interface.id.name.as_str())),
+            DeclarationPath::root(DeclBindingKey::new(owner, interface.id.name.as_str())),
             interface_dependency_names(interface),
         )],
         Declaration::ClassDeclaration(class_decl) => class_decl
@@ -359,7 +371,7 @@ fn collect_declaration_dependencies(
             .as_ref()
             .map(|id| {
                 vec![(
-                    DeclarationPath::root(DeclKey::new(owner, id.name.as_str())),
+                    DeclarationPath::root(DeclBindingKey::new(owner, id.name.as_str())),
                     class_dependency_names(class_decl),
                 )]
             })

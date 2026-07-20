@@ -35,7 +35,7 @@ use verter_type_expr::facts::{
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::FunctionSpansOrigin;
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 pub type DeclarationId = u64;
 
@@ -688,18 +688,19 @@ pub struct EvalEnv {
     /// so a scoped declaration lookup can address them. Kept separate from
     /// `type_symbols` — these inner declarations never enter the file's
     /// top-level surface.
-    pub augmentation_scopes: FxHashMap<(AugmentationScopeKind, DeclKey), TypeDeclGroup>,
+    pub augmentation_scopes: FxHashMap<(AugmentationScopeKind, DeclBindingKey), TypeDeclGroup>,
     /// Value-space counterpart to [`augmentation_scopes`](Self::augmentation_scopes):
     /// the retained INDEX entries of VALUE declarations (`const`/`let`/`var`,
     /// `function`, `class`, `enum`) nested in `declare module "X" { ... }` /
     /// `declare global { ... }` blocks. Kept separate from `value_symbols`
     /// (file scope) — these augment another module's value surface and are the
     /// typed source for value-space module-augmentation facts.
-    pub augmentation_value_scopes: FxHashMap<(AugmentationScopeKind, DeclKey), ValueDeclGroup>,
+    pub augmentation_value_scopes:
+        FxHashMap<(AugmentationScopeKind, DeclBindingKey), ValueDeclGroup>,
     /// Stable ids assigned to type declarations inserted into this environment.
-    type_decl_ids: FxHashMap<DeclKey, DeclarationId>,
+    type_decl_ids: FxHashMap<DeclBindingKey, DeclarationId>,
     /// Stable ids assigned to value declarations inserted into this environment.
-    value_decl_ids: FxHashMap<DeclKey, DeclarationId>,
+    value_decl_ids: FxHashMap<DeclBindingKey, DeclarationId>,
     /// Traversal budgets for consumers that walk this inventory.
     pub limits: EvalLimits,
     /// Total traversal steps consumed (monotonically increasing).
@@ -807,7 +808,7 @@ impl EvalEnv {
 
     #[must_use]
     pub fn type_group_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&TypeDeclGroup> {
-        self.type_symbols.get(&DeclKey::new(owner, name))
+        self.type_symbols.get(&DeclBindingKey::new(owner, name))
     }
 
     #[must_use]
@@ -817,13 +818,13 @@ impl EvalEnv {
 
     #[must_use]
     pub fn value_group_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&ValueDeclGroup> {
-        self.value_symbols.get(&DeclKey::new(owner, name))
+        self.value_symbols.get(&DeclBindingKey::new(owner, name))
     }
 
     /// Register a type declaration, appending it to the named group in
     /// source/binder order (creating the group if absent).
     pub fn add_type(&mut self, mut decl: TypeDeclInfo) {
-        let key = DeclKey::new(decl.owner, decl.name.as_str());
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
         let decl_id = self.stabilize_type_declaration_id(&key, decl.declaration_id);
         decl.declaration_id = decl_id;
         match self.type_symbols.get_mut(&key) {
@@ -844,7 +845,7 @@ impl EvalEnv {
     /// group's ordinal — deterministic and idempotent under order-preserving
     /// re-registration ([`extend_missing`](Self::extend_missing)).
     pub fn add_value(&mut self, mut decl: ValueDeclInfo) {
-        let key = DeclKey::new(decl.owner, decl.name.as_str());
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
         let decl_id = self.stabilize_value_declaration_id(&key, decl.declaration_id);
         decl.declaration_id = decl_id;
         match self.value_symbols.get_mut(&key) {
@@ -867,7 +868,7 @@ impl EvalEnv {
     /// These declarations are retained for cross-file augmentation stitching
     /// and never enter the file-scope `type_symbols`.
     pub fn add_augmentation_type(&mut self, scope: AugmentationScopeKind, decl: TypeDeclInfo) {
-        let key = DeclKey::new(decl.owner, decl.name.as_str());
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
         match self
             .augmentation_scopes
             .get_mut(&(scope.clone(), key.clone()))
@@ -890,7 +891,7 @@ impl EvalEnv {
         scope: AugmentationScopeKind,
         mut decl: ValueDeclInfo,
     ) {
-        let key = DeclKey::new(decl.owner, decl.name.as_str());
+        let key = DeclBindingKey::new(decl.owner, decl.name.as_str());
         match self
             .augmentation_value_scopes
             .get_mut(&(scope.clone(), key.clone()))
@@ -978,7 +979,9 @@ impl EvalEnv {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<DeclarationId> {
-        self.type_decl_ids.get(&DeclKey::new(owner, name)).copied()
+        self.type_decl_ids
+            .get(&DeclBindingKey::new(owner, name))
+            .copied()
     }
 
     pub fn value_declaration_id(&self, name: &str) -> Option<DeclarationId> {
@@ -990,12 +993,14 @@ impl EvalEnv {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<DeclarationId> {
-        self.value_decl_ids.get(&DeclKey::new(owner, name)).copied()
+        self.value_decl_ids
+            .get(&DeclBindingKey::new(owner, name))
+            .copied()
     }
 
     fn stabilize_type_declaration_id(
         &mut self,
-        key: &DeclKey,
+        key: &DeclBindingKey,
         declaration_id: DeclarationId,
     ) -> DeclarationId {
         if declaration_id != 0 {
@@ -1016,7 +1021,7 @@ impl EvalEnv {
 
     fn stabilize_value_declaration_id(
         &mut self,
-        key: &DeclKey,
+        key: &DeclBindingKey,
         declaration_id: DeclarationId,
     ) -> DeclarationId {
         if declaration_id != 0 {

@@ -19,10 +19,15 @@
 //! - `prepared_type_decl`
 //! - `prepared_value_decl`
 //! - `resolve_imported_type_root`
-//! - `resolve_named_type_export_target`
 //! - `resolve_named_type_export_target_shallow`
 //! - `resolve_owner_direct_import`
 //! - `resolve_type_declaration_for_dep`
+//!
+//! (The former deep `resolve_named_type_export_target` trait method was
+//! DELETED with the legacy eager type-export rail — only the shallow
+//! variant remains on the trait; the deep spelling survives solely as a
+//! `#[cfg(test)]` fixture on `VerterHost` in `host_resolve/route_surface.rs`,
+//! which is not a production shim.)
 //!
 //! Each method MUST contain BOTH a `#[cfg(any(test, feature = "test-support"))]`
 //! arm AND a `#[cfg(not(any(test, feature = "test-support")))] { panic!(...) }`
@@ -54,10 +59,6 @@ const EXPECTED_PANIC_METHODS: &[(&str, &str)] = &[
     (
         "resolve_imported_type_root",
         "bare-host resolve_imported_type_root called from",
-    ),
-    (
-        "resolve_named_type_export_target",
-        "bare-host resolve_named_type_export_target called",
     ),
     (
         "resolve_named_type_export_target_shallow",

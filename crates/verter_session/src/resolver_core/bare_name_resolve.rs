@@ -231,7 +231,7 @@ pub(crate) fn resolve_bare_name_in_scope(
     // declaration/import route has missed. The reverse edge does not exist.
     // Re-entering this resolver with the exact parent owner preserves normal
     // module declaration/import rules and threads that owner into the returned
-    // DeclKey identity; an absent or ambiguous parent fails closed.
+    // DeclBindingKey identity; an absent or ambiguous parent fails closed.
     if let Some(parent_owner) = indexed.as_ref().and_then(|entry| {
         entry
             .shallow_state

@@ -68,11 +68,29 @@ impl ComponentDefaultSynth for VueComponentDefaultSynth {
     fn synthesise(&self, cx: ComponentDefaultSynthCtx<'_>) -> Option<LoweredValueDecl> {
         let ComponentDefaultSynthCtx {
             canonical_id: _,
-            language: _,
+            language,
             macros,
             script_candidates: _,
         } = cx;
         crate::resolver_core::vue_default_synth::synthesise_vue_default_value_symbol(macros)
+            .or_else(|| {
+                // EVERY genuine `.vue` carrier is a component: a scriptless /
+                // macro-less SFC still IS its own implicit `export default`
+                // (the empty-instance component). Without this arm the file
+                // has NO `default` on its shallow EXPORT surface, so a barrel
+                // `export { default as X } from './X.vue'` route walk — the
+                // strict export-surface walk value resolution now shares with
+                // the type rail — misses at the terminal hop and fallthrough
+                // child routing fails. Mirrors the Svelte leg's
+                // always-synthesize contract (an empty candidate set is the
+                // empty-default case, never a no-op). The typeinfo SCRATCH
+                // surface (routed to this leg by the registry despite its
+                // `.ts` classification) keeps the macros-only behavior: a
+                // scratch with no inlined macros synthesizes nothing.
+                language
+                    .is_vue()
+                    .then(crate::resolver_core::vue_default_synth::empty_vue_default_value_symbol)
+            })
     }
 }
 

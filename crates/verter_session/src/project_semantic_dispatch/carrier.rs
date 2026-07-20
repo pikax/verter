@@ -97,6 +97,12 @@ pub(super) struct AuthoredResolutionDebtFrame {
     canonical_id: Arc<str>,
     owner: verter_type_expr::TopLevelOwnerId,
     outstanding: Cell<bool>,
+    /// A demanded OWN-BODY member VALUE reached the unresolved authored
+    /// import. Distinct from `outstanding`: the member LIST (root surface)
+    /// stays authoritative, but the produced surface carries an
+    /// unresolvable demanded value, so the result is typed
+    /// `MISSING_DEPENDENCY`-partial and never admits warm (no-poison).
+    member_value_outstanding: Cell<bool>,
     finished: Cell<bool>,
 }
 
@@ -106,6 +112,7 @@ impl AuthoredResolutionDebtFrame {
             canonical_id: Arc::clone(&root_identity.canonical_id),
             owner: root_identity.owner,
             outstanding: Cell::new(false),
+            member_value_outstanding: Cell::new(false),
             finished: Cell::new(false),
         }
     }
@@ -125,10 +132,15 @@ impl AuthoredResolutionDebtFrame {
         };
         if canonical_id.as_ref() == self.canonical_id.as_ref() && *owner == self.owner {
             match context.merge_role() {
-                // A reference inside an object member's value is locally
-                // classifiable by the member consumer; it does not remove any
-                // member from the authoritative root surface.
-                crate::semantic_query::MemberMergeRole::OwnBody => {}
+                // A reference inside an object member's value does not remove
+                // any member from the authoritative root surface, but the
+                // DEMANDED value itself failed to resolve — record the
+                // member-value debt so the enclosing build folds typed
+                // MISSING_DEPENDENCY partiality and refuses warm admission
+                // while keeping the surface (member list) authoritative.
+                crate::semantic_query::MemberMergeRole::OwnBody => {
+                    self.member_value_outstanding.set(true);
+                }
                 // Root aliases, authored intersection/union arms, and real
                 // interface/class heritage arms contribute to the root
                 // surface. Losing one is authoritative missing-dependency
@@ -149,6 +161,13 @@ impl AuthoredResolutionDebtFrame {
             "authored resolution debt must be finalized exactly once"
         );
         self.outstanding.get()
+    }
+
+    /// Whether a demanded OWN-BODY member value reached the unresolved
+    /// authored import. Read at the same build-exit sites as [`Self::finish`]
+    /// (after it); does not participate in the finalize-once discipline.
+    pub(super) fn member_value_outstanding(&self) -> bool {
+        self.member_value_outstanding.get()
     }
 }
 

@@ -49,9 +49,6 @@ pub mod shallow_surface;
 pub mod surface;
 pub mod symbol_inventory;
 pub mod types;
-// Landed as a production-ready substrate before compiler cutover. Until the
-// compiler begins demanding it, only its focused contract tests call it.
-#[allow(dead_code)]
 pub(crate) mod vue_macro_codegen;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the

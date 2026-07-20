@@ -55,7 +55,8 @@ pub mod span_origins;
 /// query-time `TypeExpr` walking.
 pub mod facts;
 pub use facts::{
-    merge_route_demands, DeclKey, RouteDemand, RouteKeySet, TopLevelOwnerId, TopLevelOwnerKind,
+    merge_route_demands, DeclBindingKey, RouteDemand, RouteKeySet, TopLevelOwnerId,
+    TopLevelOwnerKind,
 };
 
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact

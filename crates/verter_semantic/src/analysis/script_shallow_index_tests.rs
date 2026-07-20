@@ -4,7 +4,7 @@ use oxc_span::SourceType;
 use verter_parser::utils::oxc::script::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptImportRoute, ScriptLocalExportRoute,
 };
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 use super::script_shallow_index::{
     build_script_shallow_index, build_script_shallow_index_with_owners, ScriptShallowIndex,
@@ -30,7 +30,7 @@ export { Props as PublicProps }
 
     assert!(declaration_headers
         .type_headers
-        .contains_key(&DeclKey::new(owner, "Props")));
+        .contains_key(&DeclBindingKey::new(owner, "Props")));
     assert_eq!(
         routes.imports,
         [ScriptImportRoute {
@@ -85,7 +85,7 @@ export { Props as PublicProps }
     assert!(index
         .declaration_headers
         .type_headers
-        .contains_key(&DeclKey::new(module, "Props")));
+        .contains_key(&DeclBindingKey::new(module, "Props")));
     assert_eq!(index.routes.imports[0].owner, module);
     assert_eq!(index.routes.local_exports[0].owner, module);
     assert_eq!(index.routes.local_exports[1].owner, instance);

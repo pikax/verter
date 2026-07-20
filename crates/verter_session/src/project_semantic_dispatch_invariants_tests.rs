@@ -2742,8 +2742,12 @@ fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
         include_str!("resolver_core/component_meta_query_engine/helpers.rs"),
     ];
     let combined = cmqe_files.join("\n");
+    // The dispatch-first lowering entry is the OWNER-AWARE scope spelling
+    // (`lower_type_expr_in_owner_scope_with_mode`): the engine threads the
+    // exact top-level lexical owner into the dispatch lowering so a Vue
+    // module/setup owner pair never collapses onto one scope.
     assert!(
-        combined.contains("dispatch.lower_type_expr_in_scope_with_mode"),
+        combined.contains("dispatch.lower_type_expr_in_owner_scope_with_mode"),
         "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
     );
     assert!(

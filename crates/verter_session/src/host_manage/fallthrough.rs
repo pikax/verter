@@ -516,7 +516,7 @@ impl VerterHost {
                 materialized_runtime_values: std::collections::BTreeSet::new(),
             });
         }
-        let local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclKey> =
+        let local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey> =
             base_env.value_symbols.keys().cloned().collect();
         // Hydration mutates: clone the base env once, hydrate, and
         // hand out a fresh Arc.
@@ -656,7 +656,7 @@ impl VerterHost {
     pub(super) fn materialize_imported_runtime_values_into_env(
         &self,
         snapshot: &FileAnalysisSnapshot,
-        owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclKey>,
+        owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_semantic::analysis::type_eval::EvalEnv,
     ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
@@ -1374,7 +1374,20 @@ impl VerterHost {
         }
         // ALWAYS fires — even when cc.dependencies union is unchanged, the
         // semantic-class slice may have changed (closes F15).
+        //
+        // A file is never its own transitive dependency. The macro
+        // fact-footprint that feeds this axis records the OWNER's own
+        // canonical (its own decl / whole-hash facts are read during macro
+        // resolution), but a self-edge is not a cross-file semantic
+        // transitive dependency. Excluding it keeps the empty-cross-file
+        // case genuinely empty, so removing the last macro type dep fully
+        // clears the axis instead of leaving a spurious self-edge (F15).
+        let transitive_without_self: std::collections::BTreeSet<String> = transitive_deps
+            .iter()
+            .filter(|dep| dep.as_str() != canonical_id)
+            .cloned()
+            .collect();
         self.ws()
-            .replace_semantic_transitive(canonical_id, transitive_deps.clone());
+            .replace_semantic_transitive(canonical_id, transitive_without_self);
     }
 }

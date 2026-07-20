@@ -2126,47 +2126,14 @@ fn collect_named_class(
                     members.push(ObjectMember::Method(signature));
                 }
             }
-            ClassElement::AccessorProperty(prop) => {
-                if let Some(prop_name) = property_key_name(&prop.key) {
-                    let ty = prop
-                        .type_annotation
-                        .as_ref()
-                        .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                        .or_else(|| {
-                            prop.value.as_ref().map(|value| {
-                                infer_declaration_or_unknown(
-                                    value,
-                                    source,
-                                    false,
-                                    &mut inference_unavailable,
-                                )
-                            })
-                        })
-                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Unknown));
-                    let spans = MemberSpans {
-                        declaration: Some(prop.span.into()),
-                        name: Some(prop.key.span().into()),
-                        type_annotation: prop
-                            .type_annotation
-                            .as_ref()
-                            .map(|ta| ta.type_annotation.span().into()),
-                    };
-                    let member =
-                        ObjectMember::Property(verter_type_expr::ObjectProperty::with_visibility(
-                            prop_name,
-                            ty,
-                            false,
-                            false,
-                            visibility_from_ts_accessibility(prop.accessibility),
-                            spans,
-                        ));
-                    if prop.r#static {
-                        static_members.push(member);
-                    } else {
-                        members.push(member);
-                    }
-                }
-            }
+            // `ClassElement::AccessorProperty` (the `accessor` keyword)
+            // deliberately does NOT fold — accessor lowering is out of the
+            // producer's scope on both the constructor (static) and
+            // instance surfaces. The future accessor-projection contract is
+            // tracked by the ignored
+            // `decorators_identity_accessor_decorator_publishes_public_property`
+            // typeinfo test; landing it means projecting the accessor's
+            // PUBLIC get/set surface, not folding the raw property shape.
             _ => {}
         }
     }
@@ -3662,17 +3629,41 @@ fn collect_return_types(
         | Statement::TSGlobalDeclaration(_)
         | Statement::TSImportEqualsDeclaration(_) => Ok(true),
 
+        // Loop / labeled statements: a subtree with NO `return` anywhere in
+        // its STATEMENT tree is RETURN-TRANSPARENT — it contributes no
+        // return arm and never prevents fall-through past it (a `break` /
+        // `continue` inside only exits the construct), so collection of the
+        // CURRENT function-level returns continues exactly (the CF13
+        // labeled-break contract: `outer: for … { break outer } return
+        // "done" as const` infers `"done"`). A loop/labeled subtree that
+        // DOES contain a `return` stays honestly Unsupported: the union's
+        // arms depend on loop reachability/endpoint analysis this collector
+        // does not model, and narrowing there is the exact hazard
+        // `return_inference_flow_rejects_unsupported_instead_of_narrowing`
+        // pins.
         Statement::DoWhileStatement(_)
         | Statement::ForInStatement(_)
         | Statement::ForOfStatement(_)
         | Statement::ForStatement(_)
-        | Statement::WhileStatement(_) => Err(ReturnInferenceUnsupported::Loop.into()),
+        | Statement::WhileStatement(_) => {
+            if statement_subtree_has_return(stmt) {
+                Err(ReturnInferenceUnsupported::Loop.into())
+            } else {
+                Ok(true)
+            }
+        }
         Statement::SwitchStatement(_) => Err(ReturnInferenceUnsupported::Switch.into()),
         Statement::TryStatement(_) => Err(ReturnInferenceUnsupported::Try.into()),
         Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
             Err(ReturnInferenceUnsupported::Jump.into())
         }
-        Statement::LabeledStatement(_) => Err(ReturnInferenceUnsupported::Labeled.into()),
+        Statement::LabeledStatement(_) => {
+            if statement_subtree_has_return(stmt) {
+                Err(ReturnInferenceUnsupported::Labeled.into())
+            } else {
+                Ok(true)
+            }
+        }
         Statement::WithStatement(_) => Err(ReturnInferenceUnsupported::With.into()),
         Statement::ImportDeclaration(_)
         | Statement::ExportAllDeclaration(_)
@@ -3682,6 +3673,50 @@ fn collect_return_types(
         | Statement::TSNamespaceExportDeclaration(_) => {
             Err(ReturnInferenceUnsupported::ModuleDeclaration.into())
         }
+    }
+}
+
+/// Whether a STATEMENT subtree contains a `return` statement of the CURRENT
+/// function. Walks statement structure only — nested function/arrow/class
+/// bodies live in EXPRESSION position and are never entered, so their
+/// `return`s (which belong to the nested function) never count. Drives the
+/// return-transparency rule for loop / labeled statements in
+/// [`collect_return_types`]: a return-free construct is skipped exactly; a
+/// return-bearing one stays typed-Unsupported.
+fn statement_subtree_has_return(stmt: &Statement<'_>) -> bool {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ReturnStatement(_) => true,
+        Statement::BlockStatement(block) => block.body.iter().any(statement_subtree_has_return),
+        Statement::IfStatement(if_stmt) => {
+            statement_subtree_has_return(&if_stmt.consequent)
+                || if_stmt
+                    .alternate
+                    .as_ref()
+                    .is_some_and(statement_subtree_has_return)
+        }
+        Statement::LabeledStatement(labeled) => statement_subtree_has_return(&labeled.body),
+        Statement::WhileStatement(w) => statement_subtree_has_return(&w.body),
+        Statement::DoWhileStatement(d) => statement_subtree_has_return(&d.body),
+        Statement::ForStatement(f) => statement_subtree_has_return(&f.body),
+        Statement::ForInStatement(f) => statement_subtree_has_return(&f.body),
+        Statement::ForOfStatement(f) => statement_subtree_has_return(&f.body),
+        Statement::SwitchStatement(s) => s
+            .cases
+            .iter()
+            .flat_map(|case| case.consequent.iter())
+            .any(statement_subtree_has_return),
+        Statement::TryStatement(t) => {
+            t.block.body.iter().any(statement_subtree_has_return)
+                || t.handler
+                    .as_ref()
+                    .is_some_and(|h| h.body.body.iter().any(statement_subtree_has_return))
+                || t.finalizer
+                    .as_ref()
+                    .is_some_and(|f| f.body.iter().any(statement_subtree_has_return))
+        }
+        Statement::WithStatement(w) => statement_subtree_has_return(&w.body),
+        _ => false,
     }
 }
 

@@ -216,23 +216,17 @@ impl VerterHost {
         }
         let indexed_opt = indexed_serve.map(|serve| serve.indexed);
         if let Some(indexed) = indexed_opt.as_ref() {
-            for import in indexed.shallow_state.import_targets.values() {
-                // Materialise each resolved dependency so a direct-dep
-                // augmenter enters the store BEFORE any target probe runs:
-                // the index cold-scan installs its result on first query,
-                // and an augmenter that has not entered `FileArtifactStore`
-                // contributes nothing (R29). Indexing every dep up front
-                // (rather than interleaved with probing) keeps the result
-                // independent of the unordered import-table iteration. A
-                // FENCED dep serve published no artifacts row — fail
-                // closed (see the owner serve above).
-                if !import.canonical_id.is_empty()
-                    && self
-                        .ensure_indexed_ready_serve(&import.canonical_id)
-                        .is_some_and(|serve| !serve.store_published)
-                {
-                    return true;
-                }
+            // Iterate `owner_import_targets` — the per-owner binding-import
+            // inventory keyed by `(top_level_owner, local)` — NOT the
+            // name-keyed `import_targets`. `import_targets` only carries
+            // bindings whose owner is `ordinary_file`, so a `.vue`
+            // `<script setup>` import (whose bindings carry a module/instance
+            // top-level owner, per the carrier's multi-block ownership) never
+            // lands there and the probe would see ZERO binding imports for
+            // every SFC. `owner_import_targets` carries every binding import
+            // regardless of top-level owner, so a `.vue` owner's cross-file
+            // imports are visible to the augmentation probe.
+            for import in indexed.shallow_state.owner_import_targets.values() {
                 let specifier = import.source_specifier.as_str();
                 // Relative classification is the full TS `pathIsRelative`
                 // class (bare `.`/`..` + `./`/`../`/`.\`/`..\` prefixes) —
@@ -243,10 +237,44 @@ impl VerterHost {
                 // probe reports "no augmenters", and a Content request
                 // admits a content-addressed entry with NO augmenter
                 // fingerprint — stale serves after the augmenter edits.
-                if verter_workspace::resolver::is_relative_specifier(specifier) {
-                    per_import_targets.push(AugmentationTargetKind::ResolvedRelativeCanonical(
-                        Arc::from(import.canonical_id.as_str()),
-                    ));
+                let is_relative = verter_workspace::resolver::is_relative_specifier(specifier);
+                // Resolve a relative specifier's canonical: prefer the
+                // shallow-baked `canonical_id`, falling back to the live
+                // type-dependency resolver when it is empty (a bare-`.`/`..`
+                // edge whose shallow-time route resolver returned nothing) so
+                // a `ResolvedRelativeCanonical("")` never silently matches no
+                // augmenter. The live resolver is the SAME `pathIsRelative`
+                // authority the fact-side matcher uses.
+                let resolved: Arc<str> = if !import.canonical_id.is_empty() {
+                    Arc::from(import.canonical_id.as_str())
+                } else if is_relative {
+                    resolver(canonical, specifier)
+                        .filter(|c| !c.is_empty())
+                        .unwrap_or_else(|| Arc::from(""))
+                } else {
+                    Arc::from("")
+                };
+                // Materialise each resolved dependency so a direct-dep
+                // augmenter enters the store BEFORE any target probe runs:
+                // the index cold-scan installs its result on first query,
+                // and an augmenter that has not entered `FileArtifactStore`
+                // contributes nothing (R29). Indexing every dep up front
+                // (rather than interleaved with probing) keeps the result
+                // independent of the unordered import-table iteration. A
+                // FENCED dep serve published no artifacts row — fail
+                // closed (see the owner serve above).
+                if !resolved.is_empty()
+                    && self
+                        .ensure_indexed_ready_serve(&resolved)
+                        .is_some_and(|serve| !serve.store_published)
+                {
+                    return true;
+                }
+                if is_relative {
+                    if !resolved.is_empty() {
+                        per_import_targets
+                            .push(AugmentationTargetKind::ResolvedRelativeCanonical(resolved));
+                    }
                 } else if !specifier.contains('*') {
                     per_import_targets.push(AugmentationTargetKind::ExternalSpecifier(
                         InternedSpecifier::from(specifier),

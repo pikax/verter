@@ -31,13 +31,13 @@ pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
 /// exact visible declaration owner before expansion.
 pub fn collect_requested_binding_demands(
     macros: &[AnalyzedMacro],
-) -> BTreeSet<verter_type_expr::DeclKey> {
+) -> BTreeSet<verter_type_expr::DeclBindingKey> {
     macros
         .iter()
         .flat_map(|mac| {
             mac.expose_fields
                 .iter()
-                .map(|field| verter_type_expr::DeclKey::new(mac.owner, field.name.as_str()))
+                .map(|field| verter_type_expr::DeclBindingKey::new(mac.owner, field.name.as_str()))
         })
         .collect()
 }

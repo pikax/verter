@@ -2691,6 +2691,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let unresolved_owner_debt = authored_resolution_debt
                 .as_ref()
                 .is_some_and(|debt| debt.finish());
+            let member_value_debt = authored_resolution_debt
+                .as_ref()
+                .is_some_and(|debt| debt.member_value_outstanding());
+            if member_value_debt && !unresolved_owner_debt {
+                // Demanded OWN-BODY member value reached the unresolved
+                // authored import: typed MISSING_DEPENDENCY partiality +
+                // no warm admission, while the root surface stays
+                // authoritative.
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+                );
+            }
             if unresolved_owner_debt {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                     crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
@@ -2871,6 +2883,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                 crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
             );
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+            );
+        }
+        let member_value_debt = authored_resolution_debt
+            .as_ref()
+            .is_some_and(|debt| debt.member_value_outstanding());
+        if member_value_debt && !unresolved_owner_debt {
+            // Demanded OWN-BODY member value reached the unresolved authored
+            // import: the member LIST stays authoritative (no RecursiveRef
+            // downgrade), but the produced surface is typed
+            // MISSING_DEPENDENCY-partial and refuses warm admission — the
+            // fold sets both the completeness scope and the build-local
+            // taint (result_is_partial + cache_suppress).
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
             );

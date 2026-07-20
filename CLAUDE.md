@@ -29,7 +29,7 @@ Architectural consequence:
 
 **Audit infrastructure:** Rust-first deterministic per-request observability for every audited `VerterHost` entry-point (component-meta, type-resolution, compile, analyze, workspace ops, LSP handlers, MCP tools, bundler batches). TS bindings in `packages/types/audit.generated.ts`; opt-in via `HostConfig::audit_enabled + footprint_capture`. See `/audit-infrastructure` and [`docs/audit-footprint/`](docs/audit-footprint/).
 
-Guards: `verter_audit_no_upward_deps`, `audit_substrate_isolation`, `audit_observer_single_accessor`; single-engine cluster (registered under Macro Type Traversal Rule): `no_new_resolve_type_engine_path_production_file`, `no_new_resolved_elements_production_file`, `no_new_prepared_surface_projection_production_file`, `no_new_from_eager_meta_production_site`, `no_new_duplicate_read_surface_members_definition`.
+Guards: `verter_audit_no_upward_deps`, `audit_substrate_isolation`, `audit_observer_single_accessor`. The former single-engine `no_new_*` shrinking-ledger scanners retired with the deleted parser-owned `type_surface` engine; the single-engine invariant is now held structurally (the compiler consumes only the dependency-neutral macro DTO) plus the Vue macro boundary suite registered under "Vue Macro Semantic Boundary" in `CRITICAL_RULE_GUARDS`.
 
 ### Build Philosophy (CRITICAL)
 
@@ -109,7 +109,7 @@ When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, c
 
 **Owned resolution is bounded by `workspace_root`:** `node_modules` and package `#imports` ancestor walks stop at `IdeProjectConfig.workspace_root`.
 
-Guards: `root_conditional_still_distributes`, `no_macro_string_heuristics_in_resolver_core`, `no_text_based_macro_surface_projection_helpers`, `no_role_inference_from_name_suffix`, `no_pick_or_omit_string_prefix_check`, plus the `no_new_*` single-engine shrinking-ledger cluster — full list in `CRITICAL_RULE_GUARDS`.
+Guards: `root_conditional_still_distributes`, `no_macro_string_heuristics_in_resolver_core`, `no_text_based_macro_surface_projection_helpers`, `no_role_inference_from_name_suffix`, `no_pick_or_omit_string_prefix_check` — full list in `CRITICAL_RULE_GUARDS` (the retired `no_new_*` shrinking-ledger scanners left with the deleted `type_surface` engine; the compile-boundary half of the invariant is guarded under "Vue Macro Semantic Boundary").
 
 See `/type-resolution` skill for the full traversal rules and resolver mode details.
 

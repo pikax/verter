@@ -47,7 +47,12 @@ impl VerterHost {
     /// discarded route facts are the only proof a barrel retarget
     /// invalidates the enclosing cache entry. Memoized builds route
     /// through the `_with_facts` sibling and record the facts onto the
-    /// active tracer.
+    /// active tracer. Production request-bound contexts now call the
+    /// `_with_facts_with_store_view` sibling directly; the sole
+    /// remaining caller is the test-support arm of the panic-shimmed
+    /// `ResolverContext::resolve_imported_type_root`, so this wrapper
+    /// is gated to that configuration.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn resolve_imported_type_root_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,

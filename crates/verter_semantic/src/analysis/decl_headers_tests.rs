@@ -25,7 +25,7 @@ fn owner_scoped_headers_do_not_merge_same_name_declarations() {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 interface Shared { moduleA: string }
@@ -47,11 +47,11 @@ namespace Ns { export class C { value!: string } }
     let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
     let module_header = index
         .type_headers
-        .get(&DeclKey::new(module, "Shared"))
+        .get(&DeclBindingKey::new(module, "Shared"))
         .expect("module Shared");
     let instance_header = index
         .type_headers
-        .get(&DeclKey::new(instance, "Shared"))
+        .get(&DeclBindingKey::new(instance, "Shared"))
         .expect("instance Shared");
 
     assert_eq!(module_header.contributors.len(), 2);
@@ -65,17 +65,17 @@ namespace Ns { export class C { value!: string } }
         0
     );
 
-    let namespaced = DeclKey::new(instance, "Ns.C");
+    let namespaced = DeclBindingKey::new(instance, "Ns.C");
     assert!(index.type_headers.contains_key(&namespaced));
     assert!(index.value_headers.contains_key(&namespaced));
 }
 
 #[test]
 fn ordinary_header_entry_point_uses_module_zero_owner() {
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let index = index_for("interface Props { value: string }");
-    let key = DeclKey::new(TopLevelOwnerId::ordinary_file(), "Props");
+    let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "Props");
     let header = index.type_headers.get(&key).expect("ordinary Props");
     assert_eq!(header.contributors[0].anchor.owner, key.owner);
     assert_eq!(header.contributors[0].anchor.owner_local_ordinal, 0);
@@ -87,7 +87,7 @@ fn default_export_aliases_are_scoped_by_lexical_owner() {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 export default interface ModuleDefault { module: string }
@@ -107,11 +107,11 @@ export default interface InstanceDefault { instance: number }
     let index = build_decl_header_index_with_owners(&parsed.program, source, &owners);
     let module_default = index
         .type_headers
-        .get(&DeclKey::new(module, "default"))
+        .get(&DeclBindingKey::new(module, "default"))
         .expect("module default alias");
     let instance_default = index
         .type_headers
-        .get(&DeclKey::new(instance, "default"))
+        .get(&DeclBindingKey::new(instance, "default"))
         .expect("instance default alias");
     assert_eq!(module_default.contributors[0].anchor.owner, module);
     assert_eq!(instance_default.contributors[0].anchor.owner, instance);
@@ -125,7 +125,7 @@ fn jsdoc_typedef_headers_use_attachment_or_explicit_region_owner() {
     use oxc_parser::Parser;
     use oxc_span::SourceType;
     use verter_span::Span;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 /** @typedef {string} Shared */
@@ -146,11 +146,11 @@ const instanceMarker = 0;
 
     let module_header = index
         .type_headers
-        .get(&DeclKey::new(module, "Shared"))
+        .get(&DeclBindingKey::new(module, "Shared"))
         .expect("module typedef");
     let instance_header = index
         .type_headers
-        .get(&DeclKey::new(instance, "Shared"))
+        .get(&DeclBindingKey::new(instance, "Shared"))
         .expect("instance typedef");
     let module_typedef = module_header.jsdoc_typedef.expect("module locator");
     let instance_typedef = instance_header.jsdoc_typedef.expect("instance locator");
@@ -175,7 +175,7 @@ const instanceMarker = 0;
         build_decl_header_index_with_owners(&regional.program, regional_source, &regional_owners);
     assert!(regional_index
         .type_headers
-        .contains_key(&DeclKey::new(instance, "Regional")));
+        .contains_key(&DeclBindingKey::new(instance, "Regional")));
 
     let unowned = TopLevelOwnerTable::try_from_statement_owners(1, [instance])
         .expect("single carrier owner is not an implicit region");
@@ -186,12 +186,13 @@ const instanceMarker = 0;
         build_decl_header_index_with_owners(&unowned_program.program, unowned_source, &unowned);
     assert!(!unowned_index
         .type_headers
-        .contains_key(&DeclKey::new(instance, "Unowned")));
+        .contains_key(&DeclBindingKey::new(instance, "Unowned")));
 
     let ordinary = index_for("/** @typedef {string} Ordinary */");
-    assert!(ordinary
-        .type_headers
-        .contains_key(&DeclKey::new(TopLevelOwnerId::ordinary_file(), "Ordinary")));
+    assert!(ordinary.type_headers.contains_key(&DeclBindingKey::new(
+        TopLevelOwnerId::ordinary_file(),
+        "Ordinary"
+    )));
 }
 
 #[test]
@@ -201,7 +202,7 @@ fn augmentation_contributors_retain_lexical_owner() {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 declare module "pkg" { interface Config { module: string } }
@@ -223,10 +224,10 @@ declare module "pkg" { interface Config { instance: number } }
         .expect("pkg augmentation");
 
     let module_header = scoped
-        .get(&DeclKey::new(module, "Config"))
+        .get(&DeclBindingKey::new(module, "Config"))
         .expect("module Config");
     let instance_header = scoped
-        .get(&DeclKey::new(instance, "Config"))
+        .get(&DeclBindingKey::new(instance, "Config"))
         .expect("instance Config");
     assert_eq!(module_header.contributors.len(), 1);
     assert_eq!(instance_header.contributors.len(), 1);
@@ -424,7 +425,7 @@ fn vue_ignore_facts_are_scoped_to_exact_merged_contributor_and_lexical_owner() {
     use oxc_parser::Parser;
     use oxc_span::SourceType;
     use verter_type_expr::facts::VueIgnoredHeritageFact;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 interface Shared extends /* @vue-ignore */ Imported<string>, Kept {}
@@ -447,7 +448,7 @@ interface Child extends Shared {}
     assert_eq!(
         index
             .type_headers
-            .get(&DeclKey::new(module, "Shared"))
+            .get(&DeclBindingKey::new(module, "Shared"))
             .expect("module Shared")
             .vue_ignored_heritage
             .as_ref(),
@@ -465,7 +466,7 @@ interface Child extends Shared {}
     assert!(
         index
             .type_headers
-            .get(&DeclKey::new(instance, "Shared"))
+            .get(&DeclBindingKey::new(instance, "Shared"))
             .expect("instance Shared")
             .vue_ignored_heritage
             .is_empty(),

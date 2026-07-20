@@ -456,7 +456,7 @@ fn c4_dependency_value_symbol_graph_native_matches_oracle_and_is_bounded() {
             .unwrap_or_else(|| panic!("oracle must know `{name}`"));
 
         let graph = host
-            .dependency_value_symbol_graph_native("/src/dep.ts", name)
+            .dependency_value_symbol_graph_native_for_test("/src/dep.ts", name)
             .unwrap_or_else(|| panic!("graph-native reader must know `{name}`"));
 
         // Field-by-field equivalence (declaration_id is the opaque,
@@ -489,7 +489,7 @@ fn c4_dependency_value_symbol_graph_native_matches_oracle_and_is_bounded() {
 
     // A missing value symbol → None (graph-native miss).
     assert!(host
-        .dependency_value_symbol_graph_native("/src/dep.ts", "nope")
+        .dependency_value_symbol_graph_native_for_test("/src/dep.ts", "nope")
         .is_none());
 }
 
@@ -595,8 +595,8 @@ fn c4_dependency_value_symbol_graph_native_is_bounded_on_fresh_host() {
     );
 
     // Run ONLY the graph-native per-name reader (oracle never called).
-    let theme = host.dependency_value_symbol_graph_native("/src/dep.ts", "theme");
-    let count = host.dependency_value_symbol_graph_native("/src/dep.ts", "count");
+    let theme = host.dependency_value_symbol_graph_native_for_test("/src/dep.ts", "theme");
+    let count = host.dependency_value_symbol_graph_native_for_test("/src/dep.ts", "count");
     assert!(theme.is_some(), "graph-native reader must know `theme`");
     assert!(count.is_some(), "graph-native reader must know `count`");
 
@@ -700,7 +700,7 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
         &self,
         source: &crate::resolver_core::ValueDeclIdentity,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
-        self.host.dependency_value_symbol_graph_native_in(source)
+        self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(
@@ -759,7 +759,7 @@ fn materializer_touched_source_pairs(
         crate::host_manage::component_meta_extract::collect_required_template_runtime_value_names(
             snapshot,
         );
-    let owner_local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclKey> = host
+    let owner_local_value_names: rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey> = host
         .base_eval_env_arc(owner)
         .map(|env| env.value_symbols.keys().cloned().collect())
         .unwrap_or_default();
@@ -959,15 +959,22 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
         .expect("the oracle must build the lightweight fallthrough env");
 
     // SURFACE positive: the required cross-file binding `theme` is hydrated.
+    // Owner-aware surface read: SFC setup imports hydrate under the
+    // import's lexical Instance owner, so presence is checked by NAME
+    // across owners (the owner-aware DeclMap's bare-str view is the
+    // ordinary-file compatibility view only).
+    let has_value_named = |env: &verter_semantic::analysis::type_eval::EvalEnv,
+                           name: &str|
+     -> bool { env.value_symbols.keys().any(|key| &*key.name == name) };
     assert!(
-        env.value_symbols.contains_key("theme"),
+        has_value_named(&env, "theme"),
         "the oracle must hydrate the required cross-file binding `theme` into its \
          runtime-value surface (matching the graph-native dep set's required selection)"
     );
     // SURFACE negative: the unused `helper` is NOT hydrated — the surface
     // reflects the SAME required-name filter the dep set applies.
     assert!(
-        !env.value_symbols.contains_key("helper"),
+        !has_value_named(&env, "helper"),
         "the oracle must NOT hydrate the unused `helper` binding (it is not in the \
          graph-native dep set); a surface that hydrated it would diverge from the set"
     );
@@ -978,12 +985,13 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
     // SAME source the graph-native set resolves, not a barrel-stop.
     let source = deps.iter().next().expect("one dep identity");
     let graph_source = host
-        .dependency_value_symbol_graph_native_in(source)
+        .dependency_value_symbol_graph_native(source)
         .expect("graph-native reader must resolve the dep-pair source");
     let oracle_binding = env
         .value_symbols
-        .get("theme")
-        .map(|group| group.primary().clone())
+        .iter()
+        .find(|(key, _)| &*key.name == "theme")
+        .map(|(_, group)| group.primary().clone())
         .expect("the oracle-hydrated `theme` binding must be present");
     assert_eq!(
         oracle_binding.object_shape, graph_source.object_shape,

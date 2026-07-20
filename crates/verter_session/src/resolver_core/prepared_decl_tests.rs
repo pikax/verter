@@ -19,7 +19,7 @@ fn ordinary_import_canonicalization(entries: &[(&str, &str, &str)]) -> ImportCan
             .iter()
             .map(|(local_name, canonical_id, symbol_name)| {
                 (
-                    verter_type_expr::DeclKey::new(owner, *local_name),
+                    verter_type_expr::DeclBindingKey::new(owner, *local_name),
                     ResolvedRootIdentity::new_in_owner(*canonical_id, owner, *symbol_name),
                 )
             })
@@ -64,7 +64,7 @@ export interface Props extends /* @vue-ignore */ Imported<string> { own: number 
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let import_canonicalization = ImportCanonicalization {
         final_resolution: FxHashMap::from_iter([(
-            verter_type_expr::DeclKey::new(owner, "Imported"),
+            verter_type_expr::DeclBindingKey::new(owner, "Imported"),
             ResolvedRootIdentity::new_in_owner("/src/base.ts", owner, "Imported"),
         )]),
     };

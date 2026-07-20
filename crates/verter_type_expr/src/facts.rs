@@ -135,12 +135,12 @@ impl Default for TopLevelOwnerId {
     NoTypeExpr,
     NoStoredSpan,
 )]
-pub struct DeclKey {
+pub struct DeclBindingKey {
     pub owner: TopLevelOwnerId,
     pub name: Arc<str>,
 }
 
-impl DeclKey {
+impl DeclBindingKey {
     #[must_use]
     pub fn new(owner: TopLevelOwnerId, name: impl Into<Arc<str>>) -> Self {
         Self {
@@ -152,7 +152,7 @@ impl DeclKey {
 
 #[cfg(test)]
 mod top_level_owner_identity_tests {
-    use super::{DeclKey, TopLevelOwnerId, TopLevelOwnerKind, ValueDeclIdentityPart};
+    use super::{DeclBindingKey, TopLevelOwnerId, TopLevelOwnerKind, ValueDeclIdentityPart};
     use crate::locators::{AuthoredAnchor, LocatorSymbolSpace};
     use crate::span_origins::DeclContributorAnchor;
     use std::collections::HashSet;
@@ -187,15 +187,15 @@ mod top_level_owner_identity_tests {
 
     #[test]
     fn declaration_key_discriminates_same_name_across_owners() {
-        let module = DeclKey::new(TopLevelOwnerId::module(0), "Props");
-        let instance = DeclKey::new(TopLevelOwnerId::instance(0), "Props");
+        let module = DeclBindingKey::new(TopLevelOwnerId::module(0), "Props");
+        let instance = DeclBindingKey::new(TopLevelOwnerId::instance(0), "Props");
 
         assert_eq!(module.name.as_ref(), "Props");
         assert_ne!(module, instance);
         assert_ne!(hash_of(&module), hash_of(&instance));
 
         let json = serde_json::to_string(&instance).expect("serialize key");
-        let round_trip: DeclKey = serde_json::from_str(&json).expect("deserialize key");
+        let round_trip: DeclBindingKey = serde_json::from_str(&json).expect("deserialize key");
         assert_eq!(round_trip, instance);
     }
 
@@ -2884,7 +2884,7 @@ pub struct SvelteModuleExportFact {
     /// Exact neutral lexical owner of the export statement.
     pub owner: crate::TopLevelOwnerId,
     /// Exact owner-qualified local value binding.
-    pub binding_key: crate::DeclKey,
+    pub binding_key: crate::DeclBindingKey,
 }
 
 /// The narrowed persisted `SvelteScriptFacts`. `props_type` /

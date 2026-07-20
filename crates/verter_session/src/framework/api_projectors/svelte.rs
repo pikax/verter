@@ -26,7 +26,7 @@ use verter_type_expr::facts::{
     FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource,
 };
 use verter_type_expr::locators::AuthoredBodyLocator;
-use verter_type_expr::{DeclKey, TopLevelOwnerId};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
 use crate::framework::api_projector::{
     ComponentApiProjection, ComponentApiProjector, ComponentApiProjectorCtx,
@@ -164,7 +164,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // (leaf refs in the props fact + dispatcher map + export facts) so the
         // prelude imports ONLY the referenced owner-qualified bindings. A bare
         // name is insufficient for split module/instance scripts.
-        let mut referenced: BTreeSet<DeclKey> = BTreeSet::new();
+        let mut referenced: BTreeSet<DeclBindingKey> = BTreeSet::new();
         if let Some(props) = props_type {
             collect_fact_refs(props, component_owner, &mut referenced);
         }
@@ -403,13 +403,13 @@ struct PropNameMapping {
 
 struct ResolvedPublicExports {
     text: String,
-    type_references: BTreeSet<DeclKey>,
+    type_references: BTreeSet<DeclBindingKey>,
 }
 
 struct ResolvedPublicModuleExport {
     exported_name: String,
     type_annotation: String,
-    type_references: BTreeSet<DeclKey>,
+    type_references: BTreeSet<DeclBindingKey>,
 }
 
 /// Read the authored Svelte tooling `generics="..."` declaration from the
@@ -725,7 +725,7 @@ fn resolve_public_module_exports(
                 type_references: member
                     .type_references
                     .into_iter()
-                    .map(|name| DeclKey::new(export.binding_key.owner, name))
+                    .map(|name| DeclBindingKey::new(export.binding_key.owner, name))
                     .collect(),
             }
         })
@@ -766,8 +766,16 @@ fn locator_owner(locator: &AuthoredBodyLocator) -> TopLevelOwnerId {
     }
 }
 
-fn collect_owned_refs(owner: TopLevelOwnerId, names: &[String], out: &mut BTreeSet<DeclKey>) {
-    out.extend(names.iter().map(|name| DeclKey::new(owner, name.as_str())));
+fn collect_owned_refs(
+    owner: TopLevelOwnerId,
+    names: &[String],
+    out: &mut BTreeSet<DeclBindingKey>,
+) {
+    out.extend(
+        names
+            .iter()
+            .map(|name| DeclBindingKey::new(owner, name.as_str())),
+    );
 }
 
 /// Use the AST-captured type spelling only when every local reference it names
@@ -1086,23 +1094,27 @@ fn render_type_only_import(
 /// ONE level into the shim, so its member value refs are preserved references
 /// the prelude must import. A locator-backed fact carries no name — honestly
 /// nothing to import (the consumer re-resolves the authored position).
-fn collect_fact_refs(fact: &FactOrLocator, owner: TopLevelOwnerId, out: &mut BTreeSet<DeclKey>) {
+fn collect_fact_refs(
+    fact: &FactOrLocator,
+    owner: TopLevelOwnerId,
+    out: &mut BTreeSet<DeclBindingKey>,
+) {
     match fact {
         FactOrLocator::Leaf(LeafTypeFact::Ref(name)) => {
-            out.insert(DeclKey::new(owner, name.as_str()));
+            out.insert(DeclBindingKey::new(owner, name.as_str()));
         }
         // A closed union of leaves contributes each leaf `Ref` name.
         FactOrLocator::LeafUnion(leaves) => {
             for leaf in leaves.iter() {
                 if let LeafTypeFact::Ref(name) = leaf {
-                    out.insert(DeclKey::new(owner, name.as_str()));
+                    out.insert(DeclBindingKey::new(owner, name.as_str()));
                 }
             }
         }
         FactOrLocator::LeafObject(members) => {
             for member in members.iter() {
                 if let LeafTypeFact::Ref(name) = &member.ty {
-                    out.insert(DeclKey::new(owner, name.as_str()));
+                    out.insert(DeclBindingKey::new(owner, name.as_str()));
                 }
             }
         }

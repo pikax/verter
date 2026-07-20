@@ -111,6 +111,17 @@ fn top_level_owner_table_from_region_spans(
     regions: &[(verter_span::Span, verter_language::ScriptRegionKind)],
 ) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
     let mut regions = regions.to_vec();
+    // A script block with no inline content — an external `<script src=...>`
+    // block, or a genuinely empty `<script></script>` — contributes NO
+    // top-level statements to the parsed program (an external source is
+    // merged in later, at compile time). The carrier emits an EMPTY content
+    // span for such a block (the `tag_open.end` fallback, `start == end`).
+    // Such a region owns nothing at this stage, so drop it before building
+    // the owner mapping: keeping it would consume an owner ordinal and make
+    // `try_with_regions` reject the empty span as `EmptyRegion`, so a
+    // `<script src=...>` beside a `<script setup>` (or any empty script
+    // block) would fail to index.
+    regions.retain(|(span, _)| span.start < span.end);
     regions.sort_by_key(|(span, _)| (span.start, span.end));
     for pair in regions.windows(2) {
         if pair[1].0.start < pair[0].0.end {

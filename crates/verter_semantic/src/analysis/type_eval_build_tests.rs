@@ -44,7 +44,7 @@ fn owner_aware_eval_env_keeps_setup_and_module_locators_distinct() {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 interface Shared { module: string }
@@ -71,11 +71,11 @@ namespace Ns { export class C { value!: string } }
 
     let module_group = env
         .type_symbols
-        .get(&DeclKey::new(module, "Shared"))
+        .get(&DeclBindingKey::new(module, "Shared"))
         .expect("module Shared");
     let instance_group = env
         .type_symbols
-        .get(&DeclKey::new(instance, "Shared"))
+        .get(&DeclBindingKey::new(instance, "Shared"))
         .expect("instance Shared");
     assert_eq!(module_group.contributors().len(), 1);
     assert_eq!(instance_group.contributors().len(), 1);
@@ -83,7 +83,7 @@ namespace Ns { export class C { value!: string } }
     assert_eq!(instance_group.primary().body.anchor.owner, instance);
     assert_ne!(module_group.primary().body, instance_group.primary().body);
 
-    let namespaced = DeclKey::new(instance, "Ns.C");
+    let namespaced = DeclBindingKey::new(instance, "Ns.C");
     assert_eq!(
         env.type_symbols
             .get(&namespaced)
@@ -104,7 +104,7 @@ fn jsdoc_typedef_bodies_lower_by_exact_owner_qualified_comment() {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use verter_type_expr::{DeclKey, TopLevelOwnerId};
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
 /** @typedef {string} Shared */
@@ -129,7 +129,7 @@ const instanceMarker = 0;
         &owners,
     );
     assert_eq!(
-        env.type_symbols[&DeclKey::new(module, "Shared")]
+        env.type_symbols[&DeclBindingKey::new(module, "Shared")]
             .primary()
             .body
             .anchor
@@ -137,7 +137,7 @@ const instanceMarker = 0;
         module
     );
     assert_eq!(
-        env.type_symbols[&DeclKey::new(instance, "Shared")]
+        env.type_symbols[&DeclBindingKey::new(instance, "Shared")]
             .primary()
             .body
             .anchor
@@ -146,12 +146,12 @@ const instanceMarker = 0;
     );
 
     let headers = build_decl_header_index_with_owners(&parsed.program, source, &owners);
-    let module_comment = headers.type_headers[&DeclKey::new(module, "Shared")]
+    let module_comment = headers.type_headers[&DeclBindingKey::new(module, "Shared")]
         .jsdoc_typedef
         .expect("module typedef locator")
         .comment_span
         .start;
-    let instance_comment = headers.type_headers[&DeclKey::new(instance, "Shared")]
+    let instance_comment = headers.type_headers[&DeclBindingKey::new(instance, "Shared")]
         .jsdoc_typedef
         .expect("instance typedef locator")
         .comment_span
@@ -992,11 +992,11 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
 
     let key_intrinsic = (
         AugmentationScopeKind::Global,
-        DeclKey::new(TopLevelOwnerId::ordinary_file(), "JSX.IntrinsicElements"),
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.IntrinsicElements"),
     );
     let key_element = (
         AugmentationScopeKind::Global,
-        DeclKey::new(TopLevelOwnerId::ordinary_file(), "JSX.Element"),
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.Element"),
     );
 
     assert!(
@@ -1098,7 +1098,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
 
     let key = (
         AugmentationScopeKind::Global,
-        DeclKey::new(TopLevelOwnerId::ordinary_file(), "JSX.IntrinsicElements"),
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.IntrinsicElements"),
     );
     let group = &env.augmentation_scopes[&key];
     assert_eq!(
@@ -1196,7 +1196,7 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
 
     let key = (
         AugmentationScopeKind::Global,
-        DeclKey::new(TopLevelOwnerId::ordinary_file(), "JSX.VERSION"),
+        DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), "JSX.VERSION"),
     );
 
     // (a) registers in the global VALUE-augmentation scope, with the const's

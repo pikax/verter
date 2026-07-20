@@ -229,12 +229,31 @@ fn generate_public_api_stubs(
 /// `(vue_path, tsx_code, virtual tsx_path)` tuples; the in-memory `--api` overlay
 /// serves the code and the synthetic tsconfig lists the path in `files`.
 fn generate_all_tsx(
+    host: &VerterHost,
     vue_files: &[PathBuf],
     base_dir: &Path,
 ) -> Result<Vec<(PathBuf, String, PathBuf)>, api_check::TypecheckError> {
+    // Produce the authoritative Vue macro semantic bundle for each carrier
+    // SEQUENTIALLY (bundle production reads the shared host store view; the
+    // batch typecheck keeps it off the parallel compile lane, mirroring the
+    // sequential `get_public_api_batch` design), then compile in parallel. The
+    // validation TSX MUST compile with the real bundle, not `Unavailable`:
+    // without it, a type-based macro's template prop references degrade to
+    // instance-property access (`___VERTER___instance.foo`) — unresolvable
+    // against the public instance surface — instead of the resolved
+    // `__props.foo` form.
+    let macro_inputs: Vec<verter_compiler::compile::VueMacroSemanticInput> = vue_files
+        .iter()
+        .map(|vue_path| {
+            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            host.vue_macro_semantic_input(&canonical_id, CompileTarget::TSX)
+        })
+        .collect();
+
     vue_files
         .par_iter()
-        .map(|vue_path| {
+        .zip(macro_inputs.par_iter())
+        .map(|(vue_path, macro_input)| {
             let source = fs::read_to_string(vue_path).map_err(|error| {
                 api_check::TypecheckError::new(format!(
                     "verter-tsc: failed to read validation carrier source {}: {error}",
@@ -265,7 +284,7 @@ fn generate_all_tsx(
                 &source,
                 &options,
                 &verter_options,
-                &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+                macro_input,
                 &alloc,
             );
 
@@ -597,7 +616,7 @@ fn run_inmemory_typecheck(
     // in-project virtual paths (so node_modules resolution walks from the root).
     let stubs = generate_public_api_stubs(host, &config.vue_files, &root);
     let (stub_files, vue_ts_map) = stubs.value;
-    let mut tsx_files = generate_all_tsx(&config.vue_files, &root)?;
+    let mut tsx_files = generate_all_tsx(host, &config.vue_files, &root)?;
     // Lower the generated TSX's OWN carrier specifiers to the public-API stubs (or
     // strip back to the bare carrier for the `*.vue` wildcard shim).
     for (_, code, _) in &mut tsx_files {
@@ -2106,6 +2125,27 @@ fn cleanup_empty_dirs(dir: &Path) {
 mod tests {
     use super::*;
     use crate::tsconfig::load_tsconfig;
+
+    /// Build a standalone host with each carrier upserted, so `generate_all_tsx`
+    /// can thread the real Vue macro semantic bundle (a carrier that is not
+    /// indexed yields `Unavailable`).
+    fn upsert_host(files: &[PathBuf]) -> VerterHost {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        for path in files {
+            let canonical_id = path.to_string_lossy().replace('\\', "/");
+            let source = fs::read_to_string(path).unwrap();
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical_id.clone()),
+                    input_id: canonical_id,
+                    source: std::sync::Arc::<str>::from(source),
+                    file_language: FileLanguage::vue(),
+                    aliases: Vec::new(),
+                })
+                .unwrap();
+        }
+        host
+    }
 
     /// Discriminating gate for the `build_host_config()` seam: the production
     /// `verter-tsc` host MUST construct through the Batch typecheck preset
@@ -4106,8 +4146,9 @@ import type { Foo } from './types'"#;
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let results =
-            generate_all_tsx(&[vue_path], &out_dir).expect("validation carrier infrastructure");
+        let host = upsert_host(std::slice::from_ref(&vue_path));
+        let results = generate_all_tsx(&host, &[vue_path], &out_dir)
+            .expect("validation carrier infrastructure");
         assert_eq!(results.len(), 1, "should produce one TSX file");
 
         let (_vue, tsx_code, _tsx_path) = &results[0];
@@ -4128,7 +4169,8 @@ import type { Foo } from './types'"#;
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let results = generate_all_tsx(std::slice::from_ref(&vue_path), &out_dir)
+        let host = upsert_host(std::slice::from_ref(&vue_path));
+        let results = generate_all_tsx(&host, std::slice::from_ref(&vue_path), &out_dir)
             .expect("validation carrier infrastructure");
         let (_vue, tsx_code, _tsx_path) = &results[0];
 
@@ -4160,7 +4202,11 @@ import type { Foo } from './types'"#;
         let temp = tempfile::TempDir::new().unwrap();
         let missing = temp.path().join("Missing.vue");
 
-        let error = generate_all_tsx(std::slice::from_ref(&missing), temp.path())
+        // The carrier source is absent: bundle production yields `Unavailable`
+        // (the file is not indexed) and the source read fails closed on the
+        // infrastructure rail. An empty host suffices.
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let error = generate_all_tsx(&host, std::slice::from_ref(&missing), temp.path())
             .expect_err("missing source must use the infrastructure error rail");
         let rendered = error.to_string();
 
@@ -4748,10 +4794,14 @@ defineProps<{ msg: string }>()
     ///     `>= 1`, so a dead counter cannot trivially satisfy the bound). This
     ///     is exactly the cliff the migration removes — a regression to a
     ///     per-file `host.get_public_api(` loop drives this `>= N` → RED.
-    ///  2. **Cross-item materialization.** A LATER file (`Parent.vue`) imports an
-    ///     EARLIER file's (`Child.vue`) emit interface; its declaration output
-    ///     MATERIALIZES the sibling SFC's `(e: 'childEvt', payload: number)`
-    ///     signature. A failed cross-item walk drops `payload: number` → RED.
+    ///  2. **Cross-item materialization.** A LATER file (`Consumer{i}.vue`) imports
+    ///     an EARLIER file's (`Child.vue`) emit interface; its declaration output
+    ///     MATERIALIZES the sibling SFC's `ChildEmits` payload as the
+    ///     re-synthesized `(event: "childEvt", payload: number)` overload — and
+    ///     retains NO dangling `.vue` emit-type import (the imported carrier type
+    ///     name is unreferenced by the re-synthesized rows, so keeping it would
+    ///     dangle: a `.vue` module resolves to `DefineComponent`, never a named
+    ///     type export). A failed cross-item walk drops `payload: number` → RED.
     #[test]
     fn generate_all_tsc_routes_through_batch_o1_reads_and_resolves_cross_item() {
         use std::sync::atomic::Ordering::Relaxed;
@@ -4857,9 +4907,15 @@ defineEmits<ChildEmits>()
                 .map(|(_, code, _)| code.clone())
                 .unwrap_or_else(|| panic!("{consumer_name} declaration output present"));
             assert!(
-                code.contains("payload: number") && code.contains("'childEvt'"),
+                code.contains("payload: number")
+                    && code.contains("event: \"childEvt\"")
+                    && !code.contains("import type { ChildEmits }"),
                 "{consumer_name} declaration output must MATERIALIZE the sibling \
-                 SFC's `ChildEmits` `(e: 'childEvt', payload: number)`; got:\n{code}",
+                 SFC's `ChildEmits` payload as the re-synthesized \
+                 `(event: \"childEvt\", payload: number)` overload AND must retain \
+                 NO dangling `.vue` emit-type import (`ChildEmits` from a `.vue` \
+                 module resolves to `DefineComponent`, never a named type export); \
+                 got:\n{code}",
             );
         }
     }

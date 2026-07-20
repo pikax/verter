@@ -207,7 +207,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
     let wrong_owner_canonicalization =
         crate::resolver_core::prepared_decl::ImportCanonicalization {
             final_resolution: rustc_hash::FxHashMap::from_iter([(
-                verter_type_expr::DeclKey::new(TopLevelOwnerId::module(1), "Foo"),
+                verter_type_expr::DeclBindingKey::new(TopLevelOwnerId::module(1), "Foo"),
                 verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
                     "/types.ts",
                     TopLevelOwnerId::ordinary_file(),
@@ -294,7 +294,10 @@ fn oracle_augmented_foo_member_names(host: &VerterHost) -> Vec<String> {
         .expect("base env for /aug.ts must build");
     let aug_key = (
         AugmentationScopeKind::Module("./types".to_string()),
-        verter_type_expr::DeclKey::new(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Foo"),
+        verter_type_expr::DeclBindingKey::new(
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "Foo",
+        ),
     );
     let aug_group = aug_env
         .augmentation_scopes

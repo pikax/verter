@@ -544,6 +544,20 @@ fn resolve_named_symbol_in_current_view(
 ) {
     let scope_arc: Arc<str> = Arc::from(canonical_id);
 
+    // Owner-agnostic entry → exact authored owner. This public
+    // named-symbol surface takes no owner, so the dispatch scope owner is
+    // selected through the SAME header-inventory rule the C1 consumer
+    // uses (`unique_local_type_declaration_owner_in`): the sole authored
+    // declaring owner when the canonical declares the name (a
+    // `<script setup>`-local declaration resolves under its Instance
+    // owner, where the script-setup `generic="T"` params bind), and the
+    // ordinary-file view otherwise (import-routed names, ambient names,
+    // multi-owner ambiguity — each fails closed exactly as before).
+    let entry_owner = host
+        .routed_shallow_state(canonical_id)
+        .and_then(|state| crate::VerterHost::unique_local_type_declaration_owner_in(&state, name))
+        .unwrap_or_else(verter_type_expr::TopLevelOwnerId::ordinary_file);
+
     // Resolve the bare declaration. The dispatch entry-point
     // memoises this through its `execute_cooperative` path. Note
     // that `ResolveDecl` may legitimately return an
@@ -557,7 +571,7 @@ fn resolve_named_symbol_in_current_view(
     let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: Arc::clone(&scope_arc),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            owner: entry_owner,
             local_scope: None,
         },
         name: Arc::from(name),
@@ -600,16 +614,12 @@ fn resolve_named_symbol_in_current_view(
     };
     let scope_node = NodeScopeId::File {
         canonical_id: Arc::clone(&scope_arc),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        owner: entry_owner,
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
     let _ = &scope_node;
-    let base = dispatch.type_slot_for(
-        Arc::clone(&scope_arc),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(name),
-    );
+    let base = dispatch.type_slot_for(Arc::clone(&scope_arc), entry_owner, Arc::from(name));
 
     let instantiate_key =
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(

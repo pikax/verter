@@ -69,7 +69,7 @@ use verter_type_expr::facts::{
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::DeclContributorAnchor;
-use verter_type_expr::{DeclKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
+use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
 
 use crate::decl_lowering::{DeclLoweringService, SnapshotKey, SnapshotLease};
 use crate::fact_emission::{RouteLens, ShallowLens};
@@ -305,8 +305,8 @@ enum DemandCell<D> {
 type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
 type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
 type LoweredDeclGroups = (
-    Vec<(DeclKey, LoweredTypeDecl)>,
-    Vec<(DeclKey, LoweredValueDecl)>,
+    Vec<(DeclBindingKey, LoweredTypeDecl)>,
+    Vec<(DeclBindingKey, LoweredValueDecl)>,
 );
 
 /// Outcome of a demanded per-symbol lowering ([`DeclBodyMemo::lower_demanded`]).
@@ -470,10 +470,10 @@ impl RetainedValueTransients {
 /// Owned product of one statement-batch lowering job: every symbol the
 /// demanded statements actually declared, ready for entry population.
 struct LoweredStatementBatch {
-    types: Vec<(DeclKey, LoweredTypeDecl)>,
-    values: Vec<(DeclKey, LoweredValueDecl)>,
-    aug_types: Vec<(AugmentationScopeKind, DeclKey, LoweredTypeDecl)>,
-    aug_values: Vec<(AugmentationScopeKind, DeclKey, LoweredValueDecl)>,
+    types: Vec<(DeclBindingKey, LoweredTypeDecl)>,
+    values: Vec<(DeclBindingKey, LoweredValueDecl)>,
+    aug_types: Vec<(AugmentationScopeKind, DeclBindingKey, LoweredTypeDecl)>,
+    aug_values: Vec<(AugmentationScopeKind, DeclBindingKey, LoweredValueDecl)>,
     /// Declaration-body contributors lowered by this job — the
     /// `decl_bodies_lowered` increment.
     lowered_count: usize,
@@ -514,10 +514,10 @@ pub struct DeclBodyMemo {
     /// header-membership view) the graph-free route producer classifies
     /// against — installed with the shallow lens at state construction.
     route_lens: OnceLock<Arc<RouteLens>>,
-    type_entries: DashMap<DeclKey, TypeCell>,
-    value_entries: DashMap<DeclKey, ValueCell>,
-    aug_type_entries: DashMap<(AugmentationScopeKind, DeclKey), TypeCell>,
-    aug_value_entries: DashMap<(AugmentationScopeKind, DeclKey), ValueCell>,
+    type_entries: DashMap<DeclBindingKey, TypeCell>,
+    value_entries: DashMap<DeclBindingKey, ValueCell>,
+    aug_type_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
+    aug_value_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
     whole_env: OnceLock<Arc<EvalEnv>>,
     raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
 }
@@ -812,7 +812,7 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
-        let key = DeclKey::new(owner, name);
+        let key = DeclBindingKey::new(owner, name);
         let Some((contributors, jsdoc_typedef)) = self
             .header_index
             .type_header_in(owner, name)
@@ -868,7 +868,7 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredValueDecl> {
-        let key = DeclKey::new(owner, name);
+        let key = DeclBindingKey::new(owner, name);
         let Some(contributors) = self
             .header_index
             .value_header_in(owner, name)
@@ -940,7 +940,7 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
-        let key = DeclKey::new(owner, name);
+        let key = DeclBindingKey::new(owner, name);
         let Some(contributors) = self
             .header_index
             .augmentation_type_header_in(scope, owner, name)
@@ -1010,7 +1010,7 @@ impl DeclBodyMemo {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredValueDecl> {
-        let key = DeclKey::new(owner, name);
+        let key = DeclBindingKey::new(owner, name);
         let Some(contributors) = self
             .header_index
             .augmentation_value_header_in(scope, owner, name)
@@ -1146,7 +1146,7 @@ impl DeclBodyMemo {
     /// leaves the (lazily-created) cell uninitialised, so this returns `false`.
     #[cfg(test)]
     pub(crate) fn type_entry_materialized(&self, name: &str) -> bool {
-        let key = DeclKey::new(TopLevelOwnerId::ordinary_file(), name);
+        let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
         self.type_entries
             .get(&key)
             .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
@@ -1158,7 +1158,7 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
         self.raw_surfaces.contains_key(&(
-            DeclarationPath::root(DeclKey::new(TopLevelOwnerId::ordinary_file(), name)),
+            DeclarationPath::root(DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name)),
             space,
         ))
     }
@@ -1190,7 +1190,7 @@ impl DeclBodyMemo {
         name: &str,
         space: SymbolSpace,
     ) -> Arc<Vec<RawSourceSurface>> {
-        let declaration = DeclarationPath::root(DeclKey::new(owner, name));
+        let declaration = DeclarationPath::root(DeclBindingKey::new(owner, name));
         if let Some(cached) = self.raw_surfaces.get(&(declaration.clone(), space)) {
             return Arc::clone(&cached);
         }
@@ -1209,7 +1209,7 @@ impl DeclBodyMemo {
                 if let Some(header) = self
                     .header_index
                     .enum_headers
-                    .get(&DeclKey::new(owner, name))
+                    .get(&DeclBindingKey::new(owner, name))
                 {
                     contributors.extend_from_slice(&header.contributors);
                 }
@@ -1221,7 +1221,7 @@ impl DeclBodyMemo {
                 if let Some(header) = self
                     .header_index
                     .enum_headers
-                    .get(&DeclKey::new(owner, name))
+                    .get(&DeclBindingKey::new(owner, name))
                 {
                     contributors.extend_from_slice(&header.contributors);
                 }
@@ -1306,7 +1306,7 @@ impl DeclBodyMemo {
     /// scratch env.
     fn lower_demanded(
         &self,
-        key: &DeclKey,
+        key: &DeclBindingKey,
         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
     ) -> DemandLower {
@@ -1338,22 +1338,23 @@ impl DeclBodyMemo {
             // source order) so a merged group fingerprints its FULL same-name
             // contributor set. Fact-production intermediates — dropped with
             // this closure, never stored.
-            let mut retained_types: FxHashMap<DeclKey, RetainedTypeTransients> =
+            let mut retained_types: FxHashMap<DeclBindingKey, RetainedTypeTransients> =
                 FxHashMap::default();
             let mut retained_aug_types: FxHashMap<
-                (AugmentationScopeKind, DeclKey),
+                (AugmentationScopeKind, DeclBindingKey),
                 RetainedTypeTransients,
             > = FxHashMap::default();
             // TRANSIENT lowered VALUE annotations/shapes, retained the same
             // way for the value-body fingerprint (see
             // [`RetainedValueTransients`]).
-            let mut retained_values: FxHashMap<DeclKey, RetainedValueTransients> =
+            let mut retained_values: FxHashMap<DeclBindingKey, RetainedValueTransients> =
                 FxHashMap::default();
             let mut retained_aug_values: FxHashMap<
-                (AugmentationScopeKind, DeclKey),
+                (AugmentationScopeKind, DeclBindingKey),
                 RetainedValueTransients,
             > = FxHashMap::default();
-            let mut dep_records: FxHashMap<DeclKey, DeclDependencyFacts> = FxHashMap::default();
+            let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> =
+                FxHashMap::default();
             for contributor in &contributors {
                 let index = contributor.anchor.contributor_index;
                 let Some(stmt) = program.body.get(index as usize) else {
@@ -1367,25 +1368,31 @@ impl DeclBodyMemo {
                 };
                 for decl in &parts.type_decls {
                     retained_types
-                        .entry(DeclKey::new(owner, decl.name.as_str()))
+                        .entry(DeclBindingKey::new(owner, decl.name.as_str()))
                         .or_default()
                         .push(decl, Some(contributor.anchor));
                 }
                 for (scope, decl) in &parts.aug_type_decls {
                     retained_aug_types
-                        .entry((scope.clone(), DeclKey::new(owner, decl.name.as_str())))
+                        .entry((
+                            scope.clone(),
+                            DeclBindingKey::new(owner, decl.name.as_str()),
+                        ))
                         .or_default()
                         .push(decl, Some(contributor.anchor));
                 }
                 for decl in &parts.value_decls {
                     retained_values
-                        .entry(DeclKey::new(owner, decl.name.as_str()))
+                        .entry(DeclBindingKey::new(owner, decl.name.as_str()))
                         .or_default()
                         .push(decl);
                 }
                 for (scope, decl) in &parts.aug_value_decls {
                     retained_aug_values
-                        .entry((scope.clone(), DeclKey::new(owner, decl.name.as_str())))
+                        .entry((
+                            scope.clone(),
+                            DeclBindingKey::new(owner, decl.name.as_str()),
+                        ))
                         .or_default()
                         .push(decl);
                 }
@@ -1395,11 +1402,11 @@ impl DeclBodyMemo {
                 // the mirrored symbol fingerprints identically.
                 if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
                     if let Some(retained) = retained_types
-                        .get(&DeclKey::new(owner, alias_from))
+                        .get(&DeclBindingKey::new(owner, alias_from))
                         .cloned()
                     {
                         retained_types
-                            .entry(DeclKey::new(owner, "default"))
+                            .entry(DeclBindingKey::new(owner, "default"))
                             .or_default()
                             .extend_from(retained);
                     }
@@ -1579,7 +1586,7 @@ impl DeclBodyMemo {
     fn demand_and_commit<D>(
         &self,
         cell: &Arc<OnceLock<DemandCell<D>>>,
-        key: &DeclKey,
+        key: &DeclBindingKey,
         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
@@ -1644,8 +1651,8 @@ impl DeclBodyMemo {
         &self,
         batch: LoweredStatementBatch,
         lowered_statements: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
-        demanded_file_scope: Option<(SymbolSpace, &DeclKey)>,
-        demanded_augmentation: Option<(&AugmentationScopeKind, SymbolSpace, &DeclKey)>,
+        demanded_file_scope: Option<(SymbolSpace, &DeclBindingKey)>,
+        demanded_augmentation: Option<(&AugmentationScopeKind, SymbolSpace, &DeclBindingKey)>,
     ) {
         let covers =
             |contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor]| {
@@ -1768,7 +1775,7 @@ impl DeclBodyMemo {
             return DemandOutcome::Ready(None);
         };
         self.transient_type_bodies_for(
-            DeclKey::new(owner, name),
+            DeclBindingKey::new(owner, name),
             &contributors,
             jsdoc_typedef,
             None,
@@ -1789,7 +1796,12 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(DeclKey::new(owner, name), &contributors, None, Some(scope))
+        self.transient_type_bodies_for(
+            DeclBindingKey::new(owner, name),
+            &contributors,
+            None,
+            Some(scope),
+        )
     }
 
     /// Shared lease-only TYPE-body re-lowering over the demanded symbol's
@@ -1798,7 +1810,7 @@ impl DeclBodyMemo {
     /// `export default interface/class` mirror and the JSDoc-typedef payload).
     fn transient_type_bodies_for(
         &self,
-        key: DeclKey,
+        key: DeclBindingKey,
         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
         aug_scope: Option<&AugmentationScopeKind>,
@@ -2276,9 +2288,11 @@ pub(crate) fn lowered_decls_from_env_and_program(
 ) -> LoweredDeclGroups {
     let owner = TopLevelOwnerId::ordinary_file();
     let header_index = build_decl_header_index(program, source);
-    let mut retained_types: FxHashMap<DeclKey, RetainedTypeTransients> = FxHashMap::default();
-    let mut retained_values: FxHashMap<DeclKey, RetainedValueTransients> = FxHashMap::default();
-    let mut dep_records: FxHashMap<DeclKey, DeclDependencyFacts> = FxHashMap::default();
+    let mut retained_types: FxHashMap<DeclBindingKey, RetainedTypeTransients> =
+        FxHashMap::default();
+    let mut retained_values: FxHashMap<DeclBindingKey, RetainedValueTransients> =
+        FxHashMap::default();
+    let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {
         let parts = lower_statement_parts(stmt, source);
         let contributor_anchor =
@@ -2291,23 +2305,23 @@ pub(crate) fn lowered_decls_from_env_and_program(
                 });
         for decl in &parts.type_decls {
             retained_types
-                .entry(DeclKey::new(owner, decl.name.as_str()))
+                .entry(DeclBindingKey::new(owner, decl.name.as_str()))
                 .or_default()
                 .push(decl, contributor_anchor);
         }
         for decl in &parts.value_decls {
             retained_values
-                .entry(DeclKey::new(owner, decl.name.as_str()))
+                .entry(DeclBindingKey::new(owner, decl.name.as_str()))
                 .or_default()
                 .push(decl);
         }
         if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
             if let Some(retained) = retained_types
-                .get(&DeclKey::new(owner, alias_from))
+                .get(&DeclBindingKey::new(owner, alias_from))
                 .cloned()
             {
                 retained_types
-                    .entry(DeclKey::new(owner, "default"))
+                    .entry(DeclBindingKey::new(owner, "default"))
                     .or_default()
                     .extend_from(retained);
             }
