@@ -973,6 +973,17 @@ pub struct LspMethodTimeoutsConfig {
     /// `textDocument/rename` — workspace-wide edit; matches the
     /// references budget.
     pub rename: std::time::Duration,
+    /// Always-on production request deadline applied to EVERY audited handler
+    /// body when `audit_enabled = false` (the production default).
+    ///
+    /// The per-method budgets above are the tight audit-supersede SLO, applied
+    /// only when audit is enabled. Without this, production would run every
+    /// handler with ZERO timeout — a hung provider wedged the handler forever.
+    /// This is the production wedge backstop: generous by design (well above a
+    /// legitimate slow round-trip, so it never fail-closes a request that is
+    /// merely slow), but finite, so a genuinely wedged handler fails closed with
+    /// `request_cancelled` instead of parking. `Duration::ZERO` disables it.
+    pub production_request_deadline: std::time::Duration,
 }
 
 impl Default for LspMethodTimeoutsConfig {
@@ -988,6 +999,9 @@ impl Default for LspMethodTimeoutsConfig {
             inlay_hints: std::time::Duration::from_millis(1000),
             code_action: std::time::Duration::from_millis(500),
             rename: std::time::Duration::from_millis(5000),
+            // 15s: above the transport's 10s single-round-trip bound, so a
+            // handler still running past it is wedged, not progressing.
+            production_request_deadline: std::time::Duration::from_secs(15),
         }
     }
 }

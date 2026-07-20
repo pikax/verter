@@ -126,7 +126,24 @@ where
     P: FnOnce(&mut LspRequestPayload, &T),
 {
     if !host.config().audit_enabled {
-        return body.await;
+        // Always-on production request deadline. The per-method `budget`
+        // above is the audit-supersede SLO and only applied when audit is
+        // enabled; with audit off (the production default) every handler body
+        // used to run UNBOUNDED, so a hung type provider wedged the handler (and,
+        // via tower-lsp's bounded concurrency, eventually the whole session)
+        // forever. A generous, finite production deadline fails the request
+        // closed instead of wedging it.
+        let deadline = host
+            .config()
+            .lsp_method_timeouts
+            .production_request_deadline;
+        if deadline.is_zero() {
+            return body.await;
+        }
+        return match tokio::time::timeout(deadline, body).await {
+            Ok(result) => result,
+            Err(_) => Err(tower_lsp_server::jsonrpc::Error::request_cancelled()),
+        };
     }
 
     let session = begin(host, method.clone(), &canonical_id);

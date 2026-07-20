@@ -25934,3 +25934,576 @@ async fn svelte_real_pipeline_class_definition_reaches_style_rule() {
     drain_handle.abort();
     drop(service);
 }
+
+// ===========================================================================
+// Always-on production request deadline.
+//
+// The per-method timeout must apply on the production path, not only inside the
+// audit harness: with audit disabled (the production default) a handler body that
+// ran unbounded let a wedged type provider park the handler forever. These prove
+// the handler fails closed on the production deadline, and that an unrelated
+// request is still dispatched while wedged handlers are outstanding.
+// ===========================================================================
+
+/// A wedged provider must not park the production definition handler. Audit is OFF
+/// (production default); the mock's `get_definition` hangs forever; the handler
+/// must return `request_cancelled` within the production deadline.
+#[tokio::test]
+async fn production_definition_handler_fails_closed_when_the_provider_wedges() {
+    let mut config = HostConfig::default();
+    assert!(
+        !config.audit_enabled,
+        "T2 must exercise the production audit-off path"
+    );
+    config.lsp_method_timeouts.production_request_deadline = std::time::Duration::from_millis(300);
+    let host = Arc::new(VerterHost::new_standalone(config));
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.hang_definition();
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server = Arc::clone(&type_provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    let position = find_document_position(server, &uri, "{{ count", 3);
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::nav_features_audit::handle_goto_definition_with_audit(
+            server,
+            goto_definition_params(&uri, position),
+        ),
+    )
+    .await;
+
+    let result = outcome
+        .expect("the definition handler must return within its production deadline, never wedge");
+    let err = result.expect_err("a wedged provider must fail the request closed");
+    assert_eq!(
+        err.code,
+        tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled,
+        "a deadline expiry must surface as request_cancelled, got {err:?}"
+    );
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetDefinition { .. })),
+        "the handler must have actually reached the wedged get_definition (else the deadline is untested)"
+    );
+}
+
+/// Write one LSP `Content-Length`-framed message.
+async fn write_lsp_frame<W>(w: &Arc<tokio::sync::Mutex<W>>, msg: &serde_json::Value)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let body = serde_json::to_string(msg).unwrap();
+    let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    let mut guard = w.lock().await;
+    guard.write_all(frame.as_bytes()).await.unwrap();
+    guard.flush().await.unwrap();
+}
+
+/// Control requests (`$/verter/getStatistics`) must stay responsive while a burst
+/// of wedged semantic handlers is in flight. Drives the REAL tower-lsp serve loop
+/// over duplex pipes: with a low serve concurrency and no per-request deadline, a
+/// handful of wedged definition handlers exhausted every slot, the server stopped
+/// reading client stdin, and getStatistics never dispatched at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
+    use tokio::io::AsyncReadExt;
+
+    // Production audit-off path, but a 2s deadline so the wedged definitions hold
+    // their serve-loop slots long enough that a starved getStatistics would miss
+    // the 1s liveness bar.
+    let mut config = HostConfig::default();
+    config.lsp_method_timeouts.production_request_deadline = std::time::Duration::from_secs(2);
+    let host = Arc::new(VerterHost::new_standalone(config));
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.hang_definition();
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::build(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    })
+    .custom_method(
+        "$/verter/getStatistics",
+        VerterLanguageServer::get_statistics,
+    )
+    .finish();
+
+    // Pre-open the document directly so definition dispatch never races didOpen.
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
+    let uri = open_test_vue(service.inner(), "/workspace/src/App.vue", source);
+    let position = find_document_position(service.inner(), &uri, "{{ count", 3);
+
+    // Wire the serve loop over duplex pipes: client writes → server stdin,
+    // server stdout → client reads.
+    let (server_stdin_read, client_to_server) = tokio::io::duplex(1 << 16);
+    let (server_to_client, client_stdout_read) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        tower_lsp_server::Server::new(server_stdin_read, server_to_client, socket)
+            .concurrency_level(crate::LSP_MAX_CONCURRENCY)
+            .serve(service)
+            .await;
+    });
+
+    let writer = Arc::new(tokio::sync::Mutex::new(client_to_server));
+
+    // Reader: parse frames, record response arrival instants by id, and
+    // auto-respond to any server→client request so nothing stalls.
+    let (resp_tx, mut resp_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(i64, std::time::Instant)>();
+    let reader_writer = Arc::clone(&writer);
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(client_stdout_read);
+        loop {
+            // Read headers.
+            let mut content_length = 0usize;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                use tokio::io::AsyncBufReadExt;
+                let n = match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let _ = n;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some(len) = trimmed.strip_prefix("Content-Length:") {
+                    content_length = len.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) else {
+                continue;
+            };
+            let has_method = msg.get("method").is_some();
+            let id = msg.get("id").and_then(|v| v.as_i64());
+            match (has_method, id) {
+                (true, Some(id)) => {
+                    // Server→client request: auto-respond null.
+                    let reply = serde_json::json!({"jsonrpc":"2.0","id":id,"result":null});
+                    write_lsp_frame(&reader_writer, &reply).await;
+                }
+                (false, Some(id)) => {
+                    let _ = resp_tx.send((id, std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Initialize handshake.
+    write_lsp_frame(
+        &writer,
+        &serde_json::json!({
+            "jsonrpc":"2.0","id":0,"method":"initialize",
+            "params": {"processId": null, "rootUri": null, "capabilities": {}}
+        }),
+    )
+    .await;
+    // Wait for the initialize response (id=0).
+    let init_ok = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some((id, _)) = resp_rx.recv().await {
+            if id == 0 {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(matches!(init_ok, Ok(true)), "server must answer initialize");
+    write_lsp_frame(
+        &writer,
+        &serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    // Fire a burst of definition requests (they wedge on the mock, holding slots
+    // for the full 2s production deadline), then immediately getStatistics.
+    for id in 1..=8i64 {
+        write_lsp_frame(
+            &writer,
+            &serde_json::json!({
+                "jsonrpc":"2.0","id":id,"method":"textDocument/definition",
+                "params": {
+                    "textDocument": {"uri": uri.as_str()},
+                    "position": {"line": position.line, "character": position.character}
+                }
+            }),
+        )
+        .await;
+    }
+    let stats_sent = std::time::Instant::now();
+    write_lsp_frame(
+        &writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":1000,"method":"$/verter/getStatistics","params":{}}),
+    )
+    .await;
+
+    // getStatistics must answer well before the 2s definition deadlines.
+    let stats = tokio::time::timeout(std::time::Duration::from_millis(1000), async {
+        while let Some((id, at)) = resp_rx.recv().await {
+            if id == 1000 {
+                return Some(at);
+            }
+        }
+        None
+    })
+    .await;
+    let arrived = stats
+        .expect("getStatistics must not be starved by wedged definition handlers")
+        .expect("response stream closed before getStatistics answered");
+    assert!(
+        arrived.duration_since(stats_sent) < std::time::Duration::from_secs(1),
+        "getStatistics answered too slowly ({:?}) — control requests are being starved",
+        arrived.duration_since(stats_sent)
+    );
+}
+
+// ===========================================================================
+// Definition-latency freshness gate.
+//
+// Every go-to-definition re-ran the imported-carrier + barrel preamble and
+// re-pushed byte-identical carrier companions (`.vue.tsx` + `.vue.ts`) as
+// full-text didChange, bumping the LSP version and invalidating the engine's
+// whole program → a project-scale re-check on the next query. The per-document
+// import-set freshness memo skips the whole preamble while nothing that could
+// change the resolved import set has advanced, so the steady-state definition
+// path emits ZERO redundant sync. `ProjectSync::synced_tsx_contents` is a
+// record-only evidence ledger of the bytes the engine last received — it does no
+// compare-and-skip of its own, so the memo is what makes the steady state quiet.
+// ===========================================================================
+
+/// The SECOND identical go-to-definition on an unchanged document must perform
+/// ZERO carrier-companion `update_file` / `open_file` / `load_file` — the
+/// freshness memo skips the preamble that would re-push them. Fails pre-fix (it
+/// re-synced every imported carrier on every request). Uses Tsgo so the DirectOpen
+/// arm actually delivers companion content (tsserver suppresses it entirely).
+#[tokio::test]
+async fn definition_second_identical_request_performs_zero_carrier_resync() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+    // Warm request: opens + syncs the carrier companions into the provider.
+    let first = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("first goto definition succeeds")
+        .expect("component event resolves on the first request");
+    assert!(
+        !definition_locations(first).is_empty(),
+        "the warm request must resolve to the child defineEmits"
+    );
+
+    // Count carrier-sync verbs performed by the SECOND identical request only.
+    let is_sync_verb = |c: &MockCall| {
+        matches!(
+            c,
+            MockCall::OpenFile { .. } | MockCall::UpdateFile { .. } | MockCall::LoadFile { .. }
+        )
+    };
+    let before = provider.calls().iter().filter(|c| is_sync_verb(c)).count();
+    // Positive control: the warm request DID push companions. Without this, a
+    // fixture that never syncs companions at all would satisfy the zero-delta
+    // assertion below and the memo would be untested.
+    assert!(
+        before > 0,
+        "the warm request must actually have pushed carrier companions, else the \
+         zero-resync assertion below is vacuous"
+    );
+
+    let second = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await
+        .expect("second goto definition succeeds")
+        .expect("component event still resolves on the repeat request");
+    assert!(
+        !definition_locations(second).is_empty(),
+        "the freshness gate must not change the answer"
+    );
+
+    let after = provider.calls().iter().filter(|c| is_sync_verb(c)).count();
+    let new_syncs: Vec<_> = provider
+        .calls()
+        .into_iter()
+        .filter(|c| is_sync_verb(c))
+        .skip(before)
+        .collect();
+    assert_eq!(
+        after - before,
+        0,
+        "the second identical definition must re-push ZERO carrier companions \
+         (byte-identical didChange invalidates the engine program); got: {new_syncs:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// The memo's INVALIDATION direction: editing an IMPORTED file's CONTENTS, with
+/// its import set unchanged, must make the next definition re-push that carrier
+/// WITH THE NEW BYTES.
+///
+/// This is the half a zero-resync assertion cannot cover. The memo key rides the
+/// workspace `content_generation`, which any content edit bumps — including an
+/// edit to a dependency the requesting document merely imports. Without that, a
+/// warm skip would serve the engine stale companion bytes indefinitely.
+#[tokio::test]
+async fn editing_an_imported_carrier_re_pushes_it_with_the_new_bytes() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+
+    // Warm the memo: after this the steady state pushes nothing.
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let child_pushes = |calls: Vec<MockCall>| -> Vec<String> {
+        calls
+            .into_iter()
+            .filter_map(|call| match call {
+                MockCall::OpenFile { path, content }
+                | MockCall::UpdateFile { path, content }
+                | MockCall::LoadFile { path, content } => {
+                    path.starts_with(&child_id).then_some(content)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let warm_pushes = child_pushes(provider.calls());
+    assert!(
+        !warm_pushes.is_empty(),
+        "the warm request must actually have pushed the imported child's companions, \
+         else this test proves nothing"
+    );
+    let already_pushed = warm_pushes.len();
+
+    // Edit the IMPORTED child's CONTENTS ONLY. The parent's import set is
+    // untouched — only the bytes behind the import change.
+    let edited_child = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: number] }>()\n</script>\n";
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            canonical_id: Some(child_id.clone()),
+            input_id: child_id.clone(),
+            source: edited_child.into(),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert the edited imported child");
+
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let after_edit: Vec<String> = child_pushes(provider.calls())
+        .into_iter()
+        .skip(already_pushed)
+        .collect();
+    assert!(
+        !after_edit.is_empty(),
+        "an edited imported carrier must be re-pushed on the next definition — the memo \
+         must not warm-skip a content change behind the import"
+    );
+    assert!(
+        after_edit.iter().any(|content| content.contains("number")),
+        "the re-push must carry the NEW bytes, not the memoized ones; got: {after_edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Replacing the VFS workspace must evict the import-set memo.
+///
+/// The memo key embeds the workspace `content_generation`, which is PER-WORKSPACE:
+/// a fresh workspace restarts it low, so an entry minted against the previous
+/// workspace can collide with a low generation of the new one and serve a warm
+/// skip for a pass that never ran against it. Eviction also bounds the map's
+/// growth across a long session, since nothing else ever removes an entry.
+#[tokio::test]
+async fn swapping_the_vfs_workspace_evicts_the_import_set_memo() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+    // Warm the memo through a real request.
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+    assert!(
+        server.import_sync.recorded_len() > 0,
+        "the request must actually have recorded a memo entry, else this test proves nothing"
+    );
+
+    // Replace the workspace exactly as `initialize` does.
+    let replacement = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
+            roots: vec![workspace_id.clone()],
+            eager_preload: false,
+        },
+    ));
+    replacement.set_project_graph(verter_workspace::ProjectGraph::new());
+    server.swap_vfs_workspace(replacement);
+
+    assert_eq!(
+        server.import_sync.recorded_len(),
+        0,
+        "a workspace swap must evict every memo entry: their keys belong to the workspace \
+         that was just replaced"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// A carrier sync that FAILED inside the import-set preamble must leave the memo
+/// COLD, so the next request RETRIES that carrier.
+///
+/// Publishing the memo over a failed leg warm-skips the entire preamble until an
+/// unrelated edit bumps the generation: the failure arms only queue
+/// `pending_snapshot_provider_sync`, whose sole drain is background init, so a
+/// transient provider error strands the carrier for the rest of the session.
+#[tokio::test]
+async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    // Fail ONLY the imported child's IDE companion; every other sync succeeds, so
+    // the preamble reaches its publish point with exactly one failed leg.
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+    let child_ide_path = verter_workspace::carrier_ide_provider_path(&child_id, false);
+    provider.set_fail_sync_path(&child_ide_path);
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let child_sync_attempts = |calls: Vec<MockCall>| {
+        calls
+            .into_iter()
+            .filter(|call| match call {
+                MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. } => path == &child_ide_path,
+                _ => false,
+            })
+            .count()
+    };
+
+    // Reach assertion: the first pass must ACTUALLY attempt the failing sync,
+    // otherwise the retry assertion below would be vacuous.
+    let before = child_sync_attempts(provider.calls());
+    assert!(
+        before > 0,
+        "the first request must actually attempt the child's IDE companion sync \
+         ({child_ide_path}), else this test proves nothing"
+    );
+
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let after = child_sync_attempts(provider.calls());
+    assert!(
+        after > before,
+        "a FAILED carrier sync must leave the import memo cold so the next request \
+         retries it; attempts stayed at {before} (after: {after})"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}

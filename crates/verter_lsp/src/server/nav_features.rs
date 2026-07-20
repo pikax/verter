@@ -369,9 +369,9 @@ pub(super) async fn handle_hover(
                         // Fail-closed-on-persistent is the INTENDED semantics:
                         // after the bounded retry the handler returns `None`
                         // (no tooltip), never a fabrication and never a spin.
-                        // A persistently failing provider is a sync/health
-                        // concern (the B10/B12 family), not something hover
-                        // may paper over with invented content.
+                        // A persistently failing provider is a provider
+                        // sync/health concern, not something hover may paper
+                        // over with invented content.
                         tracing::warn!(
                             "hover type provider error: {} — resyncing and retrying once",
                             e
@@ -1063,7 +1063,7 @@ async fn handle_completion_attempt(
             );
             server.ensure_current_file_synced(uri).await;
         }
-        server.ensure_imported_carrier_apis_synced(uri).await;
+        let _ = server.ensure_imported_carrier_apis_synced(uri).await;
         let ctx = server.type_provider_context(uri);
         if ctx.is_none() {
             tracing::debug!("completion: no ide_context for {}", uri.as_str());
@@ -1238,7 +1238,7 @@ async fn handle_completion_attempt(
                             server.force_reopen_current_file_in_type_provider(uri).await;
                             server.sync_api_to_provider(uri).await;
                         }
-                        server.ensure_imported_carrier_apis_synced(uri).await;
+                        let _ = server.ensure_imported_carrier_apis_synced(uri).await;
                         tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                         type_completion_result = tp
                             .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)

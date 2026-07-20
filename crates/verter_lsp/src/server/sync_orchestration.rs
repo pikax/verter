@@ -30,6 +30,51 @@ use super::handler_guard::block_in_place_if_available;
 use super::server_utils::*;
 use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguageServer};
 
+/// Whether every provider-sync leg of an import-set pass actually reached the
+/// provider.
+///
+/// The import-set memo may only be published for a `Complete` pass. A failed or
+/// requeued leg feeds `pending_snapshot_provider_sync`, whose sole drain is
+/// background init — so a memo published over such a leg warm-skips the retry
+/// until an unrelated edit bumps the workspace generation, stranding the carrier
+/// for the rest of the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub(super) enum ImportSyncOutcome {
+    /// Every leg reached the provider, or had nothing to deliver.
+    Complete,
+    /// At least one leg failed or was requeued for a later retry.
+    Retry,
+}
+
+impl ImportSyncOutcome {
+    /// Fold two legs: the pass is `Complete` only when both are.
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (ImportSyncOutcome::Complete, ImportSyncOutcome::Complete) => {
+                ImportSyncOutcome::Complete
+            }
+            _ => ImportSyncOutcome::Retry,
+        }
+    }
+
+    fn from_sync<T, E>(result: &Result<T, E>) -> Self {
+        Self::from_ok(result.is_ok())
+    }
+
+    fn from_ok(delivered: bool) -> Self {
+        if delivered {
+            ImportSyncOutcome::Complete
+        } else {
+            ImportSyncOutcome::Retry
+        }
+    }
+
+    fn is_complete(self) -> bool {
+        self == ImportSyncOutcome::Complete
+    }
+}
+
 impl VerterLanguageServer {
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
         let diagnostics = self.compute_full_diagnostics(uri).await;
@@ -1404,20 +1449,99 @@ impl VerterLanguageServer {
     /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
     pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
         self.ensure_current_file_synced(uri).await;
-        self.ensure_imported_carrier_apis_synced(uri).await;
-        self.ensure_barrel_imports_synced(uri).await;
+        self.ensure_imported_carriers_synced_memoized(uri).await;
     }
 
-    pub(super) async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) {
-        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+    /// The current-file leg's imported-carrier + barrel preamble, wrapped in a
+    /// per-document singleflight + freshness memo. A go-to-definition
+    /// storm on an UNCHANGED document paid a full import-graph BFS re-walk + carrier
+    /// gateway reconcile on EVERY request; this skips both entirely when nothing
+    /// that could change the resolved import set has advanced since the last pass.
+    ///
+    /// The memo key is the workspace `(content_generation, snapshot_generation)`:
+    /// ANY content edit (this document OR a dependency carrier) bumps
+    /// `content_generation`, and any resolver re-publish (ownership/route change)
+    /// bumps the snapshot generation. Both are supersets of "the import set could
+    /// have changed", so a warm skip can never strand a stale carrier — a real edit
+    /// always misses the memo and re-runs the preamble, which re-pushes the changed
+    /// companions.
+    ///
+    /// A pass with any failed or requeued leg does NOT publish the memo: the memo
+    /// records that the import set was successfully delivered at this generation,
+    /// and a partial pass has not delivered it.
+    pub(super) async fn ensure_imported_carriers_synced_memoized(&self, uri: &Uri) {
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            let _ = self.ensure_imported_carrier_apis_synced(uri).await;
+            let _ = self.ensure_barrel_imports_synced(uri).await;
             return;
+        };
+
+        // Singleflight: coalesce a concurrent request storm on this document onto
+        // ONE import-set pass. A follower that acquires the lock after the leader
+        // finished sees a fresh memo and returns without re-walking.
+        let lock = self.import_sync.lock_for(&canonical_id);
+        let _guard = lock.lock().await;
+
+        let key = self.import_sync_freshness_key();
+        if let Some(key) = key {
+            if self.import_sync.is_fresh_at(&canonical_id, key) {
+                return; // The import set was already delivered at this generation.
+            }
+        }
+
+        let outcome = self
+            .ensure_imported_carrier_apis_synced(uri)
+            .await
+            .and(self.ensure_barrel_imports_synced(uri).await);
+
+        // Publish the memo only when the whole preamble DELIVERED under a stable
+        // key — never warm a torn generation, and never warm over a leg that has
+        // still to be retried.
+        if let Some(key) = key {
+            if outcome.is_complete() && self.import_sync_freshness_key() == Some(key) {
+                self.import_sync.record_delivered(canonical_id, key);
+            }
+        }
+    }
+
+    /// Install `workspace` as the host's VFS workspace — the single entry point
+    /// for replacing it.
+    ///
+    /// Evicting the import-set memo is part of the swap, not an afterthought: its
+    /// keys embed the OLD workspace's `content_generation`, which a fresh
+    /// workspace restarts low, so a surviving entry can collide with a low
+    /// generation of the new workspace and serve a warm skip for a pass that never
+    /// ran against it.
+    pub(super) fn swap_vfs_workspace(&self, workspace: Arc<verter_workspace::FilesystemWorkspace>) {
+        let workspace_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.clone();
+        self.documents.host().set_workspace(workspace_dyn);
+        *self.vfs_workspace.write() = Some(workspace);
+        self.import_sync.evict_all();
+    }
+
+    /// The workspace `(content_generation, resolver_snapshot_generation)` pair that
+    /// keys the import-set freshness memo. `None` when no published resolver exists
+    /// yet (bootstrap) — the caller then never memoizes and always runs the preamble.
+    fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
+        let content_generation = self.documents.host().workspace_read().content_generation();
+        let snapshot_generation = {
+            let ws = self.vfs_workspace.read();
+            let ws = ws.as_ref()?;
+            ws.load_published()?.snapshot.generation.0
+        };
+        Some((content_generation, snapshot_generation))
+    }
+
+    pub(super) async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) -> ImportSyncOutcome {
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+            return ImportSyncOutcome::Complete;
         }
 
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
         let Some(analysis) = self.documents.get_analysis(uri) else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
 
         let mut import_ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
@@ -1441,9 +1565,11 @@ impl VerterLanguageServer {
             }
         }
 
+        let mut outcome = ImportSyncOutcome::Complete;
         for import_id in import_ids {
-            self.sync_imported_carrier_api_lightweight(&import_id).await;
+            outcome = outcome.and(self.sync_imported_carrier_api_lightweight(&import_id).await);
         }
+        outcome
     }
 
     /// Sync barrel (non-carrier re-export) imports and their framework-carrier
@@ -1459,21 +1585,21 @@ impl VerterLanguageServer {
     /// dependencies first, then syncs the intermediate barrels. Provider-neutral: both tsgo and
     /// tsserver benefit (a bounded over-sync of unrelated barrel imports is acceptable — the
     /// provider decides the actual symbol).
-    pub(super) async fn ensure_barrel_imports_synced(&self, uri: &Uri) {
+    pub(super) async fn ensure_barrel_imports_synced(&self, uri: &Uri) -> ImportSyncOutcome {
         let Some(sync) = &self.project_sync else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
         let Some(snapshot) = self.published_resolver() else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
         let Some(analysis) = self.documents.get_analysis(uri) else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
         let Some(template) = analysis.template.as_ref() else {
-            return;
+            return ImportSyncOutcome::Complete;
         };
 
         let host = self.documents.host();
@@ -1584,10 +1710,12 @@ impl VerterLanguageServer {
             );
         }
 
+        let mut outcome = ImportSyncOutcome::Complete;
+
         // Sync carrier dependencies first (so the provider has their virtual
         // IDE targets).
         for carrier_id in &barrel_carrier_deps {
-            self.sync_imported_carrier_api_lightweight(carrier_id).await;
+            outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);
         }
 
         // Sync barrel files. Carrier import specifiers already carry their
@@ -1638,10 +1766,11 @@ impl VerterLanguageServer {
 
             if let Some(transition) = self.prepare_non_carrier_provider_sync_transition(barrel_id) {
                 self.close_provider_paths(&transition.stale_paths).await;
-                if let Err(error) = sync
+                let result = sync
                     .sync_file(&prepared.provider_path, &prepared.rewritten)
-                    .await
-                {
+                    .await;
+                outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
+                if let Err(error) = result {
                     tracing::warn!(
                         "barrel sync: failed to sync {}: {error}",
                         prepared.provider_path
@@ -1649,16 +1778,20 @@ impl VerterLanguageServer {
                 } else {
                     self.commit_provider_sync_state(barrel_id, transition.next);
                 }
-            } else if let Err(error) = sync
-                .sync_file(&prepared.provider_path, &prepared.rewritten)
-                .await
-            {
-                tracing::warn!(
-                    "barrel sync: failed to sync {}: {error}",
-                    prepared.provider_path
-                );
+            } else {
+                let result = sync
+                    .sync_file(&prepared.provider_path, &prepared.rewritten)
+                    .await;
+                outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
+                if let Err(error) = result {
+                    tracing::warn!(
+                        "barrel sync: failed to sync {}: {error}",
+                        prepared.provider_path
+                    );
+                }
             }
         }
+        outcome
     }
 
     pub(super) fn current_file_needs_inline_type_provider_sync(&self, uri: &Uri) -> bool {
@@ -2237,6 +2370,8 @@ impl VerterLanguageServer {
             carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
             carrier_transaction_coordinator: Arc::clone(&self.carrier_transaction_coordinator),
             decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
+            resync_coordinator: Arc::clone(&self.resync_coordinator),
+            import_sync: Arc::clone(&self.import_sync),
         };
 
         let ctx = context.to_owned();
@@ -2261,7 +2396,10 @@ impl VerterLanguageServer {
     /// if the host already has the file in memory, `get_public_api` avoids
     /// re-reading from disk. Falls back to `resync_background_carrier_file` when
     /// the file hasn't been upserted yet.
-    pub(super) async fn sync_imported_carrier_api_lightweight(&self, canonical_id: &str) {
+    pub(super) async fn sync_imported_carrier_api_lightweight(
+        &self,
+        canonical_id: &str,
+    ) -> ImportSyncOutcome {
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let profile = self.documents.tsx_profile.read().clone();
         let snapshot = self.published_resolver();
@@ -2279,7 +2417,7 @@ impl VerterLanguageServer {
             } else {
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
             }
-            return;
+            return ImportSyncOutcome::Complete;
         }
 
         // Fast path: host already has the file — sync directly from cached artifacts.
@@ -2292,17 +2430,20 @@ impl VerterLanguageServer {
 
             if !ownership_ready {
                 // Bootstrap: unresolved sync is allowed
+                let mut outcome = ImportSyncOutcome::Complete;
                 if let Some(ide) = ide.as_ref() {
-                    let _ = self
+                    let delivered = self
                         .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
                         .await;
+                    outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
-                let _ = self
+                let delivered = self
                     .sync_carrier_api_unresolved(canonical_id, &api.code)
                     .await;
-                return;
+                return outcome.and(ImportSyncOutcome::from_ok(delivered));
             }
 
+            let mut outcome = ImportSyncOutcome::Complete;
             if let Some(sync) = &self.project_sync {
                 // The dialect comes from the compile, falling back to the
                 // parse-level script language when the compile is unavailable.
@@ -2342,6 +2483,7 @@ impl VerterLanguageServer {
                                 } else {
                                     sync.open_tsx(&ide_path, &ide.code).await
                                 };
+                                outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
                                 if result.is_ok() {
                                     committed_state
                                         .set_background_loaded(ProviderPathKind::Ide, true);
@@ -2370,6 +2512,7 @@ impl VerterLanguageServer {
                             } else {
                                 sync.open_dts(&dts_path, &api.code).await
                             };
+                            outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
                             if result.is_ok() {
                                 committed_state.set_background_loaded(ProviderPathKind::Api, true);
                                 synced_kinds.push(ProviderPathKind::Api);
@@ -2413,6 +2556,14 @@ impl VerterLanguageServer {
                             canonical_id,
                             Some(&self.pending_snapshot_provider_sync),
                         );
+                        // A requeued class (bootstrap `NotReady`, or a `Pending`
+                        // failed retract) is retried later, so this pass has not
+                        // delivered the carrier. Only the TERMINAL `Unresolved`
+                        // owner-loss is a settled, complete disposition.
+                        outcome = outcome.and(ImportSyncOutcome::from_ok(matches!(
+                            class,
+                            crate::external_ts::SettleClass::Unresolved
+                        )));
                         if class.runs_buffer_cleanup() {
                             if self.documents.canonical_id_to_uri(canonical_id).is_some() {
                                 self.preserve_open_unresolved_carrier(
@@ -2428,7 +2579,7 @@ impl VerterLanguageServer {
                     }
                 }
             }
-            return;
+            return outcome;
         }
 
         if !ownership_ready {
@@ -2451,28 +2602,33 @@ impl VerterLanguageServer {
                     .unwrap_or(false)
             });
 
+            let mut outcome = ImportSyncOutcome::Complete;
             if compiled {
                 if is_tsgo {
                     if let Some(ide) = self.documents.host.get_ide(canonical_id, &profile) {
-                        let _ = self
+                        let delivered = self
                             .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
                             .await;
+                        outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                     }
                 }
                 if let Some(api) = self.documents.host.get_public_api(canonical_id) {
-                    let _ = self
+                    let delivered = self
                         .sync_carrier_api_unresolved(canonical_id, &api.code)
                         .await;
-                    return;
+                    return outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
             }
 
+            // Nothing was delivered — the carrier is queued for the background
+            // drain and must be retried, never memoized as synced.
             self.queue_snapshot_provider_sync(canonical_id.to_string());
-            return;
+            return ImportSyncOutcome::Retry;
         }
 
         // Slow path: file not in host yet — full disk read + upsert + compile + sync.
         self.resync_background_carrier_file(canonical_id).await;
+        ImportSyncOutcome::Complete
     }
 
     pub(super) async fn resync_background_carrier_file(&self, canonical_id: &str) {

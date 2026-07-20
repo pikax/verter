@@ -161,7 +161,10 @@ async fn main() {
     )
     .finish();
 
-    Server::new(stdin, stdout, socket).serve(service).await;
+    Server::new(stdin, stdout, socket)
+        .concurrency_level(verter_lsp::LSP_MAX_CONCURRENCY)
+        .serve(service)
+        .await;
 }
 
 /// Parsed CLI arguments.
