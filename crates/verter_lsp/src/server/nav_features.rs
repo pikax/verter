@@ -34,6 +34,95 @@ use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
+/// Whether the completion position sits inside a style `v-bind(|)` context.
+fn is_style_v_bind_context(server: &VerterLanguageServer, uri: &Uri, position: &Position) -> bool {
+    (|| {
+        let doc = server.documents.get(uri)?;
+        let analysis = server.documents.get_analysis(uri);
+        let blocks = scan_sfc_blocks(&doc.source);
+        let offset = doc.line_index.position_to_offset(position)?;
+        Some(matches!(
+            classify_cursor_context_for_language(
+                offset,
+                &doc.source,
+                &blocks,
+                analysis.as_ref(),
+                CarrierTemplateLanguage::from_uri(uri.as_str()),
+            ),
+            CursorContext::Style(crate::features::cursor_context::StyleCursorContext::VBind)
+        ))
+    })()
+    .unwrap_or(false)
+}
+
+/// Attach provider-typed `detail` to `v-bind(|)` completion items: for each
+/// offered binding (bounded), a quickinfo at its DECLARATION position supplies
+/// the type line. Items whose declaration cannot be mapped keep their native
+/// kind detail (fail closed — never fabricated).
+async fn enrich_v_bind_completion_details(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    mut items: Vec<CompletionItem>,
+) -> Vec<CompletionItem> {
+    const MAX_TYPED_ITEMS: usize = 12;
+    let Some(tp) = &server.type_provider else {
+        return items;
+    };
+    let Some(ctx) = server.type_provider_context(uri) else {
+        return items;
+    };
+    // Declaration position per offered binding name (sync snapshot reads).
+    let decl_positions: Vec<(usize, Position)> = {
+        let Some(doc) = server.documents.get(uri) else {
+            return items;
+        };
+        let Some(analysis) = server.documents.get_analysis(uri) else {
+            return items;
+        };
+        items
+            .iter()
+            .enumerate()
+            .take(MAX_TYPED_ITEMS)
+            .filter_map(|(idx, item)| {
+                let binding = analysis.bindings.iter().find(|b| b.name == item.label)?;
+                if binding.span.start == 0 && binding.span.end == 0 {
+                    return None;
+                }
+                Some((idx, doc.line_index.offset_to_position(binding.span.start)?))
+            })
+            .collect()
+    };
+    for (idx, decl_pos) in decl_positions {
+        let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+            &decl_pos,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        ) else {
+            continue;
+        };
+        if let Ok(Some(info)) = tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+            // Post-await validation (fail closed): stop enriching against a
+            // superseded surface; already-set details came from a live one.
+            if !server.provider_context_still_valid(uri, &ctx) {
+                break;
+            }
+            // First informative line of the quickinfo (skip code fences).
+            if let Some(line) = info
+                .contents
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with("```"))
+            {
+                if let Some(item) = items.get_mut(idx) {
+                    item.detail = Some(line.to_string());
+                }
+            }
+        }
+    }
+    items
+}
+
 pub(super) async fn handle_hover(
     server: &VerterLanguageServer,
     params: HoverParams,
@@ -135,6 +224,47 @@ pub(super) async fn handle_hover(
         if matches!(target, hover::ChildHoverTarget::SlotAttribute(_)) {
             return Ok(None);
         }
+    }
+
+    // B4: typed `v-bind()` hover — the style token has no TSX projection
+    // (style blocks are removed from the generated surface), so the provider
+    // is queried at the root binding's DECLARATION position and the result is
+    // presented on the v-bind token. Fail-closed to the native v-bind hover.
+    let vbind_target = (|| {
+        let doc = server.documents.get(uri)?;
+        let analysis = server.documents.get_analysis(uri)?;
+        let offset = doc.line_index.position_to_offset(position)?;
+        let (expr, decl_span) = crate::css::v_bind_decl_target_at(offset, &analysis)?;
+        let decl_pos = doc.line_index.offset_to_position(decl_span.start)?;
+        Some((expr, decl_pos))
+    })();
+    if let Some((expr, decl_pos)) = vbind_target {
+        if let Some(tp) = &server.type_provider {
+            if let Some(ctx) = server.type_provider_context(uri) {
+                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+                    &decl_pos,
+                    &ctx.carrier_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                ) {
+                    if let Ok(Some(info)) = tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+                        // Post-await validation (fail closed): drop a provider
+                        // result produced against a superseded surface.
+                        if server.provider_context_still_valid(uri, &ctx) {
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!("**v-bind({expr})**\n\n{}", info.contents),
+                                }),
+                                range: None,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        // No provider / unmappable declaration — native v-bind hover only.
+        return Ok(verter_result);
     }
 
     // Slot syntax: verter provides rich hover; type provider returns unhelpful
@@ -835,6 +965,17 @@ async fn handle_completion_attempt(
             .map(|result| (result.is_incomplete, Some(result.items)))
             .unwrap_or((false, None))
     };
+    // B4: typed detail for `v-bind(|)` completions — the style position has
+    // no TSX projection, so each offered binding's type comes from a provider
+    // quickinfo at its DECLARATION position (bounded; fail-closed to the
+    // native kind detail when the mapping or provider is unavailable).
+    let verter_items = match verter_items {
+        Some(items) if is_style_v_bind_context(server, uri, position) => {
+            Some(enrich_v_bind_completion_details(server, uri, items).await)
+        }
+        other => other,
+    };
+
     if native_only {
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {

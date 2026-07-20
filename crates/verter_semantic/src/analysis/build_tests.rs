@@ -2244,6 +2244,8 @@ fn mark_bindings_used_in_style_simple() {
             start: 0,
             end: 5,
             generated_var_name: None,
+            expr_roots: vec!["color".into()],
+            roots_complete: true,
         }],
         ..Default::default()
     }];
@@ -2269,6 +2271,8 @@ fn mark_bindings_used_in_style_member_expression() {
             start: 0,
             end: 11,
             generated_var_name: None,
+            expr_roots: vec!["theme".into()],
+            roots_complete: true,
         }],
         ..Default::default()
     }];
@@ -2292,6 +2296,8 @@ fn mark_bindings_used_in_style_multiple_blocks() {
                 start: 0,
                 end: 1,
                 generated_var_name: None,
+                expr_roots: vec!["a".into()],
+                roots_complete: true,
             }],
             ..Default::default()
         },
@@ -2302,6 +2308,8 @@ fn mark_bindings_used_in_style_multiple_blocks() {
                 start: 0,
                 end: 1,
                 generated_var_name: None,
+                expr_roots: vec!["c".into()],
+                roots_complete: true,
             }],
             ..Default::default()
         },
@@ -2341,6 +2349,8 @@ fn mark_bindings_used_in_style_quoted_expression() {
             start: 0,
             end: 5,
             generated_var_name: None,
+            expr_roots: vec!["color".into()],
+            roots_complete: true,
         }],
         ..Default::default()
     }];

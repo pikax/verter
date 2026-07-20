@@ -115,6 +115,8 @@ fn test_css_analysis_with_vue_input() {
             start: 10,
             end: 25,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![SpecialPseudoInput {
             kind: SpecialPseudoKind::Deep,
@@ -143,6 +145,8 @@ fn test_preprocessor_no_css_parsing() {
             start: 10,
             end: 25,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: Vec::new(),
     };
@@ -170,6 +174,8 @@ fn test_flags_derived_correctly() {
             start: 0,
             end: 5,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![
             SpecialPseudoInput {
@@ -376,6 +382,8 @@ fn test_style_block_analysis_serializes_camel_case() {
             start: 10,
             end: 25,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![SpecialPseudoInput {
             kind: SpecialPseudoKind::Deep,
@@ -1193,6 +1201,8 @@ fn test_v_bind_generated_var_name() {
             start: 10,
             end: 25,
             generated_var_name: Some("--a4f2eed6-color".to_string()),
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![],
     };

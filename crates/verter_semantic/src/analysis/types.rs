@@ -290,31 +290,45 @@ impl ScriptAnalysisSnapshot {
         &mut self,
         style_analyses: &[crate::analysis::style::StyleBlockAnalysis],
     ) {
-        // Collect all root identifiers from v-bind() expressions across all style blocks.
-        let referenced: rustc_hash::FxHashSet<&str> = style_analyses
-            .iter()
-            .flat_map(|s| &s.v_binds)
-            .map(|vb| {
-                // Extract root identifier: "theme.color" → "theme", "color" → "color"
-                vb.expression
-                    .split_once('.')
-                    .map_or(vb.expression.as_str(), |(root, _)| root)
-            })
-            // Also handle bracket access: "obj['key']" → "obj"
-            .map(|root| {
-                root.split_once('[')
-                    .map_or(root, |(before_bracket, _)| before_bracket)
-            })
-            .filter(|name| !name.is_empty())
-            .collect();
+        // The SOUND per-expression root facts recorded by the producer
+        // (`AnalyzedVBind.expr_roots`, OXC-derived) are the sole usage
+        // authority — never a text split of the expression.
+        let mut referenced: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+        let mut any_v_bind = false;
+        let mut all_complete = true;
+        for vb in style_analyses.iter().flat_map(|s| &s.v_binds) {
+            any_v_bind = true;
+            if !vb.roots_complete {
+                all_complete = false;
+            }
+            referenced.extend(
+                vb.expr_roots
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|n| !n.is_empty()),
+            );
+        }
 
-        if referenced.is_empty() {
+        if !any_v_bind {
             return;
         }
 
         let mut roots: Vec<String> = referenced.iter().map(|name| name.to_string()).collect();
         roots.sort_unstable();
         self.style_vbind_roots = roots;
+
+        if !all_complete {
+            // An unparseable v-bind expression: fail OPEN — every binding is
+            // treated as style-used so no false unused diagnostic can fire.
+            for binding in &mut self.bindings {
+                binding.used_in_style = true;
+            }
+            return;
+        }
+
+        if referenced.is_empty() {
+            return;
+        }
 
         for binding in &mut self.bindings {
             if referenced.contains(binding.name.as_str()) {

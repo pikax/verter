@@ -25655,3 +25655,152 @@ async fn global_css_leg_does_not_shadow_script_references() {
     drain_handle.abort();
     drop(service);
 }
+
+// =====================================================================
+// B4: typed v-bind() hover + completion (declaration-position provider)
+// =====================================================================
+
+/// Hover on a style `v-bind(width)` token shows the provider's TypeScript
+/// type for the binding, queried at the DECLARATION position (the style
+/// token has no TSX projection).
+#[tokio::test]
+async fn v_bind_hover_shows_provider_type_from_declaration() {
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst width = ref(10)\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    // Provider quickinfo at the DECLARATION position.
+    let decl_pos = find_document_position(server, &uri, "const width", 6);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        "const width: Ref<number>",
+    );
+
+    // Hover ON the v-bind expression token in the style block.
+    let vbind_pos = find_document_position(server, &uri, "v-bind(width)", 8);
+    let hover = server
+        .hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: vbind_pos,
+            },
+            work_done_progress_params: Default::default(),
+        })
+        .await
+        .expect("hover request should succeed")
+        .expect("v-bind token must hover");
+
+    let contents = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(
+        contents.contains("v-bind(width)"),
+        "hover names the v-bind: {contents}"
+    );
+    assert!(
+        contents.contains("Ref<number>"),
+        "hover carries the provider type from the declaration: {contents}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Without a provider answer the v-bind hover fails closed to the native
+/// description — never a fabricated type.
+#[tokio::test]
+async fn v_bind_hover_without_provider_answer_falls_back_native() {
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst width = ref(10)\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(width); }\n</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let vbind_pos = find_document_position(server, &uri, "v-bind(width)", 8);
+    let hover = server
+        .hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: vbind_pos,
+            },
+            work_done_progress_params: Default::default(),
+        })
+        .await
+        .expect("hover request should succeed")
+        .expect("native v-bind hover still serves");
+
+    let contents = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(contents.contains("v-bind(width)"), "{contents}");
+    assert!(
+        !contents.contains("Ref<"),
+        "no fabricated provider type: {contents}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Completion inside `v-bind(|)` offers the setup bindings by bare name with
+/// the provider type as detail — and never property-name/snippet junk.
+#[tokio::test]
+async fn v_bind_completion_offers_typed_setup_bindings() {
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst width = ref(10)\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(); }\n</style>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const width", 6);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        "const width: Ref<number>",
+    );
+
+    // Cursor between the parens of v-bind().
+    let pos = find_document_position(server, &uri, "v-bind()", 7);
+    let response = server
+        .completion(completion_params(&uri, pos, None))
+        .await
+        .expect("completion request should succeed")
+        .expect("v-bind completion must offer setup bindings");
+
+    let items = match response {
+        CompletionResponse::List(list) => list.items,
+        CompletionResponse::Array(items) => items,
+    };
+    let width = items
+        .iter()
+        .find(|i| i.label == "width")
+        .expect("setup binding offered by bare name");
+    assert_eq!(
+        width.detail.as_deref(),
+        Some("const width: Ref<number>"),
+        "provider type attached as detail"
+    );
+    assert!(
+        !items.iter().any(|i| i.label.starts_with("v-bind(")),
+        "no nested v-bind(...) snippet junk inside v-bind(: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        !items.iter().any(|i| i.label == "display"),
+        "no css property-name junk inside v-bind("
+    );
+
+    drain_handle.abort();
+    drop(service);
+}

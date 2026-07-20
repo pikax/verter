@@ -463,6 +463,8 @@ fn css_v_binds_inject_use_css_vars() {
     let v_binds = vec![crate::css::types::VBindVar {
         expression: "count".to_string(),
         var_name: "abc-count".to_string(),
+        expr_start: 0,
+        expr_end: 0,
     }];
 
     let result = gen_script(
@@ -1114,6 +1116,8 @@ fn e2e_complex_sfc_valid_js() {
     let v_binds = vec![crate::css::types::VBindVar {
         expression: "count".to_string(),
         var_name: "abc-count".to_string(),
+        expr_start: 0,
+        expr_end: 0,
     }];
 
     let result = gen_script(

@@ -133,9 +133,13 @@ fn extract_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, us
     let var_name = generate_var_name(scope_id, expr_clean);
     let replacement = format!("var({})", var_name);
 
+    let clean_start = (expr_clean.as_ptr() as usize).saturating_sub(css.as_ptr() as usize) as u32;
+    let clean_end = clean_start + expr_clean.len() as u32;
     let v_bind_var = VBindVar {
         expression: expr_clean.to_string(),
         var_name,
+        expr_start: clean_start,
+        expr_end: clean_end,
     };
 
     Some((replacement, full_end, v_bind_var))

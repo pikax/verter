@@ -30,6 +30,11 @@ pub struct VBindInput {
     pub end: u32,
     /// Generated CSS variable name from the prepass (e.g. `"--a4f2eed6-color"`).
     pub generated_var_name: Option<String>,
+    /// Free identifier roots of the expression (OXC-derived at the producer).
+    pub expr_roots: Vec<String>,
+    /// `false` when the expression failed to parse — consumers fail OPEN
+    /// (treat every binding as style-used).
+    pub roots_complete: bool,
 }
 
 /// A Vue special pseudo-class (`:deep`, `:global`, `:slotted`).
@@ -96,6 +101,15 @@ pub struct AnalyzedVBind {
     /// Generated CSS variable name from the prepass (e.g. `"--a4f2eed6-color"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_var_name: Option<String>,
+    /// Free identifier roots of the expression — the SOUND OXC-derived usage
+    /// fact recorded once at the producer and consumed by style-liveness
+    /// marking AND compile-input assembly (never re-derived by text split).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expr_roots: Vec<String>,
+    /// `false` when the expression failed to parse — consumers fail OPEN
+    /// (treat every binding as style-used, never a false unused diagnostic).
+    #[serde(default)]
+    pub roots_complete: bool,
 }
 
 /// Analyzed Vue special pseudo-class.
@@ -672,6 +686,8 @@ fn convert_v_binds(input: &VueStyleInput) -> Vec<AnalyzedVBind> {
             start: vb.start,
             end: vb.end,
             generated_var_name: vb.generated_var_name.clone(),
+            expr_roots: vb.expr_roots.clone(),
+            roots_complete: vb.roots_complete,
         })
         .collect()
 }

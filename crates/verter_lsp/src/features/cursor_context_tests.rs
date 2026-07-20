@@ -304,6 +304,8 @@ fn test_style_block_vbind() {
                 start: 68,
                 end: 73,
                 generated_var_name: None,
+                expr_roots: vec!["color".to_string()],
+                roots_complete: true,
             }],
             ..Default::default()
         }])

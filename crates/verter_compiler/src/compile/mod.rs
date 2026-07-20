@@ -16,7 +16,7 @@
 
 mod helpers;
 mod macro_type_diagnostics;
-pub(crate) mod style_usage;
+pub mod style_usage;
 pub mod template_data;
 pub(crate) mod template_expr_overlay;
 pub mod types;

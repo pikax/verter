@@ -107,13 +107,12 @@ pub fn completions_at_position(
             })
         }
         CursorContext::Style(StyleCursorContext::VBind) => {
-            // Style v-bind: offer reactive bindings via css completions
-            crate::css::css_completions(position, source, blocks, analysis, line_index).map(
-                |items| CompletionResult {
-                    items,
-                    is_incomplete: false,
-                },
-            )
+            // Inside `v-bind(|)`: the setup-scope bindings by bare name —
+            // never property-name or snippet junk.
+            crate::css::v_bind_scope_completions(analysis?).map(|items| CompletionResult {
+                items,
+                is_incomplete: false,
+            })
         }
         CursorContext::Style(StyleCursorContext::General) => crate::css::css_completions(
             position, source, blocks, analysis, line_index,

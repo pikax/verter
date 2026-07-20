@@ -1566,17 +1566,26 @@ fn build_single_style_analysis(
     let scope_id = verter_compiler::compile::get_hash(&component_name);
     let prepass_result = verter_compiler::css::prepass::prepass(css_content, &scope_id);
 
-    // Build VueStyleInput from prepass results
+    // Build VueStyleInput from prepass results. Each v-bind carries its
+    // authored expression span (SFC-absolute) and the SOUND OXC-derived free
+    // identifier roots — the single owning usage fact consumed by liveness
+    // marking and compile-input assembly.
     let vue_input = verter_semantic::analysis::VueStyleInput {
         v_binds: prepass_result
             .v_bind_vars
             .iter()
-            .map(|vb| verter_semantic::analysis::VBindInput {
-                expression: vb.expression.clone(),
-                quoted: false,
-                start: content_offset,
-                end: content_offset,
-                generated_var_name: Some(vb.var_name.clone()),
+            .map(|vb| {
+                let roots =
+                    verter_compiler::compile::style_usage::expression_free_roots(&vb.expression);
+                verter_semantic::analysis::VBindInput {
+                    expression: vb.expression.clone(),
+                    quoted: false,
+                    start: content_offset + vb.expr_start,
+                    end: content_offset + vb.expr_end,
+                    generated_var_name: Some(vb.var_name.clone()),
+                    roots_complete: roots.is_some(),
+                    expr_roots: roots.unwrap_or_default(),
+                }
             })
             .collect(),
         special_pseudos: vec![],
@@ -3131,6 +3140,102 @@ watch(count, (value, oldValue) => {
             css.selectors.iter().all(|s| s.rule_body_span.is_some()),
             "closed rules carry body spans"
         );
+    }
+
+    /// DISCRIMINATING pair for the sound v-bind usage fact: `v-bind(a + b)`
+    /// marks BOTH `a` and `b` used-in-style (the retired `.split('.')` text
+    /// probe produced the literal "a + b" and marked neither), while a truly
+    /// unused binding stays unmarked.
+    #[test]
+    fn v_bind_complex_expression_marks_every_root_used_in_style() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst a = 1\nconst b = 2\nconst unused = 3\n</script>\n<style>\n.x { width: v-bind(a + b); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        let binding = |name: &str| {
+            snap.script_analysis
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("binding {name}"))
+        };
+        assert!(
+            binding("a").used_in_style,
+            "root `a` of `a + b` is style-used"
+        );
+        assert!(
+            binding("b").used_in_style,
+            "root `b` of `a + b` is style-used"
+        );
+        assert!(
+            !binding("unused").used_in_style,
+            "a binding not referenced by any v-bind stays unmarked"
+        );
+        assert!(
+            snap.script_analysis
+                .style_vbind_roots
+                .contains(&"a".to_string())
+                && snap
+                    .script_analysis
+                    .style_vbind_roots
+                    .contains(&"b".to_string()),
+            "the B5 liveness feed carries both roots: {:?}",
+            snap.script_analysis.style_vbind_roots
+        );
+    }
+
+    /// The pair's positive leg: a binding used ONLY in style `v-bind()` is
+    /// used_in_style (no unused diagnostic); member roots count.
+    #[test]
+    fn v_bind_only_style_usage_counts_as_used() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst color = 'red'\nconst theme = { main: 'blue' }\n</script>\n<style>\n.x { color: v-bind(color); background: v-bind(theme.main); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        let binding = |name: &str| {
+            snap.script_analysis
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap()
+        };
+        assert!(binding("color").used_in_style);
+        assert!(
+            binding("theme").used_in_style,
+            "member-expression root counts"
+        );
+    }
+
+    /// An unparseable v-bind expression fails OPEN: every binding is treated
+    /// as style-used (no false unused diagnostic can fire).
+    #[test]
+    fn v_bind_unparseable_expression_fails_open() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst a = 1\n</script>\n<style>\n.x { color: v-bind(@@@); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        let a = snap
+            .script_analysis
+            .bindings
+            .iter()
+            .find(|b| b.name == "a")
+            .unwrap();
+        assert!(
+            a.used_in_style,
+            "an unparseable v-bind marks every binding live (fail open)"
+        );
+    }
+
+    /// Analyzed v-binds carry REAL SFC-absolute expression spans (the token
+    /// the IDE hover/completion anchors on), not a degenerate content-offset
+    /// pair.
+    #[test]
+    fn v_bind_carries_real_expression_span() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst color = 'red'\n</script>\n<style>\n.x { color: v-bind(color); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        assert_eq!(snap.style_analyses.len(), 1);
+        let vb = &snap.style_analyses[0].v_binds[0];
+        assert_eq!(
+            &source[vb.start as usize..vb.end as usize],
+            "color",
+            "v-bind span covers exactly the authored expression"
+        );
+        assert_eq!(vb.expr_roots, vec!["color".to_string()]);
+        assert!(vb.roots_complete);
     }
 
     /// Svelte `<style>` blocks scan to scoped-by-default CSS facts with

@@ -877,7 +877,9 @@ fn classify_style_context(
                 - 1;
             if let Some(style_analysis) = analysis.styles.get(style_idx) {
                 for vb in &style_analysis.v_binds {
-                    if offset >= vb.start && offset < vb.end {
+                    // Inclusive end: the caret sits AT the expression end while
+                    // typing, and an empty `v-bind(|)` has start == end.
+                    if offset >= vb.start && offset <= vb.end {
                         return CursorContext::Style(StyleCursorContext::VBind);
                     }
                 }

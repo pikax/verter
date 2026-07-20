@@ -66,6 +66,20 @@ pub fn extract_style_v_bind_usage<'a>(
     StyleVBindUsage { used, complete }
 }
 
+/// The free identifier roots of one `v-bind()` expression, OXC-parsed —
+/// the SOUND per-expression fact producers store on analyzed v-binds
+/// (`AnalyzedVBind.expr_roots`). Returns `None` on a parse failure (the
+/// caller records the expression's roots as UNKNOWN and fails open).
+pub fn expression_free_roots(expr_text: &str) -> Option<Vec<String>> {
+    let mut used = FxHashSet::default();
+    if !collect_expr_identifier_roots(expr_text, &mut used) {
+        return None;
+    }
+    let mut roots: Vec<String> = used.into_iter().collect();
+    roots.sort_unstable();
+    Some(roots)
+}
+
 /// Parse `expr_text` as a TS expression and union its free identifier roots into
 /// `used`. Returns `true` on a clean parse, `false` on any parse error (so the
 /// caller can mark usage incomplete).
