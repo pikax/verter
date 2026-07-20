@@ -295,7 +295,7 @@ impl VerterHost {
                     {
                         note_empty(serve_published);
                     }
-                    match self.materialize_prepared_decl_bundle(view, canonical_id) {
+                    match self.materialize_prepared_decl_bundle(canonical_id) {
                         Some(BundleMaterialization::Built { bundle, admitted }) => {
                             Some((bundle, admitted))
                         }
@@ -589,17 +589,11 @@ impl VerterHost {
             rustc_hash::FxHashMap::default()
         };
 
-        // Canonicalize re-export-hop imports against the request-bound view
-        // (overlay-aware). Route facts are NOT retained here: per R17 this
-        // overlay bundle is never admitted to the shared cache, so its fact
-        // rail is irrelevant — the per-call bundle is request-scoped.
-        let (import_canonicalization, _import_route_facts) = self
-            .build_prepared_import_canonicalization(
-                ctx,
-                ctx.store_view(),
-                state.as_ref(),
-                &dep_edges,
-            );
+        // Record the DIRECT-hop import identities; the final defining owner
+        // resolves at decl-prepare demand through the shared route authority
+        // (see `build_prepared_import_canonicalization`).
+        let import_canonicalization =
+            self.build_prepared_import_canonicalization(state.as_ref(), &dep_edges);
 
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
@@ -696,60 +690,59 @@ impl VerterHost {
         (dep_edges, import_route_hash)
     }
 
-    /// Canonicalize a file's import targets to their FINAL defining-file
-    /// identity through the SAME route authority the carrier fallback /
-    /// dispatch fallthrough use, so the eager/prepared `name_resolution`
-    /// records the FINAL definition rather than the intermediate barrel.
+    /// Record each import binding's DIRECT-hop identity for DEMAND-DRIVEN
+    /// canonicalization: `(local owner, local name) → (direct target
+    /// canonical, ordinary-file owner, imported name)`.
     ///
-    /// For each import target whose resolved canonical is known, both rails are
-    /// VIEW-AWARE, FULL-CHAIN-fact resolvers: the TYPE-export authority
-    /// ([`Self::resolve_imported_type_root_with_facts_with_store_view`]) is tried
-    /// FIRST, then the VALUE-export authority
-    /// ([`Self::resolve_value_export_root_with_facts_with_store_view`]). Each
-    /// returns the full route-chain fact list. Every resolvable import is recorded
-    /// with its exact final `(canonical, owner, symbol)` identity, including a
-    /// direct import whose defining file is cold. Prepared declarations require
-    /// that owner-bearing identity; an unresolved route is left absent so
-    /// preparation fails with `MissingExternalOwner` rather than synthesizing an
-    /// owner from the importing declaration.
+    /// Bundle build resolves NO import chain. The final defining identity is
+    /// resolved at the FIRST decl-prepare / ref-head DEMAND through the shared
+    /// route authority (`resolve_imported_type_root_with_facts*`, memoized
+    /// host-side in `ImportedRootDb` under an R6 content-free query-identity
+    /// key), and every demand site records the chain hops' route facts into
+    /// the ACTIVE fact tracer AT DEMAND TIME — so the CONSUMING cache entry
+    /// (the `LowerLocator` shape memo, an `Instantiate` memo, a
+    /// component-meta proof) carries the barrel/re-export participants'
+    /// `FileWholeHash` + `Route` facts in its OWN read-set and a retarget or
+    /// leaf edit anywhere on the chain misses that warm read. The demand
+    /// sites: the locator-shape ref-head re-canonicalization
+    /// (`resolve_locator_ref_head`), the prepared-decl final-hop retry
+    /// (`resolve_prepared_type_decl_via_host`), the bare-name import layers
+    /// (`resolve_import_binding_from_facts`), and the imported-registry
+    /// resolver (`resolve_imported_registry_symbol_with_budget`) — each is
+    /// gated on the stored `ordinary_file()` PROVISIONAL owner, the marker
+    /// that final-owner resolution is still owed.
     ///
-    /// The type-export route walk is symbol-space-NEUTRAL (it follows ANY
-    /// re-export, value-only included, and terminates at ANY local symbol), so it
-    /// already canonicalizes a CROSS-FILE value re-export and records its full
-    /// chain — the value rail is reached only when the type route resolves to the
-    /// barrel itself (a local binding, no cross-file hop), where its distinct work
-    /// is the terminal SAME-FILE `typeof` value-alias peel. Both rails return the
-    /// full chain regardless, so whichever wins records the same complete fact set.
+    /// The eager whole-bundle chain resolution this replaces walked EVERY
+    /// import at bundle build (loading files nothing demanded, lowering dead
+    /// type-args for unresolvable heads) and pinned the chain facts on the
+    /// BUNDLE's fact rail — where a downstream memo's read-set never saw
+    /// them, so a barrel retarget with the owner unchanged false-warmed the
+    /// memoized shape.
     ///
-    /// The returned `route_facts` carry every barrel/re-export participant's
-    /// version (each participant's `FileWholeHash` + route surface) so the
-    /// bundle's fact rail INVALIDATES on a retarget ANYWHERE on the winning chain —
-    /// a content edit to a re-export clause (or a route change) on the IMMEDIATE
-    /// barrel OR a MULTI-HOP inner barrel (`owner → barrel → mid → final`,
-    /// retargeting `mid`) misses the warm bundle. Both rails resolve
-    /// graph-native; neither materialises a dependency's `whole_env()` during
-    /// prep.
+    /// An UNRESOLVABLE specifier (no dep-edge, no parse-time canonical)
+    /// records NO entry, preserving the typed `MissingExternalOwner`
+    /// preparation failure for declarations that reference it. A namespace
+    /// import (`import * as NS`) records NO entry — a namespace alias is a
+    /// module handle, not a declaration identity; qualified members resolve
+    /// through the namespace-member facts path.
     fn build_prepared_import_canonicalization(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        view: &dyn crate::resolver_core::StoreView,
         state: &crate::resolver_core::ShallowFileState,
         dep_edges: &rustc_hash::FxHashMap<String, String>,
-    ) -> (
-        crate::resolver_core::prepared_decl::ImportCanonicalization,
-        Vec<crate::resolver_core::FactVersionRef>,
-    ) {
+    ) -> crate::resolver_core::prepared_decl::ImportCanonicalization {
         use verter_semantic::analysis::type_solver::ResolvedRootIdentity;
 
         let mut canonicalization =
             crate::resolver_core::prepared_decl::ImportCanonicalization::default();
-        let mut route_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
         let interner = self.project_type_store().identity_interner();
 
         for (local, target) in state.owner_import_targets.iter() {
-            // The import's resolved barrel canonical (dep_edges → target →
+            if target.is_namespace {
+                continue;
+            }
+            // The import's resolved direct canonical (dep_edges → target →
             // raw): the same precedence `resolve_import_target` applies.
-            let barrel_canonical =
+            let direct_canonical =
                 if let Some(resolved) = dep_edges.get(&target.source_specifier).cloned() {
                     resolved
                 } else if !target.canonical_id.is_empty() {
@@ -759,82 +752,21 @@ impl VerterHost {
                     // target owner to publish.
                     continue;
                 };
-            if barrel_canonical.is_empty() {
+            if direct_canonical.is_empty() {
                 continue;
             }
 
-            // TYPE rail: resolve the direct target or walk its re-export chain to
-            // the final defining declaration, recording every participant's
-            // facts. The view-aware route authority materializes a cold target
-            // when required and returns the exact defining owner. A same-file
-            // result is still recorded: it is the sole authoritative owner for a
-            // direct import, not a recoverable default.
-            let (type_final, type_chain_facts) = self
-                .resolve_imported_type_root_with_facts_with_context_and_store_view(
-                    ctx,
-                    view,
-                    &barrel_canonical,
-                    &target.imported_name,
-                );
-            if let Some(type_final) = type_final
-                .as_ref()
-                .filter(|identity| identity.canonical_id.as_ref() != barrel_canonical.as_str())
-            {
-                canonicalization
-                    .final_resolution
-                    .insert(local.clone(), type_final.clone());
-                route_facts.extend(type_chain_facts.iter().cloned());
-                continue;
-            }
-
-            // VALUE rail. Reached ONLY when the type rail above did NOT produce a
-            // DIFFERENT final canonical — i.e. `type_final_canonical ==
-            // barrel_canonical`, which covers BOTH a same-file resolution (the
-            // barrel declares/re-aliases the name itself) AND a type-route
-            // miss/fallback (the resolver returns `(barrel, name)` when the route
-            // does not resolve). The symbol-space-neutral type rail follows every
-            // CROSS-FILE re-export hop (value-only included) and short-circuits
-            // the moment it lands cross-file, so in the reached case the only
-            // remaining work is the SAME-FILE terminal `typeof` value-alias peel
-            // (`export const V: typeof realImpl = realImpl` on the barrel →
-            // `realImpl`) — this rail's distinct live contribution.
-            // The cross-file fact completeness is delivered by the type rail's
-            // full-chain walk above, not here. Resolve through the VIEW-AWARE,
-            // FULL-CHAIN-fact resolver (symmetric with the type rail, same final
-            // normalization); NEVER routes through `peel_value_decl_alias` /
-            // `base_eval_env_arc` / `whole_env()` (the legacy whole-env oracle
-            // path) during prep.
-            let (value_final, value_chain_facts) = self
-                .resolve_value_export_root_with_facts_with_store_view(
-                    view,
-                    &barrel_canonical,
-                    &target.imported_name,
-                );
-            if let Some(value_final) = value_final {
-                if value_final.canonical_id != barrel_canonical
-                    || value_final.name != target.imported_name
-                {
-                    canonicalization.final_resolution.insert(
-                        local.clone(),
-                        ResolvedRootIdentity::new_in_owner(
-                            interner.intern(&value_final.canonical_id),
-                            value_final.owner,
-                            interner.intern(&value_final.name),
-                        ),
-                    );
-                    route_facts.extend(value_chain_facts.iter().cloned());
-                    continue;
-                }
-            }
-            if let Some(type_final) = type_final {
-                canonicalization
-                    .final_resolution
-                    .insert(local.clone(), type_final);
-                route_facts.extend(type_chain_facts.iter().cloned());
-            }
+            canonicalization.final_resolution.insert(
+                local.clone(),
+                ResolvedRootIdentity::new_in_owner(
+                    interner.intern(&direct_canonical),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    interner.intern(&target.imported_name),
+                ),
+            );
         }
 
-        (canonicalization, route_facts)
+        canonicalization
     }
 
     /// Routed-shallow cold producer (declaration files only). Returns
@@ -886,10 +818,11 @@ impl VerterHost {
 
         let (dep_edges, _legacy_import_route_hash) =
             self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
-        // Canonicalize re-export-hop imports to the FINAL defining file; the
-        // accumulated barrel route facts join the bundle's fact rail below.
-        let (import_canonicalization, import_route_facts) =
-            self.build_prepared_import_canonicalization(self, view, state.as_ref(), &dep_edges);
+        // Record the DIRECT-hop import identities; final canonicalization is
+        // DEMAND-DRIVEN (chain facts are observed into the CONSUMING query's
+        // read-set at decl-prepare demand, never pinned on the bundle rail).
+        let import_canonicalization =
+            self.build_prepared_import_canonicalization(state.as_ref(), &dep_edges);
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
@@ -931,9 +864,10 @@ impl VerterHost {
                 hash: import_route_hash,
             });
         }
-        // Fold in the barrel route-chain facts so a re-export retarget on any
-        // walked barrel invalidates this bundle (no stale-served final root).
-        facts.extend(import_route_facts);
+        // No import-chain facts are pinned here: canonicalization is
+        // demand-driven, so retarget invalidation rides the CONSUMING
+        // query's read-set (recorded at decl-prepare demand), not the
+        // bundle rail.
 
         // Promote the just-materialised canonical's facts into the request
         // overlay BEFORE the bundle insert. Without this promotion the
@@ -1048,7 +982,6 @@ impl VerterHost {
     /// canonical is unloadable (no serve at all).
     fn materialize_prepared_decl_bundle(
         &self,
-        view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
     ) -> Option<BundleMaterialization> {
         // Wall-clock fence for the cold materialisation envelope —
@@ -1091,14 +1024,13 @@ impl VerterHost {
             rustc_hash::FxHashMap::default()
         };
 
-        // 4b. Canonicalize re-export-hop imports to the FINAL defining file
-        // through the shared route authority, against the request-bound `view`
-        // (currentness-preserving — a stale seed fails the route cache's
-        // validation closed, never serves a stale final root). The accumulated
-        // barrel route facts are folded into the bundle's fact rail (step 6) so
-        // a barrel retarget invalidates this bundle.
-        let (import_canonicalization, import_route_facts) =
-            self.build_prepared_import_canonicalization(self, view, state.as_ref(), &dep_edges);
+        // 4b. Record the DIRECT-hop import identities. Final canonicalization
+        // is DEMAND-DRIVEN: the first decl-prepare demand resolves the chain
+        // through the shared route authority and records the chain hops'
+        // route facts into the CONSUMING query's read-set (never the bundle
+        // rail), so a barrel retarget invalidates the consuming entries.
+        let import_canonicalization =
+            self.build_prepared_import_canonicalization(state.as_ref(), &dep_edges);
 
         // 5. Build the bundle atomically.
         let bundle = std::sync::Arc::new(
@@ -1156,9 +1088,10 @@ impl VerterHost {
                 hash: import_route_hash,
             });
         }
-        // Fold in the barrel route-chain facts so a re-export retarget on any
-        // walked barrel invalidates this bundle (no stale-served final root).
-        fact_versions.extend(import_route_facts);
+        // No import-chain facts are pinned here: canonicalization is
+        // demand-driven, so retarget invalidation rides the CONSUMING
+        // query's read-set (recorded at decl-prepare demand), not the
+        // bundle rail.
 
         // 7. Insert into the stable cache. Strict admission — bundles always
         // carry `FileWholeHash` — gated on the IndexedReady serve's

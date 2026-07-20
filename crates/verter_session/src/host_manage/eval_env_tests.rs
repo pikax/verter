@@ -1171,51 +1171,25 @@ fn c3_graph_native_dep_reader_does_not_materialize_dependency_whole_env() {
     );
 }
 
-/// The canonical ids carrying a `FileWholeHash` fact in a `FactVersionRef`
-/// list — the participant identities the resolver recorded for invalidation.
-#[cfg(not(target_arch = "wasm32"))]
-fn whole_hash_participants(
-    facts: &[crate::resolver_core::FactVersionRef],
-) -> std::collections::BTreeSet<String> {
-    facts
-        .iter()
-        .filter_map(|f| match f {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. } => {
-                Some(canonical_id.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// FIX A — the VIEW-AWARE value-export root resolver
-/// (`resolve_value_export_root_with_facts_with_store_view`) resolves a
-/// MULTI-HOP value re-export to its FINAL defining value AND returns the
-/// FULL participant chain facts — a `FileWholeHash` for EVERY file on the
-/// walk (`barrel`, `mid`, `a`), not just the immediate barrel. It also peels
-/// the terminal same-file `typeof` value alias (`V: typeof realImpl` →
-/// `realImpl`). This mirrors the type rail's
-/// `resolve_imported_type_root_with_facts_with_store_view`.
+/// The graph-native value-export resolver
+/// (`resolve_value_export_target_graph_native`) resolves a MULTI-HOP value
+/// re-export to its FINAL defining value AND peels the terminal same-file
+/// `typeof` value alias (`V: typeof realImpl` → `realImpl`) — whole-env-free.
 ///
-/// Why this is the discriminating surface (per architecture review + codex
-/// adjudication): the value rail of `build_prepared_import_canonicalization`
-/// is pre-empted by the symbol-space-NEUTRAL type rail for any CROSS-FILE
-/// re-export hop (the type-export route walk follows value-only re-exports
-/// too and records the same chain, then `continue`s), so a prep-integration
-/// multi-hop test cannot isolate the value-rail fold. The resolver itself IS
-/// the regression surface this fix changed: the OLD `resolve_value_export_target`
-/// returned NO chain facts (only the caller recorded the immediate barrel) AND
-/// routed through `peel_value_decl_alias` → `base_eval_env_arc` → `whole_env()`.
+/// This is the DEMAND-path value resolver: prepared import canonicalization
+/// is demand-driven (the bundle records only the DIRECT hop), so the chain
+/// walk + terminal peel run at the value demand and any chain-participant
+/// facts are observed by the demanding query's own tracer, never pinned on a
+/// bundle rail.
 ///
-/// Discriminating (RED-proof): neutralizing the chain-fact fold inside the
-/// resolver (returning `Vec::new()` / dropping `chain_facts`) makes the
-/// `whole_hash_participants` assertion FAIL — the inner `mid` and the final
-/// `a` are no longer recorded, so a retarget of either would stale-serve. The
-/// full chain facts are the SOLE record of the inner participants AT THIS
-/// resolver.
+/// Discriminating (RED-proof): a resolver that stops at the intermediate
+/// barrel (or skips the terminal peel) fails the `(canonical, name)` identity
+/// assertion; a resolver that routes through the legacy
+/// `peel_value_decl_alias` → `base_eval_env_arc` → `whole_env()` oracle fails
+/// the whole-env-free BOUND assertion.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal() {
+fn value_export_target_graph_native_walks_chain_and_peels_terminal() {
     use crate::types::HostConfig;
     use crate::VerterHost;
 
@@ -1230,22 +1204,12 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
     upsert_ts(&host, "/src/mid.ts", "export { V } from './a'\n");
     upsert_ts(&host, "/src/barrel.ts", "export { V } from './mid'\n");
 
-    let view = host
-        .resolver_store_view_read()
-        .into_cold_seed_view()
-        .into_inner();
-    let (identity, facts) =
-        host.resolve_value_export_root_with_facts_with_store_view(&view, "/src/barrel.ts", "V");
+    let identity = host.resolve_value_export_target_graph_native("/src/barrel.ts", "V");
 
     // (1) Final defining value: the cross-file chain resolves to /src/a.ts and
-    // the terminal same-file `typeof` alias peels `V` -> `realImpl`. This is the
-    // resolver's own end-to-end behavior; at the production call site the
-    // cross-file hops are taken by the symbol-space-neutral TYPE rail and this
-    // resolver runs only for the same-file terminal peel, but the unit resolver
-    // walks the full chain identically (and is what the integration relies on if
-    // the ordering ever changes).
+    // the terminal same-file `typeof` alias peels `V` -> `realImpl`.
     let identity =
-        identity.expect("the value export root must resolve through the multi-hop chain");
+        identity.expect("the value export target must resolve through the multi-hop chain");
     assert_eq!(
         (identity.canonical_id.as_str(), identity.name.as_str()),
         ("/src/a.ts", "realImpl"),
@@ -1254,35 +1218,21 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
          unpeeled `V`)"
     );
 
-    // (2) FULL participant chain facts: a `FileWholeHash` for EVERY file on the
-    // walk — barrel, mid, AND a. The inner `mid` (and the final `a`) being
-    // present is the discriminator that catches an inner-barrel retarget; a rail
-    // that recorded only the immediate barrel could not.
-    let participants = whole_hash_participants(&facts);
-    for required in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
-        assert!(
-            participants.contains(required),
-            "the value-export root resolver must record a FileWholeHash for EVERY participant on \
-             the value re-export chain — missing `{required}` (recorded: {participants:?}). The \
-             inner participant facts are the SOLE catcher of an inner-barrel retarget."
-        );
-    }
-
-    // (3) BOUND: the resolver is graph-native — it does NOT materialise any
+    // (2) BOUND: the resolver is graph-native — it does NOT materialise any
     // participant's whole_env() (the correctness defect the graph-native rail
     // avoids: the legacy `resolve_value_export_target` routed through
     // `peel_value_decl_alias` -> `base_eval_env_arc` -> `whole_env()`).
     for participant in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
         assert!(
             !whole_env_materialized(&host, participant),
-            "the value-export root resolver must NOT materialise `{participant}`'s whole_env() \
-             during prep — it is graph-native (export-graph walk + per-symbol header peel), never \
-             the legacy `peel_value_decl_alias`/`base_eval_env_arc` oracle"
+            "the value-export resolver must NOT materialise `{participant}`'s whole_env() \
+             during resolution — it is graph-native (export-graph walk + per-symbol header \
+             peel), never the legacy `peel_value_decl_alias`/`base_eval_env_arc` oracle"
         );
     }
 }
 
-/// FIX A' (normalization parity): the value-export root resolver normalizes its
+/// Normalization parity: the graph-native value-export resolver normalizes its
 /// FINAL canonical through `resolve_eval_dependency_canonical` — exactly as the
 /// TYPE rail normalizes its final `defining_canonical`
 /// (`imported_type_root.rs`). When a value re-export terminates at a `.js`
@@ -1293,7 +1243,7 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
 /// against the pre-fix resolver (which returned `/pkg/impl.js`) and PASSES against
 /// the normalized resolver (`/pkg/impl.d.ts`).
 #[test]
-fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() {
+fn value_export_target_graph_native_normalizes_final_canonical_like_type_rail() {
     use crate::types::HostConfig;
     use crate::VerterHost;
 
@@ -1310,13 +1260,9 @@ fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() 
     upsert_ts(&host, "/pkg/impl.js", "export const W = { from: 'pkg' }\n");
     upsert_ts(&host, "/pkg/barrel.ts", "export { W } from './impl.js'\n");
 
-    let view = host
-        .resolver_store_view_read()
-        .into_cold_seed_view()
-        .into_inner();
-    let (identity, _facts) =
-        host.resolve_value_export_root_with_facts_with_store_view(&view, "/pkg/barrel.ts", "W");
-    let identity = identity.expect("the value export root must resolve the `.js` terminal");
+    let identity = host
+        .resolve_value_export_target_graph_native("/pkg/barrel.ts", "W")
+        .expect("the value export target must resolve the `.js` terminal");
 
     // FULL (canonical, symbol) identity: the normalization-parity fix pins the
     // CANONICAL; this assertion ALSO pins the SYMBOL axis so a resolver that

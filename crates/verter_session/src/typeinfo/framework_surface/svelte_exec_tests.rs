@@ -1858,17 +1858,23 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         other => panic!("expected exact authored partial preparation, got {other:?}"),
     }
 
-    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    // The props surface itself stays COMPLETE: the member LIST is
+    // authoritative and the unresolved `Args` stays an honest carrier the
+    // demand points retry — Instantiate completeness is demand-local, so a
+    // member-value miss never poisons the root object. Recovery is owned by
+    // the demand-time `ImportRoute` fact rail (asserted end-to-end below),
+    // not by a blanket partial.
+    let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let completeness = crate::request_context::current_cold_compute_completeness();
     assert!(
-        completeness.is_partial()
-            && completeness
-                .reasons()
-                .contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
-        "an unresolved imported owner produces typed MissingDependency partiality, got {completeness:?}"
+        !completeness.is_partial(),
+        "a member-value miss keeps the root props surface COMPLETE (the member \
+         list is authoritative; the unresolved value is an honest carrier), \
+         got {completeness:?}"
     );
+    drop(completeness_scope);
     let dispatch = ctx.dispatch();
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
@@ -1929,8 +1935,13 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         ),
     });
     assert!(
-        read.result_is_partial && read.cache_suppress,
-        "the usable carrier is Partial and ReturnOnly, never complete/cacheable"
+        !read.result_is_partial && !read.cache_suppress,
+        "the carrier-bearing surface is COMPLETE and cacheable — its read-set \
+         carries the owner's ImportRoute recovery fact, so the appearance of \
+         the missing dependency invalidates the warm entry instead of a \
+         permanent partial (got partial={}, suppress={})",
+        read.result_is_partial,
+        read.cache_suppress,
     );
 
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
@@ -1953,6 +1964,60 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
             .collect::<Vec<_>>(),
         vec!["item"],
         "the resolvable snippet publishes its ordered binding"
+    );
+
+    // RECOVERY (the invariant that replaces the old blanket partial): the
+    // missing `./missing-types` module APPEARS. The demand-time `ImportRoute`
+    // recovery fact recorded at the unresolved-head site invalidates every
+    // warm entry that consumed the carrier, so a fresh resolution now
+    // prepares Props COMPLETE and publishes the previously-dropped `bad`
+    // slot with its resolved binding. A tree that warm-served the stale
+    // carrier surface (no recovery fact) keeps `bad` dropped and FAILS.
+    let _ = host
+        .upsert(crate::types::UpsertRequest {
+            canonical_id: Some("/workspace/missing-types.ts".to_string()),
+            input_id: "/workspace/missing-types.ts".to_string(),
+            source: Arc::from("export type Args = [item: boolean];\n"),
+            file_language: crate::types::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("late dependency upsert");
+    let recovered_view =
+        crate::typeinfo::current_store_view_for_query(&host).expect("post-upsert store view");
+    let recovered_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let recovered_ctx = crate::resolver_core::HostResolverContext::from_current(
+        &host,
+        &recovered_view,
+        recovered_overlay,
+    );
+    let recovered_facts = host
+        .resolve_svelte_script_facts_with_ctx(&recovered_ctx, component)
+        .expect("svelte facts after the dependency appears");
+    let recovered_props = recovered_facts.props_type.as_ref().expect("props type");
+    let recovered_surface =
+        navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
+            .expect("props surface after recovery");
+    let recovered_filtered =
+        retain_members(&recovered_surface, &["bad".to_string(), "good".to_string()]);
+    let recovered_resolved = macro_surface_shell(
+        recovered_filtered,
+        AnalyzedMacroKind::DefineSlots,
+        component,
+    );
+    let recovered_slots =
+        svelte_snippet_slots_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
+    let recovered_bad = recovered_slots
+        .iter()
+        .find(|s| s.name == "bad")
+        .expect("the previously-dropped slot publishes once its dependency appears (recovery)");
+    assert_eq!(
+        recovered_bad
+            .bindings
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["item"],
+        "the recovered snippet publishes its resolved ordered binding"
     );
 }
 

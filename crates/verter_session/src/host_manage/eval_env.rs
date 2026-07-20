@@ -451,8 +451,19 @@ impl VerterHost {
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
-        let (route_result, _) =
+        let (route_result, chain_facts) =
             self.build_named_type_export_route_entry(dep_canonical_id, imported_name)?;
+        // Demand-time fact observation: the chain participants' version
+        // facts (each hop's `FileWholeHash` + route surface) enter the
+        // ACTIVE fact tracer, so the CONSUMING query's read-set — the
+        // `Enum.Member` projection memo, a `build_typeof` value root, the
+        // class static-surface composer — invalidates on a retarget or a
+        // leaf edit anywhere on the chase. Prepared import
+        // canonicalization is demand-driven (the bundle records only the
+        // DIRECT hop), so this observation is the SOLE record of the
+        // chain for value-space demands. A no-op without an installed
+        // tracer.
+        crate::fact_signature_helpers::observe_fact_signature(&chain_facts);
         let (canonical_id, owner, name) = route_result.resolved()?;
         let canonical_id = self
             .resolve_eval_dependency_canonical(canonical_id)
@@ -462,97 +473,6 @@ impl VerterHost {
             owner,
             name: name.to_string(),
         })
-    }
-
-    /// View-aware, FULL-CHAIN-fact value-export root resolver — the VALUE
-    /// counterpart of
-    /// [`Self::resolve_imported_type_root_with_facts_with_store_view`].
-    ///
-    /// Resolves a value re-export to its FINAL defining value AND returns the
-    /// version facts of EVERY file on the re-export walk (each participant's
-    /// `FileWholeHash` + route surface), then peels the terminal SAME-FILE
-    /// `typeof` value alias.
-    ///
-    /// Integration role at the sole production call site
-    /// (`build_prepared_import_canonicalization`): this rail is reached ONLY
-    /// when the symbol-space-NEUTRAL TYPE rail above it did NOT produce a
-    /// DIFFERENT final canonical — i.e. it resolved the name to the BARREL
-    /// itself, covering BOTH a same-file resolution AND a type-route
-    /// miss/fallback (both return the barrel). The type rail's
-    /// participant-accumulating walk follows EVERY cross-file re-export hop —
-    /// value-only re-exports included, because module resolution is
-    /// symbol-space-neutral — and short-circuits the moment it lands cross-file;
-    /// so by the time this rail runs, the only remaining work is the SAME-FILE
-    /// terminal value-alias peel (`export const V: typeof realImpl = realImpl`
-    /// declared on the barrel itself → `realImpl`). That same-file `typeof` peel
-    /// is this rail's distinct live contribution; the cross-file fact
-    /// completeness is delivered by the type rail's full-chain walk, not here.
-    /// The rail is whole-env-free and SYMMETRIC with the type rail, so it stays
-    /// correct if the integration ordering ever changes.
-    ///
-    /// Two graph-native sub-walks, both whole-env-free; NEVER routes through
-    /// `peel_value_decl_alias` / `base_eval_env_arc` / `whole_env()`:
-    ///
-    /// 1. The re-export CHAIN walk reuses
-    ///    [`Self::build_named_type_export_route_entry`] — the shared
-    ///    participant-accumulating walk over `ShallowFileState::export_target`
-    ///    (`Local` / `Reexport`, module resolution is symbol-space-neutral, so
-    ///    a `export { V } from './mid'` value re-export traverses identically to
-    ///    a type re-export). It returns the terminal defining `(canonical,
-    ///    name)` plus the participant `FileWholeHash` + `Route` facts; a
-    ///    fenced-serve walk returns EMPTY facts (the strict-admission
-    ///    negative-cache contract), so this resolver inherits it. The terminal
-    ///    canonical is normalized through
-    ///    [`Self::resolve_eval_dependency_canonical`] — the SAME normalization
-    ///    the type rail applies to its final `defining_canonical` — so a final
-    ///    that an eval-dependency alias collapses onto the barrel is reported
-    ///    identically by both rails (parity; no spurious cross-file divergence).
-    /// 2. The terminal value `typeof`-alias is peeled graph-native via
-    ///    [`Self::peel_value_decl_alias_graph_native`] (per-symbol value memo +
-    ///    header PRESENCE). The peeled identity is the final defining value.
-    ///
-    /// `view` carries the request boundary, symmetric with the type rail's
-    /// `_with_store_view` entry: the participant CHAIN walk (shared
-    /// `build_named_type_export_route_entry`) is the view-INDEPENDENT cold
-    /// compute — exactly as the type rail's identically-named cold closure is —
-    /// and the recorded chain facts are validated against `view` by the
-    /// consuming bundle's `ReadSetSignature` fact rail at warm-read time. The
-    /// parameter is the seam through which a future value-space route cache can
-    /// validate a cached value-export entry against the supplied view.
-    pub(crate) fn resolve_value_export_root_with_facts_with_store_view(
-        &self,
-        _view: &dyn crate::resolver_core::StoreView,
-        dep_canonical_id: &str,
-        imported_name: &str,
-    ) -> (
-        Option<ValueDeclIdentity>,
-        Vec<crate::resolver_core::FactVersionRef>,
-    ) {
-        let Some((route_result, chain_facts)) =
-            self.build_named_type_export_route_entry(dep_canonical_id, imported_name)
-        else {
-            return (None, Vec::new());
-        };
-        let Some((final_canonical, final_owner, final_name)) = route_result.resolved() else {
-            // A stable Miss carries the participant facts so a later-appearing
-            // export still invalidates a recorded miss; no value identity.
-            return (None, chain_facts);
-        };
-        // Normalize the terminal canonical exactly as the type rail normalizes
-        // its final `defining_canonical` (companion-declaration / bundle-entry
-        // collapse) so the two rails agree on the final identity — parity, no
-        // value-only divergence on an eval-dependency-aliased final.
-        let final_canonical = self
-            .resolve_eval_dependency_canonical(final_canonical)
-            .unwrap_or_else(|| final_canonical.to_string());
-        // Peel the terminal value alias graph-native (no whole-env). A pure
-        // `export const V` terminal peels to itself.
-        let identity = self.peel_value_decl_alias_graph_native(
-            final_canonical.as_str(),
-            final_owner,
-            final_name,
-        );
-        (Some(identity), chain_facts)
     }
 
     pub(crate) fn build_snapshot_from_parse(parse: crate::ParseSnapshot) -> FileAnalysisSnapshot {

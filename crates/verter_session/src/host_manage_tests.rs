@@ -615,12 +615,25 @@ export interface CheckboxProps {
         .prepared_type_decl("/workspace/Checkbox.vue", "CheckboxProps")
         .expect("CheckboxProps should rebuild after import routes are upgraded");
     assert_eq!(
-        rebuilt
-            .name_resolution
-            .get("theme")
-            .map(|identity| (identity.canonical_id.as_ref(), identity.symbol_name.as_ref())),
-        Some(("/workspace/.nuxt/ui/checkbox.ts", "theme")),
-        "prepared decl caches must rebuild to the exact exported value owner when dependency resolutions improve",
+        rebuilt.name_resolution.get("theme").map(|identity| (
+            identity.canonical_id.as_ref(),
+            identity.symbol_name.as_ref()
+        )),
+        Some(("/workspace/.nuxt/ui/checkbox.ts", "default")),
+        "prepared decl caches must rebuild to the resolved DIRECT hop when \
+         dependency resolutions improve (demand-driven canonicalization keeps \
+         the imported name; the value demand peels the default alias)",
+    );
+    // Demand-side: the value rail peels `export default theme` to the exact
+    // exported value declaration at demand.
+    let peeled = host
+        .resolve_value_export_target_graph_native("/workspace/.nuxt/ui/checkbox.ts", "default")
+        .expect("the value demand resolves the upgraded route's default export");
+    assert_eq!(
+        (peeled.canonical_id.as_str(), peeled.name.as_str()),
+        ("/workspace/.nuxt/ui/checkbox.ts", "theme"),
+        "the demand-time value rail must peel the default alias to the exact \
+         exported value owner",
     );
 }
 
@@ -759,19 +772,22 @@ fn prepared_type_decl_bundle_invalidates_when_exact_resolution_changes() {
     );
 }
 
-/// A type / value imported through a re-export BARREL must store the FINAL
-/// defining-file canonical in the prepared/eager `name_resolution`, NOT the
-/// intermediate barrel. The carrier fallback already walks to the final file;
-/// the eager fast-path used to stop at the barrel (the divergence). This pins
-/// that the eager `name_resolution` now canonicalizes BOTH rails (type imports
-/// via the type-export authority, value imports via the value-export
-/// authority) to the final defining file at preparation time.
+/// Prepared import canonicalization is DEMAND-DRIVEN: the bundle records the
+/// DIRECT hop `(barrel, ordinary-file owner, imported name)` for each import
+/// binding (the `ordinary_file()` owner is the provisional final-resolution-
+/// owed marker), and the FINAL defining identity resolves at the first
+/// decl-prepare / ref-head demand through the shared route authority — the
+/// type-export rail for type bindings, the graph-native value-export rail
+/// (with the terminal alias peel) for value bindings. Bundle build walks NO
+/// import chain.
 ///
-/// Discriminating: a build that left the eager `name_resolution` pinned to the
-/// barrel canonical would return `/src/barrel.ts` for both `Node` and
-/// `theme` — the asserts demand the final `/src/defining.ts`.
+/// Discriminating both ways: an eager build that pre-resolved the chain would
+/// store `/src/defining.ts` in `name_resolution` (the first asserts demand
+/// the barrel DIRECT hop); a demand path that stopped at the barrel would
+/// return `/src/barrel.ts` from the route authority (the second asserts
+/// demand the final `/src/defining.ts` identities on BOTH rails).
 #[test]
-fn prepared_decl_name_resolution_canonicalizes_barrel_reexport_to_final_defining_file() {
+fn prepared_decl_name_resolution_stores_direct_hop_and_demand_resolves_final() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/defining.ts",
@@ -814,40 +830,69 @@ fn prepared_decl_name_resolution_canonicalizes_barrel_reexport_to_final_defining
         .prepared_type_decl("/src/owner.ts", "Props")
         .expect("Props should prepare through the barrel");
 
-    // TYPE rail: `Node` imported through the barrel canonicalizes to the
-    // FINAL defining file (not the intermediate `/src/barrel.ts`).
+    // Bundle-side contract: BOTH bindings store the DIRECT hop with the
+    // provisional ordinary-file owner — bundle build walked no chain.
+    for (local, imported) in [("Node", "Node"), ("theme", "theme")] {
+        let identity = prepared
+            .name_resolution
+            .get(local)
+            .unwrap_or_else(|| panic!("`{local}` must have a name_resolution entry"));
+        assert_eq!(
+            (
+                identity.canonical_id.as_ref(),
+                identity.owner,
+                identity.symbol_name.as_ref()
+            ),
+            (
+                "/src/barrel.ts",
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                imported
+            ),
+            "the prepared name_resolution stores the DIRECT hop for `{local}` \
+             (demand-driven canonicalization) — an eager chain walk at bundle \
+             build would have stored the final defining identity",
+        );
+    }
+
+    // Demand-side contract, TYPE rail: the shared route authority resolves
+    // the direct hop to the FINAL defining file at demand.
+    let node_final = host
+        .resolve_imported_type_root("/src/barrel.ts", "Node")
+        .expect("the type rail resolves the barrel hop at demand");
     assert_eq!(
-        prepared.name_resolution.get("Node").map(|identity| (
-            identity.canonical_id.as_ref(),
-            identity.symbol_name.as_ref()
-        )),
-        Some(("/src/defining.ts", "Node")),
-        "the barrel-imported TYPE `Node` must canonicalize to the FINAL defining file \
-         /src/defining.ts in the eager name_resolution, not the intermediate barrel",
+        (
+            node_final.canonical_id.as_ref(),
+            node_final.symbol_name.as_ref()
+        ),
+        ("/src/defining.ts", "Node"),
+        "the demand-time TYPE rail must canonicalize the barrel-imported `Node` \
+         to the FINAL defining file, not the intermediate barrel",
     );
 
-    // VALUE rail: `theme` imported through the barrel canonicalizes to the
-    // FINAL defining `themeImpl` (the value-export authority peels the alias).
+    // Demand-side contract, VALUE rail: the graph-native value-export rail
+    // resolves the barrel hop AND peels the terminal alias to `themeImpl`.
+    let theme_final = host
+        .resolve_value_export_target_graph_native("/src/barrel.ts", "theme")
+        .expect("the value rail resolves the barrel hop at demand");
     assert_eq!(
-        prepared.name_resolution.get("theme").map(|identity| (
-            identity.canonical_id.as_ref(),
-            identity.symbol_name.as_ref()
-        )),
-        Some(("/src/defining.ts", "themeImpl")),
-        "the barrel-imported VALUE `theme` must canonicalize to the FINAL defining \
-         (/src/defining.ts, themeImpl), not the intermediate barrel binding",
+        (theme_final.canonical_id.as_str(), theme_final.name.as_str()),
+        ("/src/defining.ts", "themeImpl"),
+        "the demand-time VALUE rail must canonicalize the barrel-imported `theme` \
+         to the FINAL defining (/src/defining.ts, themeImpl), peeling the \
+         re-export alias",
     );
 }
 
-/// Editing the barrel's re-export TARGET must invalidate the owner's prepared
-/// `name_resolution` — the recorded barrel route facts catch the retarget so a
-/// stale final-root is never served. This pins the invalidation rail P6a's
-/// canonicalization must preserve.
+/// Editing the barrel's re-export TARGET must invalidate the DEMAND-TIME
+/// final resolution — the route authority's memoized entry (`ImportedRootDb`)
+/// records the barrel route-chain facts at demand, so a retarget anywhere on
+/// the chain misses the warm entry and re-resolves to the NEW defining file.
+/// A stale final-root is never served.
 ///
-/// Discriminating: if the canonicalization did NOT record the barrel route
-/// facts (or rooted only on the owner + final file), retargeting the barrel
-/// from `/src/a.ts` to `/src/b.ts` would keep serving the stale `/src/a.ts`
-/// final root — the second assert demands `/src/b.ts`.
+/// Discriminating: if the demand-time resolution did NOT record the barrel
+/// route facts (or rooted only on the owner + final file), retargeting the
+/// barrel from `/src/a.ts` to `/src/b.ts` would keep serving the stale
+/// `/src/a.ts` final root — the second assert demands `/src/b.ts`.
 #[test]
 fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -886,8 +931,17 @@ fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
             .name_resolution
             .get("Node")
             .map(|identity| identity.canonical_id.as_ref()),
-        Some("/src/a.ts"),
-        "before the barrel retarget the final canonical is /src/a.ts",
+        Some("/src/barrel.ts"),
+        "the prepared name_resolution stores the DIRECT barrel hop \
+         (demand-driven canonicalization)",
+    );
+    let initial_final = host
+        .resolve_imported_type_root("/src/barrel.ts", "Node")
+        .expect("the demand-time route resolves through the barrel");
+    assert_eq!(
+        initial_final.canonical_id.as_ref(),
+        "/src/a.ts",
+        "before the barrel retarget the demand-time final canonical is /src/a.ts",
     );
 
     // Retarget the barrel's re-export from ./a to ./b (a content edit to the
@@ -917,8 +971,17 @@ fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
             .name_resolution
             .get("Node")
             .map(|identity| identity.canonical_id.as_ref()),
-        Some("/src/b.ts"),
-        "the barrel retarget must invalidate the owner's prepared name_resolution so the \
+        Some("/src/barrel.ts"),
+        "the direct-hop entry stays the barrel — the retarget moves the \
+         DEMAND-TIME resolution, not the bundle-stored hop",
+    );
+    let retargeted_final = host
+        .resolve_imported_type_root("/src/barrel.ts", "Node")
+        .expect("the demand-time route re-resolves after the retarget");
+    assert_eq!(
+        retargeted_final.canonical_id.as_ref(),
+        "/src/b.ts",
+        "the barrel retarget must invalidate the memoized demand-time route so the \
          final canonical follows the barrel to /src/b.ts (no stale-served final root)",
     );
 }
@@ -1673,7 +1736,7 @@ fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn prepared_type_decl_reuses_warmed_package_target_and_materializes_cold_helper_once() {
+fn prepared_type_decl_reuses_warmed_package_target_and_leaves_undemanded_helper_cold() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/node_modules/pkg/dist/index.d.ts",
@@ -1770,26 +1833,31 @@ fn prepared_type_decl_reuses_warmed_package_target_and_materializes_cold_helper_
             .is_some(),
         "the inspected active package target owns a canonical IndexedReady",
     );
-    // The exact-owner discriminator: index/index3 are already warm, while
-    // Payload has no authoritative target owner yet. Preparation therefore
-    // builds exactly the one cold helper; rebuilding either warm package
-    // artifact or reading Payload twice would raise these counts above one.
+    // The demand-driven discriminator: index/index3 are already warm and the
+    // helper `Payload` was NOT demanded — preparation records only the
+    // DIRECT-hop identity and materializes NOTHING. An eager
+    // whole-bundle chain walk would have indexed the helper here (the
+    // pre-redesign behavior these zero-counts discriminate against);
+    // rebuilding either warm package artifact would also raise the count.
     assert_eq!(
         host.provenance().snapshot().indexed_ready_materializes,
-        1,
-        "the prepared-decl build must reuse index/index3 and materialize only the previously unowned helper",
+        0,
+        "the prepared-decl build must reuse index/index3 and leave the \
+         un-demanded helper cold (demand-driven canonicalization walks no \
+         import chain at bundle build)",
     );
     assert_eq!(
         ws.read_count("/workspace/node_modules/pkg/dist/payload.d.ts"),
-        1,
-        "exact target ownership requires one cold helper read and no duplicate read",
+        0,
+        "the un-demanded helper must not be read at preparation time",
     );
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
-            .is_some(),
-        "the exact-owner helper materialization must publish one reusable IndexedReady artifact",
+            .is_none(),
+        "the un-demanded helper stays cold until a decl-prepare / ref-head \
+         demand actually resolves it",
     );
 }
 
