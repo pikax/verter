@@ -94,3 +94,9 @@ External (NOT ours — the LSP branch / base): 9 `verter_lsp` real_provider + 3 
 - Dual-corpus integrity: 29 inline goldens are real official `inlineTemplate:true`; the 7 PASS cells are genuine; the 22 tracked divergences are real (not false-greens).
 - Render-arity (97033f2b8): no counterexample found.
 - Mode isolation: IDE/TSX (mode-2) + TSC (mode-3) unaffected by the gate/inline changes.
+
+### `export const {…} = defineProps` in `<script setup>` not rejected  [PRE-EXISTING, lint surface]
+Official rejects a `<script setup>` `export const { x } = defineProps(...)` with "cannot contain ES module exports"; Verter leaves the export. Separate `no-export-in-script-setup` lint surface (round-9 finding) — not part of the macro scope-check reconciliation. Pre-existing.
+
+### Non-top-level macro calls skip scope-check  [PRE-EXISTING]
+`if (true) { defineProps(...) }` / a macro call nested below the top level — both Verter and official's scope-walk are top-level only, but prop-extraction differences predate the peel/gate work (round-9 finding). Pre-existing; documented for completeness.
