@@ -2299,6 +2299,7 @@ impl VerterLanguageServer {
             carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
             carrier_transaction_coordinator: Arc::clone(&self.carrier_transaction_coordinator),
             decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
+            resync_coordinator: Arc::clone(&self.resync_coordinator),
         };
 
         let ctx = context.to_owned();

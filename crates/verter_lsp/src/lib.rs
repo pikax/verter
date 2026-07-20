@@ -29,6 +29,7 @@ pub mod features;
 pub mod project_resolver;
 pub mod provider_surface_store;
 pub mod provider_sync;
+pub mod resync_coordinator;
 pub mod server;
 pub mod statistics;
 pub mod svelte_assets;
