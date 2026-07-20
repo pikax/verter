@@ -1468,6 +1468,10 @@ defineProps<External>()
         .contains("$props: import(\"vue\").PublicProps & External"));
 }
 
+/// Mutation recipe: synthesize `state.emits_names` from the authoritative TSC
+/// event rows. The exact public handler/overload may still pass, but the
+/// runtime-`emits` negative assertion must fail because TSC and runtime bundles
+/// are independent authorities.
 #[test]
 fn explicit_emit_fixture_drives_emit_and_handler_parameter_contracts() {
     let source = r#"<script setup lang="ts">defineEmits<{ save: [id: number] }>()</script>"#;
@@ -1498,6 +1502,11 @@ fn explicit_emit_fixture_drives_emit_and_handler_parameter_contracts() {
         .code
         .contains(r#"((event: "save", id: number) => void)"#));
     assert!(output.code.contains("(payload: number) => void"));
+    let comp = output.code.split("declare const TestComp").next().unwrap();
+    assert!(
+        !comp.contains("emits: ["),
+        "type-only TSC rows must not synthesize runtime emits: {comp}"
+    );
 }
 
 fn gen_tsc(sfc: &str) -> String {

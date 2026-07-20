@@ -12,6 +12,9 @@ use crate::{
 };
 use verter_compiler::compile::CompileTarget;
 use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
+use verter_macro_dto::{
+    MacroAnchor, MacroTscBundle, MacroTscOutcome, MacroTscProjection, TscPublicPropsProjection,
+};
 
 fn strict_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -4811,26 +4814,202 @@ fn direct_compiler_public_api(
     host: &VerterHost,
     mode: verter_compiler::tsc::TscMode,
 ) -> verter_compiler::tsc::TscOutput {
-    let macro_output = host.produce_vue_macro_codegen(
+    direct_compiler_public_api_for(
+        host,
         "/src/Cap.vue",
+        PUBLIC_API_BYTE_PIN_SOURCE,
+        "Cap",
+        mode,
+    )
+}
+
+fn direct_compiler_public_api_for(
+    host: &VerterHost,
+    canonical_id: &str,
+    source: &str,
+    component_name: &str,
+    mode: verter_compiler::tsc::TscMode,
+) -> verter_compiler::tsc::TscOutput {
+    let macro_output = host.produce_vue_macro_codegen(
+        canonical_id,
         crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
     );
     let bundle = macro_output.tsc.expect("direct compiler TSC bundle");
     let extracted = verter_compiler::tsc::extract_tsc_state(
-        PUBLIC_API_BYTE_PIN_SOURCE,
-        "Cap",
+        source,
+        component_name,
         &verter_compiler::tsc::TscExtractOptions {
-            filename: Some("/src/Cap.vue".to_string()),
+            filename: Some(canonical_id.to_string()),
         },
     )
     .expect("direct compiler extraction");
     verter_compiler::tsc::generate_tsc_from_state(
         &extracted,
-        "Cap",
+        component_name,
         mode,
         verter_compiler::tsc::MacroTscInput::Authoritative(bundle.as_ref()),
     )
     .expect("direct compiler projection")
+}
+
+const CARRIER_STYLE_V_BIND_SOURCE: &str = "<script setup lang=\"ts\">\nconst accent = 'red'\n</script>\n<template><div /></template>\n<style scoped>.x { color: v-bind(accent); }</style>\n";
+const CARRIER_WITH_DEFAULTS_SOURCE: &str = "<script setup lang=\"ts\">\ninterface Props {\n  count: number\n  label: string\n}\nwithDefaults(defineProps<Props>(), { count: 0, label: 'hi' })\n</script>\n<template><div /></template>\n";
+const CARRIER_SLOTS_SOURCE: &str = "<script setup lang=\"ts\">\ndefineSlots<{\n  default(props: { item: number }): any\n}>()\n</script>\n<template><div /></template>\n";
+const CARRIER_GENERICS_SOURCE: &str = "<script setup lang=\"ts\" generic=\"T\">\ndefineProps<{ items: T[]; selected: T }>()\n</script>\n<template><div /></template>\n";
+const CARRIER_CROSS_FILE_TYPES: &str = "export interface ChildProps {\n  id: number\n  label: string\n}\nexport interface ChildEmits {\n  (e: 'change', value: number): void\n}\n";
+const CARRIER_CROSS_FILE_CHILD_SOURCE: &str = "<script setup lang=\"ts\">\nimport type { ChildProps, ChildEmits } from './types'\ndefineProps<ChildProps>()\ndefineEmits<ChildEmits>()\n</script>\n<template><div /></template>\n";
+
+fn public_api_tsc_bundle(host: &VerterHost, canonical_id: &str) -> Arc<MacroTscBundle> {
+    host.produce_vue_macro_codegen(
+        canonical_id,
+        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+    )
+    .tsc
+    .expect("public API TSC bundle")
+}
+
+fn assert_authored_props_projection(
+    bundle: &MacroTscBundle,
+    entry_index: usize,
+    entry_macro_index: u32,
+    anchor_macro_index: u32,
+) {
+    let entry = &bundle.entries[entry_index];
+    assert_eq!(entry.macro_index, entry_macro_index);
+    let MacroTscOutcome::Complete(MacroTscProjection::Props(props)) = &entry.outcome else {
+        panic!("entry {entry_index} must be a complete props projection: {entry:?}");
+    };
+    assert_eq!(
+        props.public,
+        TscPublicPropsProjection::AuthoredArgument {
+            anchor: MacroAnchor::MacroArgument {
+                macro_index: anchor_macro_index
+            },
+        },
+    );
+}
+
+/// Mutation recipe: bypass the registry projector, replace its structured TSC
+/// bundle, empty the generated source map, or reintroduce runtime `emits` from a
+/// type-only emits row. Direct producer parity or the exact semantic assertions
+/// below must fail before a carrier golden can be refreshed.
+#[test]
+fn public_api_carrier_goldens_match_direct_structured_projection() {
+    let host = strict_host();
+    for (canonical_id, source) in [
+        ("/proj/Accent.vue", CARRIER_STYLE_V_BIND_SOURCE),
+        ("/proj/WithDefaults.vue", CARRIER_WITH_DEFAULTS_SOURCE),
+        ("/proj/Slots.vue", CARRIER_SLOTS_SOURCE),
+        ("/proj/Generics.vue", CARRIER_GENERICS_SOURCE),
+        ("/proj/Child.vue", CARRIER_CROSS_FILE_CHILD_SOURCE),
+    ] {
+        upsert_vue(&host, canonical_id, source);
+    }
+    upsert_non_sfc(&host, "/proj/types.ts", CARRIER_CROSS_FILE_TYPES);
+
+    let style_bundle = public_api_tsc_bundle(&host, "/proj/Accent.vue");
+    assert!(style_bundle.entries.is_empty());
+    let slots_bundle = public_api_tsc_bundle(&host, "/proj/Slots.vue");
+    assert!(slots_bundle.entries.is_empty());
+
+    let defaults_bundle = public_api_tsc_bundle(&host, "/proj/WithDefaults.vue");
+    assert_eq!(defaults_bundle.entries.len(), 1);
+    assert_authored_props_projection(&defaults_bundle, 0, 1, 0);
+
+    let generics_bundle = public_api_tsc_bundle(&host, "/proj/Generics.vue");
+    assert_eq!(generics_bundle.entries.len(), 1);
+    assert_authored_props_projection(&generics_bundle, 0, 0, 0);
+
+    let child_bundle = public_api_tsc_bundle(&host, "/proj/Child.vue");
+    assert_eq!(child_bundle.entries.len(), 2);
+    assert_authored_props_projection(&child_bundle, 0, 0, 0);
+    let MacroTscOutcome::Complete(MacroTscProjection::Emits(emits)) =
+        &child_bundle.entries[1].outcome
+    else {
+        panic!("Child entry 1 must be the complete emits projection");
+    };
+    assert_eq!(emits.events.len(), 1);
+    assert_eq!(emits.events[0].name, "change");
+    assert_eq!(emits.events[0].emit_parameters.as_str(), "value: number");
+    assert_eq!(emits.events[0].handler_parameters.as_str(), "value: number");
+
+    for (canonical_id, source, component_name) in [
+        ("/proj/Accent.vue", CARRIER_STYLE_V_BIND_SOURCE, "Accent"),
+        (
+            "/proj/WithDefaults.vue",
+            CARRIER_WITH_DEFAULTS_SOURCE,
+            "WithDefaults",
+        ),
+        ("/proj/Slots.vue", CARRIER_SLOTS_SOURCE, "Slots"),
+        ("/proj/Generics.vue", CARRIER_GENERICS_SOURCE, "Generics"),
+        ("/proj/Child.vue", CARRIER_CROSS_FILE_CHILD_SOURCE, "Child"),
+    ] {
+        let projected = host
+            .get_public_api(canonical_id)
+            .unwrap_or_else(|error| {
+                panic!("public API projection failed for {canonical_id}: {error}")
+            })
+            .unwrap_or_else(|| panic!("public API projection absent for {canonical_id}"));
+        let direct = direct_compiler_public_api_for(
+            &host,
+            canonical_id,
+            source,
+            component_name,
+            verter_compiler::tsc::TscMode::Public,
+        );
+        assert_eq!(
+            projected.code.as_ref(),
+            direct.code,
+            "{canonical_id} registry code must equal the direct compiler"
+        );
+        assert_eq!(
+            projected.source_map.as_deref(),
+            Some(direct.source_map.as_str()),
+            "{canonical_id} registry map must equal the direct compiler"
+        );
+        assert!(
+            !direct.source_map.contains(r#""mappings":"""#),
+            "{canonical_id} must carry a non-empty structured source map"
+        );
+
+        match canonical_id {
+            "/proj/Accent.vue" => {
+                assert!(direct
+                    .code
+                    .contains(r#"$props: import("vue").PublicProps & {}"#));
+                assert!(!direct.code.contains("accent:"));
+            }
+            "/proj/WithDefaults.vue" => assert!(direct.code.contains(
+                r#"Omit<Props, "count" | "label"> & Partial<Pick<Props, "count" | "label">>"#
+            )),
+            "/proj/Slots.vue" => assert!(direct
+                .code
+                .contains("default(props: { item: number }): any")),
+            "/proj/Generics.vue" => assert!(direct.code.contains(
+                r#"new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T })"#
+            )),
+            "/proj/Child.vue" => {
+                assert!(direct
+                    .code
+                    .contains("import type { ChildProps } from './types'"));
+                assert!(direct
+                    .code
+                    .contains("import type { ChildEmits } from './types'"));
+                assert!(direct
+                    .code
+                    .contains(r#""onChange"?: (value: number) => void"#));
+                assert!(direct
+                    .code
+                    .contains(r#"((event: "change", value: number) => void)"#));
+                let comp = direct.code.split("declare const Child").next().unwrap();
+                assert!(
+                    !comp.contains("emits: ["),
+                    "type-only TSC rows must not synthesize a runtime emits option"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QSwyQztBO0E7QTs7QTtBLDBDQUdZLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";

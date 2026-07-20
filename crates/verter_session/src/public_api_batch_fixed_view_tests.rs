@@ -309,6 +309,11 @@ fn matrix_shared_imports_scalar_equals_batch() {
 }
 
 /// (b) Unique imports: each SFC imports its OWN `./types_i`.
+///
+/// Mutation recipe: make terminal event literals single-quoted, collapse every
+/// handler to `() => void`, or route every row to `go0`. The exact `$emit` and
+/// handler assertions below must reject the quote/shape/ownership mutation,
+/// while `public_api_batch_equals_scalar_bytes` remains a passing control.
 #[test]
 fn matrix_unique_imports_scalar_equals_batch() {
     let host = make_host();
@@ -338,16 +343,20 @@ defineEmits<E{i}>()
     let batch = assert_scalar_equals_batch(&host, &ids);
     // Each surface resolves its OWN distinct cross-file import with NO cross-talk
     // between items sharing the one fixed view. Discriminating on a MATERIALIZED
-    // surface: item i's emit `E{i} = (e: 'go{i}', n: number)` materializes its
-    // unique event literal `'go{i}'`, and item i must NOT carry any OTHER item's
-    // event `'go{j}'` (j != i). A shared-view cross-talk bug (item i served item
-    // j's resolved emit) would surface a foreign `'go{j}'` → RED; a stale/empty
-    // view would drop item i's own `'go{i}'` → RED.
+    // surface: item i's emit `E{i} = (e: 'go{i}', n: number)` materializes as
+    // the compiler-canonical double-quoted `$emit` overload plus its exact
+    // handler prop, and item i must NOT carry any OTHER item's rows. A
+    // shared-view cross-talk bug (item i served item j's resolved emit) would
+    // surface a foreign signature/handler → RED; a stale/empty view would drop
+    // item i's own rows → RED.
     for (i, slot) in batch.iter().enumerate() {
         let r = slot.as_ref().unwrap_or_else(|| panic!("Uniq{i} renders"));
+        let own_emit = format!(r#"((event: "go{i}", n: number) => void)"#);
+        let own_handler = format!(r#""onGo{i}"?: (n: number) => void"#);
         assert!(
-            r.code.contains(&format!("'go{i}'")),
-            "Uniq{i} surface must MATERIALIZE its own `'go{i}'` emit event; \
+            r.code.contains(&own_emit) && r.code.contains(&own_handler),
+            "Uniq{i} surface must MATERIALIZE its exact `{own_emit}` overload \
+             and `{own_handler}` handler; \
              got:\n{}",
             r.code,
         );
@@ -355,10 +364,12 @@ defineEmits<E{i}>()
             if j == i {
                 continue;
             }
+            let foreign_emit = format!(r#"((event: "go{j}", n: number) => void)"#);
+            let foreign_handler = format!(r#""onGo{j}"?: (n: number) => void"#);
             assert!(
-                !r.code.contains(&format!("'go{j}'")),
-                "Uniq{i} surface leaked another item's `'go{j}'` emit event \
-                 (fixed-view cross-talk); got:\n{}",
+                !r.code.contains(&foreign_emit) && !r.code.contains(&foreign_handler),
+                "Uniq{i} surface leaked another item's `{foreign_emit}` overload \
+                 or `{foreign_handler}` handler (fixed-view cross-talk); got:\n{}",
                 r.code,
             );
         }
@@ -444,6 +455,9 @@ defineEmits<ChildEmits>()
 ///  * scalar == batch byte identity, AND
 ///  * the augmented PROP member `extra` stays SHALLOW (absent) — documents the
 ///    shallow-by-default boundary.
+/// Mutation recipe: single-quote terminal literals, replace the `AugEmits`
+/// handler parameters with `()`, or retarget the event name. The exact emit +
+/// handler pair must fail; the shallow `AugProps` assertion remains a control.
 #[test]
 fn matrix_external_augmenter_does_not_poison_emit_materialization_scalar_equals_batch() {
     let host = make_host();
@@ -475,9 +489,12 @@ defineEmits<AugEmits>()
     // The imported emit still MATERIALIZES despite the augmenter in the
     // workspace (the augmenter does not poison the shared-view resolution).
     assert!(
-        r.code.contains("payload: number") && r.code.contains("'augd'"),
+        r.code
+            .contains(r#"((event: "augd", payload: number) => void)"#)
+            && r.code.contains(r#""onAugd"?: (payload: number) => void"#),
         "with an external augmenter loaded, the imported `AugEmits` must still \
-         MATERIALIZE `(e: 'augd', payload: number)`; got:\n{}",
+         MATERIALIZE the canonical `((event: \"augd\", payload: number) => void)` \
+         overload and exact handler; got:\n{}",
         r.code,
     );
     // The augmented PROP member stays SHALLOW (shallow-by-default): `AugProps`
@@ -568,6 +585,9 @@ defineEmits<MEmits>()
 /// type on demand would drop `payload: number`, flipping the assertion RED. A
 /// bare `is_some()` (the pre-strengthening assertion) passed even on a shallow
 /// `DepModel` prop ref and so could not catch that.
+/// Mutation recipe: single-quote terminal literals, erase the handler payload,
+/// or retarget the admitted event away from `fwd`. The exact overload + handler
+/// pair must fail while `public_api_batch_equals_scalar_bytes` stays green.
 #[test]
 fn matrix_midbatch_lazy_publication_forward_scalar_equals_batch() {
     let host = make_host();
@@ -600,10 +620,15 @@ defineEmits<DepEmits>()
     // The consumer's emit surface carries the EARLIER dep's MATERIALIZED payload
     // — only reachable by on-demand materializing `Dep.vue`'s `<script>` export.
     assert!(
-        consumer.code.contains("payload: number") && consumer.code.contains("'fwd'"),
+        consumer
+            .code
+            .contains(r#"((event: "fwd", payload: number) => void)"#)
+            && consumer
+                .code
+                .contains(r#""onFwd"?: (payload: number) => void"#),
         "the consumer's emit surface must MATERIALIZE the earlier-declared dep's \
-         `(e: 'fwd', payload: number)` signature; a stale/shallow/empty view \
-         would drop it. got:\n{}",
+         canonical `((event: \"fwd\", payload: number) => void)` overload and \
+         exact handler; a stale/shallow/empty view would drop it. got:\n{}",
         consumer.code,
     );
 }
@@ -622,6 +647,9 @@ defineEmits<DepEmits>()
 /// later-declared dep on demand would drop `payload: number` (the emit would
 /// fall back to an unresolved signature) — flipping the assertion RED. A bare
 /// `is_some()` (the pre-strengthening assertion) could not catch that.
+/// Mutation recipe: single-quote terminal literals, erase the handler payload,
+/// or retarget the admitted event away from `bInv`. The exact overload +
+/// handler pair must fail while `public_api_batch_equals_scalar_bytes` stays green.
 #[test]
 fn matrix_midbatch_lazy_publication_inverse_scalar_equals_batch() {
     let host = make_host();
@@ -658,10 +686,16 @@ defineEmits<DepBEmits>()
     // — only reachable by on-demand materializing `DepB.vue` during the
     // consumer's render (it is the SECOND id, not yet rendered at this point).
     assert!(
-        consumer.code.contains("payload: number") && consumer.code.contains("'bInv'"),
+        consumer
+            .code
+            .contains(r#"((event: "bInv", payload: number) => void)"#)
+            && consumer
+                .code
+                .contains(r#""onBInv"?: (payload: number) => void"#),
         "the consumer's emit surface must MATERIALIZE the later-declared dep's \
-         `(e: 'bInv', payload: number)` signature (on-demand serve of the LATER \
-         batch item); a stale/shallow/empty view would drop it. got:\n{}",
+         canonical `((event: \"bInv\", payload: number) => void)` overload and \
+         exact handler (on-demand serve of the LATER batch item); a \
+         stale/shallow/empty view would drop it. got:\n{}",
         consumer.code,
     );
 }
