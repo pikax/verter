@@ -2,8 +2,6 @@
 //! dependency-source readers.
 //!
 //! Owns:
-//! - `current_route_surface_hash` — the single route-fact production
-//!   helper (IndexedReady is the SOLE route-surface authority).
 //! - `route_surface_is_edge_current` — the shared edge-currency oracle.
 //! - `resolve_prepared_decl_target` /
 //!   `resolve_decl_in_scope_with_reexport_chain` (test-only) — host-state
@@ -17,55 +15,9 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use crate::host_manage::component_meta_trace_custom;
-use crate::types::*;
 use crate::VerterHost;
 
 impl VerterHost {
-    /// The current route-surface hash for `canonical` — the single
-    /// route-fact production helper. ONE source, identical to the source
-    /// [`crate::resolver_store::HostStoreView`] snapshots route facts
-    /// from: the current-content `IndexedReady` artifact. There is no
-    /// secondary route-surface artifact; a route-only file the indexed
-    /// store has not materialised simply has no `Route` fact yet (its
-    /// first traversal materialises it through `ensure_indexed_ready_serve`).
-    ///
-    /// The lookup is content-pinned to the scheduler's authoritative
-    /// current hash when one exists; a scheduler-invisible canonical
-    /// reads through the NON-RECURSING artifact-only authority
-    /// ([`Self::artifact_current_indexed_raw`] — declines for any
-    /// scheduler-tracked canonical, so a permissive multi-candidate
-    /// read can never bake a stale content hash into the route-fact
-    /// oracle), matching the source order the store-view validator
-    /// uses.
-    pub(crate) fn current_route_surface_hash(&self, canonical_id: &str) -> Option<Hash16> {
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical(canonical_id)
-            .unwrap_or_else(|| canonical_id.to_string());
-        let canonical = normalized_canonical.as_str();
-        let current_hash = self
-            .effective_file_state(canonical, None)
-            .map(|state| state.whole_hash);
-        let indexed = match current_hash {
-            Some(current_hash) => self
-                .project_type_store
-                .indexed()
-                .get(canonical, current_hash),
-            None => self.artifact_current_indexed_raw(canonical),
-        }?;
-        // The indexed artifact is the route-surface authority ONLY while
-        // edge-current: an artifact with cross-file edges whose baked
-        // edges are stale (a dependency appeared / retargeted while the
-        // owner content stayed put) produces NO `Route` fact, forcing a
-        // cold re-resolve against the live file set.
-        if !self.indexed_surface_is_current(canonical, &indexed) {
-            return None;
-        }
-        indexed
-            .shallow_state
-            .has_resolvable_surface()
-            .then(|| crate::resolver_store::hash_route_surface(&indexed.shallow_state))
-    }
-
     /// The COMPLETE reuse gate for an `IndexedReady` surface: the
     /// edge-currency oracle ([`Self::route_surface_is_edge_current`])
     /// PLUS the `project_generation` stamp for any surface with

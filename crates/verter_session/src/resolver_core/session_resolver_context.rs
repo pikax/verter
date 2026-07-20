@@ -519,11 +519,8 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         // entry validates against the session-bound overlay-aware view
         // (`self.request_view` — overlay + session reads layered over
         // base). Avoids the carrier-site bare-host rebuild.
-        self.inner.resolve_imported_type_root_with_store_view(
-            &self.request_view,
-            dep_canonical,
-            imported_name,
-        )
+        self.inner
+            .resolve_imported_type_root_with_context(self, dep_canonical, imported_name)
     }
 
     #[inline]
@@ -540,11 +537,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
         // route-chain fact list the caller records onto the active tracer
         // so the enclosing cache entry invalidates on a barrel retarget.
         self.inner
-            .resolve_imported_type_root_with_facts_with_store_view(
-                &self.request_view,
-                dep_canonical,
-                imported_name,
-            )
+            .resolve_imported_type_root_with_facts_with_context(self, dep_canonical, imported_name)
     }
 
     #[inline]

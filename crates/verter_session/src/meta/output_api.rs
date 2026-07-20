@@ -225,16 +225,19 @@ impl MetaSession {
         };
 
         // (3) Extraction context seeded from the SHARED batch cold-seed —
-        // no fresh per-item store-view read. The cold-seed carries the
+        // no fresh per-item store-view read. Keep the session view attached:
+        // macro DTO extraction can replay an exact imported declaration whose
+        // canonical exists only in the overlay. The cold-seed carries the
         // capture's currentness, so a non-current seed fails nested warm
         // probes closed.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             host,
+            view,
             fixed.cold_seed(),
-            std::sync::Arc::clone(&overlay),
+            overlay,
         );
-        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
         let crate::host_manage::ComponentMetaExtractOutcome {
             analysis,
             fallthrough_fact_versions,
@@ -243,7 +246,7 @@ impl MetaSession {
             host,
             canonical.as_str(),
             &resolved,
-            host_ctx_ref,
+            ctx,
         );
         host.merge_extraction_facts_into_admitted_resolved_meta(
             canonical.as_str(),
@@ -286,28 +289,13 @@ impl MetaSession {
         let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(
             &resolved,
         );
-        // SESSION-BOUND output context (the session-bound counterpart of
-        // `HostResolverContext::from_cold_seed`, SAME capture, same fence):
-        // an output-time raise that replays a producing route
-        // (`ensure_indexed_ready_serve` on the owning SFC — the macro hot
-        // mirror, the member-path / callable-params replays) must observe
-        // the session view the analysis was served under; the base-bound
-        // context cannot serve an overlay-only canonical and fails those
-        // raises typed. Scoped to the OUTPUT materialization only — the
-        // extract above keeps the established base-bound binder. A base
-        // (empty-overlay) session's view falls through to the host's
-        // standard reads — identical behavior.
-        let output_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-            host,
-            view,
-            fixed.cold_seed(),
-            overlay,
-        );
-        let output_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
-            &output_ctx;
+        // Keep using the SAME live session-bound context. An output-time
+        // raise that replays a producing route (`ensure_indexed_ready_serve`
+        // on the owning SFC — the macro hot mirror, member-path, or callable-
+        // params replay) therefore observes the same view as extraction.
         let (output_result, output_read_set) = host.with_fact_tracer(|| {
             crate::meta_resolve::projectors::build_component_meta_output(
-                output_ctx_ref,
+                ctx,
                 canonical.as_str(),
                 analysis,
                 Some(seed),

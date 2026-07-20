@@ -26,13 +26,14 @@ use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
 impl VerterHost {
-    fn append_route_participant_fact_versions(
+    fn append_route_participant_fact_versions_with_context(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         canonical: &str,
         facts: &mut Vec<crate::resolver_core::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
     ) {
-        if let Some(hash) = self.current_or_read_whole_hash(canonical) {
+        if let Some(hash) = ctx.authoritative_current_content_hash(canonical) {
             let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
@@ -42,14 +43,11 @@ impl VerterHost {
             }
         }
 
-        // Route fact production routes through the single
-        // `current_route_surface_hash` helper — the SAME source order
-        // (content-pinned `IndexedReady` for a scheduler-tracked
-        // canonical, the artifact-only authority otherwise) the
-        // `HostStoreView` validator snapshots route facts in. A
-        // divergent source order here would record a hash the
-        // validator could not reproduce.
-        if let Some(hash) = self.current_route_surface_hash(canonical) {
+        if let Some(hash) = ctx
+            .indexed_for_current_content(canonical)
+            .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
+            .and_then(|indexed| indexed.route_hash)
+        {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
                 kind: crate::resolver_core::DerivedFactKind::Route,
@@ -59,6 +57,29 @@ impl VerterHost {
                 facts.push(fact);
             }
         }
+    }
+
+    fn generation_current_import_route_hash_covering_sources_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical: &str,
+        required_sources: &[String],
+    ) -> Option<crate::types::Hash16> {
+        let session_masks_canonical = ctx.active_session_view().is_some_and(|view| {
+            view.overlay_content_hash_for(canonical).is_some() || view.is_tombstoned(canonical)
+        });
+        if session_masks_canonical {
+            let indexed = ctx.indexed_for_current_content(canonical)?;
+            if required_sources
+                .iter()
+                .any(|source| !indexed.import_routes.contains_key(source))
+            {
+                return None;
+            }
+            return indexed.import_route_hash;
+        }
+
+        self.generation_current_import_route_hash_covering_sources(canonical, required_sources)
     }
 
     pub(crate) fn resolve_route_type_edge(
@@ -106,8 +127,26 @@ impl VerterHost {
         Some(resolved)
     }
 
+    fn resolve_route_type_edge_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        owner_canonical: &str,
+        source_specifier: &str,
+    ) -> Option<String> {
+        let resolved = ctx.resolve_type_dependency_canonical(owner_canonical, source_specifier)?;
+        if ctx
+            .authoritative_current_content_hash(resolved.as_str())
+            .is_none()
+            && !ctx.ensure_loaded(resolved.as_str())
+        {
+            return None;
+        }
+        Some(resolved)
+    }
+
     fn resolve_named_type_export_route_from_target(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         provider_canonical: &str,
         target: &crate::resolver_core::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -117,11 +156,16 @@ impl VerterHost {
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
             crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
-                let state = self.route_shallow_state(provider_canonical, route_shallow_cache)?;
+                let state = self.route_shallow_state_with_context(
+                    ctx,
+                    provider_canonical,
+                    route_shallow_cache,
+                )?;
                 if state.is_import_local_in(*owner, symbol_name) {
                     let import_target = state.import_target_in(*owner, symbol_name)?;
                     let target_canonical = if import_target.canonical_id.is_empty() {
-                        self.resolve_route_type_edge(
+                        self.resolve_route_type_edge_with_context(
+                            ctx,
                             provider_canonical,
                             import_target.source_specifier.as_str(),
                         )?
@@ -129,6 +173,7 @@ impl VerterHost {
                         import_target.canonical_id.clone()
                     };
                     return self.resolve_named_type_export_route_uncached(
+                        ctx,
                         target_canonical.as_str(),
                         import_target.imported_name.as_str(),
                         active,
@@ -151,11 +196,16 @@ impl VerterHost {
                 ..
             } => {
                 let target_canonical = if canonical_id.is_empty() {
-                    self.resolve_route_type_edge(provider_canonical, source_specifier.as_str())?
+                    self.resolve_route_type_edge_with_context(
+                        ctx,
+                        provider_canonical,
+                        source_specifier.as_str(),
+                    )?
                 } else {
                     canonical_id.clone()
                 };
                 self.resolve_named_type_export_route_uncached(
+                    ctx,
                     target_canonical.as_str(),
                     original_name.as_str(),
                     active,
@@ -265,22 +315,6 @@ impl VerterHost {
         Some(serve)
     }
 
-    /// Thin wrapper over [`Self::route_shallow_state_serve`] that drops
-    /// the publication status from the RETURN value. The fenced
-    /// observation still lands on the threaded `route_shallow_cache`,
-    /// so walk-level consumers stay covered; callers that derive
-    /// SHARED-cache entries from the returned state directly must use
-    /// the serve variant and gate admission on `store_published` (see
-    /// [`RoutedShallowServe`]).
-    pub(super) fn route_shallow_state(
-        &self,
-        canonical_id: &str,
-        route_shallow_cache: &mut RouteShallowStateCache,
-    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        self.route_shallow_state_serve(canonical_id, route_shallow_cache)
-            .map(|serve| serve.state)
-    }
-
     /// One-shot [`Self::route_shallow_state_serve`] with a fresh memo —
     /// the publication status reflects exactly the requested
     /// canonical's serve.
@@ -290,6 +324,50 @@ impl VerterHost {
     ) -> Option<RoutedShallowServe> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state_serve(canonical_id, &mut route_shallow_cache)
+    }
+
+    /// Context-preserving routed shallow serve used by imported-root cold
+    /// producers. The context remains the semantic read authority; its
+    /// `StoreView` is not used as a substitute for overlay-aware artifact
+    /// lookup.
+    pub(crate) fn routed_shallow_state_serve_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+    ) -> Option<RoutedShallowServe> {
+        let mut route_shallow_cache = RouteShallowStateCache::default();
+        self.route_shallow_state_serve_with_context(ctx, canonical_id, &mut route_shallow_cache)
+    }
+
+    fn route_shallow_state_serve_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<RoutedShallowServe> {
+        let cache_key = ctx.normalized_analysis_canonical(canonical_id).into_owned();
+        if let Some(cached) = route_shallow_cache.get(cache_key.as_str()) {
+            return Some(cached.clone());
+        }
+
+        let indexed_serve = ctx.ensure_indexed_ready_serve(canonical_id)?;
+        let serve = RoutedShallowServe {
+            state: Arc::clone(&indexed_serve.indexed.shallow_state),
+            store_published: indexed_serve.store_published,
+        };
+        route_shallow_cache.observe_serve(&serve);
+        route_shallow_cache.insert(cache_key, serve.clone());
+        Some(serve)
+    }
+
+    fn route_shallow_state_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        self.route_shallow_state_serve_with_context(ctx, canonical_id, route_shallow_cache)
+            .map(|serve| serve.state)
     }
 
     /// Thin wrapper over [`Self::routed_shallow_state_serve`] that drops
@@ -369,6 +447,7 @@ impl VerterHost {
 
     fn resolve_named_type_export_route_uncached(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         provider_canonical: &str,
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -398,9 +477,11 @@ impl VerterHost {
                 let mut layer_states = Vec::with_capacity(layer.len());
                 for canonical in &layer {
                     participants.insert(canonical.clone());
-                    let state = self.route_shallow_state(canonical, route_shallow_cache)?;
+                    let state =
+                        self.route_shallow_state_with_context(ctx, canonical, route_shallow_cache)?;
                     if let Some(target) = state.export_target(exported_name) {
                         return self.resolve_named_type_export_route_from_target(
+                            ctx,
                             canonical,
                             target,
                             active,
@@ -423,7 +504,8 @@ impl VerterHost {
                     for wildcard_index in wildcard_indices {
                         let wildcard = &state.wildcard_reexports[wildcard_index];
                         let target_canonical = if wildcard.canonical_id.is_empty() {
-                            self.resolve_route_type_edge(
+                            self.resolve_route_type_edge_with_context(
+                                ctx,
                                 canonical.as_str(),
                                 wildcard.source_specifier.as_str(),
                             )
@@ -482,11 +564,24 @@ impl VerterHost {
         crate::resolver_core::RouteResult,
         Vec<crate::resolver_core::FactVersionRef>,
     )> {
+        self.build_named_type_export_route_entry_with_context(self, dep_canonical, requested_name)
+    }
+
+    pub(crate) fn build_named_type_export_route_entry_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<(
+        crate::resolver_core::RouteResult,
+        Vec<crate::resolver_core::FactVersionRef>,
+    )> {
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
         let mut unresolved_edge_owners = rustc_hash::FxHashSet::default();
         let mut route_shallow_cache = RouteShallowStateCache::default();
         let route_result = self.resolve_named_type_export_route_uncached(
+            ctx,
             dep_canonical,
             requested_name,
             &mut active,
@@ -516,7 +611,12 @@ impl VerterHost {
         participants.sort();
         participants.dedup();
         for canonical in participants {
-            self.append_route_participant_fact_versions(canonical.as_str(), &mut facts, &mut seen);
+            self.append_route_participant_fact_versions_with_context(
+                ctx,
+                canonical.as_str(),
+                &mut facts,
+                &mut seen,
+            );
         }
 
         // Root any unresolved `export *` wildcard edge the traversal hit in the
@@ -558,7 +658,11 @@ impl VerterHost {
         }
         for (owner, sources) in owner_sources {
             let Some(import_route_hash) = self
-                .generation_current_import_route_hash_covering_sources(owner.as_str(), &sources)
+                .generation_current_import_route_hash_covering_sources_with_context(
+                    ctx,
+                    owner.as_str(),
+                    &sources,
+                )
             else {
                 // The empty-facts signal alone only protects the caches
                 // that inspect route facts directly (`RouteDb` /

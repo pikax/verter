@@ -62,6 +62,43 @@ impl VerterHost {
         .0
     }
 
+    /// Request-context-bound imported-root resolution.
+    ///
+    /// The [`crate::resolver_core::ResolverContext`] is the authority for both
+    /// the cache-validation view and every cold producer read. In particular,
+    /// a session context must keep its overlay-aware prepared declaration and
+    /// export-route reads all the way through the cold closure; reducing the
+    /// context to a `StoreView` would retain validation identity while losing
+    /// the overlay's semantic inputs.
+    pub(crate) fn resolve_imported_type_root_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+        self.resolve_imported_type_root_with_facts_with_context(ctx, dep_canonical, imported_name)
+            .0
+    }
+
+    /// Facts-returning sibling of
+    /// [`Self::resolve_imported_type_root_with_context`].
+    pub(crate) fn resolve_imported_type_root_with_facts_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
+        self.resolve_imported_type_root_with_facts_with_context_and_store_view(
+            ctx,
+            ctx.store_view(),
+            dep_canonical,
+            imported_name,
+        )
+    }
+
     /// Like [`Self::resolve_imported_type_root`] but ALSO returns
     /// the full route-chain fact list the resolution observed.
     /// Producers that thread the recorded facts into a downstream
@@ -117,6 +154,24 @@ impl VerterHost {
         Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
+        self.resolve_imported_type_root_with_facts_with_context_and_store_view(
+            self,
+            view,
+            dep_canonical,
+            imported_name,
+        )
+    }
+
+    pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        view: &dyn crate::resolver_core::StoreView,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 
         let normalized_canonical = self
@@ -139,7 +194,7 @@ impl VerterHost {
                 normalized_canonical.as_str(),
                 imported_name,
                 view,
-                self,
+                ctx,
                 || {
                     // Trace inside the closure: the closure runs only on
                     // cache miss, so the trace event records actual
@@ -157,7 +212,8 @@ impl VerterHost {
                     });
 
                     if let Some((resolved, facts)) = self
-                        .resolve_direct_imported_type_root_fast_path(
+                        .resolve_direct_imported_type_root_fast_path_with_context(
+                            ctx,
                             normalized_canonical.as_str(),
                             imported_name,
                         )
@@ -177,10 +233,12 @@ impl VerterHost {
                     // resolved by a prior query. Then collect full route
                     // participant facts via build_named_type_export_route_entry
                     // for proper cache invalidation on intermediate barrel changes.
-                    let (route_result, facts) = self.build_named_type_export_route_entry(
-                        normalized_canonical.as_str(),
-                        imported_name,
-                    )?;
+                    let (route_result, facts) = self
+                        .build_named_type_export_route_entry_with_context(
+                            ctx,
+                            normalized_canonical.as_str(),
+                            imported_name,
+                        )?;
                     let root_result = match route_result {
                         crate::resolver_core::RouteResult::Resolved {
                             defining_canonical,

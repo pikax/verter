@@ -332,11 +332,8 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // entry validates against the request-bound overlay-aware view
         // rather than rebuilding a fresh owned workspace snapshot per
         // call (the carrier site identified by 6.e attribution).
-        self.inner.resolve_imported_type_root_with_store_view(
-            &self.view,
-            dep_canonical,
-            imported_name,
-        )
+        self.inner
+            .resolve_imported_type_root_with_context(self, dep_canonical, imported_name)
     }
 
     #[inline]
@@ -353,11 +350,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // list the caller records onto the active tracer so the enclosing
         // cache entry invalidates on a barrel retarget.
         self.inner
-            .resolve_imported_type_root_with_facts_with_store_view(
-                &self.view,
-                dep_canonical,
-                imported_name,
-            )
+            .resolve_imported_type_root_with_facts_with_context(self, dep_canonical, imported_name)
     }
 
     #[inline]

@@ -29224,6 +29224,42 @@ defineEmits<{ save: [id: number] }>()
 /// upserts + the fixed-view output path — the flow the native bindings
 /// drive) publishes the same real payload tuple as the base-host scalar.
 #[test]
+fn cross_file_call_signature_emit_analysis_retains_the_session_overlay_context() {
+    let project = make_project();
+    let session = project.open_session_batch().expect("batch session");
+    session
+        .upsert(
+            "/events.ts",
+            "export interface Events { (e: 'save', value: number): void }\n".to_string(),
+        )
+        .unwrap();
+    session
+        .upsert(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let analysis = session
+        .get_component_meta("/App.vue")
+        .expect("the session-overlay analysis query succeeds")
+        .expect("the overlay-only component resolves");
+    assert!(
+        analysis.events.iter().any(|event| event.name == "save"),
+        "macro DTO extraction must retain the session view while resolving the exact \
+         overlay-only `/events.ts` `Events` declaration"
+    );
+}
+
+/// OUTPUT parity for the same overlay-only callable declaration. The analysis
+/// extraction and the later payload materialization must remain bound to the
+/// same session view and fixed store capture.
+#[test]
 fn cross_file_call_signature_emit_payload_replays_under_a_session_overlay() {
     let project = make_project();
     let session = project.open_session_batch().expect("batch session");

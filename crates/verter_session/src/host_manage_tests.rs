@@ -6763,7 +6763,7 @@ fn route_fact_retargets_js_to_dts_on_warm_host() {
 /// DISCRIMINATING regression (generation-current wildcard-edge surface on the
 /// INDEXED producer). `ensure_indexed_ready` bakes wildcard sources into the
 /// content-pinned `IndexedReady` surface, and the indexed surface is the SOLE
-/// route authority `current_route_surface_hash` / `HostStoreView::build`
+/// route authority `current_derived_fact_hash(Route)` / `HostStoreView::build`
 /// serve — a baked wildcard edge depends on the dependency file set, not the
 /// owner's content. A barrel `export * from './runtime'` indexed while only
 /// `runtime.js` exists bakes the `./runtime → runtime.js` edge; when the
@@ -9321,7 +9321,7 @@ export interface Props { label: string }
 
     host.provenance().reset();
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path("/src/types.vue", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/types.vue", "Props")
         .expect("a direct local exported declaration should stay on the shallow fast path");
 
     assert_eq!(
@@ -9378,7 +9378,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     );
 
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path("/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
         .expect("direct named reexport should resolve through the fast imported-root path");
 
     assert_eq!(
@@ -9457,7 +9457,7 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
 
     let _view = host.resolver_store_view_read().into_owned_view();
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path("/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
         .expect(
             "fast imported-root proof should resolve cold child hashes under a current store view",
         );
@@ -9507,7 +9507,7 @@ fn direct_imported_type_root_fast_path_reuses_provider_shallow_state_for_provide
     );
 
     let _ = host
-        .resolve_direct_imported_type_root_fast_path("/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
         .expect("exported local imports should resolve through the fast imported-root path");
 
     assert_eq!(
@@ -9543,7 +9543,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     );
 
     let (resolved, facts) = host
-        .resolve_direct_imported_type_root_fast_path("/src/index.ts", "Props")
+        .resolve_direct_imported_type_root_fast_path_with_context(&host, "/src/index.ts", "Props")
         .expect("exported local imports should resolve through the fast imported-root path");
 
     assert_eq!(

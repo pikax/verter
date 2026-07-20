@@ -500,20 +500,20 @@ impl VerterHost {
             )?
         };
         resolved.request_id = self.next_request_id();
-        // Build a HostResolverContext before extract so engine
-        // constructions inside the policy / fallthrough path bind to the
-        // request-bound ctx rather than a bare-host. This is a post-fence
-        // extraction binder — the pinned resolve already ran under its own
-        // publish fence — and it seeds from the SAME capture's cold-seed: a
-        // non-current capture fails the ctx's nested warm-cache probes
-        // closed rather than validating against a stale snapshot.
+        // Keep the session view attached while extracting: policy,
+        // fallthrough, and macro-DTO replay all bind to this request context.
+        // It seeds from the SAME capture's cold-seed, so a non-current capture
+        // fails nested warm-cache probes closed rather than validating against
+        // a stale snapshot.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
+            view,
             fixed.cold_seed(),
             overlay,
         );
-        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
+            &session_ctx;
         // This view path does NOT publish to `ComponentMetaResultDb`, so the
         // extract completeness carrier is discarded here.
         let extract = extract_component_meta_from_resolved(

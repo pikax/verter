@@ -2329,7 +2329,7 @@ impl HostStoreView {
 
         // Snapshot FileArtifactStore entries into the store view. The
         // `IndexedReady` artifact is the SOLE route-surface source —
-        // identical to the producer (`current_route_surface_hash`), so
+        // identical to the producer (`current_derived_fact_hash(Route)`), so
         // producer and validator stay on one source order.
         for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
             let canonical_str = canonical_id.as_ref().to_owned();

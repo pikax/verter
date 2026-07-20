@@ -1978,7 +1978,7 @@ fn route_fact_capture_is_side_effect_free() {
 }
 
 /// Route-fact producer/validator parity: the producer-side
-/// `current_route_surface_hash` and the `HostStoreView` validator
+/// `current_derived_fact_hash(Route)` and the `HostStoreView` validator
 /// snapshot must derive the `Route` fact from the SAME (IndexedReady)
 /// source for every canonical a cold resolve materialised.
 #[test]
@@ -1994,7 +1994,8 @@ fn route_fact_producer_matches_validator_snapshot() {
 
     let view = host.resolver_store_view_read().into_owned_view();
     for canonical in [barrel, leaf] {
-        let producer = host.current_route_surface_hash(canonical);
+        let producer =
+            host.current_derived_fact_hash(canonical, crate::resolver_core::DerivedFactKind::Route);
         let validator = crate::resolver_core::StoreView::derived_hash_for(
             &view,
             canonical,
@@ -2044,7 +2045,8 @@ fn route_fact_none_for_non_route_resolvable_current_surface() {
         "precondition: the fixture surface must not be route-resolvable",
     );
 
-    let producer = host.current_route_surface_hash(plain);
+    let producer =
+        host.current_derived_fact_hash(plain, crate::resolver_core::DerivedFactKind::Route);
     assert!(
         producer.is_none(),
         "producer: no Route fact for a non-route-resolvable surface",
