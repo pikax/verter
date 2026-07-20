@@ -84,20 +84,25 @@ fn css_comment_string_mask(content: &str) -> Vec<bool> {
 }
 
 /// Whether `offset` sits in a declaration VALUE position: scanning backwards
-/// (skipping masked comment/string bytes), the nearest structural byte is a
-/// `:` — not a `;`, `{`, `}`, or the block start. A hex-shaped ID selector
-/// (`#bad {`) fails this test; `color: #f00` passes.
+/// (skipping masked comment/string bytes), a `:` appears before any `;`,
+/// `{`, `}`, AND that colon is a DECLARATION colon — the scan continues to a
+/// `{` or `;` (rule-body context) rather than a `}` or the block start
+/// (selector context). A hex-shaped ID selector (`#bad {`) fails outright;
+/// a pseudo-class'd selector (`a:hover #bad {`) fails because `:hover`'s
+/// colon sits in selector context; `color: #f00` passes.
 fn is_value_position(content: &str, mask: &[bool], offset: usize) -> bool {
     let bytes = content.as_bytes();
     let mut i = offset;
+    let mut seen_colon = false;
     while i > 0 {
         i -= 1;
         if mask.get(i).copied().unwrap_or(false) {
             continue;
         }
         match bytes[i] {
-            b':' => return true,
-            b';' | b'{' | b'}' => return false,
+            b':' => seen_colon = true,
+            b';' | b'{' => return seen_colon,
+            b'}' => return false,
             _ => {}
         }
     }
@@ -572,6 +577,28 @@ mod tests {
 
         let colors = document_colors(source, &blocks, &line_index);
         assert_eq!(colors.len(), 1, "only the value chips, not the selector");
+        let start_off = line_index
+            .position_to_offset(&colors[0].range.start)
+            .unwrap() as usize;
+        let end_off = line_index.position_to_offset(&colors[0].range.end).unwrap() as usize;
+        assert_eq!(&source[start_off..end_off], "#f00");
+    }
+
+    /// A pseudo-class colon (`a:hover`) is NOT a declaration colon: a
+    /// hex-shaped ID selector after a pseudo-class never chips; the value
+    /// inside the rule still does.
+    #[test]
+    fn pseudo_class_colon_never_makes_a_selector_a_value_position() {
+        let source = "<style>\na:hover #bad { color: #f00; }\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let colors = document_colors(source, &blocks, &line_index);
+        assert_eq!(
+            colors.len(),
+            1,
+            "only the value chips, not the pseudo-class'd selector"
+        );
         let start_off = line_index
             .position_to_offset(&colors[0].range.start)
             .unwrap() as usize;
