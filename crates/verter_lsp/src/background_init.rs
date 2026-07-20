@@ -67,6 +67,9 @@ pub(super) struct BackgroundInitArgs {
     /// Project-level coalescing singleflight for `resync_open_files`, shared with
     /// the server so concurrent init generations collapse their resync sweeps.
     pub(super) resync_coordinator: Arc<crate::resync_singleflight::ResyncCoordinator>,
+    /// Per-document import-set freshness memo, shared with the server so a
+    /// workspace installed here evicts entries keyed on the previous one.
+    pub(super) import_sync: Arc<super::ImportSyncMemo>,
 }
 
 struct PublishedWorkspaceBuild {
@@ -178,6 +181,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         carrier_transaction_coordinator,
         decl_overlay_owner,
         resync_coordinator,
+        import_sync,
     } = args;
 
     let host = documents.host_arc();
@@ -207,6 +211,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 let ws_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = new_ws.clone();
                 host.set_workspace(ws_dyn);
                 *vfs_workspace.write() = Some(Arc::clone(&new_ws));
+                // The memo keys embed the previous workspace's content generation,
+                // which this fresh workspace restarts low.
+                import_sync.evict_all();
                 tracing::info!(
                     "VFS workspace created lazily in background_init with {} roots",
                     canonical_roots.len()

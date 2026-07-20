@@ -325,6 +325,62 @@ struct CompletionSnapshotPause {
     release: Arc<tokio::sync::Notify>,
 }
 
+/// Per-document import-set freshness memo plus the singleflight locks that guard
+/// the pass which populates it.
+///
+/// The memo records the workspace `(content_generation,
+/// resolver_snapshot_generation)` after a DELIVERED imported-carrier + barrel
+/// preamble, so a request storm on an unchanged document skips the per-request
+/// import-graph BFS re-walk and carrier gateway reconcile entirely. Both
+/// generations are safe superset signals: ANY content edit (this document OR a
+/// dependency) bumps `content_generation`, and any resolver re-publish bumps the
+/// snapshot generation.
+///
+/// Both maps are owned together because both must be evicted together when the
+/// workspace is REPLACED. `content_generation` is per-workspace and a fresh
+/// workspace restarts it low, so an entry minted against the previous workspace
+/// can collide with a low generation of the new one and serve a warm skip for a
+/// pass that never ran against it. Eviction also bounds the maps' growth across a
+/// long session.
+#[derive(Default)]
+pub(crate) struct ImportSyncMemo {
+    fresh_at: DashMap<String, (u64, u64)>,
+    locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl ImportSyncMemo {
+    /// The per-document singleflight lock. A tokio `Mutex` is fair (FIFO) and
+    /// cancel-safe, so a request storm cannot starve or wedge the pass.
+    pub(crate) fn lock_for(&self, canonical_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks
+            .entry(canonical_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Whether this document's import set was already delivered at `key`.
+    pub(crate) fn is_fresh_at(&self, canonical_id: &str, key: (u64, u64)) -> bool {
+        self.fresh_at.get(canonical_id).map(|entry| *entry) == Some(key)
+    }
+
+    pub(crate) fn record_delivered(&self, canonical_id: String, key: (u64, u64)) {
+        self.fresh_at.insert(canonical_id, key);
+    }
+
+    /// Drop every entry. Called whenever the workspace is replaced, because the
+    /// generations the keys are built from belong to the OLD workspace.
+    pub(crate) fn evict_all(&self) {
+        self.fresh_at.clear();
+        self.locks.clear();
+    }
+
+    /// Number of documents currently recorded as delivered (test observation).
+    #[cfg(test)]
+    pub(crate) fn recorded_len(&self) -> usize {
+        self.fresh_at.len()
+    }
+}
+
 /// The Verter language server implementation.
 ///
 /// Wraps `verter_session` for SFC analysis and optionally a `TypeProvider`
@@ -407,19 +463,9 @@ pub struct VerterLanguageServer {
     /// document instance that initiated stale work.
     ide_sync_open_generations: Arc<DashMap<String, u64>>,
     ide_sync_next_generation: std::sync::atomic::AtomicU64,
-    /// Per-document import-set sync memo. Records the workspace
-    /// `(content_generation, resolver_snapshot_generation)` after a successful
-    /// imported-carrier + barrel preamble, so a go-to-definition storm on an
-    /// unchanged document skips the per-request import-graph BFS re-walk +
-    /// carrier gateway reconcile entirely. Both generations are safe superset
-    /// signals: ANY content edit (this doc OR a dependency) bumps
-    /// `content_generation`, and any resolver re-publish bumps the snapshot
-    /// generation, so a stale skip is impossible.
-    import_sync_memo: Arc<DashMap<String, (u64, u64)>>,
-    /// Per-document singleflight for the import-set preamble: concurrent
-    /// definition/completion requests on one document coalesce onto ONE pass
-    /// instead of stampeding duplicate syncs of shared UI-kit carriers.
-    import_sync_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-document import-set freshness memo and its singleflight locks.
+    /// Shared with `background_init` so a workspace swap evicts both.
+    import_sync: Arc<ImportSyncMemo>,
     /// Project-level coalescing singleflight for `resync_open_files`. Background
     /// init fires a full close+reopen sweep of every open file up to twice per
     /// pass, and a superseded init generation can fire it concurrently with the
@@ -998,8 +1044,7 @@ impl VerterLanguageServer {
             ide_sync_repair_locks,
             ide_sync_open_generations,
             ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
-            import_sync_memo: Arc::new(DashMap::new()),
-            import_sync_locks: Arc::new(DashMap::new()),
+            import_sync: Arc::new(ImportSyncMemo::default()),
             resync_coordinator: Arc::new(crate::resync_singleflight::ResyncCoordinator::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),
@@ -1084,7 +1129,10 @@ impl VerterLanguageServer {
         self.ensure_current_file_synced(uri).await;
     }
 
-    /// Install a VFS workspace (test harness access).
+    /// Install ONLY the server-side VFS workspace handle (test harness access).
+    /// Unlike the production [`VerterLanguageServer::swap_vfs_workspace`] this does
+    /// NOT re-point the host or evict generation-keyed caches — a harness that
+    /// needs the full swap must call that instead.
     pub(crate) fn install_vfs_workspace(
         &self,
         workspace: Arc<verter_workspace::FilesystemWorkspace>,

@@ -93,9 +93,7 @@ pub(super) async fn handle_initialize(
             },
         ));
         ws.set_project_graph(verter_workspace::ProjectGraph::new());
-        let ws_dyn: std::sync::Arc<dyn verter_workspace::WorkspaceAccess> = ws.clone();
-        server.documents.host().set_workspace(ws_dyn);
-        *server.vfs_workspace.write() = Some(ws);
+        server.swap_vfs_workspace(ws);
         tracing::info!(
             "VFS workspace created early in initialize() with {} roots",
             roots.len()

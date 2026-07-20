@@ -1477,20 +1477,15 @@ impl VerterLanguageServer {
         };
 
         // Singleflight: coalesce a concurrent request storm on this document onto
-        // ONE import-set pass. A tokio `Mutex` is fair (FIFO) and cancel-safe, so a
-        // storm cannot starve or wedge; a follower that acquires it after the leader
+        // ONE import-set pass. A follower that acquires the lock after the leader
         // finished sees a fresh memo and returns without re-walking.
-        let lock = self
-            .import_sync_locks
-            .entry(canonical_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
+        let lock = self.import_sync.lock_for(&canonical_id);
         let _guard = lock.lock().await;
 
         let key = self.import_sync_freshness_key();
         if let Some(key) = key {
-            if self.import_sync_memo.get(&canonical_id).map(|entry| *entry) == Some(key) {
-                return; // The import set was already synced at this generation.
+            if self.import_sync.is_fresh_at(&canonical_id, key) {
+                return; // The import set was already delivered at this generation.
             }
         }
 
@@ -1504,9 +1499,24 @@ impl VerterLanguageServer {
         // still to be retried.
         if let Some(key) = key {
             if outcome.is_complete() && self.import_sync_freshness_key() == Some(key) {
-                self.import_sync_memo.insert(canonical_id, key);
+                self.import_sync.record_delivered(canonical_id, key);
             }
         }
+    }
+
+    /// Install `workspace` as the host's VFS workspace — the single entry point
+    /// for replacing it.
+    ///
+    /// Evicting the import-set memo is part of the swap, not an afterthought: its
+    /// keys embed the OLD workspace's `content_generation`, which a fresh
+    /// workspace restarts low, so a surviving entry can collide with a low
+    /// generation of the new workspace and serve a warm skip for a pass that never
+    /// ran against it.
+    pub(super) fn swap_vfs_workspace(&self, workspace: Arc<verter_workspace::FilesystemWorkspace>) {
+        let workspace_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.clone();
+        self.documents.host().set_workspace(workspace_dyn);
+        *self.vfs_workspace.write() = Some(workspace);
+        self.import_sync.evict_all();
     }
 
     /// The workspace `(content_generation, resolver_snapshot_generation)` pair that
@@ -2361,6 +2371,7 @@ impl VerterLanguageServer {
             carrier_transaction_coordinator: Arc::clone(&self.carrier_transaction_coordinator),
             decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
             resync_coordinator: Arc::clone(&self.resync_coordinator),
+            import_sync: Arc::clone(&self.import_sync),
         };
 
         let ctx = context.to_owned();

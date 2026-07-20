@@ -26201,20 +26201,24 @@ async fn t3_get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
 }
 
 // ===========================================================================
-// B12 (former B13) — definition-latency freshness gate.
+// Definition-latency freshness gate.
 //
-// Every go-to-definition re-pushed byte-identical carrier companions
-// (`.vue.tsx` + `.vue.ts`) as full-text didChange, bumping the LSP version and
-// invalidating the engine's whole program → a project-scale re-check on the
-// next query. The byte-equality no-op gate in ProjectSync makes the steady-state
-// definition path emit ZERO redundant sync.
+// Every go-to-definition re-ran the imported-carrier + barrel preamble and
+// re-pushed byte-identical carrier companions (`.vue.tsx` + `.vue.ts`) as
+// full-text didChange, bumping the LSP version and invalidating the engine's
+// whole program → a project-scale re-check on the next query. The per-document
+// import-set freshness memo skips the whole preamble while nothing that could
+// change the resolved import set has advanced, so the steady-state definition
+// path emits ZERO redundant sync. `ProjectSync::synced_tsx_contents` is a
+// record-only evidence ledger of the bytes the engine last received — it does no
+// compare-and-skip of its own, so the memo is what makes the steady state quiet.
 // ===========================================================================
 
 /// The SECOND identical go-to-definition on an unchanged document must perform
 /// ZERO carrier-companion `update_file` / `open_file` / `load_file` — the
-/// byte-equality gate skips the redundant didChange. Fails pre-fix (it re-synced
-/// every imported carrier on every request). Uses Tsgo so the DirectOpen arm
-/// actually delivers companion content (tsserver suppresses it entirely).
+/// freshness memo skips the preamble that would re-push them. Fails pre-fix (it
+/// re-synced every imported carrier on every request). Uses Tsgo so the DirectOpen
+/// arm actually delivers companion content (tsserver suppresses it entirely).
 #[tokio::test]
 async fn definition_second_identical_request_performs_zero_carrier_resync() {
     let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
@@ -26252,6 +26256,14 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
         )
     };
     let before = provider.calls().iter().filter(|c| is_sync_verb(c)).count();
+    // Positive control: the warm request DID push companions. Without this, a
+    // fixture that never syncs companions at all would satisfy the zero-delta
+    // assertion below and the memo would be untested.
+    assert!(
+        before > 0,
+        "the warm request must actually have pushed carrier companions, else the \
+         zero-resync assertion below is vacuous"
+    );
 
     let second = server
         .goto_definition(goto_definition_params(&app_uri, position))
@@ -26275,6 +26287,151 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
         0,
         "the second identical definition must re-push ZERO carrier companions \
          (byte-identical didChange invalidates the engine program); got: {new_syncs:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// The memo's INVALIDATION direction: editing an IMPORTED file's CONTENTS, with
+/// its import set unchanged, must make the next definition re-push that carrier
+/// WITH THE NEW BYTES.
+///
+/// This is the half a zero-resync assertion cannot cover. The memo key rides the
+/// workspace `content_generation`, which any content edit bumps — including an
+/// edit to a dependency the requesting document merely imports. Without that, a
+/// warm skip would serve the engine stale companion bytes indefinitely.
+#[tokio::test]
+async fn editing_an_imported_carrier_re_pushes_it_with_the_new_bytes() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+
+    // Warm the memo: after this the steady state pushes nothing.
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let child_pushes = |calls: Vec<MockCall>| -> Vec<String> {
+        calls
+            .into_iter()
+            .filter_map(|call| match call {
+                MockCall::OpenFile { path, content }
+                | MockCall::UpdateFile { path, content }
+                | MockCall::LoadFile { path, content } => {
+                    path.starts_with(&child_id).then_some(content)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let warm_pushes = child_pushes(provider.calls());
+    assert!(
+        !warm_pushes.is_empty(),
+        "the warm request must actually have pushed the imported child's companions, \
+         else this test proves nothing"
+    );
+    let already_pushed = warm_pushes.len();
+
+    // Edit the IMPORTED child's CONTENTS ONLY. The parent's import set is
+    // untouched — only the bytes behind the import change.
+    let edited_child = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: number] }>()\n</script>\n";
+    server
+        .documents
+        .host()
+        .upsert(UpsertRequest {
+            canonical_id: Some(child_id.clone()),
+            input_id: child_id.clone(),
+            source: edited_child.into(),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert the edited imported child");
+
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    let after_edit: Vec<String> = child_pushes(provider.calls())
+        .into_iter()
+        .skip(already_pushed)
+        .collect();
+    assert!(
+        !after_edit.is_empty(),
+        "an edited imported carrier must be re-pushed on the next definition — the memo \
+         must not warm-skip a content change behind the import"
+    );
+    assert!(
+        after_edit.iter().any(|content| content.contains("number")),
+        "the re-push must carry the NEW bytes, not the memoized ones; got: {after_edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Replacing the VFS workspace must evict the import-set memo.
+///
+/// The memo key embeds the workspace `content_generation`, which is PER-WORKSPACE:
+/// a fresh workspace restarts it low, so an entry minted against the previous
+/// workspace can collide with a low generation of the new one and serve a warm
+/// skip for a pass that never ran against it. Eviction also bounds the map's
+/// growth across a long session, since nothing else ever removes an entry.
+#[tokio::test]
+async fn swapping_the_vfs_workspace_evicts_the_import_set_memo() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+
+    // Warm the memo through a real request.
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+    assert!(
+        server.import_sync.recorded_len() > 0,
+        "the request must actually have recorded a memo entry, else this test proves nothing"
+    );
+
+    // Replace the workspace exactly as `initialize` does.
+    let replacement = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
+            roots: vec![workspace_id.clone()],
+            eager_preload: false,
+        },
+    ));
+    replacement.set_project_graph(verter_workspace::ProjectGraph::new());
+    server.swap_vfs_workspace(replacement);
+
+    assert_eq!(
+        server.import_sync.recorded_len(),
+        0,
+        "a workspace swap must evict every memo entry: their keys belong to the workspace \
+         that was just replaced"
     );
 
     drain_handle.abort();
