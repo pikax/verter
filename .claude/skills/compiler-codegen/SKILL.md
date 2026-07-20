@@ -173,7 +173,16 @@ Runtime and TSC are independent demands. Bundler script emission consumes only
 Entries join macro syntax by stable `syntax_index`. Runtime entries contain
 the normalized props/emits/model shapes. TSC entries contain terminal splice
 text and are emitted directly; the compiler does not parse or reinterpret the
-splice.
+splice. A property-form emits tuple remains one terminal rest-tuple parameter
+(`...args: [value: T]`) in both `TscEmitRow.emit_parameters` and
+`handler_parameters`; flattening it to `value: T` loses the authored tuple
+shape and is forbidden.
+
+Profile-aware public-API projection treats a script/content block override as
+an immutable one-file session overlay. The batch fixed view, TypeInfo macro
+producer (`SessionResolverContext`), syntax extraction, and whole-hash revision
+fence must all observe that exact overlay source. Override extraction is
+request-local and must not populate the raw-source `cached_tsc_extract` slot.
 
 Resolved invalid roots cross this boundary only as closed
 `MacroInvalidReason` facts. The compiler renders their public diagnostic once,

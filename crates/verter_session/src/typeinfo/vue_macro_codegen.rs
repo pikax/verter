@@ -2234,7 +2234,10 @@ fn render_tuple_parameters(
             element.rest,
         ));
     }
-    Ok(TscSpliceText::new(rendered.join(", ")))
+    Ok(TscSpliceText::new(format!(
+        "...args: [{}]",
+        rendered.join(", ")
+    )))
 }
 
 fn render_function_parameters(

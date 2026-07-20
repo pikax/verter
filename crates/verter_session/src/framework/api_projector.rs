@@ -115,4 +115,9 @@ pub(crate) struct PublicApiRenderSeed<'a> {
     /// extraction resolver context. Reused across every item; the cold compute
     /// seeds from it WITHOUT a fresh per-item `resolver_store_view_read()`.
     pub(crate) cold_seed: &'a crate::resolver_store::ColdSeedHostStoreView,
+    /// The exact session/profile view the cold seed was rooted through.
+    /// Profile-owned block overrides ride this view as one immutable source
+    /// overlay, so syntax extraction, semantic macro projection, and revision
+    /// fencing all observe the same bytes.
+    pub(crate) view: &'a dyn crate::session_view::SessionView,
 }

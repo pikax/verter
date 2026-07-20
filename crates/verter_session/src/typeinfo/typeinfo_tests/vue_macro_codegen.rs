@@ -1553,6 +1553,9 @@ defineModel<string>('title')
     );
 }
 
+/// Mutation recipe: flatten tuple members in `render_tuple_parameters` while
+/// leaving function-form signatures unchanged. The `save` row loses its
+/// terminal rest-tuple form while the `cancel` control stays direct.
 #[test]
 fn tsc_emits_models_and_scope_are_explicit_role_rows() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1589,7 +1592,10 @@ defineModel<Payload>('selected')
             .iter()
             .map(|event| (event.name.as_str(), event.emit_parameters.as_str()))
             .collect::<Vec<_>>(),
-        [("save", "value: Local"), ("cancel", "reason?: string")]
+        [
+            ("save", "...args: [value: Local]"),
+            ("cancel", "reason?: string"),
+        ]
     );
     assert!(emits
         .scope
@@ -1749,9 +1755,18 @@ fn assert_complete_emits_across_demands(
                 projection
                     .events
                     .iter()
-                    .map(|row| (row.name.as_str(), row.emit_parameters.as_str()))
+                    .map(|row| {
+                        (
+                            row.name.as_str(),
+                            row.emit_parameters.as_str(),
+                            row.handler_parameters.as_str(),
+                        )
+                    })
                     .collect::<Vec<_>>(),
                 expected
+                    .iter()
+                    .map(|(name, parameters)| (*name, *parameters, *parameters))
+                    .collect::<Vec<_>>()
             );
         } else {
             assert!(output.tsc.is_none());
@@ -1761,8 +1776,9 @@ fn assert_complete_emits_across_demands(
 
 /// Mutation recipe: normalize member payloads with the enclosing runtime
 /// surface's Shallow context instead of the terminal published Navigate
-/// context. Indexed-access tuples collapse to empty object surfaces and the
-/// runtime/combined rows fail with `InvalidEmitsShape`.
+/// context, or flatten `render_tuple_parameters` to its inner parameter list.
+/// Indexed-access tuples then either fail with `InvalidEmitsShape` or lose the
+/// terminal `...args: [tuple]` contract asserted for both TSC roles.
 #[test]
 fn indexed_access_tuple_emits_are_complete_and_demand_invariant() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1793,15 +1809,17 @@ defineEmits<SharedEmits>()
         &host,
         FILE,
         &[
-            ("escapeKeydown", "event: KeyboardEvent"),
-            ("pointerdownOutside", "event: PointerEvent"),
+            ("escapeKeydown", "...args: [event: KeyboardEvent]"),
+            ("pointerdownOutside", "...args: [event: PointerEvent]"),
         ],
     );
 }
 
-/// Mutation recipe: bypass indexed-access normalization or accept unresolved
-/// member names through a fallback. The TSC parameter assertions then degrade
-/// to unknown payloads even if runtime event names happen to survive.
+/// Mutation recipe: bypass indexed-access normalization, accept unresolved
+/// member names through a fallback, or flatten `render_tuple_parameters` to
+/// its inner parameter list. The paired TSC role assertions then degrade to
+/// unknown payloads or lose their terminal `...args: [tuple]` contract even if
+/// runtime event names happen to survive.
 #[test]
 fn omit_alias_of_indexed_access_tuple_emits_is_complete_and_demand_invariant() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1846,8 +1864,8 @@ defineEmits<PublicEmits>()
         &host,
         FILE,
         &[
-            ("escapeKeydown", "event: KeyboardEvent"),
-            ("pointerdownOutside", "event: PointerEvent"),
+            ("escapeKeydown", "...args: [event: KeyboardEvent]"),
+            ("pointerdownOutside", "...args: [event: PointerEvent]"),
         ],
     );
 }

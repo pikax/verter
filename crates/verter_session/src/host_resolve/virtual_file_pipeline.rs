@@ -2117,7 +2117,7 @@ impl VerterHost {
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
-        _view: &dyn crate::session_view::SessionView,
+        view: &dyn crate::session_view::SessionView,
     ) -> Vec<
         Result<
             Option<crate::framework::api_projector::ComponentApiProjection>,
@@ -2158,6 +2158,7 @@ impl VerterHost {
                     profile,
                     render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
                         cold_seed: fixed.cold_seed(),
+                        view,
                     }),
                 })
             })
@@ -2215,26 +2216,55 @@ impl VerterHost {
         // Scalar == batch BY CONSTRUCTION (both are `render_public_api_items`),
         // and the render takes ZERO per-call store-view reads. The host method
         // stays the single entry every consumer calls. The host-level
-        // public-API path carries no session overlay, so the base `HostViewRef`
-        // is the session view (an empty-overlay capture).
-        //
-        // CAVEAT (see `get_public_api_batch`): the base host view is correct
-        // ONLY because there is no session-scoped public-API entry; a future
-        // session-scoped entry must thread the real overlay/session view (and
-        // likely a `SessionResolverContext`), not this base view.
+        // A profile-owned content override is represented as one immutable
+        // source overlay and captured through the same fixed-view mechanism.
+        // The projector then threads that exact view into a
+        // `SessionResolverContext`; a profile with no content override uses the
+        // base `HostViewRef` capture.
+        let render = |fixed: &crate::resolver_store::BatchFixedView,
+                      view: &dyn crate::session_view::SessionView| {
+            self.render_public_api_items(
+                std::slice::from_ref(&canonical_id),
+                mode,
+                profile,
+                fixed,
+                view,
+            )
+            .into_iter()
+            .next()
+            .unwrap_or(Ok(None))
+            .map(|projection| projection.map(|projection| projection.response))
+        };
+
+        if let Some(profile) = profile {
+            let canonical = self.resolve_alias_or_canonical(canonical_id);
+            let profile_hash = compile_profile_hash(profile);
+            let content_override = self.compile_cache().get(&canonical).and_then(|cache| {
+                cache
+                    .content_overrides
+                    .get(&profile_hash)
+                    .map(|state| (state.source.clone(), state.parse.whole_hash))
+            });
+            if let Some((source, whole_hash)) = content_override {
+                let mut overlays = FxHashMap::default();
+                overlays.insert(canonical.clone(), source);
+                let mut overlay_hashes = FxHashMap::default();
+                overlay_hashes.insert(canonical, whole_hash);
+                let tombstones = std::collections::HashSet::new();
+                let view = crate::session_view::OverlaidViewRef::new(
+                    self,
+                    &overlays,
+                    &overlay_hashes,
+                    &tombstones,
+                );
+                let fixed = self.capture_batch_fixed_view(&view);
+                return render(&fixed, &view);
+            }
+        }
+
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
-        self.render_public_api_items(
-            std::slice::from_ref(&canonical_id),
-            mode,
-            profile,
-            &fixed,
-            &view,
-        )
-        .into_iter()
-        .next()
-        .unwrap_or(Ok(None))
-        .map(|projection| projection.map(|projection| projection.response))
+        render(&fixed, &view)
     }
 
     /// Generate the public declaration and its framework-owned structured
@@ -2290,6 +2320,11 @@ impl VerterHost {
         // existing `&canonical` / `.clone()` consumers without re-resolving.
         let canonical = resolved_canonical.to_string();
         let profile_hash = profile.map(compile_profile_hash);
+        let has_content_override = profile_hash.is_some_and(|profile_hash| {
+            self.compile_cache()
+                .get(&canonical)
+                .is_some_and(|cache| cache.content_overrides.contains_key(&profile_hash))
+        });
 
         if self.is_canonical_evicted(&canonical) {
             return Ok(None);
@@ -2307,15 +2342,19 @@ impl VerterHost {
                     .map(|hd| hd.file_language.clone())
             })?;
             // cached_tsc_extract lives on DerivedRawState (D48 split).
-            let cached = self.derived_raw_cache().get(&canonical).and_then(|cc| {
-                cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
-                    if *hash == efs.whole_hash {
-                        Some(Arc::clone(extract))
-                    } else {
-                        None
-                    }
+            let cached = if has_content_override {
+                None
+            } else {
+                self.derived_raw_cache().get(&canonical).and_then(|cc| {
+                    cc.cached_tsc_extract.as_ref().and_then(|(hash, extract)| {
+                        if *hash == efs.whole_hash {
+                            Some(Arc::clone(extract))
+                        } else {
+                            None
+                        }
+                    })
                 })
-            });
+            };
             Some((efs.source, cached, efs.whole_hash))
         })() else {
             return Ok(None);
@@ -2334,16 +2373,30 @@ impl VerterHost {
         let macro_output = if let Some(seed) = render_seed.as_ref() {
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-                self,
-                seed.cold_seed,
-                overlay,
-            );
-            self.produce_vue_macro_codegen_with_ctx(
-                &host_ctx,
-                &canonical,
-                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
-            )
+            if seed.view.overlay_content_hash_for(&canonical).is_some() {
+                let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+                    self,
+                    seed.view,
+                    seed.cold_seed,
+                    overlay,
+                );
+                self.produce_vue_macro_codegen_with_ctx(
+                    &session_ctx,
+                    &canonical,
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                )
+            } else {
+                let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                    self,
+                    seed.cold_seed,
+                    overlay,
+                );
+                self.produce_vue_macro_codegen_with_ctx(
+                    &host_ctx,
+                    &canonical,
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                )
+            }
         } else {
             self.produce_vue_macro_codegen(
                 &canonical,
@@ -2386,7 +2439,7 @@ impl VerterHost {
             },
         ) {
             let arc = Arc::new(fresh);
-            {
+            if !has_content_override {
                 // cached_tsc_extract lives on DerivedRawState (D48 split).
                 let mut derived_ref = self
                     .derived_raw_cache()

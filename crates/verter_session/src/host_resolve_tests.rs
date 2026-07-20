@@ -1593,6 +1593,65 @@ fn public_api_with_profile_uses_override_script_state() {
     );
 }
 
+/// Mutation recipe: remove the `!has_content_override` guard around the
+/// `cached_tsc_extract` write in the Vue projector. The profile render then
+/// occupies the raw-derived cache slot before the raw projection control runs.
+#[test]
+fn public_api_profile_override_does_not_populate_raw_extract_cache() {
+    let host = strict_host();
+    upsert_vue(
+        &host,
+        "/src/CacheOwner.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ raw: string }>()\n</script>\n<template><div/></template>",
+    );
+
+    let profile = CompileProfile::default();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "/src/CacheOwner.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Script,
+                index: 0,
+                code: Arc::from("defineProps<{ overrideProp: number }>()"),
+                source_map: None,
+            }],
+        })
+        .expect("script override should succeed");
+
+    let overridden = public_api_code_with_profile(
+        &host,
+        "/src/CacheOwner.vue",
+        PublicApiMode::Public,
+        &profile,
+    );
+    assert!(
+        overridden.contains("overrideProp"),
+        "profile projection must use override syntax: {overridden}"
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.derived_raw_cache()
+            .get("/src/CacheOwner.vue")
+            .is_none_or(|state| state.cached_tsc_extract.is_none()),
+        "an override extraction must not occupy the raw-derived cache slot"
+    );
+
+    let raw = public_api_code(&host, "/src/CacheOwner.vue");
+    assert!(
+        raw.contains("raw") && !raw.contains("overrideProp"),
+        "the unprofiled control must still project raw syntax: {raw}"
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(
+        host.derived_raw_cache()
+            .get("/src/CacheOwner.vue")
+            .is_some_and(|state| state.cached_tsc_extract.is_some()),
+        "the raw projection control should populate its owning cache slot"
+    );
+}
+
 // ── TSC extract cache tests ──────────────────────────────────────────────
 
 #[test]
@@ -4733,13 +4792,11 @@ fn resolve_decl_in_scope_with_reexport_chain_returns_declaring_decl_identity() {
 // the gate (it would break LSP hover / go-to-def landing).
 // ─────────────────────────────────────────────────────────────────────────
 
+const PUBLIC_API_BYTE_PIN_SOURCE: &str = "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>";
+
 fn public_api_byte_pin_host() -> VerterHost {
     let host = strict_host();
-    upsert_vue(
-        &host,
-        "/src/Cap.vue",
-        "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
-    );
+    upsert_vue(&host, "/src/Cap.vue", PUBLIC_API_BYTE_PIN_SOURCE);
     let _ = host.upsert(crate::UpsertRequest {
         canonical_id: None,
         input_id: "/src/cap-types.ts".to_string(),
@@ -4750,14 +4807,43 @@ fn public_api_byte_pin_host() -> VerterHost {
     host
 }
 
-const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiIifQ==\n";
+fn direct_compiler_public_api(
+    host: &VerterHost,
+    mode: verter_compiler::tsc::TscMode,
+) -> verter_compiler::tsc::TscOutput {
+    let macro_output = host.produce_vue_macro_codegen(
+        "/src/Cap.vue",
+        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+    );
+    let bundle = macro_output.tsc.expect("direct compiler TSC bundle");
+    let extracted = verter_compiler::tsc::extract_tsc_state(
+        PUBLIC_API_BYTE_PIN_SOURCE,
+        "Cap",
+        &verter_compiler::tsc::TscExtractOptions {
+            filename: Some("/src/Cap.vue".to_string()),
+        },
+    )
+    .expect("direct compiler extraction");
+    verter_compiler::tsc::generate_tsc_from_state(
+        &extracted,
+        "Cap",
+        mode,
+        verter_compiler::tsc::MacroTscInput::Authoritative(bundle.as_ref()),
+    )
+    .expect("direct compiler projection")
+}
 
-const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"\"}";
+const PUBLIC_API_PUBLIC_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\nimport type { CapProps } from './cap-types'\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  }\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QSwyQztBO0E7QTs7QTtBLDBDQUdZLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
 
-const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: CapProps['label']\ndeclare const n: CapProps['n']\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiI7Ozs7Ozs7Ozs7Ozs7OztjQUdZO2NBQUE7Ozs7Ozs7RUFETiJ9\n";
+const PUBLIC_API_PUBLIC_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A,2C;A;A;A;;A;A,0CAGY,Q;A,wCAAA,Q;A,W,2C;A;A;A;A;A;A\"}";
 
-const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\";;;;;;;;;;;;;;;cAGY;cAAA;;;;;;;EADN\"}";
+const PUBLIC_API_TESTING_CODE_PIN: &str = "import { defineComponent } from \"vue\"\ntype __OmitNew<T> = { [K in keyof T]: T[K] }\ntype __Verter_UnionToIntersection<U> = (U extends any ? (value: U) => void : never) extends ((value: infer I) => void) ? I : never\ntype __Verter_EmitFn<T> = T extends (...args: any[]) => any ? T : T extends Record<string, any> ? __Verter_UnionToIntersection<{ [K in keyof T]: T[K] extends any[] ? (event: K, ...args: T[K]) => void : T[K] extends (...args: infer A) => any ? (event: K, ...args: A) => void : (event: K, ...args: unknown[]) => void }[keyof T]> : (event: string, ...args: unknown[]) => void\ndeclare function defineProps<TypeProps>(): TypeProps\ndeclare function defineProps<RuntimeProps extends Record<string, any>>(props: RuntimeProps): import(\"vue\").ExtractPropTypes<RuntimeProps>\ndeclare function defineProps<PropName extends string>(props: readonly PropName[]): Record<PropName, unknown>\ndeclare function defineEmits<TypeEmits extends ((...args: any[]) => any) | Record<string, any>>(): __Verter_EmitFn<TypeEmits>\ndeclare function defineEmits<Named extends string>(names: readonly Named[]): __Verter_EmitFn<Record<Named, unknown[]>>\ndeclare function defineEmits<ObjectEmits extends Record<string, any>>(options: ObjectEmits): __Verter_EmitFn<ObjectEmits>\ndeclare function defineExpose<Exposed extends Record<string, any> = Record<string, never>>(exposed?: Exposed): void\ndeclare function defineOptions(options: Record<string, unknown>): void\ndeclare function defineSlots<Slots extends Record<string, any>>(): Slots\ndeclare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\ndeclare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\ndeclare const label: string\ndeclare const n: number\n\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n\ntype __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n  count: typeof count;\n}>\n\nconst __comp = defineComponent({\n})\n\ndeclare const Cap: __OmitNew<typeof __comp> & {\n  new(props?: import(\"vue\").PublicProps & CapProps): {\n    $props: import(\"vue\").PublicProps & CapProps,\n    $emit: (event: string, ...args: unknown[]) => void,\n    $data: {},\n    $attrs: import(\"vue\").HTMLAttributes,\n    $refs: {},\n  } & __Verter_TestBindings\n}\nexport default Cap\n//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3NyYy9DYXAudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENhcFByb3BzIH0gZnJvbSAnLi9jYXAtdHlwZXMnO1xuY29uc3QgY291bnQgPSAxO1xuZGVmaW5lUHJvcHM8Q2FwUHJvcHM+KCk7XG48L3NjcmlwdD5cbjx0ZW1wbGF0ZT48ZGl2Pnt7IGNvdW50IH19PC9kaXY+PC90ZW1wbGF0ZT4iXSwibWFwcGluZ3MiOiJBO0E7QTtBO0E7Ozs7Ozs7Ozs7O0EsY0FHWSxLLEUsTTtBLGNBQUEsQyxFLE07QTs7OztBO0E7QSxFQUROLEssUyxLO0E7O0E7QTs7QTtBLDBDQUNNLFE7QSx3Q0FBQSxRO0EsVywyQztBO0E7QTtBO0E7QSJ9\n";
 
+const PUBLIC_API_TESTING_MAP_PIN: &str = "{\"version\":3,\"names\":[],\"sources\":[\"/src/Cap.vue\"],\"sourcesContent\":[\"<script setup lang=\\\"ts\\\">\\nimport type { CapProps } from './cap-types';\\nconst count = 1;\\ndefineProps<CapProps>();\\n</script>\\n<template><div>{{ count }}</div></template>\"],\"mappings\":\"A;A;A;A;A;;;;;;;;;;;A,cAGY,K,E,M;A,cAAA,C,E,M;A;;;;A;A;A,EADN,K,S,K;A;;A;A;;A;A,0CACM,Q;A,wCAAA,Q;A,W,2C;A;A;A;A;A;A\"}";
+
+/// Mutation recipe: bypass the registry projector or alter one compiler-owned
+/// generated byte/map segment. The direct-producer equivalence assertion or
+/// the static byte pin must fail while the other remains an exact oracle.
 #[test]
 fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
     let host = public_api_byte_pin_host();
@@ -4765,6 +4851,17 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
         .expect("public-mode projection")
         .expect("public-mode api output");
+    let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Public);
+    assert_eq!(
+        r.code.as_ref(),
+        direct.code,
+        "registry projection must be byte-identical to the direct compiler producer"
+    );
+    assert_eq!(
+        r.source_map.as_ref().map(|map| map.as_ref()),
+        Some(direct.source_map.as_str()),
+        "registry source map must be byte-identical to the direct compiler producer"
+    );
     assert_eq!(
         r.code.as_ref(),
         PUBLIC_API_PUBLIC_CODE_PIN,
@@ -4777,6 +4874,9 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
     );
 }
 
+/// Mutation recipe: bypass the registry projector, stop semantic testing-row
+/// materialization, or alter one mapped generated segment. The direct-producer
+/// equivalence assertion or the non-empty static map pin must fail.
 #[test]
 fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
     let host = public_api_byte_pin_host();
@@ -4784,12 +4884,23 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Testing, None)
         .expect("testing-mode projection")
         .expect("testing-mode api output");
+    let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Testing);
+    assert_eq!(
+        r.code.as_ref(),
+        direct.code,
+        "registry projection must be byte-identical to the direct compiler producer"
+    );
+    assert_eq!(
+        r.source_map.as_ref().map(|map| map.as_ref()),
+        Some(direct.source_map.as_str()),
+        "registry source map must be byte-identical to the direct compiler producer"
+    );
     assert_eq!(
         r.code.as_ref(),
         PUBLIC_API_TESTING_CODE_PIN,
         "testing-mode rendered TSX must stay byte-identical through projector dispatch"
     );
-    // The testing-mode map carries NON-EMPTY mappings (`...cAGY;cAAA;...`),
+    // The testing-mode map carries NON-EMPTY mappings (`...A,cAGY...`),
     // so this pin discriminates a shifted source-map position, not just an
     // empty placeholder.
     assert_eq!(
@@ -4798,7 +4909,8 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         "testing-mode source-map bytes must stay identical through projector dispatch"
     );
     assert!(
-        PUBLIC_API_TESTING_MAP_PIN.contains("\"mappings\":\";;"),
+        PUBLIC_API_TESTING_MAP_PIN.contains("\"mappings\":\"A;")
+            && PUBLIC_API_TESTING_MAP_PIN.contains("A,cAGY"),
         "the testing-mode pin must carry real VLQ mappings to be discriminating"
     );
 }
