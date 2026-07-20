@@ -3045,12 +3045,45 @@ impl VerterHost {
                     }
                     if !ambiguous_owner {
                         if let Some(owner) = exact_owner {
-                            return Some((
-                                (dep_canonical.to_string(), owner, imported_name.to_string()),
+                            let mut facts =
                                 vec![crate::resolver_core::FactVersionRef::FileWholeHash {
                                     canonical_id: dep_canonical.to_string(),
                                     hash: source_data.parse.whole_hash,
-                                }],
+                                }];
+                            // Cross-file ROUTE fact — recorded ONLY from an
+                            // ALREADY-materialized, content-pinned, edge-current
+                            // artifact (a `get`, never an `ensure`): the fast
+                            // path must not index the dependency just to derive
+                            // the hash (that mid-resolution index is exactly
+                            // what the bundle's dynamic-import-route-hash
+                            // discipline forbids). When available, the fact
+                            // uses the SAME `hash_route_surface` derivation the
+                            // store-view snapshot publishes, so warm validation
+                            // round-trips; when the artifact is absent, the
+                            // dep's `FileWholeHash` remains the (sufficient)
+                            // covering fact for a direct local export.
+                            if let Some(indexed) = self
+                                .project_type_store
+                                .indexed()
+                                .get(dep_canonical, source_data.parse.whole_hash)
+                            {
+                                if self.indexed_surface_is_current(dep_canonical, &indexed)
+                                    && indexed.shallow_state.has_resolvable_surface()
+                                {
+                                    facts.push(
+                                        crate::resolver_core::FactVersionRef::DerivedFactHash {
+                                            canonical_id: dep_canonical.to_string(),
+                                            kind: crate::resolver_core::DerivedFactKind::Route,
+                                            hash: crate::resolver_store::hash_route_surface(
+                                                &indexed.shallow_state,
+                                            ),
+                                        },
+                                    );
+                                }
+                            }
+                            return Some((
+                                (dep_canonical.to_string(), owner, imported_name.to_string()),
+                                facts,
                             ));
                         }
                     }
