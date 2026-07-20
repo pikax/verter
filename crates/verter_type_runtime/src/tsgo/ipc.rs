@@ -75,13 +75,14 @@ const NORMAL_BATCH_CAP: usize = 5;
 /// Maximum number of Background-priority frames to flush before checking higher lanes.
 const BACKGROUND_BATCH_CAP: usize = 3;
 
-/// Writer-stall watchdog window. A `stdin.write_all` that does not complete
-/// within this window means the child process has stopped reading its stdin —
-/// the write side of a bidirectional stdio-pipe deadlock. When it trips, the
-/// writer fires `crash_notify` (unless a deliberate teardown is in flight) so
-/// the `ResilientTypeProvider` restart machinery (kill, backoff, respawn,
-/// replay) recovers the session, and the writer task ends. Generous by design:
-/// a child not draining stdin for this long is wedged, not merely busy.
+/// Writer-stall watchdog window. It bounds time WITHOUT PROGRESS on the stdin
+/// write, not the total time to write a buffer: a child that accepts NO bytes for
+/// this long has stopped reading its stdin — the write side of a bidirectional
+/// stdio-pipe deadlock. When it trips, the writer fires `crash_notify` (unless a
+/// deliberate teardown is in flight) so the `ResilientTypeProvider` restart
+/// machinery (kill, backoff, respawn, replay) recovers the session, and the writer
+/// task ends. Generous by design: a child not draining stdin at all for this long
+/// is wedged, not merely busy.
 const WRITER_STALL_TIMEOUT_SECS: u64 = 10;
 
 /// Flush `buffer` to `stdin` under the writer-stall watchdog.
@@ -90,6 +91,14 @@ const WRITER_STALL_TIMEOUT_SECS: u64 = 10;
 /// writer loop must stop (I/O error or a stall that tripped the watchdog). On a
 /// stall the child is not reading stdin, so `crash_notify` is fired (unless a
 /// deliberate teardown is in flight) to trigger the resilient restart.
+///
+/// The buffer is handed over chunk by chunk, and the window restarts on every
+/// byte the child accepts, so only a stretch with NO progress at all can trip it.
+/// A single flat window over the whole `write_all` cannot distinguish a wedged
+/// child from a healthy one cold-loading a large project: the pipe buffer is
+/// ~64KB and a restart replay pushes megabytes into a child that is mid
+/// program-build, so a flat window trips, kills, respawns, and replays the very
+/// same bulk write into the very same stall.
 async fn flush_stdin_guarded<W>(
     stdin: &mut W,
     buffer: &mut Vec<u8>,
@@ -103,24 +112,33 @@ where
     if buffer.is_empty() {
         return true;
     }
-    match tokio::time::timeout(writer_stall, stdin.write_all(buffer)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => return false,
-        Err(_) => {
-            if teardown_intent.load(Ordering::SeqCst) {
-                tracing::debug!(
-                    "TSGO stdin write stalled during deliberate teardown — not a crash"
-                );
-            } else {
-                tracing::error!(
-                    "TSGO stdin write stalled for {writer_stall:?} — child is not reading stdin; \
-                     signalling restart"
-                );
-                if let Some(notify) = crash_notify {
-                    notify.notify_waiters();
+    let mut written = 0usize;
+    while written < buffer.len() {
+        // Each chunk gets a fresh window; a timed-out `write` consumed nothing
+        // (it never returned `Ready`), and the watchdog trip bails out entirely
+        // rather than retrying, so no byte can be delivered twice.
+        match tokio::time::timeout(writer_stall, stdin.write(&buffer[written..])).await {
+            // A zero-length write means the child closed its stdin.
+            Ok(Ok(0)) => return false,
+            Ok(Ok(count)) => written += count,
+            Ok(Err(_)) => return false,
+            Err(_) => {
+                if teardown_intent.load(Ordering::SeqCst) {
+                    tracing::debug!(
+                        "TSGO stdin write stalled during deliberate teardown — not a crash"
+                    );
+                } else {
+                    tracing::error!(
+                        "TSGO stdin accepted no bytes for {writer_stall:?} ({written} of {} \
+                         written) — child is not reading stdin; signalling restart",
+                        buffer.len()
+                    );
+                    if let Some(notify) = crash_notify {
+                        notify.notify_waiters();
+                    }
                 }
+                return false;
             }
-            return false;
         }
     }
     let _ = tokio::time::timeout(writer_stall, stdin.flush()).await;

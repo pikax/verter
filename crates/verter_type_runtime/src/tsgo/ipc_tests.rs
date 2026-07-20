@@ -4746,3 +4746,78 @@ async fn a_refused_didopen_leaves_no_synced_entry_in_the_local_ledger() {
         "a REFUSED didOpen must leave no cached contents claiming the child holds them"
     );
 }
+
+/// The writer-stall watchdog must bound time WITHOUT PROGRESS, not the total time
+/// to write a buffer.
+///
+/// A child that keeps accepting bytes — merely slowly, exactly as a real engine
+/// does while cold-loading a large project through a ~64KB pipe — must NEVER trip
+/// it, even when the whole write takes many multiples of the window. A false trip
+/// kills the child, respawns it, and replays the same bulk write into the same
+/// stall.
+#[tokio::test]
+async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() {
+    // A 64-byte duplex forces the writer to hand the frame over in small pieces.
+    let (provider_side, mut child_side) = tokio::io::duplex(64);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+
+    let crash_notify = std::sync::Arc::new(Notify::new());
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        Some(std::sync::Arc::clone(&crash_notify)),
+        16,
+        // The window bounds ONE no-progress stretch. Every sip below lands well
+        // inside it; the whole write takes far longer than it.
+        std::time::Duration::from_millis(120),
+    );
+
+    // Register before the write starts (`notify_waiters` stores no permit).
+    let crash = crash_notify.notified();
+    tokio::pin!(crash);
+    crash.as_mut().enable();
+
+    let payload_len = 8192usize;
+    let drained = tokio::spawn(async move {
+        let mut seen = 0usize;
+        let mut chunk = [0u8; 256];
+        while seen < payload_len {
+            // Steady, slow progress: each pause is inside the window, but the
+            // cumulative write time is roughly an order of magnitude beyond it.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            match child_side.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => seen += n,
+                Err(_) => break,
+            }
+        }
+        seen
+    });
+
+    let payload = "x".repeat(payload_len);
+    provider
+        .update_file("/w/a.tsx", &payload)
+        .await
+        .expect("the frame must enqueue");
+
+    // Well past several whole windows: a watchdog measuring TOTAL write time has
+    // long since tripped by here, while a progress-based one has not.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(700), crash)
+            .await
+            .is_err(),
+        "a child that keeps accepting bytes must never trip the writer-stall watchdog"
+    );
+
+    // Positive control: the child genuinely received the whole frame, so the
+    // no-crash assertion cannot pass vacuously against a writer that wrote nothing.
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(15), drained)
+        .await
+        .expect("the slow child must finish draining the frame")
+        .expect("drain task panicked");
+    assert!(
+        seen >= payload_len,
+        "the child must actually have received the payload, got {seen} of {payload_len} bytes"
+    );
+}
