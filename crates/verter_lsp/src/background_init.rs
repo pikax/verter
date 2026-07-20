@@ -325,6 +325,12 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         // workspace folders and tsconfig paths are configured. Coalesced so a
         // superseded init generation's resync folds into the live one instead of
         // stacking a second full close+reopen sweep on the interactive lane.
+        //
+        // Ordering note: awaiting this no longer implies the sweep FINISHED. When
+        // another pass is already sweeping, this call folds into it and returns
+        // immediately. That is safe here because a folding pass is by definition
+        // concurrent with another one, and the generation check below refuses to
+        // publish a snapshot for anything but the live generation.
         crate::resync_singleflight::resync_open_files_coalesced(
             &resync_coordinator,
             Arc::clone(tp),
