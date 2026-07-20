@@ -64,6 +64,10 @@ Official emits `ref_for: true` on the props object for ANY ref (static or dynami
 Official inline injects `const $props = __props` (template `$props` use) and `emit: $emit` destructure (template `$emit` use, when no defineEmits) / `const $emit = __emit` (with defineEmits), and template `$props`/`$emit` references resolve to those. Verter's D4 fixed only `attrs`/`$slots`; inline `$props`/`$emit` references still route `_ctx.$props` / `_ctx.$emit`. Likely works at runtime (instance proxy) but structurally divergent from official inline.
 - Fix: extend the D4 `buildDestructureElements` port to the `$props`/`$emit` builtins (on-use), with the resolver emitting bare `$props`/`$emit` in inline mode.
 
+### PascalCase `<Component :is>` not treated as a dynamic component  [PRE-EXISTING, LOW]
+Official's `isComponentTag` is `tag === "component" || tag === "Component"` — BOTH the lowercase `component` and the PascalCase `Component` tag are dynamic-component hosts. Verter's VDOM dynamic-component detection (`is_dynamic_component_tag` / `resolve_dynamic_component`, `crates/verter_compiler/src/template/code_gen/vdom/component.rs`) accepts only lowercase `"component"`, so `<Component :is="x">` compiles as a regular component named `Component` carrying an `:is` prop instead of `_resolveDynamicComponent(x)` + an open block. Pre-existing — NOT introduced by the C1 dynamic-component-block fix (0f4415c23); surfaced by the grok adversarial review of C1. Verter SSR already accepts both spellings, so this is a VDOM-only gap. Low severity: uncommon SFC spelling, and the miss is consistent on both resolve + blockify (no resolve/block disagreement — just not full official parity).
+- Fix: accept both `"component"` and `"Component"` in the VDOM dynamic-component detection (mirror official `isComponentTag`); the C1 block-forcing then follows automatically. Add a discriminating test (`<Component :is>` → `_resolveDynamicComponent` + block) with a negative assertion.
+
 ---
 
 ## C. Low / infra
@@ -71,6 +75,10 @@ Official inline injects `const $props = __props` (template `$props` use) and `em
 ### D7 — host/FFI cannot set `inline`; `result.inline` misleading on IDE  [LOW]
 `CompileProfile.inline` exists (`types.rs:1238`) and the conformance harness uses it, but `FfiCompileProfile`/`HostCompileProfile` don't map it (`verter_ffi/.../input.rs:69-128`; `packages/native/host-types.ts:71-96`) — only `isProduction` is exposed, so a host can't force inline in dev. Also `IDE` + `inline: Some(true)` sets `result.inline = true` while emitting only TSX (flag not gated on "runtime inline actually happened").
 - Fix: map `inline` through the FFI/host profiles; gate `result.inline` on runtime-inline actually occurring.
+
+### Valueless-`:is` / static-`is` multi-root block emission lacks dedicated tests  [LOW, test coverage]
+The C1 fix (0f4415c23: dynamic `<component :is>` always opens a block) covers three forms via shared logic (`is_dynamic_component_tag` mirrors `resolve_dynamic_component`): bound `:is="expr"` / `v-bind:is`, valueless `:is` (Vue 3.4 shorthand), and static `is="Foo"`. Only the bound `:is="expr"` MULTI-ROOT case has a dedicated block-emission test; the valueless-`:is` and static-`is` multi-root forms are transitively covered (same code path) but NOT explicitly pinned.
+- Fix: add dedicated tests asserting that a valueless-`:is` and a static-`is` dynamic component in a MULTI-ROOT context each emit `(_openBlock(), _createBlock(_resolveDynamicComponent(...)))` and NOT a bare `_createVNode(_resolveDynamicComponent(...))`. Low priority — completeness, not a correctness gap.
 
 ---
 
