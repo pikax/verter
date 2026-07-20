@@ -115,6 +115,12 @@ export {
   evaluateRouteAdvisories,
   reportIsolation,
 } from "./assertions.js";
+export {
+  formatShardSummary,
+  summarizeShards,
+  type ShardSummary,
+  type ShardWallClock,
+} from "./shards.js";
 
 /** A route runner — injectable so the hermetic unit suite needs no server. */
 export type CorpusRouteRunner = (
