@@ -1104,14 +1104,16 @@ fn ws_and_snapshot(
 fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
     // The scanner's tier classifier (`classify_from_snapshot`) and the session
     // carrier resolver (`WorkspaceProjectResolver::resolve`) BOTH derive from the
-    // SAME `WorkspaceSnapshot::configured_owner_resolution_for_file`, so they can
-    // never disagree on whether a carrier has a configured owner. Byte-equivalent on
-    // the OWNERSHIP axis: scanner `ProjectSource` <=> resolver
-    // `Bound`/`Ambiguous(MultipleOwners)`; scanner `Other` <=> resolver `NoProject`.
+    // SAME `WorkspaceSnapshot` ownership authority, so they can never disagree on
+    // whether a carrier has a configured owner. Byte-equivalent on the OWNERSHIP
+    // axis: scanner `ProjectSource` <=> resolver `Bound` (a multi-claimant carrier
+    // resolves to the single tsgo default owner, still `Bound`); scanner `Other`
+    // <=> resolver `NoProject`.
     //
-    // DISCRIMINATING: a scanner that reverted to glob patterns (`classify_tiers`), or
-    // a resolver that COLLAPSED a multiply-owned carrier to a single `Bound`, would
-    // break the agreement below.
+    // DISCRIMINATING: a scanner that reverted to glob patterns (`classify_tiers`),
+    // or a resolver that FAILED CLOSED on a multiply-owned carrier (the pre-fix
+    // terminal `Ambiguous(MultipleOwners)`, the release-blocking "no inference"
+    // bug), would break the agreement below.
     let ws_root = "d:/ws";
     let owned = "d:/ws/app/src/Owned.vue";
     let multi = "d:/ws/multi/src/Multi.vue";
@@ -1142,17 +1144,11 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
         let resolution = resolver.resolve(path, None);
         assert_eq!(tier, expect_tier, "scanner tier mismatch for {path}");
         // The invariant: scanner "is a project source" == resolver "has a configured
-        // owner" (Bound OR MultipleOwners-ambiguous), computed for the SAME path from
-        // the SAME snapshot.
+        // owner" (`Bound` — a multi-claimant carrier resolves to the single tsgo
+        // default owner, never a terminal Ambiguous), computed for the SAME path
+        // from the SAME snapshot.
         let scanner_owned = tier == Tier::ProjectSource;
-        let resolver_owned = matches!(
-            resolution,
-            CarrierOwnershipResolution::Bound(_)
-                | CarrierOwnershipResolution::Ambiguous {
-                    cause: AmbiguityCause::MultipleOwners,
-                    ..
-                }
-        );
+        let resolver_owned = matches!(resolution, CarrierOwnershipResolution::Bound(_));
         assert_eq!(
             scanner_owned, resolver_owned,
             "scanner tier and resolver ownership must agree for {path}: \
@@ -1161,7 +1157,8 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
     }
 
     // Anchor the equivalence to CONCRETE resolution states (so the agreement above is
-    // not a vacuous tautology), and pin the non-collapsing 2-candidate ambiguity.
+    // not a vacuous tautology), and pin the multi-claimant carrier to its single
+    // tsgo default owner.
     assert!(
         matches!(
             resolver.resolve(owned, None),
@@ -1170,16 +1167,18 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
         "the uniquely-owned carrier resolves Bound"
     );
     match resolver.resolve(multi, None) {
-        CarrierOwnershipResolution::Ambiguous { candidates, cause } => {
-            assert_eq!(cause, AmbiguityCause::MultipleOwners);
+        CarrierOwnershipResolution::Bound(binding) => {
+            // The nearest literal `tsconfig.json` (which directly includes the file)
+            // is the tsgo `GetDefaultProject` winner — never a terminal Ambiguous.
             assert_eq!(
-                candidates.len(),
-                2,
-                "both overlapping configs preserved (non-collapsing), got {candidates:?}"
+                binding.tsconfig_uri(),
+                "d:/ws/multi/tsconfig.json",
+                "the multiply-owned carrier binds to the literal tsconfig.json default owner"
             );
         }
         other => panic!(
-            "the multiply-owned carrier must resolve Ambiguous(MultipleOwners), got {other:?}"
+            "the multiply-owned carrier must resolve to a single Bound owner \
+             (tsgo GetDefaultProject), got {other:?}"
         ),
     }
     assert_eq!(

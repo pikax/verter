@@ -743,17 +743,45 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         Ok(u) => u,
         Err(_) => return,
     };
+    let diagnostics = compute_merged_diagnostics(deps, canonical_id, &uri).await;
+    deps.client
+        .publish_diagnostics(uri, diagnostics, None)
+        .await;
+}
 
+/// Compute the merged (Verter lint + `verter(project)` ownership + TypeScript
+/// type) diagnostics for a synced file WITHOUT publishing. Split from
+/// [`publish_merged_diagnostics`] so tests can observe the merged set directly
+/// (the coordinator otherwise pushes to the client socket, which a test cannot
+/// read) — the same compute/publish split the request-side
+/// `compute_full_diagnostics` uses.
+async fn compute_merged_diagnostics(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri: &Uri,
+) -> Vec<Diagnostic> {
     // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
     let mut verter_diags = {
         let vfs_ws = deps.vfs_workspace.read();
         compute_verter_diagnostics_for_with_views(
             &deps.documents,
-            &uri,
+            uri,
             &deps.cached_verter_diags,
             vfs_ws.as_deref(),
         )
     };
+
+    // Surface the `verter(project)` ownership diagnostic on the DEBOUNCED publish
+    // path — `did_open` / `did_change` route through this coordinator, NOT through
+    // the request-only `compute_full_diagnostics`, so an unresolved carrier
+    // (terminal `NoProject` / disk-layout carrier-path conflict) is now explained
+    // on open AND edit. A resolved carrier (`Bound`, including a resolved
+    // multi-claimant) and a bootstrap `NotReady` stay silent — the shared owner
+    // authority decides, never a path-shape heuristic.
+    verter_diags.extend(crate::external_ts::project_ownership_diagnostics_for(
+        deps.documents.host(),
+        canonical_id,
+    ));
 
     // A `.svelte` file whose owner workspace has NO `svelte`
     // install fails CLOSED (module-not-found on the shim's `svelte` import) —
@@ -812,16 +840,11 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     // `ide_path` a self-file document never has).
     if let Some(tp) = &deps.type_provider {
         if crate::server::self_file_language_for(canonical_id).is_some() {
-            let diagnostics =
-                self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
-            return deps
-                .client
-                .publish_diagnostics(uri, diagnostics, None)
-                .await;
+            return self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
         }
     }
 
-    let diagnostics = if let Some(tp) = &deps.type_provider {
+    if let Some(tp) = &deps.type_provider {
         let encoding = deps.position_encoding.read().clone();
         carrier_provider_diagnostics(
             &deps.documents,
@@ -834,16 +857,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         .await
     } else {
         verter_diags
-    };
-
-    tracing::info!(
-        "sync_coordinator: publishing {} diagnostics for {}",
-        diagnostics.len(),
-        canonical_id
-    );
-    deps.client
-        .publish_diagnostics(uri, diagnostics, None)
-        .await;
+    }
 }
 
 /// Merge a carrier's provider type diagnostics into `verter_diags` for a

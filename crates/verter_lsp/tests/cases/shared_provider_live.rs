@@ -924,6 +924,117 @@ fn fixture_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot {
     build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1))
 }
 
+/// A DUAL-CLAIMANT fixture: a solution `tsconfig.json` (`files: [], references:
+/// […]`) referencing TWO leaves that BOTH `include: ["src/**/*"]`, so the carrier
+/// is claimed by MULTIPLE configured projects — the release-blocking overlap.
+/// Built through the SAME production membership/reference loaders `fixture_snapshot`
+/// uses, so the SHARED route's ownership authority (`WorkspaceProjectResolver`) is
+/// exercised exactly as production does.
+fn dual_claimant_fixture_snapshot(ws_root: &str) -> WorkspaceSnapshot {
+    let solution = format!("{ws_root}/tsconfig.json");
+    let app = format!("{ws_root}/tsconfig.app.json");
+    let components = format!("{ws_root}/tsconfig.components.json");
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(
+        solution.clone(),
+        Arc::<str>::from(
+            r#"{ "files": [], "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.components.json" }] }"#,
+        ),
+    );
+    ws.inject_file(
+        app.clone(),
+        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+    );
+    ws.inject_file(
+        components.clone(),
+        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+    );
+    ws.inject_file(
+        format!("{ws_root}/src/Widget.vue"),
+        Arc::<str>::from("<template></template>"),
+    );
+
+    let root = CanonicalPath::new(ws_root);
+    let make_project = |id: u32, tsconfig: &str| {
+        let raw_membership = load_project_membership(&ws, tsconfig);
+        let compiler_options = load_compiler_options(&ws, tsconfig);
+        let supported = supported_extensions_for(&compiler_options);
+        let spec = membership_to_spec(&root, &raw_membership, &supported);
+        let references = load_project_references(&ws, tsconfig)
+            .into_iter()
+            .map(|r| CanonicalPath::new(&r))
+            .collect();
+        OwnershipProject {
+            id: ProjectId(id),
+            root: root.clone(),
+            workspace_root: CanonicalPath::new(ws_root),
+            payload: ProjectPayload::Configured {
+                tsconfig_path: CanonicalPath::new(tsconfig),
+                membership: ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options,
+                references,
+                workspace_aliases: Vec::new(),
+            },
+        }
+    };
+    build_workspace_snapshot_simple(
+        vec![
+            make_project(0, &solution),
+            make_project(1, &app),
+            make_project(2, &components),
+        ],
+        SnapshotGeneration(1),
+    )
+}
+
+/// SHARED-route ownership proof (hermetic, no relay needed): the SHARED tsgo
+/// provider decides serving from the SAME `WorkspaceProjectResolver::resolve()`
+/// the tsserver + managed-tsgo routes consume. A dual-`.vue`-claimant solution
+/// must resolve to a single `Bound` owner (the first leaf in the solution's
+/// declared references order) — never a terminal `Ambiguous`. Reverting the
+/// multi-claimant selection makes this `Ambiguous(MultipleOwners)` and the shared
+/// route fails every carrier feature closed.
+#[test]
+fn shared_route_dual_claimant_carrier_resolves_to_single_bound_owner() {
+    let ws_root = "d:/shared-dual";
+    let snapshot = dual_claimant_fixture_snapshot(ws_root);
+    let vfs = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    let env_dims_source = |_tsconfig_uri: &str| EnvDims {
+        parse_env_hash: [11u8; 16],
+        resolve_env_hash: [22u8; 16],
+        lib_env_hash: [33u8; 16],
+        project_identity: ProjectIdentity([7u8; 16]),
+    };
+    let resolver = WorkspaceProjectResolver::new(
+        &snapshot,
+        &vfs as &dyn WorkspaceRead,
+        "7.0.2",
+        &env_dims_source,
+        true,
+    );
+    match resolver.resolve(&format!("{ws_root}/src/Widget.vue"), None) {
+        CarrierOwnershipResolution::Bound(binding) => assert_eq!(
+            binding.tsconfig_uri(),
+            format!("{ws_root}/tsconfig.app.json"),
+            "the shared route must bind a dual-claimant carrier to the first \
+             reference-order leaf — never a terminal Ambiguous"
+        ),
+        other => panic!(
+            "the shared route's dual-claimant carrier must resolve to a single Bound \
+             owner (tsgo GetDefaultProject), got {other:?}"
+        ),
+    }
+}
+
 /// A TWO-project fixture: an `app` configured project that DECLARES a redirect-ON
 /// project reference to a sibling `lib` project (both under one workspace root). The
 /// `app` project OWNS the carrier via `include: ["src/**/*"]`, so `app/src/Widget.vue`

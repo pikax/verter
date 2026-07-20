@@ -645,7 +645,7 @@ fn diagnostics_observe_readiness_while_owned_gate_stays_authoritative() {
     );
     // NotReady ⇒ NO `verter(project)` diagnostic (no spurious bootstrap warning).
     assert!(
-        crate::external_ts::project_ownership_diagnostic(&observed).is_none(),
+        crate::external_ts::carrier_sync::project_ownership_diagnostic(&observed).is_none(),
         "a NotReady carrier must emit NO verter(project) diagnostic during bootstrap"
     );
 }

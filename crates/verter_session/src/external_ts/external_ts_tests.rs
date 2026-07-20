@@ -262,6 +262,111 @@ fn binding_carries_reference_graph_data() {
     }
 }
 
+/// The release-blocking bug layout: a solution `tsconfig.json` (`files: []`)
+/// referencing TWO leaves that BOTH `include` the `.vue`. tsgo's
+/// `GetDefaultProject` resolves this to a single `Bound` owner (the first leaf in
+/// the solution's declared `references` order) — it is NEVER a terminal
+/// ambiguous / no-serve state. This is the ONE provider-neutral resolution the
+/// tsserver, managed-tsgo, and shared-tsgo carrier routes all consume, so a
+/// `Bound` result here is the route-neutral acceptance proof.
+#[test]
+fn dual_vue_claimant_solution_binds_to_first_reference_order_leaf() {
+    let ws = workspace_with(&[
+        (
+            "d:/ws/packages/ui/tsconfig.json",
+            r#"{ "files": [], "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.components.json" }] }"#,
+        ),
+        (
+            "d:/ws/packages/ui/tsconfig.app.json",
+            r#"{ "include": ["src/**/*"] }"#,
+        ),
+        (
+            "d:/ws/packages/ui/tsconfig.components.json",
+            r#"{ "include": ["src/**/*"] }"#,
+        ),
+        ("d:/ws/packages/ui/src/App.vue", "<template></template>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(
+        &ws,
+        &[
+            "d:/ws/packages/ui/tsconfig.json",
+            "d:/ws/packages/ui/tsconfig.app.json",
+            "d:/ws/packages/ui/tsconfig.components.json",
+        ],
+    );
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+
+    match resolver.resolve("d:/ws/packages/ui/src/App.vue", None) {
+        CarrierOwnershipResolution::Bound(binding) => {
+            assert_eq!(
+                binding.tsconfig_uri(),
+                "d:/ws/packages/ui/tsconfig.app.json",
+                "a dual-.vue-claimant solution must bind to the FIRST leaf in the \
+                 solution's declared references order — never a terminal Ambiguous",
+            );
+        }
+        other => panic!(
+            "dual-claimant solution must resolve to a single Bound owner (tsgo \
+             GetDefaultProject), got {other:?}"
+        ),
+    }
+}
+
+/// Reference-order determinism at the resolver surface: swapping the solution's
+/// `references` array deterministically flips the bound owner to the other leaf.
+#[test]
+fn dual_vue_claimant_binding_follows_reference_declared_order() {
+    let ws = workspace_with(&[
+        (
+            "d:/ws/packages/ui/tsconfig.json",
+            // components FIRST
+            r#"{ "files": [], "references": [{ "path": "./tsconfig.components.json" }, { "path": "./tsconfig.app.json" }] }"#,
+        ),
+        (
+            "d:/ws/packages/ui/tsconfig.app.json",
+            r#"{ "include": ["src/**/*"] }"#,
+        ),
+        (
+            "d:/ws/packages/ui/tsconfig.components.json",
+            r#"{ "include": ["src/**/*"] }"#,
+        ),
+        ("d:/ws/packages/ui/src/App.vue", "<template></template>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(
+        &ws,
+        &[
+            "d:/ws/packages/ui/tsconfig.json",
+            "d:/ws/packages/ui/tsconfig.app.json",
+            "d:/ws/packages/ui/tsconfig.components.json",
+        ],
+    );
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+
+    match resolver.resolve("d:/ws/packages/ui/src/App.vue", None) {
+        CarrierOwnershipResolution::Bound(binding) => {
+            assert_eq!(
+                binding.tsconfig_uri(),
+                "d:/ws/packages/ui/tsconfig.components.json",
+                "reordering the solution references must deterministically change the \
+                 bound owner",
+            );
+        }
+        other => panic!("expected Bound(components leaf), got {other:?}"),
+    }
+}
+
 #[test]
 fn bound_env_dims_sourced_from_resolved_project_member_not_tsconfig_path() {
     // INV-7: a Bound binding's R21 env dims must be sourced from the resolved
@@ -603,24 +708,26 @@ fn real_file_at_carrier_path_downgrades_unowned_source_to_ambiguous() {
 
 #[test]
 fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
-    // The other non-`Unique` owner state: a source claimed by MULTIPLE configured
-    // projects (`Ambiguous(MultipleOwners)`) with a real user file at its companion path
-    // must STILL be `Ambiguous(CarrierPathOccupiedByRealFile)`, never overlay-shadowed.
-    // The safety-critical shadow conflict is checked BEFORE ownership, so it takes
-    // precedence over a `MultipleOwners` overlap.
+    // A source claimed by MULTIPLE configured projects now resolves to a single
+    // `Bound` owner (tsgo `GetDefaultProject`), but a real user file at its
+    // companion path must STILL downgrade it to
+    // `Ambiguous(CarrierPathOccupiedByRealFile)`, never overlay-shadowed. The
+    // safety-critical shadow conflict is checked BEFORE ownership, so it takes
+    // precedence over EVERY owner state — `Bound` included.
     //
-    // DISCRIMINATING: before the unconditional conflict pass, `Ambiguous(MultipleOwners)`
-    // short-circuits BEFORE the carrier-path probe, so a real `Foo.vue.tsx` beside a
-    // multiply-owned `Foo.vue` resolves to `Ambiguous(MultipleOwners)` — and the
-    // composite's shadow gate (which admits `MultipleOwners` as a genuine virtual
-    // companion) then INJECTS/overlay-shadows the real file. The unconditional pass makes
-    // it `Ambiguous(CarrierPathOccupiedByRealFile)` (rejected) instead.
+    // DISCRIMINATING: the carrier-path conflict pass runs UNCONDITIONALLY and
+    // FIRST, so a real `Foo.vue.tsx` beside an otherwise-`Bound` multiply-claimed
+    // `Foo.vue` resolves to `Ambiguous(CarrierPathOccupiedByRealFile)` (rejected)
+    // rather than being served from the default owner and overlay-shadowing the
+    // real file.
     let tsconfigs: &[&str] = &["d:/ws/tsconfig.json", "d:/ws/tsconfig.app.json"];
     let exts = carrier_exts();
     for ext in &exts {
         let source = format!("d:/ws/src/Foo.{ext}");
-        // Two sibling tsconfigs in the SAME dir both `include: ["src/**/*"]` ⇒ both own
-        // `Foo.{ext}` with no deterministic leaf ⇒ MultipleOwners.
+        // Two sibling tsconfigs in the SAME dir both `include: ["src/**/*"]` ⇒ both
+        // claim `Foo.{ext}`. tsgo `GetDefaultProject` selects the nearest literal
+        // `tsconfig.json` entry (which directly includes the file) as the single
+        // Bound owner — the overlap is NOT terminal.
         let control = {
             let ws = workspace_with(&[
                 ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
@@ -638,26 +745,15 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
             resolver.resolve(&source, None)
         };
         match &control {
-            CarrierOwnershipResolution::Ambiguous { candidates, cause } => {
+            CarrierOwnershipResolution::Bound(binding) => {
                 assert_eq!(
-                    *cause,
-                    AmbiguityCause::MultipleOwners,
-                    "control: `Foo.{ext}` claimed by two sibling tsconfigs is MultipleOwners"
-                );
-                // The MultipleOwners candidates thread the overlapping configs through
-                // for the later `verter(project)` diagnostic.
-                assert_eq!(
-                    candidates.len(),
-                    2,
-                    "MultipleOwners must list both overlapping configs, got {candidates:?}"
-                );
-                assert!(
-                    candidates.iter().any(|c| c.ends_with("tsconfig.json"))
-                        && candidates.iter().any(|c| c.ends_with("tsconfig.app.json")),
-                    "candidates must name both overlapping configs, got {candidates:?}"
+                    binding.tsconfig_uri(),
+                    "d:/ws/tsconfig.json",
+                    "control: a multiply-claimed `Foo.{ext}` binds to the literal \
+                     `tsconfig.json` default owner (which directly includes it)"
                 );
             }
-            other => panic!("control: expected Ambiguous(MultipleOwners), got {other:?}"),
+            other => panic!("control: expected Bound(tsconfig.json), got {other:?}"),
         }
 
         // The SAME multiply-owned source, but with a real user file at its `.tsx` companion.
@@ -691,20 +787,21 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
     }
 }
 
-// ── Non-collapsing multiply-owned ownership (§2.1) ──
+// ── Multi-claimant resolves to the single tsgo default owner (§2.1, narrowed) ──
 
 #[test]
-fn multiply_owned_carrier_resolves_ambiguous_with_all_candidates_non_collapsing() {
+fn multiply_owned_carrier_resolves_to_single_tsgo_default_owner() {
     // Two sibling tsconfigs in the SAME dir both `include: ["src/**/*"]` claim
-    // `Foo.vue` with no deterministic leaf. The resolver must PRESERVE both configs
-    // as `Ambiguous(MultipleOwners)` candidates — NON-COLLAPSING — never silently
-    // pick one owner and return `Bound`. This is the runtime shadow of the
-    // non-collapsing `effective_configs_for_path` ownership primitive.
+    // `Foo.vue` with no deterministic leaf. Post-fix, the multi-claimant overlap
+    // is NO LONGER terminal: tsgo `GetDefaultProject` selects a single default
+    // owner — the nearest literal `tsconfig.json`, which directly includes the
+    // file — and the resolver binds it. NEVER a terminal Ambiguous / no-serve.
     //
-    // DISCRIMINATING: a collapsing owner resolver (the retired
-    // `owner_for_file -> Option<&IdeProjectConfig>`, which picked a single winner)
-    // would resolve `Foo.vue` to ONE `Bound` owner, hiding the ambiguity and
-    // overlay-serving one project's view instead of failing closed.
+    // DISCRIMINATING: the pre-fix resolver returned `Ambiguous(MultipleOwners)`
+    // here, so every provider feature failed closed (the exact release-blocking
+    // "no inference at all" bug). A `Bound` result proves the narrowing landed;
+    // it is the ONE provider-neutral decision the tsserver, managed-tsgo, and
+    // shared-tsgo carrier routes all consume.
     let ws = workspace_with(&[
         ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
         ("d:/ws/tsconfig.app.json", r#"{ "include": ["src/**/*"] }"#),
@@ -720,26 +817,17 @@ fn multiply_owned_carrier_resolves_ambiguous_with_all_candidates_non_collapsing(
     );
 
     match resolver.resolve("d:/ws/src/Foo.vue", None) {
-        CarrierOwnershipResolution::Ambiguous { candidates, cause } => {
+        CarrierOwnershipResolution::Bound(binding) => {
             assert_eq!(
-                cause,
-                AmbiguityCause::MultipleOwners,
-                "two configs overlap with no deterministic leaf ⇒ MultipleOwners"
-            );
-            assert_eq!(
-                candidates.len(),
-                2,
-                "BOTH overlapping configs must be preserved (non-collapsing), got {candidates:?}"
-            );
-            assert!(
-                candidates.iter().any(|c| c.ends_with("tsconfig.json"))
-                    && candidates.iter().any(|c| c.ends_with("tsconfig.app.json")),
-                "the candidates must name BOTH overlapping configs, got {candidates:?}"
+                binding.tsconfig_uri(),
+                "d:/ws/tsconfig.json",
+                "the multi-claimant carrier binds to the literal `tsconfig.json` \
+                 default owner (nearest literal config, directly includes the file)"
             );
         }
         other => panic!(
-            "a multiply-owned carrier must resolve Ambiguous(MultipleOwners) — never a \
-             collapsed single Bound owner — got {other:?}"
+            "a multiply-owned carrier must resolve to a SINGLE Bound owner (tsgo \
+             GetDefaultProject) — never terminal Ambiguous — got {other:?}"
         ),
     }
 }

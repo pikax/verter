@@ -2970,6 +2970,146 @@ async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
     );
 }
 
+/// Publish a READY root with TWO sibling configured projects (`tsconfig.json` +
+/// `tsconfig.app.json`) both `include`-ing everything under `root`, with no
+/// reference edge — so every carrier under `root` is a genuine MULTI-CLAIMANT
+/// overlap (`configured_owner_resolution_for_file` ⇒ `Ambiguous`) onto an EXISTING
+/// workspace. Published LAST (after server construction + `did_open`) so it wins
+/// over any bootstrap/rescan root those steps publish.
+fn publish_multi_claimant_root(vfs_ws: &verter_workspace::FilesystemWorkspace, root: &str) {
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+    let make_configured = |tsconfig: &str| {
+        let spec = verter_workspace::StaticMembershipSpec {
+            files: Vec::new(),
+            include: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+            )],
+            exclude: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(
+                    &root_cp,
+                    "node_modules/**",
+                ),
+            )]
+            .into(),
+        };
+        verter_workspace::workspace_snapshot::OwnershipProject {
+            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            root: root_cp.clone(),
+            workspace_root: root_cp.clone(),
+            payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                membership: verter_workspace::ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                workspace_aliases: Vec::new(),
+            },
+        }
+    };
+    let projects = vec![
+        make_configured(&format!("{root}/tsconfig.json")),
+        make_configured(&format!("{root}/tsconfig.app.json")),
+    ];
+    let snapshot = std::sync::Arc::new(
+        verter_workspace::snapshot_builder::build_workspace_snapshot_simple(
+            projects,
+            verter_workspace::workspace_snapshot::SnapshotGeneration(1),
+        ),
+    );
+    let views = crate::workspace_state::build_lsp_views(vfs_ws, &snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+}
+
+// A carrier owned by MULTIPLE configured projects must FAIL rename CLOSED (a
+// clear error, no WorkspaceEdit) — never a silent partial cross-project rename.
+// This is the safety boundary for the newly-narrowed multi-claimant resolution:
+// per-file features serve from the single tsgo default owner, but a provider
+// rename would only cover that one project and leave a symbol that escapes it
+// (exported + imported by a sibling project) dangling.
+//
+// DISCRIMINATING: without the multi-claimant rename gate, `handle_rename` would
+// run the provider rename against the resolved owner and return a WorkspaceEdit
+// (`Ok(Some(_))`) — a partial edit — instead of the fail-closed error asserted
+// here.
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws.clone()));
+    let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let host_for_server = Arc::clone(&host);
+    let provider_for_server = Arc::clone(&provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&provider_for_server)),
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                mcp_port: None,
+                type_provider_reason: Some("managed tsgo".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+
+    // A carrier exporting a symbol another project could import — the escape case.
+    let source = "<script setup lang=\"ts\">\nexport const shared = 1\n</script>\n<template><div>{{ shared }}</div></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/App.vue", source);
+    // Publish the MULTI-CLAIMANT ownership root LAST — after server construction and
+    // `did_open` — so it is the authoritative root the rename gate observes.
+    publish_multi_claimant_root(&ws, "/workspace");
+    assert!(
+        server.carrier_is_multi_claimant(&uri),
+        "the carrier must be detected as multi-claimant for this test to be meaningful"
+    );
+    let position = find_document_position(server, &uri, "shared", 0);
+
+    let prepare = super::nav_features_navigation::handle_prepare_rename(
+        server,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+    )
+    .await;
+    assert!(
+        prepare.is_err(),
+        "prepare-rename on a multi-claimant carrier must FAIL CLOSED, got {prepare:?}"
+    );
+
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamed".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await;
+    match rename {
+        Err(err) => assert!(
+            err.message.contains("multiple TypeScript projects"),
+            "the fail-closed rename error must explain the multi-claimant cause, got {err:?}"
+        ),
+        Ok(edit) => panic!(
+            "a multi-claimant carrier must NEVER return a rename edit (silent partial \
+             cross-project rename), got {edit:?}"
+        ),
+    }
+}
+
 /// The editor-owned tsserver route has no local provider buffers: its only
 /// content authority is the durable carrier store consumed by the editor
 /// plugin. A live source edit must therefore take the same membership/publish

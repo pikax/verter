@@ -384,6 +384,65 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn merged_diagnostics_surface_verter_project_warning_on_unowned_carrier() {
+    // The debounced coordinator path (`did_open` / `did_change` route here, NOT
+    // through the request-only `compute_full_diagnostics`) must surface the
+    // `verter(project)` ownership diagnostic for a genuinely-unowned carrier. This
+    // is the wiring fix: pre-fix the diagnostic lived ONLY in
+    // `compute_full_diagnostics`, so an orphaned carrier was silently typeless on
+    // open AND edit.
+    //
+    // DISCRIMINATING: without the `project_ownership_diagnostics_for` wiring in
+    // `compute_merged_diagnostics`, the returned set carries NO `verter(project)`
+    // diagnostic for the unowned carrier and this assertion fails.
+    // A ready (authoritative) published root whose only configured project lives
+    // at `/other`; the `/workspace` carrier is under no configured project ⇒
+    // terminal `NoProject`. `with_ext` publishes `ownership_ready = true`, so the
+    // diagnostic path's `ObservePublishedReadiness` resolves authoritatively.
+    let vfs = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+    let ws = vfs.read().clone().expect("published workspace");
+    let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+
+    let diagnostics = compute_merged_diagnostics(&deps, "/workspace/src/App.vue", &uri).await;
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.source.as_deref() == Some("verter(project)")),
+        "an unowned carrier must surface a verter(project) ownership diagnostic on the \
+         debounced (did_open/did_change) publish path, got {diagnostics:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
     // AUDIT (sync_coordinator, invariant a): the debounced sync processes
     // OPEN documents (signalled from did_change). When a READY ownership

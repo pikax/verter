@@ -914,6 +914,24 @@ fn inject_child_prop_declaration(
     }
 }
 
+/// The fail-closed error a rename / prepare-rename returns for a carrier owned by
+/// MULTIPLE configured projects. Non-silent (the editor surfaces the message), and
+/// carries NO edit — so a partial cross-project rename can never ship for the
+/// newly-resolved multi-claimant case.
+fn multi_claimant_rename_unavailable_error() -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        // LSP `RequestFailed` (-32803): the request failed for a known, user-facing
+        // reason (not a protocol/internal fault). tower-lsp has no named variant.
+        code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+        message: "verter: rename is unavailable for a carrier owned by multiple TypeScript \
+                  projects — a cross-project rename could leave the symbol dangling in sibling \
+                  projects. Give the carrier a single owning tsconfig (disambiguate its \
+                  include/references) to enable rename."
+            .into(),
+        data: None,
+    }
+}
+
 pub(super) async fn handle_prepare_rename(
     server: &VerterLanguageServer,
     params: TextDocumentPositionParams,
@@ -929,6 +947,13 @@ pub(super) async fn handle_prepare_rename(
     // Virtual file: not supported (no Verter rename context for generated code)
     if server.documents.get_virtual_source_uri(uri).is_some() {
         return Ok(None);
+    }
+
+    // Multi-claimant carrier: fail rename closed (see `handle_rename`) so the editor
+    // surfaces the reason BEFORE the user starts a rename that could partial-edit
+    // across sibling projects.
+    if server.carrier_is_multi_claimant(uri) {
+        return Err(multi_claimant_rename_unavailable_error());
     }
 
     let result = (|| {
@@ -962,6 +987,25 @@ pub(super) async fn handle_rename(
         return Ok(None);
     }
 
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
+    }
+
+    // A carrier owned by MULTIPLE configured projects now resolves to a single tsgo
+    // default owner for per-file features (hover / definition / completion /
+    // references all serve), but a PROVIDER rename runs only within that one owner
+    // project. Renaming a symbol that ESCAPES the owner (exported + imported by a
+    // sibling configured project) would silently leave it dangling in the
+    // siblings — a partial cross-project rename. Cheaply proving escape is not
+    // feasible without the cross-project rename fan-out (not yet implemented), so rename
+    // FAILS CLOSED here with a clear message rather than shipping a partial edit;
+    // every other IDE feature still serves from the resolved owner. A
+    // uniquely-owned carrier renames normally. (Checked AFTER the editor-owned
+    // yield so an editor-plugin route still defers to the editor's own rename.)
+    if server.carrier_is_multi_claimant(uri) {
+        return Err(multi_claimant_rename_unavailable_error());
+    }
+
     // PRODUCTION sync-before-query: the cross-file rename declaration surfaces via
     // the imported component's `{carrier}.ts` PUBLIC-API surface, which the
     // provider must already hold before the query. Peer navigation handlers
@@ -971,10 +1015,6 @@ pub(super) async fn handle_rename(
     // pin the resulting generations under the fence.
     if !server.is_self_file_projection(uri) {
         server.ensure_provider_synced(uri).await;
-    }
-
-    if server.editor_owns_carrier_source_features() {
-        return Ok(None);
     }
 
     let verter_result = (|| {

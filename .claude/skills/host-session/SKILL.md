@@ -208,6 +208,24 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 | `crates/verter_lsp/src/provider_sync.rs` | `ProviderOwnerBinding`, `ProviderSyncState` |
 | `crates/verter_lsp/src/server/sync_orchestration.rs` | `PublishedResolverSnapshot`, `ensure_current_file_synced` |
 
+### Carrier Owner Selection (tsgo-faithful, single-winner)
+
+A carrier claimed by MULTIPLE configured projects is NEVER a terminal state. `WorkspaceSnapshot::default_configured_owner_for_file` (`crates/verter_workspace/src/workspace_snapshot.rs`) models tsgo `ProjectCollection.GetDefaultProject` + `findDefaultConfiguredProject` (`microsoft/typescript-go` `internal/project/projectcollection.go`):
+
+1. **Claimants** = configured projects that directly include the file (ordered `projects` Vec, never a set). Zero ⇒ `None` (⇒ `NoProject`); exactly one ⇒ that owner; ≥2 ⇒ the walk.
+2. **BFS entry** = the nearest ancestor solution — the nearest configured project whose tsconfig BASENAME is the LITERAL `tsconfig.json`/`jsconfig.json` (`computeConfigFileName`), NOT the nearest project root. `tsconfig.app.json` is never an entry; a solution `files:[]` at the same directory is.
+3. **BFS** its `references` in DECLARED array order (ordered visited set); the FIRST project that directly includes the carrier wins (stops the search). A `files:[]` solution never wins directly — it fans out to its references.
+4. **Climb** to the next ancestor solution (nearest literal config above) unless `compilerOptions.disableSolutionSearching` (default false).
+5. **Fallback** = the lexicographically-least `tsconfig_path` among the claimants (tsgo `firstConfiguredProject`) — a name-least ordering DISTINCT from the reference BFS order, drawn from configured claimants only, never an inferred/fallback project.
+
+The winner flows through the SAME `binding_for` → `BoundProject` witness as the unique-owner arm. Only ordered structures decide (no `HashSet` iteration); reference cycles resolve via the visited set. The `external_ts::resolver` REWRITES only its `Ambiguous(ids)` arm to call this selection (the carrier-path-conflict pass stays first and unconditional). This is provider-neutral — the ONE decision tsserver, managed-tsgo, and shared-tsgo all consume.
+
+**Bounded divergence:** `ConfiguredMembership` is include/`files` only and has NO `IsSourceFromProjectReference` data, so every carrier hit is treated as DIRECT (`multipleDirectInclusions` effectively always true). The solution-graph pruning in `configured_owner_resolution_for_file` (leaf-over-referencing-ancestor) is preserved on the `Unique` arm and not unified with the BFS.
+
+**Remaining terminal no-serve states:** ONLY `NoProject` (no configured project's include/`files` covers the extension) and the disk-layout carrier-path conflicts (`carrier_never_shadows_real_user_file` / `same_stem_svelte_component_rune_fails_closed`). `NotReady` is the transient bootstrap retry. Terminal `NoProject` / carrier-path conflicts emit a `verter(project)` warning on `did_open` AND `did_change` — `project_ownership_diagnostics_for` (`external_ts/carrier_sync.rs`) is wired into the debounced coordinator's `compute_merged_diagnostics` (`sync_coordinator.rs`), not only the request-only `compute_full_diagnostics`.
+
+**Rename fail-closed for a resolved multi-claimant carrier:** hover / definition / completion / references / diagnostics serve from the single resolved owner, but a provider rename covers only that one project. A symbol that escapes the owner (exported + imported by a sibling configured project) would rename partially; escape detection needs the cross-project fan-out (future block). `handle_rename` / `handle_prepare_rename` therefore FAIL CLOSED (a clear `verter:` error, no `WorkspaceEdit`) via `carrier_is_multi_claimant` (`server/provider_state.rs`) for a resolved multi-claimant carrier — never a silent partial cross-project rename. A uniquely-owned carrier renames normally.
+
 ### Editor-Liveness Provider-Sync Invariant (CRITICAL)
 
 Open-document provider-sync state is an editor-liveness invariant. An OPEN `.vue` document must keep a usable IDE TSX (`{src}.vue.tsx` / `.jsx`) live in the type provider so hover / completion / diagnostics keep working — regardless of ownership. Every `.vue` IDE/API provider sync, in every context (snapshot drain, aliased-import resync, barrel Vue-dependency pass, foreground `ensure_current_file_synced`, debounced `SyncCoordinator`, background API twin, workspace scanner), obeys the same discipline:

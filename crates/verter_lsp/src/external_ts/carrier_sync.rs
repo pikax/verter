@@ -358,6 +358,39 @@ pub(crate) fn project_ownership_diagnostic(
     })
 }
 
+/// The `verter(project)` ownership diagnostics for a carrier `canonical_id`,
+/// resolved from the ONE shared carrier-ownership authority. Empty for a
+/// non-carrier document, and — via `ObservePublishedReadiness` — for a `Bound`
+/// (now including a resolved multi-claimant carrier) or `NotReady` carrier: only
+/// a genuine terminal `NoProject` or a disk-layout carrier-path conflict
+/// surfaces a warning.
+///
+/// Shared by BOTH the full-diagnostics path
+/// ([`crate::server::Server::compute_full_diagnostics`]) and the debounced
+/// coordinator publish path ([`crate::sync_coordinator`]), so an unresolved
+/// carrier is explained on `did_open` / `did_change`, not only on a
+/// full-diagnostics request. Driven from the typed [`CarrierOwnershipResolution`]
+/// — never a path-shape heuristic.
+pub(crate) fn project_ownership_diagnostics_for(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
+    if !verter_workspace::resolver::path_is_carrier(canonical_id) {
+        return Vec::new();
+    }
+    let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
+        host,
+        canonical_id,
+        std::sync::Arc::from(""),
+        crate::tsgo::project_binding::OwnershipReadinessMode::ObservePublishedReadiness,
+    ) else {
+        return Vec::new();
+    };
+    project_ownership_diagnostic(&resolution)
+        .into_iter()
+        .collect()
+}
+
 /// Resolve the carrier's ownership EXACTLY ONCE for a sync pass — the single captured
 /// [`CarrierOwnershipResolution`] both the branch decision and (tsserver) the
 /// membership commit consume. tsserver resolves over the coordinator's negotiated
