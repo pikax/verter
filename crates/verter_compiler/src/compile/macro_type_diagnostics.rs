@@ -293,32 +293,45 @@ pub(super) fn collect_invalid_options_scope_diagnostics(
     // defineOptions, withDefaults) and assigned declarators (defineModel is
     // `const m = defineModel(...)`; withDefaults wraps defineProps into a
     // const).
+    //
+    // Official peels wrappers around the CALL before `isCallOf` dispatch:
+    // `unwrapTSNode(node.expression)` for a bare `ExpressionStatement` and
+    // `unwrapTSNode(decl.init)` for a declarator init (see `compileScript`). Babel
+    // additionally folds parentheses into a flag with no wrapper node, whereas OXC
+    // materialises an explicit `ParenthesizedExpression`, so `unwrap_ts_node`
+    // strips parens plus the 5 TS wrapper nodes. Without the peel a wrapped
+    // `(defineProps({ … }))` / `defineProps({ … }) as T` is not recognised as a
+    // macro call and the entire scope walk is skipped.
     for stmt in &setup.program().body {
         match stmt {
             Statement::ExpressionStatement(es) => {
-                if let Expression::CallExpression(call) = &es.expression {
+                if let Expression::CallExpression(call) = unwrap_ts_node(&es.expression) {
                     check_macro_call(call, &binding_types, content_str, &mut diagnostics);
                 }
             }
             Statement::VariableDeclaration(decl) => {
                 for declarator in &decl.declarations {
-                    if let Some(Expression::CallExpression(call)) = &declarator.init {
-                        check_macro_call(call, &binding_types, content_str, &mut diagnostics);
-                        // A `defineProps` / `withDefaults` destructure declaration
-                        // (`const { x = <default> } = defineProps(...)`) hoists its
-                        // default expressions with the props runtime decl, so a
-                        // default referencing a setup-local is rejected under
-                        // `defineProps()` — official
-                        // `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`.
-                        if let Expression::Identifier(callee) = &call.callee {
-                            if matches!(callee.name.as_str(), "defineProps" | "withDefaults") {
-                                check_destructure_pattern_defaults(
-                                    &declarator.id,
-                                    &binding_types,
-                                    content_str,
-                                    &mut diagnostics,
-                                );
-                            }
+                    let Some(init) = declarator.init.as_ref().map(|e| unwrap_ts_node(e)) else {
+                        continue;
+                    };
+                    let Expression::CallExpression(call) = init else {
+                        continue;
+                    };
+                    check_macro_call(call, &binding_types, content_str, &mut diagnostics);
+                    // A `defineProps` / `withDefaults` destructure declaration
+                    // (`const { x = <default> } = defineProps(...)`) hoists its
+                    // default expressions with the props runtime decl, so a
+                    // default referencing a setup-local is rejected under
+                    // `defineProps()` — official
+                    // `checkInvalidScopeReference(ctx.propsDestructureDecl, DEFINE_PROPS)`.
+                    if let Expression::Identifier(callee) = &call.callee {
+                        if matches!(callee.name.as_str(), "defineProps" | "withDefaults") {
+                            check_destructure_pattern_defaults(
+                                &declarator.id,
+                                &binding_types,
+                                content_str,
+                                &mut diagnostics,
+                            );
                         }
                     }
                 }

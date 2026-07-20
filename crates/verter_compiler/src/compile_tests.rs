@@ -17228,6 +17228,92 @@ fn define_props_destructure_default_function_scope_local_stays_valid() {
 }
 
 // =========================================================================
+// Wrapped macro CALL SITES — peel Parenthesized + TS wrappers before detection
+// =========================================================================
+//
+// Official runs `unwrapTSNode(node.expression)` / `unwrapTSNode(decl.init)`
+// BEFORE `isCallOf(...)` dispatches to processDefineProps / processDefineEmits /
+// processDefineModel / processDefineOptions / withDefaults. Babel folds
+// parentheses into a flag (no wrapper node), so a merely-parenthesized macro
+// call still matches; OXC materializes an explicit `ParenthesizedExpression`, so
+// Verter peels parens plus the 5 TS wrapper nodes (`as` / satisfies / non-null /
+// type-assertion / instantiation) to reach the same CallExpression. Without the
+// peel the whole scope walk is skipped and a setup-local reference goes uncaught.
+
+#[test]
+fn paren_wrapped_define_props_call_setup_local_default_is_error() {
+    // `(defineProps({...}))` — a parenthesized bare macro call. Official detects
+    // it (Babel drops the paren); Verter must peel the OXC paren node.
+    let result = compile_sfc(
+        "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\n;(defineProps({ x: { default: f } }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "a parenthesized defineProps call must still be scope-checked (official peels wrappers), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn ts_as_wrapped_define_props_call_setup_local_default_is_error() {
+    // `(defineProps({...}) as any)` — a TS `as`-wrapped bare macro call. Official
+    // `unwrapTSNode` peels TSAsExpression before `isCallOf`.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst f = ref(0)\n;(defineProps({ x: { default: f } }) as any)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineProps()` in <script setup> cannot reference locally declared variables"
+            )),
+        "a TS-as-wrapped defineProps call must still be scope-checked (official unwrapTSNode), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn ts_wrapped_define_model_init_setup_local_default_is_error() {
+    // `const m = (defineModel({...}) as any)` — a TS/paren-wrapped macro in a
+    // variable init. Official peels `decl.init` via unwrapTSNode before isCallOf,
+    // so the get/set-aware defineModel scope check still applies to the hoisted
+    // `default` option.
+    let result = compile_sfc(
+        "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst f = ref(0)\nconst m = (defineModel({ default: f }) as any)\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        result.errors.iter().any(|d| d.severity
+            == crate::compile::CompileDiagnosticSeverity::Error
+            && d.message.contains(
+                "`defineModel()` in <script setup> cannot reference locally declared variables"
+            )),
+        "a TS-wrapped defineModel init must still be scope-checked (official peels decl.init), got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn paren_wrapped_define_props_call_imported_default_stays_valid() {
+    // Discrimination: the peel must not over-reject — a wrapped call whose default
+    // is an import (module scope) stays valid.
+    let result = compile_sfc(
+        "<script setup>\nimport { dft } from './defs'\n;(defineProps({ x: { default: dft } }))\n</script>\n<template><div>x</div></template>",
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|d| d.severity == crate::compile::CompileDiagnosticSeverity::Error),
+        "a parenthesized defineProps call with an imported default must stay valid, got: {:?}",
+        result.errors
+    );
+}
+
+// =========================================================================
 // FIX4 — inline setup destructure order: expose, emit, attrs, slots
 // =========================================================================
 
