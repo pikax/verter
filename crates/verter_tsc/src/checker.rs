@@ -2630,7 +2630,8 @@ Set-Content -Path $emitted -Value 'export declare const ok: number;'
 # Also report an error from a different file
 Write-Output "src/other.ts(5,10): error TS2304: Cannot find name 'SomeMissingType'."
 exit 1
-"#,
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1),
             )
             .unwrap();
             fs::write(
