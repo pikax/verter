@@ -3612,3 +3612,46 @@ fn cancellation_files_are_reaped_once_they_can_no_longer_be_observed() {
         "the session's cancellation directory must not outlive the session"
     );
 }
+
+/// tsserver answers a CANCELLED request with `success: true` and a
+/// `{ canceled: true }` body — a success-shaped envelope carrying no result.
+/// Every feature parser reads the body as an array and falls back to empty, so
+/// letting that envelope through turns "the engine stopped early" into "there
+/// are no results here": a silently wrong answer instead of a visible failure.
+#[tokio::test]
+async fn a_tsserver_cancellation_envelope_is_an_error_not_an_empty_result() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = test_transport(stdin_tx);
+
+    let answerer = {
+        let pending = Arc::clone(&transport.pending);
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if let Some(tx) = pending.take(1) {
+                    let _ = tx.send(serde_json::json!({
+                        "type": "response",
+                        "request_seq": 1,
+                        "success": true,
+                        "body": { "canceled": true }
+                    }));
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            panic!("the request never registered its pending slot");
+        })
+    };
+
+    let result = transport.request("definition", serde_json::json!({})).await;
+    answerer.await.unwrap();
+
+    let err = result.expect_err(
+        "a cancellation envelope must not be handed to a feature parser, which \
+         would read its object body as an empty array",
+    );
+    assert!(
+        err.message.contains("cancel"),
+        "the failure must name the cancellation so it is attributable, got {}",
+        err.message
+    );
+}

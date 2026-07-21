@@ -465,6 +465,27 @@ impl TsserverTransport {
                             );
                             return Err(TypeProviderError::new(msg));
                         }
+                        // A cancelled request answers `success: true` with a
+                        // `{ canceled: true }` body — a success-shaped envelope
+                        // carrying no result. Every feature parser reads the body
+                        // as an array and falls back to empty, so passing it on
+                        // would turn "the engine stopped early" into "there are
+                        // no results here": a silently wrong answer in place of a
+                        // visible failure.
+                        if val
+                            .get("body")
+                            .and_then(|body| body.get("canceled"))
+                            .and_then(|flag| flag.as_bool())
+                            == Some(true)
+                        {
+                            crate::type_runtime_trace_event!(
+                                "tsserver_transport_request_error",
+                                format!("command={} seq={} message=canceled", command, seq),
+                            );
+                            return Err(TypeProviderError::new(format!(
+                                "request '{command}' was canceled at the engine"
+                            )));
+                        }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_result",
                             format!(
