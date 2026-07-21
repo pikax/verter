@@ -84,6 +84,7 @@ import { addShowRecentAuditRecordsCommand } from "./audit";
 import {
   buildRelayEditorEnv,
   isShimAdvertisement,
+  nativePreviewTsdkCandidates,
   planSharedTsgo,
   prepareEditorTsdk,
   typeProviderRoutesTsgo,
@@ -1353,16 +1354,22 @@ async function establishSharedTsgo(
   }
 
   try {
-    const nativePreviewTsdk =
-      workspace.getConfiguration("js/ts").get<string>("tsdk.path") ||
-      workspace.getConfiguration("typescript").get<string>("tsdk") ||
-      workspace.getConfiguration("typescript.native-preview").get<string>("tsdk") ||
-      join(nativePreview.extensionPath, "lib");
+    // EVERY tsdk source, in order — never collapsed to a first-non-empty value.
+    // A workspace `typescript.tsdk` pointing at a TS 5.x `node_modules/typescript/lib`
+    // must not mask the installed Native Preview bundle behind it.
+    const tsdkCandidates = nativePreviewTsdkCandidates({
+      jsTsTsdkPath: workspace.getConfiguration("js/ts").get<string>("tsdk.path"),
+      typescriptTsdk: workspace.getConfiguration("typescript").get<string>("tsdk"),
+      nativePreviewTsdk: workspace
+        .getConfiguration("typescript.native-preview")
+        .get<string>("tsdk"),
+      nativePreviewExtensionPath: nativePreview.extensionPath,
+    });
     const plan = planSharedTsgo({
       extensionPath,
       controlDirRoot: tmpdir(),
       env: process.env,
-      nativePreviewTsdk: nativePreviewTsdk || undefined,
+      tsdkCandidates,
       workspaceRoot,
     });
     if (!plan.engaged) {
@@ -1410,6 +1417,7 @@ async function establishSharedTsgo(
     }
     log?.info(
       `[shared-tsgo] armed: shim=${plan.shimPath} realTsgo=${plan.realTsgo} ` +
+        `realTsgoSource=${plan.realTsgoSource} ` +
         `controlDir=${plan.controlDir} (SHARED editor-attach attested against Native Preview's current Program)`,
     );
 
