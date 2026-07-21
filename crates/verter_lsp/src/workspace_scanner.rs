@@ -512,7 +512,6 @@ async fn scanner_loop(
                 sync,
                 &config.provider_surfaces,
                 &config.vfs_workspace,
-                config.is_tsgo,
                 &config.provider_sync_states,
             )
             .await;
@@ -524,7 +523,6 @@ async fn scanner_loop(
                 sync,
                 &config.provider_surfaces,
                 &config.vfs_workspace,
-                config.is_tsgo,
                 &config.provider_sync_states,
                 &mut node_modules_synced,
             )
@@ -580,7 +578,6 @@ pub(crate) async fn resync_non_carrier_file(
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
-    is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) {
     // Invalidate host cache so ensure_source_loaded_into_host re-reads from disk
@@ -598,7 +595,6 @@ pub(crate) async fn resync_non_carrier_file(
         sync,
         provider_surfaces,
         vfs_workspace,
-        is_tsgo,
         sync_states,
     )
     .await;
@@ -614,7 +610,6 @@ async fn sync_non_carrier_file_to_provider(
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
-    is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
 ) -> Vec<crate::project_resolver::ResolveResult> {
     let snapshot = {
@@ -691,10 +686,6 @@ async fn sync_non_carrier_file_to_provider(
     let next_state =
         crate::provider_sync::non_carrier_sync_state_for_source(&snapshot.resolver, canonical_id);
     if let Some(next) = next_state {
-        if is_tsgo {
-            crate::server::configure_provider_paths_for_source(sync, &snapshot, canonical_id, true)
-                .await;
-        }
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
         close_stale_paths(
             sync,
@@ -764,7 +755,6 @@ async fn follow_node_modules_deps(
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
-    is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
     node_modules_synced: &mut HashSet<String>,
 ) {
@@ -801,7 +791,6 @@ async fn follow_node_modules_deps(
             sync,
             provider_surfaces,
             vfs_workspace,
-            is_tsgo,
             sync_states,
         )
         .await;
@@ -927,15 +916,6 @@ async fn sync_file_to_provider(
                 );
                 return;
             };
-            if is_tsgo {
-                crate::server::configure_provider_paths_for_source(
-                    sync,
-                    &snapshot,
-                    canonical_id,
-                    true,
-                )
-                .await;
-            }
             // Close-AFTER-successful-sync (per-kind, skip-active): capture prior state
             // + stale paths, open each kind directly, then commit (receipt-gated) and
             // close only genuinely-stale paths. A failed replacement sync must never
@@ -1651,144 +1631,6 @@ defineProps<{ msg: string }>()
                 MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.verter.ts"
             )),
             "TSGO scanner sync should keep syncing the public API artifact (.vue.verter.ts) too, calls={calls:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn scanner_configures_tsgo_paths_before_opening_vue_artifacts() {
-        let tmp = TempDir::new().expect("temp project should exist");
-        let root = tmp.path();
-        fs::create_dir_all(root.join("src")).expect("src dir should exist");
-        fs::write(
-            root.join("tsconfig.json"),
-            r#"{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
-  }
-}"#,
-        )
-        .expect("tsconfig should be written");
-
-        let canonical_id = root.join("src").join("App.vue");
-        let canonical_id = canonical_id.to_string_lossy().replace('\\', "/");
-        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: Some(canonical_id.clone()),
-            input_id: canonical_id.clone(),
-            source: Arc::<str>::from(
-                r#"<script setup lang="ts">
-import Child from '@/Child.vue'
-</script>
-<template><div /></template>"#,
-            ),
-            file_language: FileLanguage::vue(),
-            aliases: Vec::new(),
-        });
-        let profile = CompileProfile {
-            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
-            ..CompileProfile::default()
-        };
-        assert!(host.ensure_compiled(&canonical_id, &profile).is_ok());
-
-        let tsconfig_path = root
-            .join("tsconfig.json")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let root_path = root.to_string_lossy().replace('\\', "/");
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
-                root_path.clone(),
-                root_path.clone(),
-                Some(tsconfig_path.clone()),
-            ),
-        ]);
-        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
-            resolver,
-            &[(&root_path, &root_path, Some(&tsconfig_path))],
-        );
-        let sync_states = DashMap::new();
-        let provider = Arc::new(MockTypeProvider::new());
-        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
-        assert!(
-            snapshot
-                .read()
-                .as_ref()
-                .and_then(|ws| ws.load_published())
-                .and_then(|published| {
-                    published
-                        .snapshot
-                        .resolver
-                        .nearest_config_for_path(&canonical_id)
-                        .cloned()
-                })
-                .is_some(),
-            "resolver should match the Vue file to the temp tsconfig owner"
-        );
-        let ws = verter_workspace::FilesystemWorkspace::new(
-            verter_workspace::FilesystemOptions::default(),
-        );
-        let (expected_base_url, expected_paths) = verter_workspace::config::raw_paths_json(
-            &ws,
-            &root.join("tsconfig.json").to_string_lossy(),
-        )
-        .expect("raw_paths_json should read the temp tsconfig");
-
-        sync_file_to_provider(
-            &canonical_id,
-            &host,
-            &profile,
-            Some(&sync),
-            &crate::provider_surface_store::ProviderSurfaceStore::new(),
-            &snapshot,
-            true,
-            &sync_states,
-            None,
-            &crate::external_ts::CarrierTransactionCoordinator::new(),
-            None,
-        )
-        .await;
-
-        let calls = provider.calls();
-        let configure_index = calls
-            .iter()
-            .position(|call| matches!(call, MockCall::ConfigurePaths { .. }))
-            .expect("TSGO scanner sync should configure owner paths from tsconfig");
-        // The configured payload carries the tsconfig's own `paths` rows
-        // (base_url + every expected row PRESENT), PLUS the always-injected
-        // Svelte IDE-projection shim rows (`@verter/svelte-jsx/*`) — assert the
-        // expected tsconfig rows survive injection (subset), not byte-equality.
-        match &calls[configure_index] {
-            MockCall::ConfigurePaths { base_url, paths } => {
-                assert_eq!(base_url, &expected_base_url, "base_url, calls={calls:?}");
-                let expected_obj = expected_paths
-                    .as_object()
-                    .expect("expected paths is an object");
-                let actual_obj = paths.as_object().expect("actual paths is an object");
-                for (k, v) in expected_obj {
-                    assert_eq!(
-                        actual_obj.get(k),
-                        Some(v),
-                        "tsconfig path row `{k}` must survive svelte injection, calls={calls:?}"
-                    );
-                }
-                // The svelte-jsx shim rows are always injected.
-                assert!(
-                    actual_obj.contains_key("@verter/svelte-jsx/jsx-runtime"),
-                    "svelte-jsx shim row injected, calls={calls:?}"
-                );
-            }
-            other => panic!("expected ConfigurePaths, got {other:?}"),
-        }
-        let first_open_index = calls
-            .iter()
-            .position(|call| matches!(call, MockCall::OpenFile { .. }))
-            .expect("TSGO scanner sync should open provider files");
-        assert!(
-            configure_index < first_open_index,
-            "path config must be sent before any provider file opens, calls={calls:?}"
         );
     }
 

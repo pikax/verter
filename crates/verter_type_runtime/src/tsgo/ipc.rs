@@ -2409,24 +2409,6 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
-/// Build the `workspace/didChangeConfiguration` payload for TSGO path aliases.
-///
-/// TSGO 7.0 rejects `baseUrl` (TS5102), so we only send `paths`. TSGO resolves
-/// `paths` relative to the tsconfig location, making `baseUrl` unnecessary.
-fn build_paths_config_payload(paths: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "settings": {
-            "typescript": {
-                "tsserver": {
-                    "compilerOptions": {
-                        "paths": paths,
-                    }
-                }
-            }
-        }
-    })
-}
-
 impl TypeProvider for TsgoTypeProvider {
     fn provider_id(&self) -> &'static str {
         "tsgo"
@@ -3572,18 +3554,6 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
-    fn configure_paths(&self, _base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
-        let transport = Arc::clone(&self.transport);
-        Box::pin(async move {
-            transport
-                .notify(
-                    "workspace/didChangeConfiguration",
-                    build_paths_config_payload(paths),
-                )
-                .await
-        })
-    }
-
     fn update_workspace_folders(
         &self,
         added: Vec<serde_json::Value>,
@@ -3674,23 +3644,6 @@ impl TypeProvider for TsgoTypeProvider {
                     Ok(cache.get(&normalized).cloned().unwrap_or_default())
                 }
             }
-        })
-    }
-
-    fn configure_paths_background(
-        &self,
-        _base_url: &str,
-        paths: serde_json::Value,
-    ) -> ProviderFuture<'_, ()> {
-        let transport = Arc::clone(&self.transport);
-        Box::pin(async move {
-            transport
-                .notify_with_priority(
-                    "workspace/didChangeConfiguration",
-                    build_paths_config_payload(paths),
-                    ProviderPriority::Background,
-                )
-                .await
         })
     }
 

@@ -796,27 +796,6 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
     );
 }
 
-#[test]
-fn test_build_paths_config_payload_includes_paths_only() {
-    let payload = build_paths_config_payload(serde_json::json!({
-        "@/*": ["src/*"],
-        "@pkg/*": ["packages/*"],
-    }));
-
-    // baseUrl must NOT be present — TSGO 7.0 rejects it with TS5102
-    assert!(
-        payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["baseUrl"].is_null(),
-        "baseUrl must not be in the payload"
-    );
-    assert_eq!(
-        payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["paths"],
-        serde_json::json!({
-            "@/*": ["src/*"],
-            "@pkg/*": ["packages/*"],
-        })
-    );
-}
-
 async fn tsgo_bin_or_skip() -> Option<String> {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
@@ -4593,4 +4572,40 @@ async fn content_cached_by_load_file_never_counts_as_delivered_to_the_child() {
     assert_eq!(frames.len(), 1, "a never-opened document owes a didOpen");
     assert_eq!(frames[0].0, "textDocument/didOpen");
     assert_eq!(frames[0].1["textDocument"]["text"], source);
+}
+
+/// tsgo must send NO `workspace/didChangeConfiguration`.
+///
+/// Native tsgo treats that payload as user preferences: it cannot add compiler
+/// options to a configured project through it, and it advertises no such
+/// capability. Verter already works around that by adapting the provider buffer to
+/// owner-bound classic JSX namespaces (`ProjectSync::prepare_tsx_content`), so the
+/// notification bought nothing — while the LSP emitted one PER SYNCED FILE,
+/// 427-490 per session, each one a frame the engine parses and discards.
+#[tokio::test]
+async fn tsgo_sends_no_workspace_configuration_notification() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let paths = serde_json::json!({ "@/*": ["src/*"] });
+
+    provider.configure_paths("/w", paths.clone()).await.unwrap();
+    provider
+        .configure_paths_background("/w", paths)
+        .await
+        .unwrap();
+
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "tsgo cannot consume workspace/didChangeConfiguration; emitting it is pure \
+         per-file transport spam"
+    );
+
+    // Positive control: the transport IS observable, so the emptiness above is a
+    // real absence rather than a test that watches nothing.
+    provider
+        .open_file("/w/a.tsx", "const x = 1;\n")
+        .await
+        .unwrap();
+    let frames = drained_notifications(&mut stdin_rx);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, "textDocument/didOpen");
 }

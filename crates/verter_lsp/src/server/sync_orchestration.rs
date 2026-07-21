@@ -24,7 +24,6 @@ use crate::type_provider::auto_import::{
 };
 use crate::type_provider::merge;
 
-use super::background_drain::configure_provider_paths_for_source;
 use super::background_init::{background_init, BackgroundInitArgs};
 use super::handler_guard::block_in_place_if_available;
 use super::server_utils::*;
@@ -369,11 +368,6 @@ impl VerterLanguageServer {
             None => return,
         };
         self.documents.host().ensure_loaded(&canonical_id);
-        if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-            if let Some(snapshot) = self.published_resolver() {
-                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false).await;
-            }
-        }
         let ide = self.documents.get_ide(uri);
         let is_jsx = ide
             .as_ref()
@@ -645,9 +639,6 @@ impl VerterLanguageServer {
         };
 
         if let Some(sync) = &self.project_sync {
-            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                configure_provider_paths_for_source(sync, snapshot, canonical_id, false).await;
-            }
             if let Some(transition) =
                 self.prepare_non_carrier_provider_sync_transition(canonical_id)
             {
@@ -793,13 +784,6 @@ impl VerterLanguageServer {
                 continue;
             };
 
-            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                let snapshot = PublishedResolverSnapshot {
-                    resolver: resolver.clone(),
-                    ownership_ready: true,
-                };
-                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, true).await;
-            }
             if let Some(transition) =
                 self.prepare_non_carrier_provider_sync_transition(&canonical_id)
             {
@@ -881,7 +865,6 @@ impl VerterLanguageServer {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         };
-        let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let is_jsx = self.documents.is_jsx(&uri);
         // The background task routes through the SINGLE carrier-sync gateway (tsgo
         // direct-open) for its transition + receipt, then applies the per-kind
@@ -904,7 +887,6 @@ impl VerterLanguageServer {
                 provider_surfaces,
                 canonical_id,
                 is_jsx,
-                is_tsgo,
                 carrier_coordinator,
                 pending_snapshot_provider_sync,
             ),
@@ -1153,9 +1135,6 @@ impl VerterLanguageServer {
                     // Non-carrier file: IDE sync not applicable.
                     return;
                 };
-                if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                    configure_provider_paths_for_source(sync, snap, &canonical_id, false).await;
-                }
                 (ide_path, true)
             }
             None => {
@@ -1757,8 +1736,6 @@ impl VerterLanguageServer {
             ) else {
                 continue;
             };
-
-            configure_provider_paths_for_source(sync, &snapshot, barrel_id, false).await;
 
             if let Some(transition) = self.prepare_non_carrier_provider_sync_transition(barrel_id) {
                 self.close_provider_paths(&transition.stale_paths).await;
@@ -2737,15 +2714,9 @@ impl VerterLanguageServer {
         let Some(sync) = &self.project_sync else {
             return;
         };
-        let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
-        if is_tsgo {
-            if let Some(snapshot) = self.published_resolver() {
-                configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;
-            }
-        }
         // Route the owner-resolved sync through the SINGLE carrier-sync gateway: the
         // membership decision is FUSED with the provider-state transition + the
         // sealed receipt that gates the commit. tsserver advertised ⇒ `Published`

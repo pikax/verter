@@ -13678,7 +13678,6 @@ defineProps<{ msg: string }>()
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
-        false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         std::sync::Arc::new(dashmap::DashSet::new()),
     )
@@ -13797,7 +13796,6 @@ defineProps<{ msg: string }>()
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
-        false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         Arc::clone(&requeue),
     )
@@ -13909,7 +13907,6 @@ defineProps<{ msg: string }>()
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
-        false,
         false,
         std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
         std::sync::Arc::new(dashmap::DashSet::new()),
@@ -16492,7 +16489,6 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         &snapshot,
         &provider_sync_states,
         &app_id,
-        false,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
@@ -16594,7 +16590,6 @@ defineProps<{ msg: string }>()
         &snapshot,
         &provider_sync_states,
         &app_id,
-        true,
         Some(&carrier_publish),
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )

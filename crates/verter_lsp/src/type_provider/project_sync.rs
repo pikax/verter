@@ -348,14 +348,6 @@ impl ProjectSync {
         self.mode
     }
 
-    pub async fn configure_paths(
-        &self,
-        base_url: &str,
-        paths: serde_json::Value,
-    ) -> Result<(), TypeProviderError> {
-        self.provider.configure_paths(base_url, paths).await
-    }
-
     // ── Background-priority variants ─────────────────────────────────
 
     pub async fn load_tsx_background(
@@ -482,16 +474,6 @@ impl ProjectSync {
 
     pub async fn close_file_background(&self, path: &str) -> Result<(), TypeProviderError> {
         self.provider.close_file_background(path).await
-    }
-
-    pub async fn configure_paths_background(
-        &self,
-        base_url: &str,
-        paths: serde_json::Value,
-    ) -> Result<(), TypeProviderError> {
-        self.provider
-            .configure_paths_background(base_url, paths)
-            .await
     }
 
     // ── Normal-priority variants ─────────────────────────────────────

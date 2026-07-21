@@ -25,7 +25,7 @@
 //! Split out of `background_drain` (a sibling `#[path]` child module of `server`);
 //! both share `use super::*;` so the same `super::` / `crate::` paths resolve, and
 //! the closure reuses `background_drain`'s carrier helpers
-//! (`configure_provider_paths_for_source`, `commit_sync_transition`, etc.).
+//! (`commit_sync_transition`, etc.).
 //!
 //! ## Lifecycle serialization & lock discipline
 //!
@@ -874,10 +874,6 @@ impl DeclOverlayOwner {
             return None;
         }
         let decl_path = host.declaration_carrier_path(dep_canonical_id)?; // adapter projects no decl
-
-        // tsgo resolves the declaration through path config; mirror the API/IDE
-        // carrier path configuration so the overlay is resolvable in the owner project.
-        configure_provider_paths_for_source(sync, snapshot, dep_canonical_id, true).await;
 
         let profile = documents.tsx_profile.read().clone();
         let api = match block_in_place_if_available(|| {

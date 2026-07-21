@@ -157,7 +157,6 @@ mod background_init;
 // Glob re-export so `server_tests.rs` (a child of `server`) sees
 // `drain_pending_snapshot_provider_sync`, `sync_pending_carrier_provider_file`,
 // `is_generated_verter_types_event`, etc. via its `use super::*;`.
-pub(crate) use self::background_drain::configure_provider_paths_for_source;
 // The declaration-overlay lifecycle owner is reached by the drain
 // (`background_drain`), the server struct, and the `did_close` lifecycle —
 // glob-export it at module scope so all three resolve the bare name.
