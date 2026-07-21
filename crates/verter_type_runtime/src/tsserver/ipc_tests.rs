@@ -3257,21 +3257,13 @@ async fn a_tsserver_hop_fires_inside_the_ambient_request_deadline() {
     );
 }
 
-/// Because the fixed inner bound never wins the race against a 1.5-6s request
-/// deadline, the failure accounting behind it never executes: a wedged tsserver
-/// is never detected and never restarted. Deriving the hop from the deadline is
-/// what re-arms hang detection.
+/// A hop bounded by the caller's deadline gives up promptly instead of parking
+/// on the transport's own fixed bound — so the cleanup behind it (releasing the
+/// slot, cancelling the engine's work) actually runs.
 #[tokio::test]
-async fn deadline_bounded_tsserver_timeouts_reach_hang_detection() {
+async fn deadline_bounded_tsserver_hops_all_give_up_promptly() {
     let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
-    let notify = Arc::new(Notify::new());
-    let transport = test_transport_with_notify(stdin_tx, Arc::clone(&notify));
-
-    let waiter = {
-        let notify = Arc::clone(&notify);
-        tokio::spawn(async move { notify.notified().await })
-    };
-    tokio::task::yield_now().await;
+    let transport = test_transport(stdin_tx);
 
     let ran = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         for _ in 0..HANG_THRESHOLD {
@@ -3287,15 +3279,75 @@ async fn deadline_bounded_tsserver_timeouts_reach_hang_detection() {
         "three hops under a 300ms ambient deadline must all complete well inside 3s; \
          a fixed 10s inner bound parks each one instead"
     );
+    assert_eq!(
+        pending_len(&transport),
+        0,
+        "each abandoned hop must have released its pending slot"
+    );
+}
+
+/// A hop the CALLER's deadline cut short is not evidence that the engine is
+/// wedged, and must not be charged toward hang detection.
+///
+/// A cold project legitimately takes longer than a 1.5s hover budget. Charging
+/// those hops restarts a healthy engine mid-program-build, which throws away the
+/// program it was building and makes the next requests cold too — three of those
+/// and it restarts again. The engine never gets far enough to answer anything,
+/// and the requests come back fast and EMPTY instead of slow and correct.
+#[tokio::test]
+async fn a_deadline_shortened_tsserver_hop_is_not_charged_to_hang_detection() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    let notify = Arc::new(Notify::new());
+    let transport = test_transport_with_notify(stdin_tx, Arc::clone(&notify));
+
+    for _ in 0..(HANG_THRESHOLD + 2) {
+        let _ = crate::deadline::with_deadline(std::time::Duration::from_millis(250), async {
+            transport.request("quickinfo", serde_json::json!({})).await
+        })
+        .await;
+    }
+
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        0,
+        "a hop the caller's own deadline cut short says nothing about engine health"
+    );
+}
+
+/// A hop that ran to its FULL configured bound and still went unanswered IS
+/// evidence of a wedged engine, and must still restart it. This is the bound
+/// long enough to mean something — batch and background work, which carries no
+/// ambient deadline.
+#[tokio::test]
+async fn a_full_bound_tsserver_timeout_is_still_charged_to_hang_detection() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    let notify = Arc::new(Notify::new());
+    let transport = test_transport_with_notify(stdin_tx, Arc::clone(&notify));
+
+    let waiter = {
+        let notify = Arc::clone(&notify);
+        tokio::spawn(async move { notify.notified().await })
+    };
+    tokio::task::yield_now().await;
+
+    for _ in 0..HANG_THRESHOLD {
+        let _ = transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({}),
+                std::time::Duration::from_millis(120),
+            )
+            .await;
+    }
 
     assert_eq!(
         transport.consecutive_failures.load(Ordering::Relaxed),
         HANG_THRESHOLD,
-        "every deadline-bounded timeout must be charged toward hang detection"
+        "an unanswered hop that used its whole configured bound must be charged"
     );
     tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
         .await
-        .expect("HANG_THRESHOLD consecutive timeouts must fire the restart notification")
+        .expect("HANG_THRESHOLD consecutive full-bound timeouts must fire the restart")
         .unwrap();
 }
 

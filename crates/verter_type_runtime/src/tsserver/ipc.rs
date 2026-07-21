@@ -317,9 +317,13 @@ impl TsserverTransport {
     /// Charge one round-trip failure toward hang detection, firing the restart
     /// notification once [`HANG_THRESHOLD`] consecutive failures accumulate.
     ///
-    /// A wedged-but-alive tsserver (accepts requests, never answers) is only
-    /// distinguishable from a slow one by consecutive failures, so every bounded
-    /// hop that gives up has to pass through here.
+    /// Only a hop that ran to its FULL configured bound reaches here. A hop the
+    /// caller's own deadline cut short is not evidence of anything: a cold
+    /// project legitimately takes longer than a 1.5s hover budget, and charging
+    /// those restarts a healthy engine mid-program-build. The restart throws away
+    /// the program, which makes the next requests cold too, which charges three
+    /// more — a loop in which the engine never gets far enough to answer, and
+    /// requests come back fast and EMPTY instead of slow and correct.
     fn note_hang_failure(&self) {
         let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
         if count >= HANG_THRESHOLD {
@@ -352,8 +356,8 @@ impl TsserverTransport {
     /// thread, so a hop that outlives the request that asked for it is pure
     /// queue contention — and, worse, a hop bound that never wins the race
     /// against the caller's 1.5-6s deadline means the failure branch below never
-    /// executes: the pending entry is never released, the failure is never
-    /// charged toward hang detection, and a wedged engine is never restarted.
+    /// executes: the pending entry is never released and the engine is never told
+    /// to stop. Hang detection is the exception — see [`Self::note_hang_failure`].
     async fn request_with_timeout(
         &self,
         command: &str,
@@ -397,6 +401,10 @@ impl TsserverTransport {
                 // full lane parks the request BEFORE the response bound even
                 // starts, and without charging anything toward hang detection.
                 let hop = crate::deadline::hop_budget(configured);
+                // Whether the engine actually got the bound it was promised. A
+                // shortened hop expiring is the CALLER running out of patience,
+                // not the engine failing to answer.
+                let full_bound = hop >= configured;
                 let deadline = tokio::time::Instant::now() + hop;
 
                 // tsserver uses newline-delimited JSON (no Content-Length framing)
@@ -419,7 +427,9 @@ impl TsserverTransport {
                     Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
                         registration.disarm();
                         self.pending.take(seq);
-                        self.note_hang_failure();
+                        if full_bound {
+                            self.note_hang_failure();
+                        }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
                             format!(
@@ -493,7 +503,9 @@ impl TsserverTransport {
                         // registration ARMED: dropping it is what releases the
                         // pending entry and cancels the engine's work, on this
                         // path and on the caller-dropped path alike.
-                        self.note_hang_failure();
+                        if full_bound {
+                            self.note_hang_failure();
+                        }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
                             format!("command={} seq={} message=timeout", command, seq),
