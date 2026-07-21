@@ -1476,6 +1476,23 @@ impl TypeProvider for TsserverTypeProvider {
                     }),
                 )
                 .await?;
+            // `configurePlugin` deliberately schedules graph mutation with
+            // `setImmediate` so it cannot corrupt a project being updated
+            // re-entrantly. Complete one response round-trip after the two
+            // fire-and-forget notifications: the next provider query is then
+            // written on a later host turn, after the plugin's scheduled refresh
+            // had an opportunity to reload the changed ScriptInfo/project roots.
+            // `projectInfo` can legitimately report that a just-published member
+            // is still cold; its response is the ordering fence, not its body.
+            let _ = transport
+                .request(
+                    "projectInfo",
+                    serde_json::json!({
+                        "file": file,
+                        "needFileNameList": false,
+                    }),
+                )
+                .await;
             Ok(())
         })
     }
