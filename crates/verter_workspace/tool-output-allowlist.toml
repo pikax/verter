@@ -87,3 +87,19 @@ rationale = "TS7 oracle harness §4 GENERATION SPIKE (#[cfg(all(test, feature = 
 [[entries]]
 path = "crates/verter_compiler/src/svelte_oracle.rs"
 rationale = "Svelte conformance-oracle comparison engine (#[cfg(feature = \"svelte-oracle\")], excluded from the default gate). load_golden / load_all_goldens read the committed golden JSON TEST FIXTURES off disk for the conformance consumers to diff a normalized candidate against — in-repo test corpus, no VerterHost/WorkspaceAccess context, never workspace/semantic state. Same category as the TS7 oracle harness fixture readers."
+
+[[entries]]
+path = "crates/verter_lsp/src/real_provider_tests/global_components.rs"
+rationale = "real-provider global-component integration tests (`#[cfg(test)] mod real_provider_tests`) — writes the `@verter/types` declaration package under the fixture's gitignored `node_modules`, mirroring the production background-init step the harness does not run; test-fixture materialization, never workspace/semantic state"
+
+[[entries]]
+path = "crates/verter_lsp/src/type_provider/project_sync.rs"
+rationale = "managed-tsgo project-sync tests (`#[cfg(test)] mod tests`) — stage a `node_modules/svelte` package (package.json + `.d.ts`) and carrier path in a tempdir to assert the exact carrier delivered to the provider; test-fixture materialization, never workspace/semantic state"
+
+[[entries]]
+path = "crates/verter_lsp/src/vue_assets.rs"
+rationale = "managed-tsgo Vue JSX authority — reads the installed `node_modules/vue` manifest + `jsx-runtime` declarations and materializes an owner-bound classic-JSX adapter on the REAL OS filesystem for the external tsgo subprocess to resolve (a subprocess reads real files, not the in-memory VFS); real-FS tool-cache, never the user workspace"
+
+[[entries]]
+path = "crates/verter_tsgo_api/src/fake_engine.rs"
+rationale = "fake `--api` engine test double — writes a process-id rendezvous file and manages the local IPC pipe/socket file lifecycle so the harness can drive the API protocol off real IPC; real-FS IPC by nature (sibling of `control/advertisement.rs`), never workspace/semantic state"
