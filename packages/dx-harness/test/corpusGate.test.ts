@@ -434,6 +434,56 @@ describe("acceptance bar", () => {
     expect(evaluateRoute(report, testConfig().thresholds)).toEqual([]);
   });
 
+  // Regression: a real corpus-A tsserver run reported `pass: true` with 0 of 15
+  // requests answered and 15 errored. The accounting identity held exactly
+  // (15 === 0 + 0 + 15 + 0), there were no empties because an empty requires an
+  // answer, and no latency samples existed to breach a p95 bar — so nothing in the
+  // bar objected. A gate that certifies a total failure cannot certify anything.
+  it("fails a route that answered nothing, however tidy its accounting", () => {
+    const report = healthyReport("tsserver", sample, {
+      accounting: {
+        requestsSent: 15,
+        requestsAnswered: 0,
+        requestsEmpty: 0,
+        requestsTimedOut: 0,
+        requestsErrored: 15,
+        requestsAbandoned: 0,
+        filesOpened: 1,
+        filesSkipped: 0,
+        probesMined: 15,
+      },
+      kinds: {
+        hover: kindSummary({ count: 0, p95Ms: 0 }),
+        definition: kindSummary({ count: 0, p95Ms: 0 }),
+        completion: kindSummary({ count: 0, p95Ms: 0 }),
+        references: kindSummary({ count: 0, p95Ms: 0 }),
+      },
+    });
+    const failures = evaluateRoute(report, testConfig().thresholds);
+    expect(failures.some((failure) => failure.includes("zero requests were answered"))).toBe(true);
+    expect(failures.some((failure) => failure.includes("errored"))).toBe(true);
+  });
+
+  it("fails a route with errored requests even when most were answered", () => {
+    const report = healthyReport("tsgo", sample, {
+      accounting: {
+        requestsSent: 16,
+        requestsAnswered: 12,
+        requestsEmpty: 0,
+        requestsTimedOut: 0,
+        requestsErrored: 4,
+        requestsAbandoned: 0,
+        filesOpened: 1,
+        filesSkipped: 0,
+        probesMined: 16,
+      },
+    });
+    const failures = evaluateRoute(report, testConfig().thresholds);
+    expect(failures.some((failure) => failure.includes("errored"))).toBe(true);
+    // Control: it must NOT also claim the run answered nothing.
+    expect(failures.some((failure) => failure.includes("zero requests were answered"))).toBe(false);
+  });
+
   it("fails a wedged route and does not double-report vacuous kinds", () => {
     const report = healthyReport("tsgo", sample, {
       wedged: true,
