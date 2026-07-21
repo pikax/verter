@@ -174,3 +174,183 @@ async fn tsserver_route_reclassifies_ts7_family_install_before_any_spawn() {
         ),
     }
 }
+
+// ── W5/FIX-4 + FIX-3: the managed fallback is CAPABILITY-driven, and it
+//    never claims a provider it cannot obtain. `choose_managed_engine` is
+//    the pure decision the IO probe feeds; every arm below is a state a
+//    real workspace reaches. ──────────────────────────────────────────────
+
+fn facts(
+    has_configured_project: bool,
+    tsgo_candidate: Option<&str>,
+    tsserver: Option<&str>,
+    node: Option<&str>,
+) -> ManagedEngineFacts {
+    ManagedEngineFacts {
+        workspace_root: "C:/workspace".to_string(),
+        has_configured_project,
+        tsgo_candidate: tsgo_candidate.map(str::to_string),
+        tsgo_notes: Vec::new(),
+        tsserver: tsserver.map(str::to_string),
+        node: node.map(str::to_string),
+    }
+}
+
+// ── DISCRIMINATING: tsgo is PREFERRED whenever the project can supply one. ──
+#[test]
+fn managed_fallback_prefers_tsgo_when_a_candidate_exists() {
+    let choice = choose_managed_engine(&facts(
+        true,
+        Some("C:/ws/node_modules/@typescript/typescript-win32-x64/lib/tsc.exe"),
+        Some("C:/ws/node_modules/typescript/lib/tsserver.js"),
+        Some("node"),
+    ));
+    match choice {
+        ManagedEngineChoice::Tsgo { detail } => assert!(detail.contains("tsc.exe"), "{detail}"),
+        other => panic!("tsgo must win when it is available: {other:?}"),
+    }
+}
+
+// ── DISCRIMINATING (the reported symptom): a project pinned to TypeScript
+//    5.x has NO tsgo anywhere but ships a perfectly good tsserver. Before
+//    this fix the managed fallback was tsgo-only and such a project got NO
+//    semantics at all. ─────────────────────────────────────────────────────
+#[test]
+fn managed_fallback_admits_tsserver_when_no_tsgo_exists() {
+    let choice = choose_managed_engine(&facts(
+        true,
+        None,
+        Some("C:/ws/node_modules/typescript/lib/tsserver.js"),
+        Some("node"),
+    ));
+    match choice {
+        ManagedEngineChoice::Tsserver { detail } => {
+            assert!(detail.contains("tsserver.js"), "{detail}");
+            assert!(
+                detail.contains("no supported tsgo"),
+                "the reason must state WHY tsserver was chosen: {detail}"
+            );
+        }
+        other => panic!("tsserver is an accepted tier-2 fallback: {other:?}"),
+    }
+}
+
+// ── DISCRIMINATING (FIX-3): nothing obtainable ⇒ None WITH a reason, never
+//    a provider that would later report "connected" with no engine. ────────
+#[test]
+fn managed_fallback_reports_none_with_a_reason_when_no_engine_exists() {
+    match choose_managed_engine(&facts(true, None, None, None)) {
+        ManagedEngineChoice::None { reason } => {
+            assert!(reason.contains("no TypeScript engine"), "{reason}");
+            assert!(
+                reason.contains("tsgo") && reason.contains("tsserver"),
+                "the reason must name both engines that were searched: {reason}"
+            );
+        }
+        other => panic!("no engine anywhere must report None: {other:?}"),
+    }
+}
+
+// ── DISCRIMINATING (FIX-3): tsserver present but Node absent is still no
+//    engine — the reason names Node, not a bare "not found". ───────────────
+#[test]
+fn managed_fallback_reports_none_when_tsserver_has_no_node() {
+    match choose_managed_engine(&facts(
+        true,
+        None,
+        Some("C:/ws/node_modules/typescript/lib/tsserver.js"),
+        None,
+    )) {
+        ManagedEngineChoice::None { reason } => {
+            assert!(reason.contains("Node.js"), "{reason}")
+        }
+        other => panic!("tsserver without node is not an engine: {other:?}"),
+    }
+}
+
+// ── DISCRIMINATING (FIX-3, Corpus C shape): a workspace with ZERO
+//    tsconfigs obtains NO managed engine — both engines are project-bound —
+//    and the reason says so instead of claiming a connected provider. ──────
+#[test]
+fn managed_fallback_fails_closed_and_says_why_without_a_configured_project() {
+    match choose_managed_engine(&facts(
+        false,
+        Some("C:/ws/node_modules/@typescript/typescript-win32-x64/lib/tsc.exe"),
+        Some("C:/ws/node_modules/typescript/lib/tsserver.js"),
+        Some("node"),
+    )) {
+        ManagedEngineChoice::None { reason } => {
+            assert!(
+                reason.contains("configured TypeScript project"),
+                "the reason must name the missing precondition: {reason}"
+            );
+            assert!(reason.contains("C:/workspace"), "{reason}");
+        }
+        other => panic!("a config-less workspace must fail closed: {other:?}"),
+    }
+}
+
+// ── DISCRIMINATING: resolver tier NOTES (a stale VERTER_TSGO_BIN, a
+//    skipped untrusted cache) survive into the no-engine reason — the user
+//    must be able to act on it. ────────────────────────────────────────────
+#[test]
+fn no_engine_reason_carries_the_resolver_tier_notes() {
+    let mut f = facts(true, None, None, None);
+    f.tsgo_notes = vec!["VERTER_TSGO_BIN points at C:/gone which is not a usable file".into()];
+    match choose_managed_engine(&f) {
+        ManagedEngineChoice::None { reason } => {
+            assert!(reason.contains("VERTER_TSGO_BIN"), "{reason}")
+        }
+        other => panic!("expected None, got {other:?}"),
+    }
+}
+
+// ── DISCRIMINATING (W5/FIX-4): candidate ENUMERATION is existence-only, so a
+//    TypeScript 5.x workspace contributes its `node_modules/.bin/tsc.cmd`
+//    shim. Counting that as an available tsgo sends the session down the tsgo
+//    route, where it dies at the version gate — the exact "no engine at all"
+//    outcome the tsserver fallback exists to prevent. Observed live against a
+//    real TS 5.3.3 project before this filter existed. ──────────────────────
+#[test]
+fn a_ts5_bin_shim_is_not_a_plausible_tsgo_candidate() {
+    use verter_tsgo_api::toolchain::discovery::Provenance;
+    let shim = std::path::Path::new("C:/ws/node_modules/.bin/tsc.cmd");
+    assert!(
+        !plausible_tsgo_candidate(shim, Provenance::ProjectLocal, false),
+        "a .bin shim in a non-native-family workspace must not count as tsgo"
+    );
+    // The same shim IS plausible when the workspace install is the TS7 family.
+    assert!(plausible_tsgo_candidate(
+        shim,
+        Provenance::ProjectLocal,
+        true
+    ));
+}
+
+// ── CONTROL: the genuine tsgo shapes stay plausible — the `@typescript`
+//    platform package (which only tsgo publishes) and every non-project-local
+//    tier, whose real validator decides. ────────────────────────────────────
+#[test]
+fn genuine_tsgo_shapes_stay_plausible_candidates() {
+    use verter_tsgo_api::toolchain::discovery::Provenance;
+    assert!(plausible_tsgo_candidate(
+        std::path::Path::new("C:/ws/node_modules/@typescript/typescript-win32-x64/lib/tsc.exe"),
+        Provenance::ProjectLocal,
+        false,
+    ));
+    for provenance in [
+        Provenance::EnvOverride,
+        Provenance::SharedPath,
+        Provenance::TempCache,
+        Provenance::Bundled,
+    ] {
+        assert!(
+            plausible_tsgo_candidate(
+                std::path::Path::new("C:/anywhere/tsc.exe"),
+                provenance,
+                false
+            ),
+            "{provenance:?} is operator- or policy-controlled and stays plausible"
+        );
+    }
+}
