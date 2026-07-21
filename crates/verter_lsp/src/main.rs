@@ -1,34 +1,5 @@
 use std::sync::Arc;
 
-/// THROWAWAY DIAGNOSTIC (perf/inv-opus): sampling allocator that probes native
-/// stack depth. Every allocation is a chance to observe an unbounded recursion
-/// no matter which module it lives in. Fully inert unless
-/// `VERTER_STACK_PROBE_ALLOC_EVERY` is set (a single relaxed TLS increment).
-struct StackProbeAlloc;
-
-unsafe impl std::alloc::GlobalAlloc for StackProbeAlloc {
-    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        verter_session::stack_probe_public::probe_alloc();
-        unsafe { std::alloc::System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
-        // Probed as well as `alloc`: a recursive `Drop` descends without ever
-        // allocating, so an alloc-only hook is blind to exactly that class.
-        verter_session::stack_probe_public::probe_alloc();
-        unsafe { std::alloc::System.dealloc(ptr, layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-        verter_session::stack_probe_public::probe_alloc();
-        unsafe { std::alloc::System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
-        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: StackProbeAlloc = StackProbeAlloc;
-
 use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
@@ -43,42 +14,8 @@ use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
 use verter_session::{HostConfig, VerterHost};
 
-/// THROWAWAY DIAGNOSTIC (perf/inv-opus): run the whole tokio runtime on a
-/// thread with an explicitly-sized stack when `VERTER_MAIN_STACK_MB` is set.
-/// Unset ⇒ byte-identical behaviour to the shipped `#[tokio::main]` entry
-/// (the process main thread's link-time stack).
-fn main() {
-    match std::env::var("VERTER_MAIN_STACK_MB")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        Some(mb) if mb > 0 => {
-            let handle = std::thread::Builder::new()
-                .name("verter-main".to_string())
-                .stack_size(mb * 1024 * 1024)
-                .spawn(|| {
-                    verter_session::stack_probe_public::set_thread_base();
-                    tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()
-                        .expect("tokio runtime")
-                        .block_on(async_main());
-                })
-                .expect("spawn verter-main");
-            let _ = handle.join();
-        }
-        _ => {
-            verter_session::stack_probe_public::set_thread_base();
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(async_main());
-        }
-    }
-}
-
-async fn async_main() {
+#[tokio::main]
+async fn main() {
     // Initialize tracing (controlled via VERTER_LOG or RUST_LOG env var).
     // ANSI colors are disabled because the output goes to VS Code's debug
     // console which renders escape codes as literal text (e.g. `[2m`, `[0m`).
@@ -89,9 +26,6 @@ async fn async_main() {
                 .unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_ansi(false)
-        // THROWAWAY DIAGNOSTIC (perf/inv-opus): thread identity on every line.
-        .with_thread_ids(true)
-        .with_thread_names(true)
         .with_writer(std::io::stderr)
         .init();
 

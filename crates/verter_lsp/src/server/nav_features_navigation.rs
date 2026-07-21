@@ -273,29 +273,6 @@ pub(super) async fn handle_goto_definition(
 
     // Enhance with TypeProvider for cross-file definitions.
     // Extract all context synchronously — no DashMap guard held across await.
-    // THROWAWAY DIAGNOSTIC (perf/inv-opus): classify why a definition never
-    // reaches the provider (Q3 — the empty-result census).
-    crate::perf_event("lsp_def_provider_gate", || {
-        let has_tp = server.type_provider.is_some();
-        let ctx = server.type_provider_context(uri);
-        let has_ctx = ctx.is_some();
-        let mapped = ctx
-            .as_ref()
-            .map(|c| {
-                merge::carrier_position_to_tsx_offset_validated(
-                    position,
-                    &c.carrier_line_index,
-                    &c.mapper,
-                    &c.tsx_line_index,
-                )
-                .is_some()
-            })
-            .unwrap_or(false);
-        format!(
-            "has_tp={has_tp} has_ctx={has_ctx} mapped={mapped} verter_hit={}",
-            verter_result.is_some()
-        )
-    });
     if let Some(tp) = &server.type_provider {
         if let Some(ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX

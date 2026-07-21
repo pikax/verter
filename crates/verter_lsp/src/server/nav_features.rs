@@ -638,7 +638,6 @@ async fn handle_completion_attempt(
         trigger_character
     );
     let provider_only = server.provider_only_completions();
-    verter_session::stack_probe_public::mark("completion:M1-after-provider-only");
 
     // Capture completion source only after an already-running `did_change` has
     // committed its registry and host updates. Keep this document-version
@@ -646,8 +645,6 @@ async fn handle_completion_attempt(
     // new edit can land between releasing the mutex and reading source/analysis.
     // The fence is released before any provider await.
     let mut edit_fence = server.did_change_mutex.lock().await;
-    verter_session::stack_probe_public::mark("completion:M2-after-edit-fence");
-
     // NOTE: We do NOT call ensure_provider_synced here.  The debounced sync in
     // did_change sends the update to TSGO within 50ms of the last keystroke.
     // Flushing inline would serialize: sync → TSGO re-analysis → get_completions,
@@ -730,7 +727,6 @@ async fn handle_completion_attempt(
         edit_fence = server.did_change_mutex.lock().await;
     }
 
-    verter_session::stack_probe_public::mark("completion:M3-before-ssr-context");
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -746,7 +742,6 @@ async fn handle_completion_attempt(
         blocks: Vec<crate::documents::sfc_scanner::SfcBlock>,
         canonical_id: String,
     }
-    verter_session::stack_probe_public::mark("completion:M4-before-native-snapshot");
     let native_snapshot = (|| {
         let doc = server.documents.get(uri)?;
         Some(NativeCompletionSnapshot {
@@ -775,7 +770,6 @@ async fn handle_completion_attempt(
         server.maybe_pause_final_completion_after_snapshot().await;
     }
 
-    verter_session::stack_probe_public::mark("completion:M5-before-verter-result");
     let verter_result = native_snapshot.as_ref().and_then(|native| {
         let canonical_id = &native.canonical_id;
         let resolve_component = |import_source: &str,
@@ -942,8 +936,6 @@ async fn handle_completion_attempt(
         };
         // Build workspace component list for auto-import
         let ws_components = build_workspace_components(&server.documents.host, canonical_id);
-        verter_session::stack_probe_public::mark("completion:M6-after-ws-components");
-        verter_session::stack_probe_public::mark("completion:M7-before-completions-at-position");
         completions_at_position(
             position,
             &native.source,

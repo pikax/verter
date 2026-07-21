@@ -13,25 +13,6 @@
 /// control requests get a slot immediately alongside a burst of semantic work.
 pub const LSP_MAX_CONCURRENCY: usize = 64;
 
-/// THROWAWAY DIAGNOSTIC (perf/inv-opus): build a trace detail string only when
-/// the shared type-runtime trace is enabled. Remove with the investigation.
-#[inline]
-pub fn perf_detail(build: impl FnOnce() -> String) -> Option<String> {
-    if verter_type_runtime::type_runtime_trace_enabled() {
-        Some(build())
-    } else {
-        None
-    }
-}
-
-/// THROWAWAY DIAGNOSTIC (perf/inv-opus): emit a point event on the shared trace.
-#[inline]
-pub fn perf_event(name: &'static str, build: impl FnOnce() -> String) {
-    if verter_type_runtime::type_runtime_trace_enabled() {
-        verter_type_runtime::type_runtime_trace_event(name, build());
-    }
-}
-
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;

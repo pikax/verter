@@ -105,27 +105,6 @@ mod template_slot_generation_rail_tests;
 mod unrootable_route_admission_tests;
 // tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
-/// THROWAWAY DIAGNOSTIC (perf/inv-opus) — native stack-depth probe.
-pub(crate) mod stack_probe;
-
-/// THROWAWAY DIAGNOSTIC (perf/inv-opus) — cross-crate probe entry.
-pub mod stack_probe_public {
-    pub fn probe(label: &dyn std::fmt::Debug, depth: u16) {
-        crate::stack_probe::probe(label, depth)
-    }
-    /// Anchor the calling thread's stack base for ABSOLUTE depth measurement.
-    pub fn set_thread_base() {
-        crate::stack_probe::set_thread_base()
-    }
-    /// Unconditional stage marker for locating a runaway recursion.
-    pub fn mark(label: &str) {
-        crate::stack_probe::mark(label)
-    }
-    /// Sampling probe for a `GlobalAlloc` wrapper — the universal recursion catcher.
-    pub fn probe_alloc() {
-        crate::stack_probe::probe_alloc()
-    }
-}
 pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
 pub(crate) mod compile_cache_mode;

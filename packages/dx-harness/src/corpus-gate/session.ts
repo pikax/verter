@@ -9,7 +9,7 @@
  * await is bounded, and the route as a whole runs under a wall-clock budget
  * the caller additionally enforces from outside.
  */
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -39,71 +39,6 @@ import type {
 
 /** The sentinel a promise-race resolves to when the raced promise never settled. */
 const NEVER_SETTLED = Symbol("corpus-gate-never-settled");
-
-// ─────────────────────────────────────────────────────────────────────────────
-// THROWAWAY DIAGNOSTIC INSTRUMENTATION (perf/inv-opus branch only).
-// Env-gated by VERTER_PERF_DUMP_DIR. Emits, per route:
-//   <dir>/<route>.requests.jsonl  — one line per request (NO corpus paths)
-//   <dir>/<route>.stderr.log      — the full verter-lsp child stderr
-//   <dir>/<route>.exit.json       — exit code / signal / alive at end
-// Privacy: files are identified by INDEX only; no corpus path ever written.
-// ─────────────────────────────────────────────────────────────────────────────
-const PERF_DUMP_DIR = process.env.VERTER_PERF_DUMP_DIR?.trim() || null;
-
-function perfDumpPath(route: string, suffix: string): string | null {
-  if (!PERF_DUMP_DIR) return null;
-  try {
-    mkdirSync(PERF_DUMP_DIR, { recursive: true });
-  } catch {
-    /* best effort */
-  }
-  return path.join(PERF_DUMP_DIR, `${route}.${suffix}`);
-}
-
-function perfAppend(route: string, suffix: string, line: string): void {
-  const target = perfDumpPath(route, suffix);
-  if (!target) return;
-  try {
-    appendFileSync(target, `${line}\n`);
-  } catch {
-    /* best effort */
-  }
-}
-
-function perfWrite(route: string, suffix: string, body: string): void {
-  const target = perfDumpPath(route, suffix);
-  if (!target) return;
-  try {
-    writeFileSync(target, body);
-  } catch {
-    /* best effort */
-  }
-}
-
-/** Compact, privacy-safe shape of an LSP result payload. */
-function perfShape(value: unknown): unknown {
-  if (value === null || value === undefined) return { t: value === null ? "null" : "undefined" };
-  if (Array.isArray(value)) return { t: "array", n: value.length };
-  if (typeof value === "object") {
-    const o = value as Record<string, unknown>;
-    if (Array.isArray(o.items))
-      return { t: "completionList", n: o.items.length, incomplete: o.isIncomplete };
-    if (o.contents !== undefined) {
-      const c = o.contents as { value?: unknown } | string | unknown[];
-      const len =
-        typeof c === "string"
-          ? c.length
-          : Array.isArray(c)
-            ? c.length
-            : typeof (c as { value?: unknown })?.value === "string"
-              ? ((c as { value: string }).value satisfies string).length
-              : -1;
-      return { t: "hover", contentLen: len };
-    }
-    return { t: "object", keys: Object.keys(o).slice(0, 8) };
-  }
-  return { t: typeof value };
-}
 
 /**
  * Race `promise` against a hard timer. Resolves to the promise's settlement
@@ -287,21 +222,10 @@ export async function runCorpusRoute(
           continue;
         }
         const uri = pathToFileURL(absolute).href;
-        const perfDidOpenAt = Date.now();
         client.sendNotification("textDocument/didOpen", {
           textDocument: { uri, languageId: "vue", version: 1, text },
         });
         accounting.filesOpened += 1;
-        perfAppend(
-          route,
-          "requests.jsonl",
-          JSON.stringify({
-            ev: "didOpen",
-            fileIndex: accounting.filesOpened,
-            bytes: text.length,
-            at: perfDidOpenAt,
-          }),
-        );
 
         // Capped per-file settle; its own failure is not a wedge (the liveness
         // check decides that) but a statistics hang here must not stall the run.
@@ -422,28 +346,6 @@ export async function runCorpusRoute(
               verdict,
               unexpectedEmpty: verdict === "empty" && !allowedEmpty.has(probe.category),
             });
-            perfAppend(
-              route,
-              "requests.jsonl",
-              JSON.stringify({
-                ev: "req",
-                fileIndex: accounting.filesOpened,
-                kind,
-                category: probe.category,
-                line: probe.line,
-                character: probe.character,
-                sinceOpenMs: requestStart - perfDidOpenAt,
-                startedAt: requestStart,
-                ms,
-                verdict,
-                unexpectedEmpty: verdict === "empty" && !allowedEmpty.has(probe.category),
-                error:
-                  raced.error !== undefined
-                    ? String((raced.error as Error)?.message ?? raced.error).slice(0, 300)
-                    : undefined,
-                shape: raced.error === undefined ? perfShape(raced.value) : undefined,
-              }),
-            );
             const stopReason = earlyStopReason();
             if (stopReason !== null) {
               earlyStop.stopped = true;
@@ -462,33 +364,6 @@ export async function runCorpusRoute(
       }
       completed = !wedged && fatalError === null && !earlyStop.stopped && Date.now() <= deadline;
     } finally {
-      // THROWAWAY DIAGNOSTIC: capture the child's death evidence BEFORE dispose
-      // (dispose kills the tree and would mask a natural exit code).
-      if (PERF_DUMP_DIR) {
-        perfWrite(route, "stderr.log", client.stderr.text());
-        perfWrite(
-          route,
-          "exit.json",
-          JSON.stringify(
-            {
-              alive: client.isAlive(),
-              exitCode: client.exitCode,
-              rawExitCode: client.process.exitCode,
-              signal: client.process.signalCode,
-              spawnError: client.spawnError ? String(client.spawnError.message) : null,
-              lspPid,
-              providerPid: handle.providerPid(),
-              stderrBytes: client.stderr.byteLength,
-              filesOpened: accounting.filesOpened,
-              fatalError,
-              wedged,
-              wedgeDetail,
-            },
-            null,
-            2,
-          ),
-        );
-      }
       // One last topology pass so a provider that only appeared late is still
       // attributed, then freeze the samplers.
       refreshTreeRoots();
