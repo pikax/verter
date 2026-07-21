@@ -959,10 +959,14 @@ async fn sync_file_to_provider(
             };
             if let Some(api) = api {
                 if let Some(dts_path) = committed_state.api_path.clone() {
+                    // The whole-project scan is bulk work: every companion open
+                    // rides the BACKGROUND lane so it never preempts (nor, on the
+                    // owned tsgo provider, serializes behind a diagnostic barrier
+                    // ahead of) the user's own interactive queries.
                     let result = if is_tsgo {
-                        sync.open_dts(&dts_path, &api.code).await
+                        sync.open_dts_background(&dts_path, &api.code).await
                     } else {
-                        sync.load_dts(&dts_path, &api.code).await
+                        sync.load_dts_background(&dts_path, &api.code).await
                     };
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
@@ -987,9 +991,9 @@ async fn sync_file_to_provider(
             if let Some(ide) = ide {
                 if let Some(tsx_path) = committed_state.ide_path.clone() {
                     let result = if is_tsgo {
-                        sync.open_tsx(&tsx_path, &ide.code).await
+                        sync.open_tsx_background(&tsx_path, &ide.code).await
                     } else {
-                        sync.load_tsx(&tsx_path, &ide.code).await
+                        sync.load_tsx_background(&tsx_path, &ide.code).await
                     };
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
@@ -1493,6 +1497,116 @@ mod tests {
         );
     }
 
+    /// The whole-project background scan opens carrier companions on the BACKGROUND
+    /// priority lane.
+    ///
+    /// The scan is bulk work over every carrier in the workspace; issuing those
+    /// opens on the INTERACTIVE lane makes them preempt (and on the owned tsgo
+    /// provider, serialize behind a diagnostic barrier for) the user's own hovers
+    /// and completions. `ProjectSync` already exposes the background variants —
+    /// the scan is the caller that must use them.
+    ///
+    /// Discriminating: `MockTypeProvider` records `open_file_background` as its own
+    /// call, so an interactive-lane open shows up as `OpenFile` and fails here.
+    #[tokio::test]
+    async fn scanner_opens_carrier_companions_on_the_background_lane() {
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        let canonical_id = "/workspace/pkg-a/src/App.vue";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::<str>::from("<template><div>App</div></template>"),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile {
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
+        assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
+
+        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                "/workspace/pkg-a".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/pkg-a/tsconfig.json".to_string()),
+            ),
+        ]);
+        let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
+            resolver,
+            &[(
+                "/workspace/pkg-a",
+                "/workspace",
+                Some("/workspace/pkg-a/tsconfig.json"),
+            )],
+        );
+        let sync_states = DashMap::new();
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+        sync_file_to_provider(
+            canonical_id,
+            &host,
+            &profile,
+            Some(&sync),
+            &crate::provider_surface_store::ProviderSurfaceStore::new(),
+            &snapshot,
+            // tsgo: companions reach the engine as directly-opened buffers, so this
+            // is the route whose lane choice is observable.
+            true,
+            &sync_states,
+            None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
+        )
+        .await;
+
+        let state = sync_states
+            .get(canonical_id)
+            .expect("scanner should commit a source-keyed provider state");
+        let api_path = state
+            .api_path
+            .clone()
+            .expect("carrier has an API companion");
+        let ide_path = state
+            .ide_path
+            .clone()
+            .expect("carrier has an IDE companion");
+        drop(state);
+
+        let calls = provider.calls();
+        let interactive: Vec<String> = calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::OpenFile { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let background: Vec<String> = calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::OpenFileBackground { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            interactive.is_empty(),
+            "the background scan must not open carrier companions on the interactive \
+             lane, but opened: {interactive:?}"
+        );
+        assert!(
+            background.contains(&api_path),
+            "the API companion must be opened on the background lane; background \
+             opens were {background:?}, expected to contain {api_path}"
+        );
+        assert!(
+            background.contains(&ide_path),
+            "the IDE companion must be opened on the background lane; background \
+             opens were {background:?}, expected to contain {ide_path}"
+        );
+    }
+
     #[tokio::test]
     async fn scanner_does_not_sync_carrier_without_a_configured_owner() {
         let host = VerterHost::new_standalone(verter_session::HostConfig::default());
@@ -1641,14 +1755,14 @@ defineProps<{ msg: string }>()
         assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.tsx"
+                MockCall::OpenFileBackground { path, .. } if path == "/workspace/src/App.vue.tsx"
             )),
-            "TSGO scanner sync should open the Vue IDE artifact, calls={calls:?}"
+            "TSGO scanner sync should open the Vue IDE artifact on the background lane,              calls={calls:?}"
         );
         assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.verter.ts"
+                MockCall::OpenFileBackground { path, .. } if path == "/workspace/src/App.vue.verter.ts"
             )),
             "TSGO scanner sync should keep syncing the public API artifact (.vue.verter.ts) too, calls={calls:?}"
         );
@@ -1784,7 +1898,7 @@ import Child from '@/Child.vue'
         }
         let first_open_index = calls
             .iter()
-            .position(|call| matches!(call, MockCall::OpenFile { .. }))
+            .position(|call| matches!(call, MockCall::OpenFileBackground { .. }))
             .expect("TSGO scanner sync should open provider files");
         assert!(
             configure_index < first_open_index,

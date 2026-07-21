@@ -31,6 +31,14 @@ mod inner {
             path: String,
             content: String,
         },
+        /// An open issued on the BACKGROUND priority lane. Recorded distinctly from
+        /// [`MockCall::OpenFile`] so a test can tell the interactive lane (which
+        /// preempts user-facing traffic and, on the owned tsgo provider, takes a
+        /// diagnostic barrier) from the background one.
+        OpenFileBackground {
+            path: String,
+            content: String,
+        },
         LoadFile {
             path: String,
             content: String,
@@ -808,6 +816,19 @@ mod inner {
             });
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
             Box::pin(async move { fail_or_ok(fail, "load_file") })
+        }
+
+        /// Recorded as its OWN call so a caller's priority lane is observable. The
+        /// trait default would collapse it into `open_file` and make the two
+        /// indistinguishable.
+        fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::OpenFileBackground {
+                path: path.to_string(),
+                content: content.to_string(),
+            });
+            let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            Box::pin(async move { fail_or_ok(fail, "open_file_background") })
         }
 
         fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
