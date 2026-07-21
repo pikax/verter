@@ -803,18 +803,6 @@ fn document_language_id(path: &str) -> &'static str {
     }
 }
 
-/// Which notification a document sync should deliver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DocumentSyncIntent {
-    /// Always a fresh `didOpen` at version 1 — the caller knows the child does
-    /// not hold this document.
-    Open,
-    /// `didChange` when the ledger already records the document as open, else the
-    /// `didOpen` the LSP protocol requires first (a `didChange` for a document the
-    /// child never opened makes tsgo panic with "overlay not found").
-    Update,
-}
-
 /// What a document sync actually delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocumentSyncMode {
@@ -827,26 +815,41 @@ enum DocumentSyncMode {
     Unchanged,
 }
 
-/// Deliver a `didOpen`/`didChange` for `path` and commit the local ledger ONLY
-/// once the transport has ACCEPTED the frame.
+/// Trace rendering of what a publication actually delivered.
+fn describe_sync_mode(mode: DocumentSyncMode) -> String {
+    match mode {
+        DocumentSyncMode::DidOpen => "mode=didOpen version=1".to_string(),
+        DocumentSyncMode::DidChange { version } => {
+            format!("mode=didChange version={version}")
+        }
+        DocumentSyncMode::Unchanged => "mode=unchanged".to_string(),
+    }
+}
+
+/// Publish `content` for `path` and commit the local ledger ONLY once the transport
+/// has ACCEPTED the resulting frame.
 ///
-/// `versions` + `contents` are this provider's record of what the child engine was
-/// actually told: `versions` decides `didOpen` vs `didChange` on the next sync, and
-/// `contents` holds the exact bytes it was last told (backing offset↔position
-/// conversion). Committing either BEFORE the transport accepts claims a sync the
-/// child never received — and a refused enqueue (a full lane behind a writer stalled
-/// on a busy child) then strands the document indefinitely, because every later sync
-/// reads the ledger, believes the document is open, and sends a `didChange` the child
-/// cannot apply.
+/// **The ledger owns the choice, not the caller.** `versions` + `contents` are this
+/// provider's record of what the child engine was actually told, and they decide
+/// what a publication owes it:
 ///
-/// A publication of bytes the ledger already records for an OPEN document sends
-/// NOTHING. Re-sending them is not a far-side no-op: every `didChange` carries a
-/// higher version, and TypeScript answers a version bump by invalidating and
-/// rebuilding program state for that document. The open state is read from
-/// `versions`, never from `contents` alone — `load_file` caches content the child
-/// was never told about, and treating that as "already delivered" would skip the
+/// - no `versions` row ⇒ `didOpen` at version 1 (the child does not hold it);
+/// - a row whose recorded bytes DIFFER ⇒ `didChange` at the next version;
+/// - a row whose recorded bytes are IDENTICAL ⇒ NO frame at all.
+///
+/// A caller cannot ask for a `didOpen`. Re-announcing a document the child already
+/// holds is not a far-side no-op — a `didOpen` replaces the overlay and every
+/// `didChange` carries a higher version, and TypeScript answers either by
+/// invalidating and rebuilding program state for that document. The open set is
+/// `versions` alone, never `contents`: `load_file` caches content the child was
+/// never told about, and treating that as "already delivered" would skip the
 /// `didOpen` the protocol requires (tsgo panics with "overlay not found" on a
 /// `didChange` for a document it never opened).
+///
+/// Committing either map BEFORE the transport accepts claims a sync the child never
+/// received — and a refused enqueue (a full lane behind a writer stalled on a busy
+/// child) then strands the document indefinitely, because every later sync reads the
+/// ledger, believes the document is open, and sends a `didChange` it cannot apply.
 ///
 /// Both maps are locked before the enqueue, and the commit runs in the same step as
 /// an accepted synchronous `try_send` with no `.await` between them. So there is no
@@ -859,7 +862,6 @@ async fn deliver_document_sync(
     contents: &Mutex<HashMap<String, Arc<str>>>,
     path: &str,
     content: &str,
-    intent: DocumentSyncIntent,
     priority: ProviderPriority,
 ) -> Result<DocumentSyncMode, TypeProviderError> {
     let uri = TsgoTypeProvider::path_to_uri(path);
@@ -869,8 +871,8 @@ async fn deliver_document_sync(
 
     // `Unchanged` returns before a frame exists, so the arms below are exactly the
     // notifications that reach the wire — there is no mode without a frame.
-    let (mode, version, method, params) = match (intent, versions_guard.get(path)) {
-        (DocumentSyncIntent::Update, Some(version)) => {
+    let (mode, version, method, params) = match versions_guard.get(path) {
+        Some(version) => {
             if contents_guard
                 .get(&contents_key)
                 .is_some_and(|held| held.as_ref() == content)
@@ -888,7 +890,7 @@ async fn deliver_document_sync(
                 }),
             )
         }
-        _ => (
+        None => (
             DocumentSyncMode::DidOpen,
             1,
             "textDocument/didOpen",
@@ -2156,8 +2158,13 @@ impl TsgoTypeProvider {
         path_to_file_uri_string(path)
     }
 
-    /// Send `textDocument/didOpen` at a specific priority.
-    fn open_file_with_priority(
+    /// Publish `content` for `path` at a specific priority.
+    ///
+    /// The SINGLE document-publication path. Which notification the engine owes —
+    /// `didOpen`, `didChange`, or nothing — is decided by the ledger inside
+    /// [`deliver_document_sync`], never by the caller, so the open and update verbs
+    /// are literally the same operation here and every priority lane shares it.
+    fn publish_document_with_priority(
         &self,
         path: &str,
         content: &str,
@@ -2171,7 +2178,7 @@ impl TsgoTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
-                "tsgo_update_file",
+                "tsgo_publish_document",
                 format!(
                     "path={} uri={} content_len={}",
                     path_owned,
@@ -2179,47 +2186,23 @@ impl TsgoTypeProvider {
                     content.len()
                 ),
                 async {
-                    deliver_document_sync(
+                    let mode = deliver_document_sync(
                         &transport,
                         &versions,
                         &contents_cache,
                         &path_owned,
                         &content,
-                        DocumentSyncIntent::Open,
                         priority,
                     )
-                    .await
-                    .map(|_| ())
+                    .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsgo_publish_document_result",
+                        format!("path={} {}", path_owned, describe_sync_mode(mode)),
+                    );
+                    Ok(())
                 }
             )
             .await
-        })
-    }
-
-    /// Send `textDocument/didChange` (or `didOpen` if needed) at a specific priority.
-    fn update_file_with_priority(
-        &self,
-        path: &str,
-        content: &str,
-        priority: ProviderPriority,
-    ) -> ProviderFuture<'_, ()> {
-        let content = content.to_string();
-        let path_owned = path.to_string();
-        let transport = Arc::clone(&self.transport);
-        let versions = Arc::clone(&self.versions);
-        let contents_cache = Arc::clone(&self.contents);
-        Box::pin(async move {
-            deliver_document_sync(
-                &transport,
-                &versions,
-                &contents_cache,
-                &path_owned,
-                &content,
-                DocumentSyncIntent::Update,
-                priority,
-            )
-            .await
-            .map(|_| ())
         })
     }
 
@@ -2453,43 +2436,12 @@ impl TypeProvider for TsgoTypeProvider {
         true
     }
 
+    /// Publish `content` for `path`. Identical to [`Self::update_file`] here: the
+    /// document ledger — not the verb the caller picked — decides whether the
+    /// engine owes a `didOpen`, a `didChange`, or nothing.
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
-        let uri = Self::path_to_uri(path);
-        let content = content.to_string();
-        let path_owned = path.to_string();
-        let transport = Arc::clone(&self.transport);
-        let versions = Arc::clone(&self.versions);
-        let contents_cache = Arc::clone(&self.contents);
-        Box::pin(async move {
-            crate::type_runtime_trace_scope_async!(
-                "tsgo_open_file",
-                format!(
-                    "path={} uri={} content_len={}",
-                    path_owned,
-                    uri,
-                    content.len()
-                ),
-                async {
-                    deliver_document_sync(
-                        &transport,
-                        &versions,
-                        &contents_cache,
-                        &path_owned,
-                        &content,
-                        DocumentSyncIntent::Open,
-                        ProviderPriority::Interactive,
-                    )
-                    .await?;
-                    crate::type_runtime_trace_event!(
-                        "tsgo_open_file_result",
-                        "opened=true version=1".to_string()
-                    );
-                    Ok(())
-                }
-            )
-            .await
-        })
+        self.publish_document_with_priority(path, content, ProviderPriority::Interactive)
     }
 
     /// Cache file content for import resolution without sending `didOpen`.
@@ -2525,44 +2477,7 @@ impl TypeProvider for TsgoTypeProvider {
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO update_file: {} ({} bytes)", path, content.len());
-        let content = content.to_string();
-        let path_owned = path.to_string();
-        let transport = Arc::clone(&self.transport);
-        let versions = Arc::clone(&self.versions);
-        let contents_cache = Arc::clone(&self.contents);
-        Box::pin(async move {
-            let mode = deliver_document_sync(
-                &transport,
-                &versions,
-                &contents_cache,
-                &path_owned,
-                &content,
-                DocumentSyncIntent::Update,
-                ProviderPriority::Interactive,
-            )
-            .await?;
-            match mode {
-                DocumentSyncMode::DidChange { version } => {
-                    crate::type_runtime_trace_event!(
-                        "tsgo_update_file_result",
-                        format!("path={} mode=didChange version={}", path_owned, version),
-                    );
-                }
-                DocumentSyncMode::DidOpen => {
-                    crate::type_runtime_trace_event!(
-                        "tsgo_update_file_result",
-                        format!("path={} mode=didOpen version=1", path_owned),
-                    );
-                }
-                DocumentSyncMode::Unchanged => {
-                    crate::type_runtime_trace_event!(
-                        "tsgo_update_file_result",
-                        format!("path={} mode=unchanged", path_owned),
-                    );
-                }
-            }
-            Ok(())
-        })
+        self.publish_document_with_priority(path, content, ProviderPriority::Interactive)
     }
 
     fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
@@ -3703,7 +3618,7 @@ impl TypeProvider for TsgoTypeProvider {
     // ── Background-priority overrides ────────────────────────────────
 
     fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        self.open_file_with_priority(path, content, ProviderPriority::Background)
+        self.publish_document_with_priority(path, content, ProviderPriority::Background)
     }
 
     fn load_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -3712,7 +3627,7 @@ impl TypeProvider for TsgoTypeProvider {
     }
 
     fn update_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        self.update_file_with_priority(path, content, ProviderPriority::Background)
+        self.publish_document_with_priority(path, content, ProviderPriority::Background)
     }
 
     fn close_file_background(&self, path: &str) -> ProviderFuture<'_, ()> {
@@ -3801,7 +3716,7 @@ impl TypeProvider for TsgoTypeProvider {
     // ── Normal-priority overrides ────────────────────────────────────
 
     fn open_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        self.open_file_with_priority(path, content, ProviderPriority::Normal)
+        self.publish_document_with_priority(path, content, ProviderPriority::Normal)
     }
 
     fn load_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -3809,7 +3724,7 @@ impl TypeProvider for TsgoTypeProvider {
     }
 
     fn update_file_normal(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        self.update_file_with_priority(path, content, ProviderPriority::Normal)
+        self.publish_document_with_priority(path, content, ProviderPriority::Normal)
     }
 
     fn close_file_normal(&self, path: &str) -> ProviderFuture<'_, ()> {
