@@ -580,16 +580,14 @@ async fn tsserver_writer_loop_exits_on_shutdown() {
 async fn tsserver_shutdown_completes_within_timeout() {
     let (stdin_tx, _rx) = mpsc::channel::<TsserverStdinMessage>(16);
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
     let transport = Arc::new(TsserverTransport {
         stdin_tx,
-        pending,
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -967,12 +965,8 @@ fn test_tsserver_pos_to_byte_offset_non_ascii() {
     assert_eq!(offset, 6, "line 2, col 1 should be byte 6");
 }
 
-async fn send_success_response(
-    pending: &Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
-    seq: i64,
-    command: &str,
-) {
-    if let Some(tx) = pending.lock().await.remove(&seq) {
+async fn send_success_response(pending: &Arc<TsserverPendingRequests>, seq: i64, command: &str) {
+    if let Some(tx) = pending.take(seq) {
         let _ = tx.send(serde_json::json!({
             "type": "response",
             "request_seq": seq,
@@ -993,8 +987,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending = Arc::new(TsserverPendingRequests::default());
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::clone(&pending),
@@ -1002,6 +995,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
 
     let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1073,11 +1067,12 @@ async fn run_update_file_capture(
 
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
 
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -1234,11 +1229,12 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
 
     // The exact command sequence of `TsserverTypeProvider::notify_carrier_changed`.
@@ -1392,11 +1388,12 @@ async fn run_resync_capture(
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
 
     let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -1542,11 +1539,12 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
     drop(stdin_rx);
     let transport = TsserverTransport {
         stdin_tx,
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     };
 
     let file = "/project/src/App.vue.tsx";
@@ -2398,11 +2396,12 @@ fn resync_harness() -> ResyncHarness {
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
     ResyncHarness {
         transport,
@@ -2606,11 +2605,12 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = TsserverTransport {
         stdin_tx: stdin_tx.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     };
 
     let opened_files: Mutex<HashMap<String, OpenKind>> = Mutex::new(HashMap::new());
@@ -2739,11 +2739,12 @@ fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
     let transport = Arc::new(TsserverTransport {
         stdin_tx: stdin_tx.clone(),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: Some(Arc::clone(&crash_notify)),
         membership_recovery: Mutex::new(None),
+        cancellation: None,
     });
     StormHarness {
         transport,
@@ -3082,9 +3083,8 @@ async fn successful_response_resets_hang_counter() {
     // Let the request register its pending entry, then answer it.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     {
-        let mut pending = harness.transport.pending.lock().await;
-        let drained: Vec<_> = pending.drain().collect();
-        if let Some((_seq, tx)) = drained.into_iter().next() {
+        let seq = harness.transport.next_seq.load(Ordering::Relaxed) - 1;
+        if let Some(tx) = harness.transport.pending.take(seq) {
             let _ = tx.send(serde_json::json!({"success": true, "body": null}));
         }
     }
@@ -3199,11 +3199,12 @@ async fn real_reload_projects_recovery_refreshes_after_cooldown() {
 fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTransport {
     TsserverTransport {
         stdin_tx,
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
+        cancellation: TsserverCancellation::create().map(Arc::new),
     }
 }
 
@@ -3214,11 +3215,12 @@ fn test_transport_with_notify(
 ) -> TsserverTransport {
     TsserverTransport {
         stdin_tx,
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: Some(crash_notify),
         membership_recovery: Mutex::new(None),
+        cancellation: TsserverCancellation::create().map(Arc::new),
     }
 }
 
@@ -3321,5 +3323,240 @@ async fn an_undeadlined_tsserver_hop_keeps_its_configured_bound() {
         elapsed >= std::time::Duration::from_millis(250),
         "with no ambient scope open the configured bound is kept verbatim, not \
          shortened; took {elapsed:?}"
+    );
+}
+
+// ===========================================================================
+// Cancel-on-drop.
+//
+// A request deadline scaled to a human fires while tsserver's round-trip is
+// still outstanding — that is the point of it. Dropping the caller's future is
+// therefore the ordinary way a request ends, and on a single-threaded engine it
+// is the case that matters most: abandoned work keeps the one JavaScript thread
+// busy ahead of every request that replaced it.
+// ===========================================================================
+
+/// How many requests the transport currently has registered. The leak surface:
+/// a request abandoned without releasing its slot shows up here and nowhere
+/// else.
+fn pending_len(transport: &TsserverTransport) -> usize {
+    transport.pending.len()
+}
+
+/// Dropping a caller's in-flight request future must release its pending-map
+/// slot. Without this the slot survives for the life of the session whenever the
+/// engine never answers — one leaked entry per abandoned request.
+#[tokio::test]
+async fn dropping_an_in_flight_tsserver_request_releases_its_pending_slot() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = test_transport(stdin_tx);
+
+    {
+        let mut fut = Box::pin(transport.request("quickinfo", serde_json::json!({})));
+        // Poll once so the seq is registered and the future is parked on the
+        // response that never comes.
+        tokio::select! {
+            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        assert_eq!(
+            pending_len(&transport),
+            1,
+            "the in-flight request must hold exactly one pending slot"
+        );
+    }
+
+    assert_eq!(
+        pending_len(&transport),
+        0,
+        "dropping the caller's future must release the pending slot, not leak it"
+    );
+}
+
+/// The seq tsserver would concatenate onto its cancellation-pipe template.
+fn cancellation_path(transport: &TsserverTransport, seq: i64) -> std::path::PathBuf {
+    let cancellation = transport
+        .cancellation
+        .as_ref()
+        .expect("the test transport owns a cancellation directory");
+    std::path::PathBuf::from(format!("{}{seq}", cancellation.prefix))
+}
+
+/// The `--cancellationPipeName` template must be exactly the prefix tsserver
+/// concatenates the request id onto, with the single trailing `*` that selects
+/// per-request mode. A prefix containing another `*` makes tsserver throw and
+/// leaves the session silently un-cancellable, so the template is built once and
+/// the written path derives from that same string.
+#[test]
+fn the_cancellation_template_names_the_paths_the_transport_writes() {
+    let cancellation =
+        TsserverCancellation::create().expect("a cancellation directory must be creatable");
+    let arg = cancellation.pipe_name_arg();
+
+    assert!(
+        arg.ends_with('*'),
+        "the template must end with `*` or tsserver treats it as a single global \
+         token that cancels whichever request happens to be running, got {arg}"
+    );
+    let prefix = arg.strip_suffix('*').unwrap();
+    assert!(
+        !prefix.contains('*'),
+        "tsserver rejects a template whose prefix contains another `*`, got {arg}"
+    );
+
+    cancellation.cancel(41);
+    assert!(
+        std::path::Path::new(&format!("{prefix}41")).exists(),
+        "the cancelled seq's file must land at exactly `<prefix><seq>` — the path \
+         tsserver stats"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{prefix}42")).exists(),
+        "a cancellation must name only its own seq"
+    );
+}
+
+/// Dropping a caller's in-flight request future must tell tsserver to stop.
+/// Abandoned work on a single JavaScript thread sits directly in front of every
+/// request that replaced it.
+#[tokio::test]
+async fn dropping_an_in_flight_tsserver_request_cancels_it_at_the_engine() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = test_transport(stdin_tx);
+
+    {
+        let mut fut = Box::pin(transport.request("references", serde_json::json!({})));
+        tokio::select! {
+            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+    }
+
+    let sent = stdin_rx.try_recv().expect("the request frame was enqueued");
+    let TsserverStdinMessage::Frame(bytes) = sent else {
+        panic!("expected a framed request");
+    };
+    let body: serde_json::Value =
+        serde_json::from_str(String::from_utf8(bytes).unwrap().trim()).unwrap();
+    let seq = body.get("seq").and_then(|v| v.as_i64()).expect("seq");
+
+    assert!(
+        cancellation_path(&transport, seq).exists(),
+        "dropping an in-flight request must signal cancellation for its own seq"
+    );
+}
+
+/// The cancellation must not queue behind the work it cancels. tsserver reads
+/// one stdin lane, and a request is typically abandoned BECAUSE that lane is not
+/// draining — a cancel sent down it would arrive after the work it was meant to
+/// stop. Signalling out of band is the whole point.
+#[tokio::test]
+async fn tsserver_cancellation_does_not_queue_behind_the_lane_it_cancels() {
+    // Capacity 1, and the request itself fills it: the lane cannot accept
+    // another byte.
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(1);
+    let transport = test_transport(stdin_tx);
+
+    {
+        let mut fut = Box::pin(transport.request("completions", serde_json::json!({})));
+        tokio::select! {
+            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        // Do not drain the lane — it stays full across the drop.
+    }
+
+    assert!(
+        cancellation_path(&transport, 1).exists(),
+        "the cancellation must be deliverable while the request's own lane is full"
+    );
+    assert!(
+        stdin_rx.try_recv().is_ok(),
+        "the original request frame is still sitting on the blocked lane"
+    );
+}
+
+/// A request that was ANSWERED must not be cancelled on the way out, and must
+/// still return its result. Cancelling a completed seq is noise at best; losing
+/// a legitimate in-flight response to a cancellation race is the failure this
+/// guards.
+#[tokio::test]
+async fn an_answered_tsserver_request_returns_its_result_and_emits_no_cancellation() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = test_transport(stdin_tx);
+
+    let answerer = {
+        let pending = Arc::clone(&transport.pending);
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if let Some(tx) = pending.take(1) {
+                    let _ = tx.send(serde_json::json!({
+                        "type": "response",
+                        "request_seq": 1,
+                        "success": true,
+                        "body": { "displayString": "const x: number" }
+                    }));
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            panic!("the request never registered its pending slot");
+        })
+    };
+
+    let result = transport
+        .request("quickinfo", serde_json::json!({}))
+        .await
+        .expect("the answered request succeeds");
+    answerer.await.unwrap();
+
+    assert_eq!(
+        result.get("displayString").and_then(|v| v.as_str()),
+        Some("const x: number"),
+        "the answered request must return the engine's own body, unaltered"
+    );
+    assert!(
+        stdin_rx.try_recv().is_ok(),
+        "the request frame was enqueued"
+    );
+    assert!(
+        !cancellation_path(&transport, 1).exists(),
+        "an answered request must emit no cancellation"
+    );
+    assert_eq!(
+        pending_len(&transport),
+        0,
+        "the answered request holds no slot"
+    );
+}
+
+/// Cancellation files are reaped once they can no longer be observed, so a long
+/// session cannot fill its temp directory one file per abandoned request.
+#[test]
+fn cancellation_files_are_reaped_once_they_can_no_longer_be_observed() {
+    let cancellation =
+        TsserverCancellation::create().expect("a cancellation directory must be creatable");
+
+    for seq in 0..(CANCEL_FILE_RETAIN_CAP as i64 + 64) {
+        cancellation.cancel(seq);
+    }
+
+    let live = std::fs::read_dir(&cancellation.dir)
+        .expect("the cancellation directory exists")
+        .count();
+    assert!(
+        live <= CANCEL_FILE_RETAIN_CAP,
+        "retained cancellations must stay bounded, found {live}"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{}0", cancellation.prefix)).exists(),
+        "the oldest cancellation must be reaped first"
+    );
+
+    let dir = cancellation.dir.clone();
+    drop(cancellation);
+    assert!(
+        !dir.exists(),
+        "the session's cancellation directory must not outlive the session"
     );
 }
