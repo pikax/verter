@@ -130,6 +130,24 @@ const HANG_THRESHOLD: u32 = 3;
 const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl TsserverTransport {
+    /// Charge one round-trip failure toward hang detection, firing the restart
+    /// notification once [`HANG_THRESHOLD`] consecutive failures accumulate.
+    ///
+    /// A wedged-but-alive tsserver (accepts requests, never answers) is only
+    /// distinguishable from a slow one by consecutive failures, so every bounded
+    /// hop that gives up has to pass through here.
+    fn note_hang_failure(&self) {
+        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= HANG_THRESHOLD {
+            tracing::error!(
+                "tsserver appears hung ({count} consecutive timeouts) — triggering restart"
+            );
+            if let Some(notify) = &self.crash_notify {
+                notify.notify_waiters();
+            }
+        }
+    }
+
     /// Send a tsserver request and wait for the response.
     async fn request(
         &self,
@@ -140,14 +158,23 @@ impl TsserverTransport {
             .await
     }
 
-    /// Send a tsserver request with a custom response timeout. Split from
-    /// [`TsserverTransport::request`] so tests can exercise the timeout / hang
-    /// detection path without waiting the full production timeout.
+    /// Send a tsserver request with a custom configured response timeout. Split
+    /// from [`TsserverTransport::request`] so tests can exercise the timeout /
+    /// hang detection path without waiting the full production timeout.
+    ///
+    /// `configured` is an upper bound, not the bound: the hop actually issued is
+    /// the tighter of `configured` and what the ambient request deadline has
+    /// left (see [`crate::deadline::hop_budget`]). tsserver is one JavaScript
+    /// thread, so a hop that outlives the request that asked for it is pure
+    /// queue contention — and, worse, a hop bound that never wins the race
+    /// against the caller's 1.5-6s deadline means the failure branch below never
+    /// executes: the pending entry is never released, the failure is never
+    /// charged toward hang detection, and a wedged engine is never restarted.
     async fn request_with_timeout(
         &self,
         command: &str,
         arguments: serde_json::Value,
-        timeout: std::time::Duration,
+        configured: std::time::Duration,
     ) -> Result<serde_json::Value, TypeProviderError> {
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
@@ -171,14 +198,44 @@ impl TsserverTransport {
                 let (tx, rx) = oneshot::channel();
                 self.pending.lock().await.insert(seq, tx);
 
+                // The enqueue and the response wait SHARE one deadline, so the
+                // whole round-trip is bounded. An unbounded `send().await` on a
+                // full lane parks the request BEFORE the response bound even
+                // starts, and without charging anything toward hang detection.
+                let hop = crate::deadline::hop_budget(configured);
+                let deadline = tokio::time::Instant::now() + hop;
+
                 // tsserver uses newline-delimited JSON (no Content-Length framing)
                 let frame = format!("{body}\n");
-                self.stdin_tx
-                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
+                let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match self
+                    .stdin_tx
+                    .send_timeout(TsserverStdinMessage::Frame(frame.into_bytes()), send_budget)
                     .await
-                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                {
+                    Ok(()) => {}
+                    Err(mpsc::error::SendTimeoutError::Closed(_)) => {
+                        self.pending.lock().await.remove(&seq);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                    Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
+                        self.pending.lock().await.remove(&seq);
+                        self.note_hang_failure();
+                        crate::type_runtime_trace_event!(
+                            "tsserver_transport_request_error",
+                            format!(
+                                "command={} seq={} message=stdin-enqueue-timeout",
+                                command, seq
+                            ),
+                        );
+                        return Err(TypeProviderError::new(format!(
+                            "request '{command}' stdin enqueue timed out after {hop:?}"
+                        )));
+                    }
+                }
 
-                let result = tokio::time::timeout(timeout, rx).await;
+                let rx_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let result = tokio::time::timeout(rx_budget, rx).await;
                 match result {
                     Ok(Ok(val)) => {
                         // Any response (even a tsserver-level error) proves the process
@@ -229,22 +286,13 @@ impl TsserverTransport {
                     Err(_) => {
                         // Timeout — clean up the pending entry to prevent leak
                         self.pending.lock().await.remove(&seq);
-                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count >= HANG_THRESHOLD {
-                            tracing::error!(
-                                "tsserver appears hung ({count} consecutive timeouts) — triggering restart"
-                            );
-                            if let Some(notify) = &self.crash_notify {
-                                notify.notify_waiters();
-                            }
-                        }
+                        self.note_hang_failure();
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
                             format!("command={} seq={} message=timeout", command, seq),
                         );
                         Err(TypeProviderError::new(format!(
-                            "request '{command}' timed out after {}s",
-                            timeout.as_secs()
+                            "request '{command}' timed out after {hop:?}"
                         )))
                     }
                 }

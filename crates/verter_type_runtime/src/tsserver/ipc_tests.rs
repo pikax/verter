@@ -3183,3 +3183,143 @@ async fn real_reload_projects_recovery_refreshes_after_cooldown() {
     real.assert_raw_types(true).await;
     real.shutdown().await;
 }
+
+// ===========================================================================
+// The hop bound and the ambient request deadline.
+//
+// tsserver is a single JavaScript thread: every request queues in front of it,
+// so a hop that outlives the request that asked for it is pure contention. The
+// inner bound therefore has to fire INSIDE the caller's deadline — that margin
+// is what buys the transport its cleanup (release the slot, charge the failure,
+// cancel the engine's work) and what makes the failure attributable to the
+// engine rather than to the handler.
+// ===========================================================================
+
+/// Build a `TsserverTransport` for tests over a caller-supplied stdin lane.
+fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTransport {
+    TsserverTransport {
+        stdin_tx,
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
+    }
+}
+
+/// As [`test_transport`], with an observable crash notification.
+fn test_transport_with_notify(
+    stdin_tx: mpsc::Sender<TsserverStdinMessage>,
+    crash_notify: Arc<Notify>,
+) -> TsserverTransport {
+    TsserverTransport {
+        stdin_tx,
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: Some(crash_notify),
+        membership_recovery: Mutex::new(None),
+    }
+}
+
+/// A hop issued under an ambient request deadline must fail at that deadline,
+/// not at the transport's own fixed bound. With the fixed bound winning, the
+/// outer deadline always fires first and the transport's failure branch — the
+/// only place the pending entry is released and the failure counted — never
+/// runs at all.
+#[tokio::test]
+async fn a_tsserver_hop_fires_inside_the_ambient_request_deadline() {
+    // Nothing drains the lane past the first frame and no read loop exists, so
+    // the request can never be answered.
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = test_transport(stdin_tx);
+
+    let started = std::time::Instant::now();
+    let outcome = crate::deadline::with_deadline(std::time::Duration::from_millis(400), async {
+        transport.request("quickinfo", serde_json::json!({})).await
+    })
+    .await;
+    let elapsed = started.elapsed();
+
+    let err = outcome.expect_err("an unanswered request must fail, not succeed");
+    assert!(
+        err.message.contains("timed out"),
+        "the hop must fail as a provider timeout so the failure is attributable to \
+         the engine, got {}",
+        err.message
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the hop must fire inside the 400ms ambient deadline, not at the transport's \
+         fixed 10s bound; took {elapsed:?}"
+    );
+}
+
+/// Because the fixed inner bound never wins the race against a 1.5-6s request
+/// deadline, the failure accounting behind it never executes: a wedged tsserver
+/// is never detected and never restarted. Deriving the hop from the deadline is
+/// what re-arms hang detection.
+#[tokio::test]
+async fn deadline_bounded_tsserver_timeouts_reach_hang_detection() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    let notify = Arc::new(Notify::new());
+    let transport = test_transport_with_notify(stdin_tx, Arc::clone(&notify));
+
+    let waiter = {
+        let notify = Arc::clone(&notify);
+        tokio::spawn(async move { notify.notified().await })
+    };
+    tokio::task::yield_now().await;
+
+    let ran = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        for _ in 0..HANG_THRESHOLD {
+            let _ = crate::deadline::with_deadline(std::time::Duration::from_millis(300), async {
+                transport.request("quickinfo", serde_json::json!({})).await
+            })
+            .await;
+        }
+    })
+    .await;
+    assert!(
+        ran.is_ok(),
+        "three hops under a 300ms ambient deadline must all complete well inside 3s; \
+         a fixed 10s inner bound parks each one instead"
+    );
+
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        HANG_THRESHOLD,
+        "every deadline-bounded timeout must be charged toward hang detection"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("HANG_THRESHOLD consecutive timeouts must fire the restart notification")
+        .unwrap();
+}
+
+/// A caller with no ambient deadline — batch and background work — keeps its
+/// configured bound verbatim. Guards the opposite failure: a hop bound so
+/// aggressive that non-interactive work cannot finish.
+#[tokio::test]
+async fn an_undeadlined_tsserver_hop_keeps_its_configured_bound() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = test_transport(stdin_tx);
+
+    let started = std::time::Instant::now();
+    let err = transport
+        .request_with_timeout(
+            "quickinfo",
+            serde_json::json!({}),
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .expect_err("an unanswered request must fail, not succeed");
+    let elapsed = started.elapsed();
+
+    assert!(err.message.contains("timed out"), "got {}", err.message);
+    assert!(
+        elapsed >= std::time::Duration::from_millis(250),
+        "with no ambient scope open the configured bound is kept verbatim, not \
+         shortened; took {elapsed:?}"
+    );
+}
