@@ -76,6 +76,7 @@ pub mod tsc;
 pub use ide::script::global_component_nav_probe_offset;
 pub use ide::script::VERTER_TYPES_AMBIENT_MODULE;
 pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
+pub use ide::script::VUE_GLOBAL_COMPONENTS_AUGMENTATION;
 pub use ide::script::VUE_JSX_RUNTIME_AUGMENTATION;
 
 #[cfg(test)]

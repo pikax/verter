@@ -137,16 +137,28 @@ declare module "@verter/types" {
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
 }
-
-declare module "vue" {
-  // Guarantee the augmentable GlobalComponents surface exists on EVERY Vue
-  // version (Vue <3.5 ships no GlobalComponents export): an empty interface
-  // merges with the user's components.d.ts / UI-kit augmentations when
-  // present, and keeps GlobalComponentType fail-closed (`unknown`, never
-  // error-`any`) when absent.
-  interface GlobalComponents {}
-}
 "#;
+
+/// Module augmentation guaranteeing the augmentable `vue` `GlobalComponents`
+/// surface exists on EVERY Vue version (Vue <3.5 ships no `GlobalComponents`
+/// export): an empty interface merges with the user's `components.d.ts` / UI-kit
+/// augmentations when present, and keeps `GlobalComponentType` fail-closed
+/// (`unknown`, never error-`any`) when absent.
+///
+/// Kept OUT of [`VERTER_TYPES_AMBIENT_MODULE`] for the SAME reason as
+/// [`VUE_JSX_RUNTIME_AUGMENTATION`]: that constant is served as a script-style
+/// standalone shim by `verter-tsc` (a `.d.ts` with no top-level import/export).
+/// A `declare module "vue"` nested there would DEFINE a replacement `vue` module
+/// instead of augmenting the real one, erasing its `defineComponent`, `ref`, …
+/// exports (the whole `TS2305`/`TS2694` "has no exported member" class).
+/// Consumers embed this block into a MODULE surface (the `.vue.ts` script
+/// carrier) or serve it wrapped as its own module carrier
+/// (`import "vue"; … export {};`), where `declare module "vue"` correctly
+/// augments. The external-module [`VERTER_TYPES_STANDALONE_DTS`] retains it inline
+/// because that file is itself a module (top-level `import`/`export`).
+pub const VUE_GLOBAL_COMPONENTS_AUGMENTATION: &str = r#"declare module "vue" {
+  interface GlobalComponents {}
+}"#;
 
 /// Standalone `@verter/types` type declarations as a `.d.ts` file.
 ///
@@ -441,11 +453,19 @@ pub(super) fn emit_type_constructs(
         }
     }
 
-    // Append ambient module declaration (TS mode only — declare module is TS syntax)
+    // Append ambient module declaration (TS mode only — declare module is TS syntax).
+    // The surrounding `.vue.ts` carrier is a MODULE (top-level import/export), so
+    // the `declare module "vue"` / `declare module "vue/jsx-runtime"` blocks here
+    // AUGMENT the real external modules. The `vue` GlobalComponents augmentation is
+    // kept OUT of the script-style `VERTER_TYPES_AMBIENT_MODULE` (which `verter-tsc`
+    // also serves as a standalone shim, where it would shadow `vue` instead) and
+    // appended separately here.
     if options.embed_ambient_types && !options.is_jsx {
         buf.push_str(VERTER_TYPES_AMBIENT_MODULE);
         buf.push('\n');
         buf.push_str(VUE_JSX_RUNTIME_AUGMENTATION);
+        buf.push('\n');
+        buf.push_str(VUE_GLOBAL_COMPONENTS_AUGMENTATION);
     }
 }
 

@@ -1666,15 +1666,6 @@ fn verter_types_surface_carries_global_components_machinery() {
             gc < ne,
             "{name}: GlobalComponents branch must precede NativeElements"
         );
-        // The surface guarantees the augmentable GlobalComponents interface
-        // exists on EVERY Vue version (Vue <3.5 exports none): without this
-        // augmentation, `import("vue").GlobalComponents` is error-`any` on
-        // such projects — a silent fail-OPEN for every unregistered tag.
-        assert!(
-            surface.contains("declare module \"vue\"")
-                && surface.contains("interface GlobalComponents {}"),
-            "{name}: must ship the empty vue GlobalComponents augmentation"
-        );
         // And the nav helper backing tag go-to-definition.
         assert!(
             surface.contains(
@@ -1683,4 +1674,40 @@ fn verter_types_surface_carries_global_components_machinery() {
             "{name}: must export the globalComponentsNav probe helper"
         );
     }
+
+    // The empty `vue` GlobalComponents augmentation guarantees the augmentable
+    // interface exists on EVERY Vue version (Vue <3.5 exports none): without it,
+    // `import("vue").GlobalComponents` is error-`any` — a silent fail-OPEN for every
+    // unregistered tag. It is shipped ONLY where `declare module "vue"` AUGMENTS the
+    // real module — a MODULE surface (a file with a top-level `import`/`export`).
+    // Inside a script-style ambient `.d.ts` shim (no top-level import/export) a
+    // `declare module "vue"` instead DEFINES a replacement `vue` and erases the real
+    // module's exports (the TS2305/TS2694 "has no exported member" class), so the
+    // ambient shim must NOT carry it.
+    let augment = "declare module \"vue\"";
+    let empty_iface = "interface GlobalComponents {}";
+    // `VUE_GLOBAL_COMPONENTS_AUGMENTATION` is the standalone augmentation block,
+    // embedded into a module carrier by consumers (the `.vue.ts` script carrier when
+    // `embed_ambient_types`, or verter-tsc's `import "vue"; … export {};` carrier).
+    assert!(
+        VUE_GLOBAL_COMPONENTS_AUGMENTATION.contains(augment)
+            && VUE_GLOBAL_COMPONENTS_AUGMENTATION.contains(empty_iface),
+        "VUE_GLOBAL_COMPONENTS_AUGMENTATION must ship the empty vue GlobalComponents augmentation"
+    );
+    // The standalone `.d.ts` stub is itself a module (top-level `export`), so it
+    // retains the augmentation inline.
+    assert!(
+        VERTER_TYPES_STANDALONE_DTS.contains(augment)
+            && VERTER_TYPES_STANDALONE_DTS.contains(empty_iface),
+        "standalone @verter/types stub (a module) must ship the vue GlobalComponents augmentation inline"
+    );
+    // The ambient @verter/types shim is served script-style by verter-tsc, so it must
+    // NOT carry `declare module "vue"` — that is exactly the erased-vue-exports bug.
+    assert!(
+        !VERTER_TYPES_AMBIENT_MODULE.contains(augment),
+        "the ambient @verter/types shim (served script-style) must NOT carry `declare module \
+         \"vue\"`: inside a script shim it defines a replacement `vue` and erases the real \
+         module's exports (TS2305/TS2694). The augmentation lives in \
+         VUE_GLOBAL_COMPONENTS_AUGMENTATION, served as a module carrier."
+    );
 }
