@@ -4403,3 +4403,102 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
         "the child must actually have received the payload, got {seen} of {payload_len} bytes"
     );
 }
+
+// ===========================================================================
+// The document ledger: didOpen once, didChange on change, NOTHING on no-change,
+// didClose on retract.
+//
+// The provider's `versions` + `contents` maps are its record of what the child
+// engine was actually told. They are the ONLY authority for which notification a
+// publication owes the engine — a caller cannot select one. Re-sending bytes the
+// child already holds is not a no-op on the far side: every `didChange` carries a
+// higher version, and TypeScript answers a version bump by invalidating and
+// rebuilding program state for that document.
+// ===========================================================================
+
+/// A provider whose transport frames land in a channel the test drains, so an
+/// assertion can name EXACTLY which document notifications reached the wire.
+/// `child: None` — nothing to spawn, nothing for `Drop` to kill.
+fn ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<StdinMessage>) {
+    let (stdin_tx, stdin_rx) = mpsc::channel(capacity);
+    let provider = TsgoTypeProvider {
+        transport: Arc::new(test_transport(stdin_tx)),
+        child: None,
+        versions: Arc::new(Mutex::new(HashMap::new())),
+        contents: Arc::new(Mutex::new(HashMap::new())),
+        diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
+    };
+    (provider, stdin_rx)
+}
+
+/// Every frame queued since the last drain, as `(method, params)`.
+fn drained_notifications(
+    stdin_rx: &mut mpsc::Receiver<StdinMessage>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut frames = Vec::new();
+    while let Ok(message) = stdin_rx.try_recv() {
+        let body = frame_body(&message);
+        frames.push((
+            body["method"].as_str().unwrap_or_default().to_string(),
+            body["params"].clone(),
+        ));
+    }
+    frames
+}
+
+/// Republishing bytes the child already holds must send NOTHING, and a genuine
+/// edit must still arrive as a `didChange` the engine can apply.
+///
+/// Both halves are load-bearing. Suppressing the redundant frame is the point;
+/// suppressing a real edit would silently serve stale types forever, which is why
+/// the edit assertions check the delivered TEXT and VERSION, not merely a count.
+#[tokio::test]
+async fn republishing_identical_bytes_sends_nothing_while_a_real_edit_still_syncs() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/App.vue.tsx";
+    let first = "const a: number = 1;\n";
+    let edited = "const a: number = 2;\n";
+
+    provider.update_file(path, first).await.unwrap();
+    let opened = drained_notifications(&mut stdin_rx);
+    assert_eq!(opened.len(), 1, "the first publication owes a didOpen");
+    assert_eq!(opened[0].0, "textDocument/didOpen");
+    assert_eq!(opened[0].1["textDocument"]["text"], first);
+
+    // The subject: the child already holds these exact bytes.
+    provider.update_file(path, first).await.unwrap();
+    provider.update_file(path, first).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a byte-identical republication must not reach the engine: every didChange \
+         carries a higher version, and TypeScript rebuilds program state for it"
+    );
+
+    // The correctness half — a real edit MUST still arrive, with its bytes.
+    provider.update_file(path, edited).await.unwrap();
+    let changed = drained_notifications(&mut stdin_rx);
+    assert_eq!(
+        changed.len(),
+        1,
+        "a genuine edit owes exactly one didChange"
+    );
+    assert_eq!(changed[0].0, "textDocument/didChange");
+    assert_eq!(changed[0].1["contentChanges"][0]["text"], edited);
+    assert_eq!(
+        changed[0].1["textDocument"]["version"], 2,
+        "the suppressed republications must not have consumed versions"
+    );
+
+    // Reverting is a change from what the engine holds, not a repeat.
+    provider.update_file(path, first).await.unwrap();
+    let reverted = drained_notifications(&mut stdin_rx);
+    assert_eq!(
+        reverted.len(),
+        1,
+        "a revert is an edit the engine has not seen"
+    );
+    assert_eq!(reverted[0].0, "textDocument/didChange");
+    assert_eq!(reverted[0].1["contentChanges"][0]["text"], first);
+    assert_eq!(reverted[0].1["textDocument"]["version"], 3);
+}

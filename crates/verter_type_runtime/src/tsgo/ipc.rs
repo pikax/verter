@@ -819,7 +819,12 @@ enum DocumentSyncIntent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DocumentSyncMode {
     DidOpen,
-    DidChange { version: i32 },
+    DidChange {
+        version: i32,
+    },
+    /// The ledger already records these exact bytes as delivered for a document
+    /// the child holds open: NO frame was sent.
+    Unchanged,
 }
 
 /// Deliver a `didOpen`/`didChange` for `path` and commit the local ledger ONLY
@@ -827,11 +832,21 @@ enum DocumentSyncMode {
 ///
 /// `versions` + `contents` are this provider's record of what the child engine was
 /// actually told: `versions` decides `didOpen` vs `didChange` on the next sync, and
-/// `contents` backs offset↔position conversion. Committing either BEFORE the
-/// transport accepts claims a sync the child never received — and a refused enqueue
-/// (a full lane behind a writer stalled on a busy child) then strands the document
-/// indefinitely, because every later sync reads the ledger, believes the document is
-/// open, and sends a `didChange` the child cannot apply.
+/// `contents` holds the exact bytes it was last told (backing offset↔position
+/// conversion). Committing either BEFORE the transport accepts claims a sync the
+/// child never received — and a refused enqueue (a full lane behind a writer stalled
+/// on a busy child) then strands the document indefinitely, because every later sync
+/// reads the ledger, believes the document is open, and sends a `didChange` the child
+/// cannot apply.
+///
+/// A publication of bytes the ledger already records for an OPEN document sends
+/// NOTHING. Re-sending them is not a far-side no-op: every `didChange` carries a
+/// higher version, and TypeScript answers a version bump by invalidating and
+/// rebuilding program state for that document. The open state is read from
+/// `versions`, never from `contents` alone — `load_file` caches content the child
+/// was never told about, and treating that as "already delivered" would skip the
+/// `didOpen` the protocol requires (tsgo panics with "overlay not found" on a
+/// `didChange` for a document it never opened).
 ///
 /// Both maps are locked before the enqueue, and the commit runs in the same step as
 /// an accepted synchronous `try_send` with no `.await` between them. So there is no
@@ -850,15 +865,32 @@ async fn deliver_document_sync(
     let uri = TsgoTypeProvider::path_to_uri(path);
     let mut versions_guard = versions.lock().await;
     let mut contents_guard = contents.lock().await;
+    let contents_key = contents_key(path);
 
-    let mode = match (intent, versions_guard.get(path)) {
-        (DocumentSyncIntent::Update, Some(version)) => DocumentSyncMode::DidChange {
-            version: version + 1,
-        },
-        _ => DocumentSyncMode::DidOpen,
-    };
-    let (method, params) = match mode {
-        DocumentSyncMode::DidOpen => (
+    // `Unchanged` returns before a frame exists, so the arms below are exactly the
+    // notifications that reach the wire — there is no mode without a frame.
+    let (mode, version, method, params) = match (intent, versions_guard.get(path)) {
+        (DocumentSyncIntent::Update, Some(version)) => {
+            if contents_guard
+                .get(&contents_key)
+                .is_some_and(|held| held.as_ref() == content)
+            {
+                return Ok(DocumentSyncMode::Unchanged);
+            }
+            let version = version + 1;
+            (
+                DocumentSyncMode::DidChange { version },
+                version,
+                "textDocument/didChange",
+                serde_json::json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "text": content }]
+                }),
+            )
+        }
+        _ => (
+            DocumentSyncMode::DidOpen,
+            1,
             "textDocument/didOpen",
             serde_json::json!({
                 "textDocument": {
@@ -869,23 +901,12 @@ async fn deliver_document_sync(
                 }
             }),
         ),
-        DocumentSyncMode::DidChange { version } => (
-            "textDocument/didChange",
-            serde_json::json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": content }]
-            }),
-        ),
     };
 
     transport.try_notify_with_priority(method, &params, priority)?;
 
-    let version = match mode {
-        DocumentSyncMode::DidOpen => 1,
-        DocumentSyncMode::DidChange { version } => version,
-    };
     versions_guard.insert(path.to_string(), version);
-    contents_guard.insert(contents_key(path), Arc::from(content));
+    contents_guard.insert(contents_key, Arc::from(content));
     Ok(mode)
 }
 
@@ -2531,6 +2552,12 @@ impl TypeProvider for TsgoTypeProvider {
                     crate::type_runtime_trace_event!(
                         "tsgo_update_file_result",
                         format!("path={} mode=didOpen version=1", path_owned),
+                    );
+                }
+                DocumentSyncMode::Unchanged => {
+                    crate::type_runtime_trace_event!(
+                        "tsgo_update_file_result",
+                        format!("path={} mode=unchanged", path_owned),
                     );
                 }
             }
