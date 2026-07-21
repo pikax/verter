@@ -102,11 +102,11 @@ pub(crate) fn resolve_carrier_ide_range_strict(
     current_carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Option<Range> {
-    // Same-file identity via the single canonical path owner (backslash→slash, drive-letter
-    // case, `\\?\` extended prefix all folded) — NEVER a raw `==`.
-    if verter_span::path::canonicalize_path_cow(path)
-        == verter_span::path::canonicalize_path_cow(current_tsx_path)
-    {
+    // Same-file identity via the shared filesystem-identity primitive
+    // (slash-normalized, drive-letter case, `\\?\` extended prefix, and the
+    // whole-path case fold tsgo/tsserver apply on case-insensitive
+    // filesystems) — NEVER a raw `==`.
+    if verter_span::path::fs_paths_equal(path, current_tsx_path) {
         return tsx_range_to_carrier_range(
             start,
             end,

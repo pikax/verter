@@ -103,6 +103,7 @@ use wrapper::{
 pub use type_constructs::{
     VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS, VUE_JSX_RUNTIME_AUGMENTATION,
 };
+pub use wrapper::global_component_nav_probe_offset;
 
 #[cfg(test)]
 use comp_emit::resolve_all_prop_refs_in_expr;
@@ -154,9 +155,10 @@ pub fn generate_ide_script<'alloc>(
     let mut return_close: Option<String> = None;
 
     let mut destructured_block: Option<DestructuredBlockMeta> = None;
-    // GlobalComponents fallback consts emitted into the templateBindingFN. Only the
-    // `<script setup>` arm emits them; the options-API and no-script arms emit none.
-    let mut global_component_fallbacks: Vec<String> = Vec::new();
+    // GlobalComponents fallback consts. Every script arm (`<script setup>`,
+    // Options-API `<script>`, and no-script) emits them, so a globally-registered
+    // component types identically regardless of the SFC's script shape.
+    let mut global_component_fallbacks: Vec<crate::ide::GlobalComponentFallback> = Vec::new();
 
     match (script, script_setup) {
         (_, Some(setup)) => {
@@ -189,6 +191,7 @@ pub fn generate_ide_script<'alloc>(
                 alloc,
                 options,
                 &builtin_components,
+                &mut global_component_fallbacks,
             );
         }
         (None, None) => {
@@ -196,7 +199,19 @@ pub fn generate_ide_script<'alloc>(
             // Imports must come BEFORE the function wrapper (TS1232: imports
             // can only appear at the top level of a module).
             emit_helper_imports(&mut out, 0, options, &builtin_components, template_ast);
-            return_close = emit_minimal_wrapper(&mut out, options, 0, template_end);
+            global_component_fallbacks = collect_global_component_fallbacks(
+                template_ast,
+                source,
+                options.custom_elements,
+                |_| false,
+            );
+            return_close = emit_minimal_wrapper(
+                &mut out,
+                options,
+                0,
+                template_end,
+                &global_component_fallbacks,
+            );
             emit_type_constructs(
                 &mut type_constructs,
                 &None, // no generics
@@ -262,7 +277,12 @@ pub fn generate_ide_script<'alloc>(
         return_close,
         return_close_pos,
         destructured_block,
-        template_component_bindings: TemplateComponentBindings::new(global_component_fallbacks),
+        template_component_bindings: TemplateComponentBindings::new(
+            global_component_fallbacks
+                .into_iter()
+                .map(|f| f.pascal)
+                .collect(),
+        ),
     }
 }
 

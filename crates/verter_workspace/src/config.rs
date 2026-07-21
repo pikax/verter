@@ -134,7 +134,11 @@ fn strip_trailing_commas(input: &str) -> String {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Discover all `tsconfig.json` (and `tsconfig.*.json`) files under a
-/// workspace root.
+/// workspace root, plus the JavaScript project config `jsconfig.json` — the
+/// configured-project authority for JS-only trees that tsserver/tsgo honor
+/// natively. A `jsconfig.json` sitting next to a `tsconfig.json` in the same
+/// directory is suppressed (TypeScript precedence: the tsconfig owns the
+/// directory).
 ///
 /// This is the one function in `verter_workspace::config` that still
 /// touches disk directly; all sibling helpers take a
@@ -203,8 +207,9 @@ pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
         let Some(name) = entry.file_name().to_str() else {
             continue;
         };
-        let matches =
-            name == "tsconfig.json" || (name.starts_with("tsconfig.") && name.ends_with(".json"));
+        let matches = name == "tsconfig.json"
+            || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+            || name == "jsconfig.json";
         if !matches {
             continue;
         }
@@ -220,6 +225,23 @@ pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
             });
         }
     }
+
+    // TypeScript precedence: a `jsconfig.json` sitting next to a
+    // `tsconfig.json` is ignored (the tsconfig owns the directory). Discovering
+    // both would make every file in that directory multiply-owned (Ambiguous)
+    // and fail every carrier feature closed, so the jsconfig is suppressed.
+    // Only the exact default `tsconfig.json` name suppresses — a suffixed
+    // `tsconfig.<name>.json` and a `jsconfig.json` are distinct configured
+    // projects under tsserver/tsgo as well.
+    let dirs_with_default_tsconfig: rustc_hash::FxHashSet<String> = entries
+        .iter()
+        .filter(|e| e.path.rsplit('/').next() == Some("tsconfig.json"))
+        .map(|e| e.root.clone())
+        .collect();
+    entries.retain(|e| {
+        e.path.rsplit('/').next() != Some("jsconfig.json")
+            || !dirs_with_default_tsconfig.contains(e.root.as_str())
+    });
 
     entries
 }
@@ -256,9 +278,9 @@ const PRUNED_SCAN_DIRS: &[&str] = &[
     ".cache",
 ];
 
-/// Whether AT LEAST ONE configured TypeScript project (`tsconfig.json` or
-/// `tsconfig.<suffix>.json`) exists ANYWHERE under `root`, short-circuiting on the
-/// first match.
+/// Whether AT LEAST ONE configured TypeScript project (`tsconfig.json`,
+/// `tsconfig.<suffix>.json`, or the JavaScript project config `jsconfig.json`)
+/// exists ANYWHERE under `root`, short-circuiting on the first match.
 ///
 /// This is the bounded owned-tsgo SPAWN PRECONDITION: owned tsgo is project-bound,
 /// so it must not start a config-less inferred project — but a mainstream monorepo
@@ -315,7 +337,10 @@ pub fn has_configured_ts_project_anywhere(root: &Path) -> bool {
         let Some(name) = entry.file_name().to_str() else {
             continue;
         };
-        if name == "tsconfig.json" || (name.starts_with("tsconfig.") && name.ends_with(".json")) {
+        if name == "tsconfig.json"
+            || (name.starts_with("tsconfig.") && name.ends_with(".json"))
+            || name == "jsconfig.json"
+        {
             // Short-circuit: one authored configured project is enough.
             return true;
         }
@@ -394,6 +419,16 @@ fn load_compiler_options_inner(
         .and_then(serde_json::Value::as_bool)
     {
         compiler_options.check_js = check_js;
+    }
+
+    // `disableSolutionSearching` stops default-project selection from climbing a
+    // solution to its ancestor solution. An explicit `false` overrides an
+    // inherited `true` (TS last-wins through the `extends` chain).
+    if let Some(disable_solution_searching) = raw_compiler_options
+        .get("disableSolutionSearching")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.disable_solution_searching = disable_solution_searching;
     }
 
     if let Some(paths) = raw_compiler_options
@@ -646,7 +681,8 @@ fn tsconfig_declares_ownership_intent(ws: &dyn WorkspaceRead, tsconfig_path: &st
 /// A discovered tsconfig is a PROJECT config (eligible to own files) only if
 /// ANY of:
 ///   * its basename is the TypeScript default project config name
-///     `tsconfig.json`; OR
+///     `tsconfig.json` or the JavaScript default project config name
+///     `jsconfig.json`; OR
 ///   * it declares `files`, `include`, `exclude`, or `references`
 ///     ([`tsconfig_declares_ownership_intent`]); OR
 ///   * it is the resolved target of a TypeScript `references[].path` from some
@@ -665,67 +701,13 @@ pub fn is_project_config(
     reference_targets: &rustc_hash::FxHashSet<String>,
 ) -> bool {
     let basename = tsconfig_path.rsplit('/').next().unwrap_or(tsconfig_path);
-    if basename == "tsconfig.json" {
+    if basename == "tsconfig.json" || basename == "jsconfig.json" {
         return true;
     }
     if reference_targets.contains(&normalize_canonical_id(tsconfig_path)) {
         return true;
     }
     tsconfig_declares_ownership_intent(ws, tsconfig_path)
-}
-
-/// Check if a workspace has any solution-style tsconfig.json.
-pub fn has_solution_style_tsconfig(ws: &dyn WorkspaceRead, workspace_root: &str) -> bool {
-    let tsconfig = join_paths(workspace_root, "tsconfig.json");
-    if is_solution_style_tsconfig(ws, &tsconfig) {
-        return true;
-    }
-
-    let Ok(depth1_entries) = ws.read_dir(workspace_root) else {
-        return false;
-    };
-    for d1 in &depth1_entries {
-        if !d1.is_dir {
-            continue;
-        }
-        let name = d1.path.rsplit('/').next().unwrap_or(&d1.path);
-        if name.starts_with('.') || name == "node_modules" || name == "dist" {
-            continue;
-        }
-        if is_solution_style_tsconfig(ws, &join_paths(&d1.path, "tsconfig.json")) {
-            return true;
-        }
-        let Ok(depth2_entries) = ws.read_dir(&d1.path) else {
-            continue;
-        };
-        for d2 in &depth2_entries {
-            if !d2.is_dir {
-                continue;
-            }
-            let name2 = d2.path.rsplit('/').next().unwrap_or(&d2.path);
-            if name2.starts_with('.') || name2 == "node_modules" || name2 == "dist" {
-                continue;
-            }
-            if is_solution_style_tsconfig(ws, &join_paths(&d2.path, "tsconfig.json")) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn is_solution_style_tsconfig(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> bool {
-    let Some(content) = ws.read_file(tsconfig_path) else {
-        return false;
-    };
-    let cleaned = strip_json_comments(&content);
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
-        return false;
-    };
-    json.get("references")
-        .and_then(|v| v.as_array())
-        .is_some_and(|refs| !refs.is_empty())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

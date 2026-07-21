@@ -105,6 +105,21 @@ async function assertCheckedJsInvalidMemberFollowsAny(): Promise<void> {
   await assertTsExpectErrorFileHolds(fixtureFile("js", true));
 }
 
+async function assertPlainJsLaxControlHover(): Promise<void> {
+  // D7 same-shape control: the plain `.js` sibling in the same lax jsconfig
+  // project carries the SAME member-access shape (`domEvent.clientX` plus
+  // `.pointerType`/`.button`) as the DomEventHandler carrier's script. Both
+  // legs expect the identical unannotated-any quickinfo on the same route, so
+  // a dead carrier hover with a live control hover isolates the defect to the
+  // carrier lane — never the provider.
+  const hover = await hoverTextAt({
+    file: "src/js-lax/project.js",
+    token: "domEvent",
+    occurrence: 0,
+  });
+  assert.match(hover, /:\s*any\b/, `plain .js control must answer the same hover: ${hover}`);
+}
+
 async function assertClassicOrLegacyBoundary(kind: "js" | "ts"): Promise<void> {
   const fw = framework();
   if (!fw) throw new Error("TEST_DEFECT: DOM event boundary loaded for wrong fixture");
@@ -200,6 +215,21 @@ suite(`DOM event handler contracts [${FIXTURE_NAME}]`, function () {
         "ISSUE-js-lax-dom-event-config",
         "lax JS",
         "checkJs=false diagnostic policy",
+        error,
+      );
+    }
+  });
+
+  test("shared.js-lax.dom-event.plain-js-control-hover", async function () {
+    try {
+      await assertPlainJsLaxControlHover();
+    } catch (error) {
+      productGap(
+        this,
+        this.test!.title,
+        "ISSUE-js-lax-dom-event-config",
+        "lax JS plain-.js control",
+        "hover",
         error,
       );
     }

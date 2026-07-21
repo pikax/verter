@@ -930,37 +930,28 @@ pub struct EvictionPolicyConfig {
     pub promote_threshold: u32,
 }
 
-/// Per-method timeout budgets for audited LSP handlers.
+/// One duration per LSP method, addressable by
+/// [`verter_audit::payloads::tags::LspMethodTag`].
 ///
-/// Each `*_with_audit` LSP handler wraps its work in a budget
-/// timeout. On expiry (or on receipt of an LSP `$/cancelRequest`
-/// translated to a deadline elapse), the handler finalises the
-/// audit registration with the cancellation marker
-/// `LspRequestPayload { error: Some("cancelled".to_string()), .. }`.
-/// This makes superseded LSP requests observable in the audit
-/// records store rather than leaking entries in the active-request
-/// registry.
+/// Used twice by [`LspMethodTimeoutsConfig`], for the two independent bounds a
+/// handler runs under: the audit-supersede SLO and the always-on production
+/// request deadline. One type, so a new method kind gains both bounds at once
+/// and neither table can silently drift out of the other's coverage.
 ///
-/// All values are durations. `Duration::ZERO` disables the timeout
-/// for that method (the handler runs to completion); production
-/// builds should retain the defaults so the leak guard is exercised
-/// continuously.
+/// `Duration::ZERO` disables the bound for that method (the handler runs to
+/// completion).
 #[derive(Debug, Clone)]
-pub struct LspMethodTimeoutsConfig {
-    /// `textDocument/hover` — fast lookup; typing-driven supersede
-    /// dominates the workload, so the budget is tight.
+pub struct LspMethodBudgets {
+    /// `textDocument/hover`.
     pub hover: std::time::Duration,
-    /// `textDocument/definition` and `textDocument/typeDefinition`.
+    /// `textDocument/definition`, `textDocument/typeDefinition`, and
+    /// `textDocument/documentHighlight` — the position-bound navigation family.
     pub goto_definition: std::time::Duration,
-    /// `textDocument/completion` — wider budget because completion
-    /// frequently round-trips through the type provider.
+    /// `textDocument/completion` and `completionItem/resolve`.
     pub completion: std::time::Duration,
-    /// `textDocument/references` — workspace-wide search, larger
-    /// budget than the position-bound methods.
+    /// `textDocument/references` — workspace-wide search.
     pub references: std::time::Duration,
-    /// `textDocument/diagnostics` — push-diagnostics path; bounded
-    /// by the debounce upstream but capped here to keep the leak
-    /// guard discriminating.
+    /// `textDocument/publishDiagnostics` — push path.
     pub diagnostics: std::time::Duration,
     /// `textDocument/documentSymbol`.
     pub document_symbols: std::time::Duration,
@@ -968,15 +959,69 @@ pub struct LspMethodTimeoutsConfig {
     pub semantic_tokens: std::time::Duration,
     /// `textDocument/inlayHint`.
     pub inlay_hints: std::time::Duration,
-    /// `textDocument/codeAction`.
+    /// `textDocument/codeAction`, and `textDocument/signatureHelp` — the
+    /// keystroke-driven assist family.
     pub code_action: std::time::Duration,
-    /// `textDocument/rename` — workspace-wide edit; matches the
-    /// references budget.
+    /// `textDocument/rename` — workspace-wide edit.
     pub rename: std::time::Duration,
+    /// Every kind not enumerated above ([`LspMethodTag::Other`]). Batch and
+    /// non-interactive work lands here, so this is the long absolute backstop
+    /// rather than a human-scaled interactive budget.
+    pub other: std::time::Duration,
 }
 
-impl Default for LspMethodTimeoutsConfig {
-    fn default() -> Self {
+impl LspMethodBudgets {
+    /// The budget for `tag`. The single authority for method → budget: handlers
+    /// select their bound from the tag they already carry rather than each
+    /// naming a config field, so a method cannot be wired to the wrong row.
+    pub fn for_method(
+        &self,
+        tag: &verter_audit::payloads::tags::LspMethodTag,
+    ) -> std::time::Duration {
+        use verter_audit::payloads::tags::LspMethodTag as Tag;
+        match tag {
+            Tag::Hover => self.hover,
+            Tag::GotoDefinition => self.goto_definition,
+            Tag::Completion => self.completion,
+            Tag::References => self.references,
+            Tag::Diagnostics => self.diagnostics,
+            Tag::DocumentSymbols => self.document_symbols,
+            Tag::SemanticTokens => self.semantic_tokens,
+            Tag::InlayHints => self.inlay_hints,
+            Tag::CodeAction => self.code_action,
+            Tag::Rename => self.rename,
+            Tag::Other(_) => self.other,
+        }
+    }
+}
+
+/// The two bounds every audited LSP handler runs under.
+///
+/// [`Self::audit_supersede`] is the tight observability SLO applied only when
+/// `audit_enabled = true`: on expiry the handler finalises the audit
+/// registration with the cancellation marker
+/// `LspRequestPayload { error: Some("cancelled".to_string()), .. }`, so
+/// superseded LSP requests are observable in the records store rather than
+/// leaking entries in the active-request registry.
+///
+/// [`Self::request_deadlines`] is the always-on production bound applied when
+/// `audit_enabled = false` (the production default). Without it, production ran
+/// every handler with ZERO timeout and a hung provider wedged the handler
+/// forever.
+#[derive(Debug, Clone)]
+pub struct LspMethodTimeoutsConfig {
+    /// Audit-supersede SLO. Consulted only when `audit_enabled = true`.
+    pub audit_supersede: LspMethodBudgets,
+    /// Always-on production request deadlines — see
+    /// [`LspMethodBudgets::interactive_defaults`] for how each value is derived.
+    pub request_deadlines: LspMethodBudgets,
+}
+
+impl LspMethodBudgets {
+    /// The audit-supersede SLO defaults — tight, because typing-driven
+    /// supersede dominates the audited workload and the point is to observe the
+    /// supersede, not to serve the request.
+    pub fn audit_supersede_defaults() -> Self {
         Self {
             hover: std::time::Duration::from_millis(500),
             goto_definition: std::time::Duration::from_millis(500),
@@ -988,6 +1033,62 @@ impl Default for LspMethodTimeoutsConfig {
             inlay_hints: std::time::Duration::from_millis(1000),
             code_action: std::time::Duration::from_millis(500),
             rename: std::time::Duration::from_millis(5000),
+            other: std::time::Duration::from_millis(5000),
+        }
+    }
+
+    /// The production request-deadline defaults.
+    ///
+    /// A deadline here is a last-resort fail-closed, NOT a latency target: a
+    /// request that routinely reaches one is an unfixed defect, not a tuned
+    /// parameter. Each value is therefore set from the MEASURED healthy p95 on
+    /// the real 731-SFC corpus (managed-tsgo route) with enough headroom that a
+    /// working request never reaches it, while staying inside the span a human
+    /// will wait for a keystroke-driven answer:
+    ///
+    /// | method             | measured healthy p95 | budget | headroom |
+    /// |--------------------|----------------------|--------|----------|
+    /// | hover              | 318ms                | 1.5s   | 4.7x     |
+    /// | goto definition    | 769ms                | 2.5s   | 3.3x     |
+    /// | references         | 661ms                | 3s     | 4.5x     |
+    /// | completion         | 2843ms               | 6s     | 2.1x     |
+    ///
+    /// Completion is the outlier and is deliberately NOT cut to the same human
+    /// scale as the rest: its measured p95 is already 2.8s, so a 3-4s budget
+    /// would fail-close roughly one in twenty completions that were working.
+    /// The 2.8s p95 is itself the defect; shortening the deadline would hide it
+    /// behind a cancellation rather than fix it.
+    ///
+    /// The unmeasured kinds take the budget of the measured kind they share a
+    /// cost structure with: document symbols and code action with definition
+    /// (single-file, position-bound), semantic tokens and inlay hints with
+    /// references (whole-file enumeration), rename above references (same
+    /// workspace-wide search plus the edit assembly).
+    ///
+    /// [`Self::other`] keeps the previous flat 15s: unenumerated kinds are
+    /// batch/non-interactive, where a long absolute backstop is correct.
+    pub fn interactive_defaults() -> Self {
+        Self {
+            hover: std::time::Duration::from_millis(1500),
+            goto_definition: std::time::Duration::from_millis(2500),
+            completion: std::time::Duration::from_secs(6),
+            references: std::time::Duration::from_secs(3),
+            diagnostics: std::time::Duration::from_secs(5),
+            document_symbols: std::time::Duration::from_millis(2500),
+            semantic_tokens: std::time::Duration::from_secs(3),
+            inlay_hints: std::time::Duration::from_secs(3),
+            code_action: std::time::Duration::from_millis(2500),
+            rename: std::time::Duration::from_secs(5),
+            other: std::time::Duration::from_secs(15),
+        }
+    }
+}
+
+impl Default for LspMethodTimeoutsConfig {
+    fn default() -> Self {
+        Self {
+            audit_supersede: LspMethodBudgets::audit_supersede_defaults(),
+            request_deadlines: LspMethodBudgets::interactive_defaults(),
         }
     }
 }
@@ -1577,6 +1678,22 @@ pub struct FileAnalysisSnapshot {
     pub script_binding_occurrences:
         Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
 
+    /// Script-side usage facts for macro-declared members (unused-declaration
+    /// diagnostics). `None` for files without Vue macros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
+
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions —
+    /// style `v-bind()` resolves PROPS by bare name, so prop-member liveness
+    /// consumes this set (see `ScriptAnalysisSnapshot::style_vbind_roots`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_vbind_roots: Vec<String>,
+
+    /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
+    /// template element IR (Svelte). Empty for Vue.
+    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
+    pub markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
+
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
@@ -2067,6 +2184,10 @@ pub(crate) struct ParseSnapshot {
     pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
+    /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
+    /// template element IR (Svelte `class="x"` entries + `class:x` directives).
+    /// Empty for Vue (its template element tree carries class facts).
+    pub(crate) markup_class_tokens: Vec<verter_semantic::analysis::MarkupClassToken>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
 }
@@ -2328,6 +2449,12 @@ pub(crate) struct CompileInput {
     /// Local/exported bindings from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
     pub(crate) script_bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
+    /// Script-side macro-member usage facts from the effective script analysis.
+    /// Feeds the unused-declaration inventories during template conversion.
+    pub(crate) script_macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
+    /// Vue API call sites from the effective script analysis (the `useSlots()`
+    /// fail-open gate for unused-slot diagnostics).
+    pub(crate) script_vue_api_calls: Vec<verter_semantic::analysis::types::VueApiCallSite>,
     /// Framework-neutral parse artifact from upsert, reused during
     /// compilation to avoid re-parsing.
     pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,

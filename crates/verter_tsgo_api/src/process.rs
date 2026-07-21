@@ -154,7 +154,7 @@ pub fn process_alive(pid: u32) -> bool {
 
     const ERROR_ACCESS_DENIED: i32 = 5;
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle != std::ptr::null_mut() {
+    if !handle.is_null() {
         unsafe {
             CloseHandle(handle);
         }
@@ -190,7 +190,7 @@ pub fn terminate_process(pid: u32) {
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-    if handle != std::ptr::null_mut() {
+    if !handle.is_null() {
         unsafe {
             TerminateProcess(handle, 1);
             CloseHandle(handle);
@@ -224,7 +224,7 @@ impl JobHandle {
 
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job == std::ptr::null_mut() {
+            if job.is_null() {
                 return None;
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -240,7 +240,7 @@ impl JobHandle {
                 return None;
             }
             let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-            if process == std::ptr::null_mut() {
+            if process.is_null() {
                 CloseHandle(job);
                 return None;
             }

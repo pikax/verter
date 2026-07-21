@@ -32,7 +32,13 @@ export type EditorNeutralContractFeature =
   | "plain-control-completion"
   | "consumer-diagnostics"
   | "provider-attestation"
-  | "shared-provider-topology";
+  | "shared-provider-topology"
+  /**
+   * Fail-closed CSS class boundary: a markup class token with NO declaring
+   * rule must produce an EMPTY hover and an EMPTY definition — never a
+   * mis-mapped affordance (e.g. a same-named script binding).
+   */
+  | "css-class-silent";
 
 export interface LspRange {
   readonly start: LspPosition;
@@ -83,6 +89,16 @@ export interface ProviderAttestation {
   readonly publicKind: "tsserver" | "tsgo" | "editor-tsserver" | "none";
   readonly reason?: string;
   readonly startedKinds: readonly string[];
+  /**
+   * Structured provider recommendation from `$/verter/typeProviderStatus`
+   * (tsgo-preferred model): REQUIRED on tsserver-family serving, FORBIDDEN on
+   * tsgo-family serving.
+   */
+  readonly recommendation?: {
+    readonly preferred: string;
+    readonly reason: string;
+    readonly knownGaps: readonly string[];
+  };
 }
 
 export interface ProviderTopologyAttestation {
@@ -507,6 +523,51 @@ const LAX_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
   },
 ];
 
+const LAX_JSCONFIG_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
+  {
+    id: "vue-js-dom-event-policy-lax-jsconfig",
+    framework: "vue",
+    document: "src/policy/lax-jsconfig/vue/JsConfigEventHandler.vue",
+    eventAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e.pointerId",
+    },
+    declarationAnchor: {
+      text: "function myClick(e) {",
+      occurrence: 0,
+      token: "e",
+    },
+    completionAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: ".",
+      offset: 1,
+    },
+  },
+  {
+    id: "svelte-js-dom-event-policy-lax-jsconfig",
+    framework: "svelte",
+    document: "src/policy/lax-jsconfig/svelte/JsConfigEventHandler.svelte",
+    eventAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e.pointerId",
+    },
+    declarationAnchor: {
+      text: "function myClick(e) {",
+      occurrence: 0,
+      token: "e",
+    },
+    completionAnchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: ".",
+      offset: 1,
+    },
+  },
+];
+
 /** Construct the exact contract inventory. The returned list is stable and deduplicated. */
 export function createEditorNeutralContractInventory(): readonly EditorNeutralContractCase[] {
   const cases: EditorNeutralContractCase[] = [];
@@ -601,6 +662,120 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         anchor: carrier.barrelDefinitionAnchor,
         expectedDefinitionDocument: carrier.document,
         expectedDefinitionRange: FILE_START_RANGE,
+      },
+    );
+  }
+
+  // CSS class intelligence: markup class ↔ component style navigation
+  // (Vue scoped styles + Svelte scoped-by-default styles), typed v-bind()
+  // hover, and the fail-closed no-rule boundary. Verter-native results —
+  // asserted identically on every provider route (no provider shadowing).
+  {
+    const vueCss = {
+      framework: "vue" as const,
+      language: "ts" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+      document: "src/vue/CssIntel.vue",
+    };
+    const svelteCss = {
+      framework: "svelte" as const,
+      language: "ts" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+      document: "src/svelte/CssIntel.svelte",
+    };
+    cases.push(
+      {
+        ...vueCss,
+        id: "vue-css.class.hover",
+        feature: "hover",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        requiredHoverFragments: ["```css", ".chip-live"],
+      },
+      {
+        ...vueCss,
+        id: "vue-css.class.definition",
+        feature: "definition",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        expectedDefinitionDocument: "src/vue/CssIntel.vue",
+        expectedDefinitionAnchor: {
+          text: ".chip-live {",
+          occurrence: 0,
+          token: "chip-live",
+        },
+      },
+      {
+        ...vueCss,
+        id: "vue-css.class.no-rule.silent",
+        feature: "css-class-silent",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "ghost-none",
+        },
+      },
+      {
+        ...vueCss,
+        id: "vue-css.vbind.hover",
+        feature: "hover",
+        anchor: {
+          text: "width: v-bind(chipWidth);",
+          occurrence: 0,
+          token: "chipWidth",
+        },
+        requiredHoverFragments: ["v-bind(chipWidth)", "chipWidth: 12"],
+      },
+      {
+        ...svelteCss,
+        id: "svelte-css.class.hover",
+        feature: "hover",
+        anchor: {
+          text: '<div class="chip-live" class:on>',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        requiredHoverFragments: ["```css", ".chip-live"],
+      },
+      {
+        ...svelteCss,
+        id: "svelte-css.class.definition",
+        feature: "definition",
+        anchor: {
+          text: '<div class="chip-live" class:on>',
+          occurrence: 0,
+          token: "chip-live",
+        },
+        expectedDefinitionDocument: "src/svelte/CssIntel.svelte",
+        expectedDefinitionAnchor: {
+          text: ".chip-live {",
+          occurrence: 0,
+          token: "chip-live",
+        },
+      },
+      {
+        ...svelteCss,
+        id: "svelte-css.class-directive.definition",
+        feature: "definition",
+        anchor: {
+          text: "class:on>",
+          occurrence: 0,
+          token: "on",
+        },
+        expectedDefinitionDocument: "src/svelte/CssIntel.svelte",
+        expectedDefinitionAnchor: {
+          text: ".on {",
+          occurrence: 0,
+          token: "on",
+        },
       },
     );
   }
@@ -705,6 +880,70 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       },
     );
   }
+
+  // D7: the same lax-JS carrier family, but configured by `jsconfig.json`
+  // (never a `tsconfig.json`) — the exact project shape of the reported
+  // js-lax repro. A plain `.js` sibling carrying the SAME JSDoc-annotated
+  // member-access shape is the discriminating control: it hovers through the
+  // ungated plain-file lane, while the carriers exercise the jsconfig-owned
+  // carrier binding — the A/B isolates the carrier lane, never the typing
+  // mechanism.
+  for (const handler of LAX_JSCONFIG_DOM_EVENT_HANDLERS) {
+    const base = {
+      framework: handler.framework,
+      language: "js" as const,
+      providers: ALL_PROVIDERS,
+      surface: "standard-lsp" as const,
+    };
+    cases.push(
+      {
+        ...base,
+        id: `${handler.id}.diagnostics.clean`,
+        feature: "diagnostics-clean",
+        document: handler.document,
+      },
+      {
+        ...base,
+        id: `${handler.id}.hover`,
+        feature: "hover",
+        document: handler.document,
+        anchor: handler.eventAnchor,
+        requiredHoverFragments: ["PointerEvent"],
+        forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+      },
+      {
+        ...base,
+        id: `${handler.id}.completion`,
+        feature: "completion",
+        document: handler.document,
+        anchor: handler.completionAnchor,
+        expectedCompletion: "pointerId",
+      },
+      {
+        ...base,
+        id: `${handler.id}.definition`,
+        feature: "definition",
+        document: handler.document,
+        anchor: handler.eventAnchor,
+        expectedDefinitionDocument: handler.document,
+        expectedDefinitionAnchor: handler.declarationAnchor,
+      },
+    );
+  }
+  cases.push({
+    id: "plain-js-lax-jsconfig-control.hover",
+    surface: "standard-lsp",
+    feature: "plain-control-hover",
+    document: "src/policy/lax-jsconfig/plain-control.js",
+    anchor: {
+      text: "e.pointerId;",
+      occurrence: 0,
+      token: "e.pointerId",
+    },
+    requiredHoverFragments: ["PointerEvent"],
+    forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
+    providers: ALL_PROVIDERS,
+  });
 
   cases.push(
     {
@@ -1223,6 +1462,24 @@ export async function executeEditorNeutralContractCase(
       }
       return;
     }
+    case "css-class-silent": {
+      const position = positionFor(testCase, driver, sources);
+      const hover = await driver.hover(testCase.document, position);
+      const text = hoverText(hover);
+      if (text.trim().length > 0) {
+        throw new Error(
+          `${testCase.id}: a rule-less class token must produce NO hover, got: ${text}`,
+        );
+      }
+      const definition = await driver.definition(testCase.document, position);
+      const locations = definitionLocations(definition);
+      if (locations.length > 0) {
+        throw new Error(
+          `${testCase.id}: a rule-less class token must produce NO definition, got ${locations.length} location(s)`,
+        );
+      }
+      return;
+    }
     case "rename": {
       const result = await driver.rename(
         testCase.document,
@@ -1288,6 +1545,24 @@ export async function executeEditorNeutralContractCase(
         ) {
           throw new Error(`${testCase.id}: tsserver provider was not started/attested`);
         }
+        // tsgo-preferred flip: tsserver-family serving MUST carry the
+        // structured TSGO recommendation with honest, non-empty known gaps
+        // and editor-agnostic wording (no client settings keys server-side).
+        const recommendation = attestation.recommendation;
+        if (!recommendation || recommendation.preferred !== "tsgo") {
+          throw new Error(
+            `${testCase.id}: tsserver serving must recommend tsgo, got ${JSON.stringify(recommendation)}`,
+          );
+        }
+        if (recommendation.knownGaps.length === 0) {
+          throw new Error(`${testCase.id}: recommendation must disclose known gaps honestly`);
+        }
+        const portable = [recommendation.reason, ...recommendation.knownGaps];
+        if (portable.some((text) => text.includes("VS Code") || text.includes("verter."))) {
+          throw new Error(
+            `${testCase.id}: recommendation wording must be editor-agnostic: ${JSON.stringify(portable)}`,
+          );
+        }
       } else if (driver.route === "tsgo") {
         if (attestation.publicKind !== "tsgo" || !attestation.startedKinds.includes("tsgo")) {
           throw new Error(`${testCase.id}: managed tsgo provider was not started/attested`);
@@ -1299,6 +1574,14 @@ export async function executeEditorNeutralContractCase(
       ) {
         throw new Error(
           `${testCase.id}: shared route lacks editor-owned provenance or already started fallback: ${JSON.stringify(attestation)}`,
+        );
+      }
+      // Negative (tsgo-family routes): the server never nags users already on
+      // the preferred provider — no recommendation, and no retired
+      // "known limitations" warning content.
+      if (driver.route !== "tsserver" && attestation.recommendation !== undefined) {
+        throw new Error(
+          `${testCase.id}: tsgo-family serving must carry no recommendation, got ${JSON.stringify(attestation.recommendation)}`,
         );
       }
       return;

@@ -67,6 +67,12 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Pipes",
+    # `Win32::System::Pipes` re-exports the named-pipe access/mode flags
+    # (`PIPE_ACCESS_DUPLEX`, …) from `Win32::Storage::FileSystem` gated on
+    # `all(Win32_Security, Win32_Storage_FileSystem)`, so the fake named-pipe
+    # engine needs this feature explicitly (never relying on cross-crate
+    # feature-unification leakage, which `--all-targets` resolution breaks).
+    "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
 ] }
 

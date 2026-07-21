@@ -213,8 +213,68 @@ export type ExtractComponent<T> =
         : never
     : T;
 
+declare module "vue" {
+  /**
+   * Guarantee the augmentable `GlobalComponents` surface exists on EVERY Vue
+   * version (Vue <3.5 ships no `GlobalComponents` export): an empty interface
+   * merges with the user's `components.d.ts` / UI-kit augmentations when
+   * present, and keeps {@link GlobalComponentType} fail-closed (`unknown`,
+   * never error-`any`) when absent.
+   */
+  interface GlobalComponents {}
+}
+
+/**
+ * Navigation surface for the go-to-definition probes Verter's IDE codegen
+ * emits beside each GlobalComponents fallback const: a member access on the
+ * returned (augmentation-merged) `GlobalComponents` interface keeps the
+ * member's declaration links, so a template tag can jump to the user's real
+ * registration declaration.
+ */
+export declare function globalComponentsNav(): import("vue").GlobalComponents;
+
+/**
+ * The registered `GlobalComponents` member type for a component name, or the
+ * fail-closed `unknown` when the name is not registered.
+ *
+ * Backs the per-tag fallback consts Verter's IDE codegen synthesizes for
+ * globally-registered components (`app.component()` / auto-import plugins):
+ * the user project's `components.d.ts` / UI-kit `GlobalComponents` augmentation
+ * supplies the member; an unregistered tag stays `unknown` and produces a real
+ * JSX diagnostic instead of a silent `any`.
+ */
+export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents
+  ? import("vue").GlobalComponents[N]
+  : unknown;
+
+/**
+ * The registered `GlobalComponents` member type for a KEBAB/lowercase-authored
+ * tag, or the fail-OPEN intrinsic-element surface when the tag is not
+ * registered.
+ *
+ * Backs the fallback consts synthesized for tags that were only ever authored
+ * in a non-Pascal form (`<my-widget>`): a registered member (looked up by the
+ * PascalCase name `N`, then the authored key `K`) resolves to its component
+ * type; an UNREGISTERED tag degrades to a function component over
+ * `JSX.IntrinsicElements[K]` — the same props surface the authored intrinsic
+ * tag had before any rewrite (a user's `IntrinsicElements` web-component
+ * augmentation keeps typing it; Vue's `[name: string]: any` index otherwise
+ * yields `any`) — never a false "no construct signatures" diagnostic on a
+ * web-component tag.
+ */
+export type GlobalComponentKebabType<
+  N,
+  K extends string,
+> = N extends keyof import("vue").GlobalComponents
+  ? import("vue").GlobalComponents[N]
+  : K extends keyof import("vue").GlobalComponents
+    ? import("vue").GlobalComponents[K]
+    : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements
+      ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any
+      : (props: Record<string, any>) => any;
+
 export type ExtractRenderComponent<T> = T extends {
-  new (): infer I;
+  new (...args: any[]): infer I;
 }
   ? I extends { $props: any }
     ? T
@@ -229,9 +289,11 @@ export type ExtractRenderComponent<T> = T extends {
         : HTMLElement
     : T extends HTMLElement
       ? (props: ExtractFromHTMLElement<T>) => T
-      : T extends keyof import("vue").NativeElements
-        ? (props: import("vue").NativeElements[T]) => JSX.Element
-        : (props: {}) => JSX.Element;
+      : T extends keyof import("vue").GlobalComponents
+        ? ExtractRenderComponent<import("vue").GlobalComponents[T]>
+        : T extends keyof import("vue").NativeElements
+          ? (props: import("vue").NativeElements[T]) => JSX.Element
+          : (props: {}) => JSX.Element;
 
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;

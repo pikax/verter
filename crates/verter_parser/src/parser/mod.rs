@@ -381,6 +381,9 @@ impl<'alloc> Syntax {
             TokenizerEvent::DirName { start, end } => {
                 self.handle_directive_name(*start, *end);
             }
+            TokenizerEvent::DirVPre { start, end } => {
+                self.handle_dir_v_pre(*start, *end, ctx);
+            }
             TokenizerEvent::DirArg {
                 is_dynamic,
                 start,
@@ -1041,6 +1044,30 @@ impl Syntax {
             prop.arg_end = Some(arg_end);
             prop.is_dynamic = Some(is_dynamic);
         }
+    }
+
+    /// The tokenizer's v-pre prepass owns the subtree skip (pure tokenizer
+    /// state) and emits `v-pre` as a dedicated event with no `AttribEnd`.
+    /// Record the completed directive fact — the typed token IDE hovers read —
+    /// through the same routing as every other directive.
+    fn handle_dir_v_pre<'alloc>(
+        &mut self,
+        start: u32,
+        end: u32,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.current_prop = Some(NodeProp {
+            start,
+            name_end: end,
+            is_directive: true,
+            arg_start: None,
+            arg_end: None,
+            is_dynamic: None,
+            value_start: None,
+            value_end: None,
+            modifiers: SmallVec::new(),
+        });
+        self.handle_attribute_end(end, QuoteType::NoValue, ctx);
     }
 
     fn handle_directive_modifier(&mut self, modifier_start: u32, modifier_end: u32) {

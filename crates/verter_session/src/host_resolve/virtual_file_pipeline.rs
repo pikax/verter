@@ -959,18 +959,13 @@ impl VerterHost {
             // the HostBacked cache-miss path builds (source, macro deps,
             // style v-bind vars from the same parse snapshot; override
             // layers from the same host state).
+            // The SOUND OXC-derived roots recorded on each analyzed v-bind —
+            // never a text split of the expression.
             let style_v_bind_vars = parse
                 .style_analyses
                 .iter()
-                .flat_map(|sa| {
-                    sa.v_binds.iter().map(|vb| {
-                        vb.expression
-                            .split('.')
-                            .next()
-                            .unwrap_or(&vb.expression)
-                            .to_string()
-                    })
-                })
+                .flat_map(|sa| &sa.v_binds)
+                .flat_map(|vb| vb.expr_roots.iter().cloned())
                 .collect();
             CompileInput {
                 canonical_id: canonical.clone(),
@@ -985,6 +980,8 @@ impl VerterHost {
                 script_imports: efs.script_analysis.imports.clone(),
                 script_macros: efs.script_analysis.macros.clone(),
                 script_bindings: efs.script_analysis.bindings.clone(),
+                script_macro_usage: efs.script_analysis.macro_usage.clone(),
+                script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
                 framework_parse: efs.framework_parse,
                 style_v_bind_vars,
             }
@@ -1302,18 +1299,15 @@ impl VerterHost {
                     script_imports: efs.script_analysis.imports.clone(),
                     script_macros: efs.script_analysis.macros.clone(),
                     script_bindings: efs.script_analysis.bindings.clone(),
+                    script_macro_usage: efs.script_analysis.macro_usage.clone(),
+                    script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
                     framework_parse: efs.framework_parse,
+                    // The SOUND OXC-derived roots recorded on each analyzed
+                    // v-bind — never a text split of the expression.
                     style_v_bind_vars: style_analyses
                         .iter()
-                        .flat_map(|sa| {
-                            sa.v_binds.iter().map(|vb| {
-                                vb.expression
-                                    .split('.')
-                                    .next()
-                                    .unwrap_or(&vb.expression)
-                                    .to_string()
-                            })
-                        })
+                        .flat_map(|sa| &sa.v_binds)
+                        .flat_map(|vb| vb.expr_roots.iter().cloned())
                         .collect(),
                 };
 
@@ -3000,11 +2994,21 @@ impl VerterHost {
                 &snapshot.script_macros,
                 &snapshot.script_bindings,
             );
+            let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
+                &snapshot.script_macros,
+                snapshot.script_macro_usage.as_ref(),
+                &snapshot.script_vue_api_calls,
+                &snapshot.script_bindings,
+                // The compile input style v-bind vars are the SOUND OXC-derived
+                // roots the analysis snapshot records on each analyzed v-bind.
+                &snapshot.style_v_bind_vars,
+            );
             crate::template_convert::convert_raw_to_analysis(
                 raw,
                 &all_imports,
                 &binding_class_unions,
                 props_binding_name.as_deref(),
+                Some(&unused_ctx),
             )
         });
 

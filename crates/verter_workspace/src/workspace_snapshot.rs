@@ -353,6 +353,181 @@ impl WorkspaceSnapshot {
             })
     }
 
+    /// The single DEFAULT configured owner for `canonical_id`, modelling tsgo's
+    /// `ProjectCollection.GetDefaultProject` + `findDefaultConfiguredProject`
+    /// (`microsoft/typescript-go` `internal/project/projectcollection.go`).
+    /// Returns the ONE configured project that serves the file's per-file IDE
+    /// features (hover / definition / completion / diagnostics), or `None` when
+    /// NO configured project includes it.
+    ///
+    /// This NEVER yields a terminal "ambiguous / multiple owners" for a
+    /// configured-container topology — tsgo's `firstConfiguredProject` fallback
+    /// always resolves a winner when >= 1 project contains the file, so the sole
+    /// terminal absence is genuine `None` (no configured owner). The winner is
+    /// chosen ONLY from ORDERED structures (the `projects` Vec, each project's
+    /// `references` Vec, an ordered visited set) — never `HashSet`/`HashMap`
+    /// iteration; `ConfiguredMembership::materialized_files` is an `FxHashSet` but
+    /// is only ever `contains()`-tested, never iterated to choose the winner.
+    ///
+    /// Direct-inclusion model: Verter's [`ConfiguredMembership`] is include/`files`
+    /// only and carries NO `IsSourceFromProjectReference` (program-level
+    /// project-reference-redirect) data, so for a carrier EVERY include/`files`
+    /// hit is treated as DIRECT and tsgo's `multipleDirectInclusions` is
+    /// effectively always true — the reference BFS decides. This is the bounded,
+    /// documented divergence recorded in the Project-Bound External-TS Contract.
+    ///
+    /// This is provider-neutral: the ONE snapshot decision that the tsserver,
+    /// managed-tsgo, and shared-tsgo carrier routes all consume identically.
+    pub fn default_configured_owner_for_file(&self, canonical_id: &str) -> Option<ProjectId> {
+        let path = CanonicalPath::new(canonical_id);
+
+        // Claimants = configured projects that DIRECTLY include the file, walked
+        // in the pre-sorted `projects` precedence order (an ordered Vec, never a
+        // set).
+        let claimants: SmallVec<[ProjectId; 4]> = self
+            .projects
+            .iter()
+            .filter(|project| match &project.payload {
+                // The default-configured-owner walk models tsgo's
+                // program-file membership: a NON-EMPTY materialized set is
+                // authoritative, so a file no configured program contains
+                // yields `None` rather than an owner invented from a broad
+                // include glob. General spec-based ownership stays in
+                // `membership.contains` (used by `owners_for_file`).
+                ProjectPayload::Configured { membership, .. } => {
+                    membership.directly_includes(&path)
+                }
+                ProjectPayload::Fallback { .. } => false,
+            })
+            .map(|project| project.id)
+            .collect();
+
+        match claimants.len() {
+            // GetDefaultProject: no configured project contains the file.
+            0 => return None,
+            // Exactly one containing project is the default owner.
+            1 => return Some(claimants[0]),
+            // multipleDirectInclusions ⇒ run the findDefaultConfiguredProject walk.
+            _ => {}
+        }
+
+        if let Some(winner) = self.find_default_configured_project(&path, &claimants) {
+            return Some(winner);
+        }
+
+        // firstConfiguredProject fallback: the lexicographically-least
+        // `tsconfig_path` among the CLAIMANTS. DISTINCT from the declared-
+        // reference BFS order, and drawn only from configured claimants — never
+        // an inferred/fallback project.
+        claimants
+            .iter()
+            .copied()
+            .min_by(|a, b| self.tsconfig_path(*a).cmp(&self.tsconfig_path(*b)))
+    }
+
+    /// The tsgo `findDefaultConfiguredProject` walk: start at the nearest
+    /// ancestor solution (the nearest literal `tsconfig.json`/`jsconfig.json`),
+    /// BFS its `references` in DECLARED order, return the first project in BFS
+    /// order that directly includes the file, climbing to the next ancestor
+    /// solution unless `disableSolutionSearching` is set. `None` when no solution
+    /// reference graph reaches a claimant.
+    fn find_default_configured_project(
+        &self,
+        path: &CanonicalPath,
+        claimants: &[ProjectId],
+    ) -> Option<ProjectId> {
+        // computeConfigFileName: nearest literal-config solution to the file dir.
+        let start_dir = CanonicalPath::new(&crate::resolver::parent_dir(path.as_str()));
+        let mut entry = self.nearest_solution_config(&start_dir);
+        // Ordered visited set over solutions — the strictly-decreasing climb
+        // already terminates, this makes cycle-freedom explicit and bulletproof.
+        let mut visited_solutions: SmallVec<[ProjectId; 4]> = SmallVec::new();
+        while let Some(solution) = entry {
+            if visited_solutions.contains(&solution) {
+                break;
+            }
+            visited_solutions.push(solution);
+
+            if let Some(winner) = self.bfs_first_direct_includer(solution, claimants) {
+                return Some(winner);
+            }
+
+            // Honor `disableSolutionSearching` (default false) BEFORE climbing.
+            if let ProjectPayload::Configured {
+                compiler_options, ..
+            } = &self.projects[solution.0 as usize].payload
+            {
+                if compiler_options.disable_solution_searching {
+                    break;
+                }
+            }
+
+            // Climb to the nearest solution STRICTLY above this solution's root.
+            let parent =
+                crate::resolver::parent_dir(self.projects[solution.0 as usize].root.as_str());
+            if parent.is_empty() {
+                break;
+            }
+            entry = self.nearest_solution_config(&CanonicalPath::new(&parent));
+        }
+        None
+    }
+
+    /// The nearest ancestor configured project whose tsconfig BASENAME is the
+    /// literal `tsconfig.json`/`jsconfig.json` (mirrors tsgo `computeConfigFileName`
+    /// — a `tsconfig.app.json` is NEVER a "nearest config"). The deepest such
+    /// project whose root is an ancestor-or-equal of `dir` wins; roots nest, so
+    /// the deepest match is unambiguous.
+    fn nearest_solution_config(&self, dir: &CanonicalPath) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .filter(|project| match &project.payload {
+                ProjectPayload::Configured { tsconfig_path, .. } => {
+                    tsconfig_basename_is_literal(tsconfig_path)
+                        && dir.starts_with_dir(&project.root)
+                }
+                ProjectPayload::Fallback { .. } => false,
+            })
+            .max_by(|a, b| a.root.as_str().len().cmp(&b.root.as_str().len()))
+            .map(|project| project.id)
+    }
+
+    /// BFS from `entry` over the reference graph in DECLARED order; the first
+    /// project visited that is a claimant (directly includes the file) wins and
+    /// stops the search. An ordered visited set terminates reference cycles.
+    fn bfs_first_direct_includer(
+        &self,
+        entry: ProjectId,
+        claimants: &[ProjectId],
+    ) -> Option<ProjectId> {
+        let mut visited: SmallVec<[ProjectId; 8]> = SmallVec::new();
+        let mut queue: std::collections::VecDeque<ProjectId> = std::collections::VecDeque::new();
+        queue.push_back(entry);
+        while let Some(id) = queue.pop_front() {
+            if visited.contains(&id) {
+                continue;
+            }
+            visited.push(id);
+            // Verter treats every carrier include/`files` hit as DIRECT, so the
+            // first claimant in BFS order is the winner (stops the search).
+            if claimants.contains(&id) {
+                return Some(id);
+            }
+            if let ProjectPayload::Configured { references, .. } =
+                &self.projects[id.0 as usize].payload
+            {
+                for reference in references {
+                    if let Some(next) = self.configured_project_by_tsconfig(reference) {
+                        if !visited.contains(&next) {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// The single FALLBACK (tsconfig-less) owner for a file, or `None` when there is
     /// no fallback owner or the fallback ownership is itself ambiguous (>1).
     ///
@@ -401,6 +576,19 @@ impl OwnershipProject {
     pub fn is_fallback(&self) -> bool {
         matches!(self.payload, ProjectPayload::Fallback { .. })
     }
+}
+
+/// Whether a tsconfig path's basename is the literal `tsconfig.json` or
+/// `jsconfig.json` — tsgo's `computeConfigFileName` filter. A `tsconfig.app.json`
+/// / `tsconfig.components.json` is NOT a literal config name, so it is never a
+/// default-project BFS entry (only a leaf a solution `references`).
+fn tsconfig_basename_is_literal(tsconfig_path: &CanonicalPath) -> bool {
+    let basename = tsconfig_path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    basename == "tsconfig.json" || basename == "jsconfig.json"
 }
 
 /// Canonical precedence spec for project ordering.

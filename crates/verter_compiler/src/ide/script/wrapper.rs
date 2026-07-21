@@ -6,11 +6,13 @@
 //! emission helpers, the global-component fallback emitter, and the
 //! `to_pascal_case` / `should_infer_function_types` glue helpers.
 
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 
 use crate::ast::types::{AstNodeKind, TemplateAst};
 use crate::cursor::ScriptLanguage;
-use crate::ide::{IdeScriptOptions, CARRIER_API_VIRTUAL_SUFFIX};
+use crate::ide::{
+    matches_custom_element, GlobalComponentFallback, IdeScriptOptions, CARRIER_API_VIRTUAL_SUFFIX,
+};
 use crate::template::code_gen::types::CodeGenOutput;
 
 /// Prefix for all emitted ___VERTER___ types/functions.
@@ -20,32 +22,72 @@ pub(super) fn should_infer_function_types(lang: Option<ScriptLanguage>) -> bool 
     matches!(lang, Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX))
 }
 
-/// Collect the GlobalComponents fallback const names for every unresolved component
+/// Collect the GlobalComponents fallback consts for every unresolved component
 /// referenced in the template.
 ///
 /// A fallback const is materialized for each component tag that is NOT a builtin, NOT a
-/// member-expression tag (`Foo.Bar`), and NOT already bound by `is_bound` — exactly the
-/// set [`emit_global_component_fallbacks`] writes. Names are returned in first-seen
-/// source order and deduplicated.
+/// member-expression tag (`Foo.Bar`), NOT the `<component>` element itself, NOT a
+/// configured custom element (`custom_elements` prefix match — those stay authored
+/// intrinsics, never component-resolved), and NOT already bound by `is_bound` — exactly
+/// the set [`emit_global_component_fallbacks`] writes. A `<component is="Name">` STATIC
+/// target contributes `Name` (unless it is a native HTML tag) because the template arm
+/// rewrites the tag to that identifier. Names are returned in first-seen source order
+/// and deduplicated by Pascal name; an entry's authored form upgrades to Pascal intent
+/// (fail-closed) when ANY occurrence authors the Pascal name itself (see
+/// [`GlobalComponentFallback`]).
 ///
 /// Collection is split from emission so that ONE list feeds both the emitted consts and
 /// the template/event-typing inventory ([`crate::ide::TemplateComponentBindings`]): a
 /// globally-registered component then types identically wherever it is referenced
-/// (`@event` spread payloads, simple-handler param inference), via the in-scope
+/// (tag JSX, `@event` spread payloads, simple-handler param inference), via the in-scope
 /// `InstanceType<typeof Pascal>["$props"]` const rather than `import('vue').GlobalComponents[...]`
 /// (which the `tsgo` TypeProvider cannot resolve).
 pub(super) fn collect_global_component_fallbacks(
     template_ast: Option<&TemplateAst>,
     source: &str,
+    custom_elements: Option<&[String]>,
     is_bound: impl Fn(&str) -> bool,
-) -> Vec<String> {
-    let mut fallbacks: Vec<String> = Vec::new();
+) -> Vec<GlobalComponentFallback> {
+    let mut fallbacks: Vec<GlobalComponentFallback> = Vec::new();
     let ast = match template_ast {
         Some(a) => a,
         None => return fallbacks,
     };
 
-    let mut seen = FxHashSet::default();
+    // pascal name → index into `fallbacks`
+    let mut seen: FxHashMap<String, usize> = FxHashMap::default();
+    let mut push_candidate = |tag_name: &str| {
+        // Skip member expressions like Foo.Bar
+        if tag_name.contains('.') {
+            return;
+        }
+        // A configured custom element is a native element: never component-resolved.
+        if matches_custom_element(custom_elements, tag_name) {
+            return;
+        }
+        // Convert to PascalCase for binding lookup
+        let pascal = to_pascal_case(tag_name);
+        if is_bound(pascal.as_str()) || is_bound(tag_name) {
+            return;
+        }
+        let pascal_authored = tag_name == pascal;
+        match seen.get(pascal.as_str()) {
+            Some(&idx) => {
+                // A Pascal-authored occurrence upgrades the entry to component
+                // intent (fail-closed const type).
+                if pascal_authored {
+                    fallbacks[idx].authored_non_pascal = None;
+                }
+            }
+            None => {
+                seen.insert(pascal.clone(), fallbacks.len());
+                fallbacks.push(GlobalComponentFallback {
+                    authored_non_pascal: (!pascal_authored).then(|| tag_name.to_string()),
+                    pascal,
+                });
+            }
+        }
+    };
 
     for node in &ast.nodes {
         if let AstNodeKind::Element(ref el) = node.kind {
@@ -60,53 +102,195 @@ pub(super) fn collect_global_component_fallbacks(
                 continue;
             }
 
-            // Convert to PascalCase for binding lookup
-            let pascal = to_pascal_case(tag_name);
-            if is_bound(pascal.as_str()) || is_bound(tag_name) {
+            // `<component>` itself is always rewritten by the template arm (static
+            // `is` → the target identifier; dynamic `:is` → the extractRenderComponent
+            // temp). The literal tag never needs a const; a STATIC non-native `is`
+            // target does, so the rewritten identifier resolves in scope.
+            if tag_name == "component" {
+                if let Some(target) = static_component_is_target(el, source) {
+                    push_candidate(target);
+                }
                 continue;
             }
 
-            // Skip member expressions like Foo.Bar
-            if tag_name.contains('.') {
-                continue;
-            }
-
-            if seen.insert(pascal.clone()) {
-                fallbacks.push(pascal);
-            }
+            push_candidate(tag_name);
         }
     }
 
     fallbacks
 }
 
-/// Emit global component fallback consts inside templateBindingFN from a collected list
-/// (see [`collect_global_component_fallbacks`]). The emitted const names are exactly the
+/// The STATIC `is="..."` target of a `<component>` element, when it names a
+/// component (not a native HTML tag). Mirrors the static branch of the template
+/// arm's `rewrite_component_is`: a plain (non-directive) `is` attribute with a
+/// non-empty value.
+fn static_component_is_target<'s>(
+    el: &crate::ast::types::ElementNode,
+    source: &'s str,
+) -> Option<&'s str> {
+    let is_prop = el.props.iter().find(|prop| {
+        !prop.is_directive && &source[prop.start as usize..prop.name_end as usize] == "is"
+    })?;
+    let (start, end) = (is_prop.value_start?, is_prop.value_end?);
+    if end <= start {
+        return None;
+    }
+    let target = source[start as usize..end as usize].trim();
+    if target.is_empty() || verter_parser::utils::vue::tag::is_html_tag(target.as_bytes()) {
+        return None;
+    }
+    Some(target)
+}
+
+/// Exact emission segments of one TS GlobalComponents fallback const + its
+/// go-to-definition NAV PROBE. Shared by [`emit_global_component_fallbacks`]
+/// and [`global_component_nav_probe_offset`] so the emitter and the locator can
+/// never drift apart.
+const GC_FALLBACK_AFTER_NAME: &str = " = {} as ___VERTER___GlobalComponentType<'";
+const GC_FALLBACK_CLOSE: &str = "'>;";
+/// Kebab-authored variant: `= {} as ___VERTER___GlobalComponentKebabType<'Pascal', 'tag'>;`
+const GC_KEBAB_FALLBACK_AFTER_NAME: &str = " = {} as ___VERTER___GlobalComponentKebabType<'";
+const GC_KEBAB_FALLBACK_MID: &str = "', '";
+const GC_NAV_PROBE_OPEN: &str = "\nvoid ___VERTER___globalComponentsNav().";
+const GC_NAV_PROBE_CLOSE: &str = ";";
+
+/// Emit global component fallback consts from a collected list (see
+/// [`collect_global_component_fallbacks`]). The emitted const names are exactly the
 /// list members, so the template/event-typing inventory and the emitted scaffolding never
 /// disagree.
+///
+/// TS form, per name (Pascal-authored — fail-closed):
+///
+/// ```text
+/// const Pascal = {} as ___VERTER___GlobalComponentType<'Pascal'>;
+/// void ___VERTER___globalComponentsNav().Pascal;
+/// ```
+///
+/// Kebab/lowercase-authored form (fail-open to the intrinsic surface):
+///
+/// ```text
+/// const Pascal = {} as ___VERTER___GlobalComponentKebabType<'Pascal', 'authored-tag'>;
+/// void ___VERTER___globalComponentsNav().Pascal;
+/// ```
+///
+/// The conditional lives in `@verter/types` (a REAL on-disk declaration file both
+/// providers resolve through normal module resolution) and reaches the carrier through
+/// the hoisted `import type` statement. The virtual TSX itself carries NO
+/// `import('vue')` type query, which the `tsgo` provider cannot resolve from a virtual
+/// carrier — that form degraded the const to `any` on the tsgo route. A registered
+/// member yields the component type; an unregistered name yields fail-closed `unknown`
+/// (a real TS2604 diagnostic at the tag, never silent `any`).
+///
+/// The second line is the go-to-definition NAV PROBE (the same known-position synthetic
+/// pattern as [`instance_probe_line`]): a provider `definition` on the tag lands on the
+/// synthetic const (fail-closed unmappable), so the LSP re-issues `definition` at this
+/// probe's MEMBER identifier — the (augmentation-merged) `GlobalComponents` interface
+/// member — which resolves to the user's real registration declaration
+/// (`components.d.ts` / UI-kit `global.d.ts`). An unregistered name has no member
+/// symbol, so the probe yields nothing and definition stays fail-closed EMPTY; its
+/// TS2339 lives in unmapped synthetic text and never surfaces.
+///
+/// JS form carries no provider-resolvable conditional (no probe): Pascal-authored
+/// names stay the fail-closed JSDoc `unknown` cast; kebab-authored names cast `*`
+/// (fail-open `any` — the JS-mode equivalent of the intrinsic surface).
 pub(super) fn emit_global_component_fallbacks(
     buf: &mut String,
-    fallbacks: &[String],
+    fallbacks: &[GlobalComponentFallback],
     is_jsx: bool,
 ) {
     use std::fmt::Write;
-    for pascal in fallbacks {
-        if is_jsx {
-            write!(
+    for fallback in fallbacks {
+        let pascal = &fallback.pascal;
+        match (&fallback.authored_non_pascal, is_jsx) {
+            (None, true) => write!(
                 buf,
                 "\nconst {pascal} = /** @type {{unknown}} */ ({{}});",
                 pascal = pascal,
-            )
-            .expect("write to String is infallible");
-        } else {
-            write!(
+            ),
+            (Some(_), true) => write!(
                 buf,
-                "\nconst {pascal} = {{}} as import('vue').GlobalComponents extends {{ {pascal}: infer C }} ? C : unknown;",
+                "\nconst {pascal} = /** @type {{*}} */ ({{}});",
                 pascal = pascal,
-            )
-            .expect("write to String is infallible");
+            ),
+            (None, false) => write!(
+                buf,
+                "\nconst {pascal}{GC_FALLBACK_AFTER_NAME}{pascal}{GC_FALLBACK_CLOSE}{GC_NAV_PROBE_OPEN}{pascal}{GC_NAV_PROBE_CLOSE}",
+                pascal = pascal,
+            ),
+            (Some(authored), false) => write!(
+                buf,
+                "\nconst {pascal}{GC_KEBAB_FALLBACK_AFTER_NAME}{pascal}{GC_KEBAB_FALLBACK_MID}{authored}{GC_FALLBACK_CLOSE}{GC_NAV_PROBE_OPEN}{pascal}{GC_NAV_PROBE_CLOSE}",
+                pascal = pascal,
+                authored = authored,
+            ),
         }
+        .expect("write to String is infallible");
     }
+}
+
+/// Locate the go-to-definition NAV PROBE member identifier for a GlobalComponents
+/// fallback const, given the const NAME span a provider `definition` response
+/// returned inside the generated TSX.
+///
+/// Byte-verifies the exact [`emit_global_component_fallbacks`] emission contract
+/// around the span — the `const ` keyword before the name and the full
+/// `= {} as ___VERTER___GlobalComponentType<'Name'>;` (or the kebab-authored
+/// `= {} as ___VERTER___GlobalComponentKebabType<'Name', 'authored-tag'>;`) +
+/// probe line after it — and returns the probe MEMBER identifier's byte offset.
+/// Any mismatch (the span is not a fallback const, the emission shape changed,
+/// foreign text) returns `None`, so the caller fails closed. This inspects only
+/// Verter's OWN synthetic emission, never user source.
+pub fn global_component_nav_probe_offset(tsx: &str, name_start: u32, name_end: u32) -> Option<u32> {
+    let (name_start, name_end) = (name_start as usize, name_end as usize);
+    let name = tsx.get(name_start..name_end)?;
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    {
+        return None;
+    }
+    const DECL_KEYWORD: &str = "const ";
+    let decl_start = name_start.checked_sub(DECL_KEYWORD.len())?;
+    if tsx.get(decl_start..name_start)? != DECL_KEYWORD {
+        return None;
+    }
+    let rest = tsx.get(name_end..)?;
+
+    // Pascal-authored (fail-closed) shape.
+    let pascal_expected =
+        format!("{GC_FALLBACK_AFTER_NAME}{name}{GC_FALLBACK_CLOSE}{GC_NAV_PROBE_OPEN}");
+    // Kebab-authored (fail-open) shape: the authored tag between MID and CLOSE is
+    // bounded, quote-free tag text ([A-Za-z0-9_$-] only) so foreign text with an
+    // embedded quote or delimiter can never satisfy the contract.
+    let probe_after = if rest.starts_with(&pascal_expected) {
+        pascal_expected.len()
+    } else {
+        let kebab_head = format!("{GC_KEBAB_FALLBACK_AFTER_NAME}{name}{GC_KEBAB_FALLBACK_MID}");
+        if !rest.starts_with(&kebab_head) {
+            return None;
+        }
+        let after_mid = &rest[kebab_head.len()..];
+        let authored_len =
+            after_mid.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '-'))?;
+        if authored_len == 0 {
+            return None;
+        }
+        let tail = &after_mid[authored_len..];
+        let close_expected = format!("{GC_FALLBACK_CLOSE}{GC_NAV_PROBE_OPEN}");
+        if !tail.starts_with(&close_expected) {
+            return None;
+        }
+        kebab_head.len() + authored_len + close_expected.len()
+    };
+
+    let member_start = name_end + probe_after;
+    let member_rest = tsx.get(member_start..)?;
+    if !member_rest.starts_with(name) || !member_rest[name.len()..].starts_with(GC_NAV_PROBE_CLOSE)
+    {
+        return None;
+    }
+    Some(member_start as u32)
 }
 
 /// Convert a kebab-case or camelCase tag name to PascalCase.
@@ -144,6 +328,7 @@ pub(super) fn emit_minimal_wrapper(
     options: &IdeScriptOptions<'_>,
     pos: u32,
     template_end: Option<u32>,
+    global_component_fallbacks: &[GlobalComponentFallback],
 ) -> Option<String> {
     if template_end.is_some() {
         // Unified CT: function start at pos, close deferred
@@ -156,6 +341,14 @@ pub(super) fn emit_minimal_wrapper(
             false,
         ));
         start.push_str(&directive_accessor_declaration(options.is_jsx));
+        // GlobalComponents fallback consts — the no-script arm's template JSX
+        // references globally-registered components exactly like the script arms.
+        // Emitted before the template body so the JSX can reference them
+        // without TDZ errors.
+        emit_global_component_fallbacks(&mut start, global_component_fallbacks, options.is_jsx);
+        if !global_component_fallbacks.is_empty() {
+            start.push('\n');
+        }
         out.prepend_alloc(pos, &start);
         let mut close = String::from("\n");
         close.push_str(&instance_probe_line());

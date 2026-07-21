@@ -3,16 +3,21 @@
 //! Warns when a prop is declared but never used in script or template.
 
 use crate::context::LintContext;
-use crate::diagnostic::{DiagnosticSpanKind, Severity};
+use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
-/// Disallow declared props that are unused by both script and template.
+/// Disallow declared props that are provably never read.
 ///
-/// NOTE: This rule depends on `TemplateAnalysisSnapshot::prop_definitions` being populated
-/// by the upstream analysis pipeline. Currently `prop_definitions` is always empty in
-/// production (the analysis pipeline doesn't populate it yet), so the rule logic is correct
-/// but will never fire until that data pipeline is wired up (see issue #17).
+/// `TemplateAnalysisSnapshot::prop_definitions` is populated FAIL-OPEN by the
+/// shared unused-declaration pipeline: members appear only when script AND
+/// template usage could be statically bounded (no whole-object escape, no
+/// destructured `defineProps` — that is provider-owned TS6133 — no `$props`,
+/// no style `v-bind()` on the props root, no expression parse errors).
+///
+/// Known accepted false positive (documented, hint-severity): a prop declared
+/// solely to STRIP it from `$attrs` fallthrough is genuinely unread and WILL
+/// be flagged.
 pub struct NoUnusedProps;
 
 impl LintRule for NoUnusedProps {
@@ -25,7 +30,7 @@ impl LintRule for NoUnusedProps {
     }
 
     fn default_severity(&self) -> Option<Severity> {
-        Some(Severity::Warning)
+        Some(Severity::Hint)
     }
 
     fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
@@ -34,13 +39,14 @@ impl LintRule for NoUnusedProps {
                 continue;
             }
 
-            ctx.report_with_severity(
+            ctx.report_with_tags(
                 self.name(),
                 self.category().as_str(),
                 format!("Prop '{}' is declared but never used.", prop.name),
                 prop.span.start,
                 prop.span.end,
                 self.default_severity(),
+                vec![DiagnosticTag::Unnecessary],
                 DiagnosticSpanKind::PropDefinition,
             );
         }
@@ -85,6 +91,11 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].rule, "no-unused-props");
         assert!(diags[0].message.contains("msg"));
+        // Faded TS-unused look: Unnecessary tag + low-stakes hint severity on
+        // the authored declaration span.
+        assert_eq!(diags[0].tags, vec![DiagnosticTag::Unnecessary]);
+        assert_eq!(diags[0].severity, Severity::Hint);
+        assert_eq!(diags[0].span, verter_span::Span::new(10, 20));
     }
 
     #[test]

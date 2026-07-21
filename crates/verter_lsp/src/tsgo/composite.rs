@@ -48,7 +48,7 @@ use verter_type_runtime::protocol::{
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
-use crate::tsgo::overlay_core::{LazyOverlayCore, OverlayTransport};
+use crate::tsgo::overlay_core::{LazyOverlayCore, OverlayPriority, OverlayTransport};
 use crate::tsgo::project_binding::{self, BoundCarrier, CarrierAdmissionCache};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
 use crate::tsgo::transport_cell::EstablishedTransport;
@@ -152,11 +152,13 @@ impl SharedTsgoOverlay {
     /// (the foreground TSX sync is budgeted far below the SHARED establishment bound).
     /// The query path ([`Self::engage_diagnostics`]) establishes the transport and
     /// injects the recorded content lazily. A non-carrier path is ignored.
-    fn record_content(&self, provider_path: &str, content: &str) {
+    fn record_content(&self, provider_path: &str, content: &str, priority: OverlayPriority) {
         if carrier_source_of(provider_path).is_none() {
             return;
         }
-        self.inner.core.record_content(provider_path, content);
+        self.inner
+            .core
+            .record_content_at_priority(provider_path, content, priority);
     }
 
     /// Retract a carrier overlay off the managed `close_file` critical path — drop its
@@ -800,9 +802,9 @@ impl TsgoCompositeProvider {
 
     /// Record the carrier's content into the SHARED overlay (a cheap in-memory insert
     /// off the managed lifecycle critical path) — a no-op when SHARED is not opted in.
-    fn shared_record(&self, path: &str, content: &str) {
+    fn shared_record(&self, path: &str, content: &str, priority: OverlayPriority) {
         if let Some(shared) = &self.shared {
-            shared.record_content(path, content);
+            shared.record_content(path, content, priority);
         }
     }
 
@@ -847,7 +849,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
     }
@@ -857,7 +859,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
     }
@@ -867,7 +869,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Interactive);
             Ok(())
         })
     }
@@ -886,7 +888,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file_background(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
     }
@@ -896,7 +898,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file_background(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
     }
@@ -906,7 +908,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file_background(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Background);
             Ok(())
         })
     }
@@ -925,7 +927,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.open_file_normal(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
     }
@@ -935,7 +937,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.load_file_normal(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
     }
@@ -945,7 +947,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.managed.update_file_normal(&path, &content).await?;
-            self.shared_record(&path, &content);
+            self.shared_record(&path, &content, OverlayPriority::Normal);
             Ok(())
         })
     }

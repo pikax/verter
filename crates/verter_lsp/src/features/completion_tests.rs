@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
@@ -1046,6 +1046,43 @@ fn test_root_completions_with_existing_blocks() {
         !items.iter().any(|i| i.label == "vue-ts"),
         "should not have scaffolds when file has content"
     );
+}
+
+#[test]
+fn svelte_root_whitespace_never_emits_vue_sfc_scaffolds() {
+    let source = "<script lang=\"ts\">const value = 1;</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let position = line_index
+        .offset_to_position(source.len() as u32)
+        .expect("root position");
+
+    let labels = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        None,
+        &line_index,
+        None,
+        None,
+        Some("file:///workspace/App.svelte"),
+        false,
+    )
+    .map(|result| {
+        result
+            .items
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+
+    for vue_scaffold in ["template", "script setup", "style scoped", "i18n"] {
+        assert!(
+            !labels.contains(&vue_scaffold.to_string()),
+            "Svelte root whitespace must not emit Vue scaffold `{vue_scaffold}`: {labels:?}"
+        );
+    }
 }
 
 #[test]
@@ -2712,6 +2749,106 @@ fn test_component_prop_completions_from_macros() {
     assert_eq!(foo_item.kind, Some(CompletionItemKind::PROPERTY));
 }
 
+fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
+    let source = "<Child ></Child>";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let parent_analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                components: vec![
+                    verter_semantic::analysis::template::TemplateComponentUsage {
+                        name: "Child".to_string(),
+                        import_source: Some(import_source.to_string()),
+                        is_dynamic: false,
+                        props: vec![],
+                        has_spread: false,
+                        slots_used: vec![],
+                        static_classes: vec![],
+                        has_dynamic_class: false,
+                        dynamic_classes: vec![],
+                        v_models: vec![],
+                        bindings: vec![],
+                        events: vec![],
+                        span: verter_span::Span::new(0, source.len() as u32),
+                    },
+                ],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let child_analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                prop_definitions: vec![verter_semantic::analysis::AnalyzedPropDefinition {
+                    name: "camelCaseProp".to_string(),
+                    type_annotation: Some("string".to_string()),
+                    has_default: false,
+                    is_required: true,
+                    is_boolean: false,
+                    used_in_template: false,
+                    used_in_script: false,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let cursor = source.find("<Child ").unwrap() + "<Child ".len();
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let expected_import = import_source.to_string();
+    let resolve = move |candidate: &str, _component_name: Option<&str>| {
+        (candidate == expected_import).then(|| child_analysis.clone())
+    };
+
+    let items = completions_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&parent_analysis),
+        &line_index,
+        Some(&resolve),
+        None,
+        Some("file:///workspace/App.svelte"),
+        false,
+    )
+    .expect("resolved child props")
+    .items;
+    let item = items
+        .iter()
+        .find(|item| item.label == "camelCaseProp")
+        .unwrap_or_else(|| panic!("Svelte parent must preserve the authored prop key: {items:?}"));
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("camelCaseProp={$1}"),
+        "Svelte parent owns prop insertion syntax regardless of import spelling"
+    );
+    assert!(
+        !items.iter().any(|item| {
+            item.label == "camel-case-prop"
+                || item
+                    .insert_text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with(":camel-case-prop="))
+        }),
+        "resolved Svelte children must never inherit Vue prop syntax: {items:?}"
+    );
+}
+
+#[test]
+fn svelte_extensionless_component_import_uses_parent_prop_syntax() {
+    assert_svelte_parent_prop_syntax_for_resolved_import("./Child");
+}
+
+#[test]
+fn svelte_barrel_component_import_uses_parent_prop_syntax() {
+    assert_svelte_parent_prop_syntax_for_resolved_import("./components");
+}
+
 // ── binding_completion_kind unit tests ──────────────────────────────
 
 #[test]
@@ -2751,4 +2888,468 @@ fn test_binding_completion_kind_all_variants() {
         binding_completion_kind(&AnalyzedBindingKind::Class),
         CompletionItemKind::CLASS
     );
+}
+
+// =============================================================================
+// D5 — slot-name completion (Vue v-slot/#, Svelte {#snippet}/{@render})
+// =============================================================================
+
+fn d5_element(tag: &str, span: (u32, u32), tag_span_end: u32) -> TemplateElement {
+    TemplateElement {
+        tag: tag.to_string(),
+        span: verter_span::Span::new(span.0, span.1),
+        tag_span_end,
+        is_component: tag.starts_with(|c: char| c.is_ascii_uppercase()),
+        ..Default::default()
+    }
+}
+
+fn d5_component(
+    name: &str,
+    import_source: &str,
+    slots_used: Vec<String>,
+) -> TemplateComponentUsage {
+    TemplateComponentUsage {
+        name: name.to_string(),
+        import_source: Some(import_source.to_string()),
+        is_dynamic: false,
+        props: vec![],
+        has_spread: false,
+        slots_used,
+        static_classes: vec![],
+        has_dynamic_class: false,
+        dynamic_classes: vec![],
+        v_models: vec![],
+        bindings: vec![],
+        events: vec![],
+        span: verter_span::Span::new(0, 0),
+    }
+}
+
+fn d5_slot_field(
+    name: &str,
+    bindings: Vec<(&str, &str)>,
+) -> verter_semantic::analysis::types::AnalyzedSlotField {
+    verter_semantic::analysis::types::AnalyzedSlotField {
+        name: name.to_string(),
+        is_required: false,
+        span: verter_span::Span::new(0, 0),
+        bindings: bindings
+            .into_iter()
+            .map(
+                |(name, ty)| verter_semantic::analysis::types::AnalyzedSlotFieldBinding {
+                    name: name.to_string(),
+                    type_annotation: Some(ty.to_string()),
+                    payload: None,
+                    binding_expr_scope: None,
+                    span: verter_span::Span::new(0, 0),
+                },
+            )
+            .collect(),
+        return_type: Some("any".to_string()),
+        payload: None,
+        return_expr_scope: None,
+        description: None,
+        tags: vec![],
+    }
+}
+
+fn d5_child_with_slots(
+    fields: Vec<verter_semantic::analysis::types::AnalyzedSlotField>,
+) -> FileAnalysisSnapshot {
+    let mac = AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
+        is_type_based: true,
+        type_references: vec![],
+        binding_name: None,
+        model_name: None,
+        has_inherit_attrs_false: false,
+        prop_fields: vec![],
+        emit_fields: vec![],
+        slot_fields: fields,
+        default_keys: vec![],
+        expose_fields: vec![],
+        default_values: vec![],
+        resolved_local_types: vec![],
+        parsed_type_argument: None,
+        parsed_type_argument_scope: None,
+        span: verter_span::Span::new(0, 0),
+    };
+    make_analysis(vec![], vec![], vec![mac])
+}
+
+fn d5_slot_completions(
+    source: &str,
+    cursor_offset: usize,
+    parent_analysis: &FileAnalysisSnapshot,
+    child: Option<&FileAnalysisSnapshot>,
+) -> Option<Vec<CompletionItem>> {
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let pos = line_index.offset_to_position(cursor_offset as u32).unwrap();
+    let child = child.cloned();
+    let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
+        Box::new(move |_, _| child.clone());
+    completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(parent_analysis),
+        &line_index,
+        Some(&*resolve),
+        None,
+        None,
+        false,
+    )
+    .map(|result| result.items)
+}
+
+fn d5_vue_parent(source_has_used_header: bool) -> (FileAnalysisSnapshot, String) {
+    let source: String = if source_has_used_header {
+        // The used slot sits on the COMPONENT element (`<MyChild #header>`) —
+        // recorded in the usage's `slots_used`.
+        "<template>\n  <MyChild #header=\"{}\">\n    <template #\n  </MyChild>\n</template>\n<script setup>\nimport MyChild from './MyChild.vue'\n</script>".to_string()
+    } else {
+        "<template>\n  <MyChild>\n    <template #\n  </MyChild>\n</template>\n<script setup>\nimport MyChild from './MyChild.vue'\n</script>".to_string()
+    };
+    let mut parent = FileAnalysisSnapshot::default();
+    let mut template = TemplateAnalysisSnapshot::default();
+    template.components.push(d5_component(
+        "MyChild",
+        "./MyChild.vue",
+        if source_has_used_header {
+            vec!["header".to_string()]
+        } else {
+            vec![]
+        },
+    ));
+    let mut child_el = d5_element("MyChild", (12, source.len() as u32), 33);
+    child_el.is_component = true;
+    template.elements.push(child_el);
+    let tpl_open = source.rfind("<template #").unwrap() as u32;
+    let mut tpl_el = d5_element("template", (tpl_open, tpl_open + 14), tpl_open + 14);
+    tpl_el.parent_index = Some(0);
+    template.elements.push(tpl_el);
+    parent.template = Some(template.into());
+    (parent, source)
+}
+
+#[test]
+fn test_slot_name_completions_from_child_define_slots() {
+    let (parent, source) = d5_vue_parent(false);
+    let source = source.as_str();
+    let cursor = source.find("<template #").unwrap() + "<template #".len();
+    let child = d5_child_with_slots(vec![
+        d5_slot_field("header", vec![("title", "string"), ("count", "number")]),
+        d5_slot_field("default", vec![("body", "string")]),
+        d5_slot_field("mySlot", vec![("note", "string")]),
+    ]);
+
+    let items = d5_slot_completions(source, cursor, &parent, Some(&child))
+        .expect("slot-name completion must produce items");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for expected in ["header", "default", "mySlot"] {
+        assert!(
+            labels.contains(&expected),
+            "must offer declared slot {expected}, got: {labels:?}"
+        );
+    }
+    let header = items.iter().find(|i| i.label == "header").unwrap();
+    let detail = header.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("title: string") && detail.contains("count: number"),
+        "header detail must carry the slot-props signature, got: {detail}"
+    );
+    assert_eq!(header.kind, Some(CompletionItemKind::FIELD));
+}
+
+#[test]
+fn test_slot_name_completions_filter_already_used_slots() {
+    let (parent, source) = d5_vue_parent(true);
+    let source = source.as_str();
+    let cursor = source.rfind("<template #").unwrap() + "<template #".len();
+    let child = d5_child_with_slots(vec![
+        d5_slot_field("header", vec![("title", "string")]),
+        d5_slot_field("default", vec![("body", "string")]),
+    ]);
+
+    let items = d5_slot_completions(source, cursor, &parent, Some(&child))
+        .expect("slot-name completion must produce items");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        !labels.contains(&"header"),
+        "already-used slot must be filtered, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"default"),
+        "unused default must remain, got: {labels:?}"
+    );
+}
+
+#[test]
+fn test_slot_name_completions_offers_default_without_declaration() {
+    let (parent, source) = d5_vue_parent(false);
+    let source = source.as_str();
+    let cursor = source.find("<template #").unwrap() + "<template #".len();
+    let child = d5_child_with_slots(vec![d5_slot_field("header", vec![])]);
+
+    let items = d5_slot_completions(source, cursor, &parent, Some(&child))
+        .expect("slot-name completion must produce items");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"default"),
+        "the implicit default slot must be offered, got: {labels:?}"
+    );
+}
+
+#[test]
+fn test_slot_name_completions_fail_closed_unresolved_child() {
+    let (parent, source) = d5_vue_parent(false);
+    let source = source.as_str();
+    let cursor = source.find("<template #").unwrap() + "<template #".len();
+
+    let result = d5_slot_completions(source, cursor, &parent, None);
+    assert!(
+        result.is_none(),
+        "an unresolved child must fail closed (no word fallback), got: {:?}",
+        result.map(|items| items.iter().map(|i| i.label.clone()).collect::<Vec<_>>())
+    );
+}
+
+#[test]
+fn test_svelte_snippet_slot_name_completions_from_child_snippet_props() {
+    let source = "<script>\n  import IdeSurfaceChild from './IdeSurfaceChild.svelte';\n</script>\n<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
+    let cursor = source.find("{#snippet ").unwrap() + "{#snippet ".len();
+
+    let mut parent = FileAnalysisSnapshot::default();
+    let mut template = TemplateAnalysisSnapshot::default();
+    template.components.push(d5_component(
+        "IdeSurfaceChild",
+        "./IdeSurfaceChild.svelte",
+        vec![],
+    ));
+    parent.template = Some(template.into());
+
+    let mut child_template = TemplateAnalysisSnapshot::default();
+    let d5_prop = |name: &str, ty: &str| AnalyzedPropDefinition {
+        name: name.to_string(),
+        type_annotation: Some(ty.to_string()),
+        has_default: false,
+        is_required: false,
+        is_boolean: false,
+        used_in_template: false,
+        used_in_script: false,
+        span: verter_span::Span::new(0, 0),
+    };
+    child_template.prop_definitions = vec![
+        d5_prop("header", "import(\"svelte\").Snippet<[{ title: string }]>"),
+        d5_prop("children", "import(\"svelte\").Snippet<[{ body: string }]>"),
+        d5_prop("label", "string"),
+    ];
+    let child = FileAnalysisSnapshot {
+        template: Some(child_template.into()),
+        ..Default::default()
+    };
+
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
+        Box::new(move |_, _| Some(child.clone()));
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&parent),
+        &line_index,
+        Some(&*resolve),
+        None,
+        Some("file:///ws/src/Parent.svelte"),
+        false,
+    );
+    let items = result
+        .expect("snippet-slot completion must produce items")
+        .items;
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"header"),
+        "must offer header, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"children"),
+        "must offer children, got: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"label"),
+        "non-snippet props must not be offered, got: {labels:?}"
+    );
+}
+
+#[test]
+fn test_svelte_render_callee_completions_in_scope_snippets() {
+    let source = "<ul>\n  {@render \n</ul>";
+
+    let parent = FileAnalysisSnapshot {
+        template: Some(
+            TemplateAnalysisSnapshot {
+                snippet_definitions: vec![
+                    SnippetDefinition {
+                        name: "row".to_string(),
+                        span: verter_span::Span::new(0, 3),
+                        params_text: Some("item: number".to_string()),
+                    },
+                    SnippetDefinition {
+                        name: "cell".to_string(),
+                        span: verter_span::Span::new(10, 14),
+                        params_text: None,
+                    },
+                ],
+                prop_definitions: vec![AnalyzedPropDefinition {
+                    name: "actions".to_string(),
+                    type_annotation: Some("import(\"svelte\").Snippet".to_string()),
+                    has_default: false,
+                    is_required: false,
+                    is_boolean: false,
+                    used_in_template: false,
+                    used_in_script: false,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    };
+
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let cursor = source.find("{@render ").unwrap() + "{@render ".len();
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&parent),
+        &line_index,
+        None,
+        None,
+        Some("file:///ws/src/List.svelte"),
+        false,
+    );
+    let items = result
+        .expect("render-callee completion must produce items")
+        .items;
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for expected in ["row", "cell", "actions"] {
+        assert!(
+            labels.contains(&expected),
+            "must offer in-scope snippet {expected}, got: {labels:?}"
+        );
+    }
+    let row = items.iter().find(|i| i.label == "row").unwrap();
+    assert!(
+        row.detail.as_deref().unwrap_or("").contains("item: number"),
+        "local snippet detail must carry its params, got: {:?}",
+        row.detail
+    );
+}
+
+#[test]
+fn test_is_snippet_type_annotation_classifies_root_reference() {
+    for typed in [
+        "Snippet",
+        "Snippet<[item: number]>",
+        "import(\"svelte\").Snippet",
+        "import(\"svelte\").Snippet<[{ title: string }]>",
+        "svelte.Snippet",
+        "Snippet<[{ title: string }]> | undefined",
+    ] {
+        assert!(
+            is_snippet_type_annotation(typed),
+            "{typed} must classify as snippet-typed"
+        );
+    }
+    for not_snippet in [
+        "NotSnippet",
+        "SnippetExtra",
+        "string",
+        "Array<Snippet>",
+        "() => Snippet",
+        "string | undefined",
+    ] {
+        assert!(
+            !is_snippet_type_annotation(not_snippet),
+            "{not_snippet} must NOT classify as snippet-typed"
+        );
+    }
+}
+
+#[test]
+fn test_svelte_snippet_slot_completions_reject_non_snippet_root_types() {
+    let source = "<script>\n  import IdeSurfaceChild from './IdeSurfaceChild.svelte';\n</script>\n<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
+    let cursor = source.find("{#snippet ").unwrap() + "{#snippet ".len();
+
+    let mut parent = FileAnalysisSnapshot::default();
+    let mut template = TemplateAnalysisSnapshot::default();
+    template.components.push(d5_component(
+        "IdeSurfaceChild",
+        "./IdeSurfaceChild.svelte",
+        vec![],
+    ));
+    parent.template = Some(template.into());
+
+    let d5_prop = |name: &str, ty: &str| AnalyzedPropDefinition {
+        name: name.to_string(),
+        type_annotation: Some(ty.to_string()),
+        has_default: false,
+        is_required: false,
+        is_boolean: false,
+        used_in_template: false,
+        used_in_script: false,
+        span: verter_span::Span::new(0, 0),
+    };
+    let child_template = TemplateAnalysisSnapshot {
+        prop_definitions: vec![
+            d5_prop("header", "import(\"svelte\").Snippet<[{ title: string }]>"),
+            d5_prop("notHeader", "import(\"svelte\").NotSnippet"),
+            d5_prop("extras", "SnippetExtra"),
+        ],
+        ..Default::default()
+    };
+    let child = FileAnalysisSnapshot {
+        template: Some(child_template.into()),
+        ..Default::default()
+    };
+
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let pos = line_index.offset_to_position(cursor as u32).unwrap();
+    let resolve: Box<dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>> =
+        Box::new(move |_, _| Some(child.clone()));
+    let result = completions_at_position(
+        &pos,
+        source,
+        &blocks,
+        Some(&parent),
+        &line_index,
+        Some(&*resolve),
+        None,
+        Some("file:///ws/src/Parent.svelte"),
+        false,
+    );
+    let items = result
+        .expect("snippet-slot completion must produce items")
+        .items;
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"header"),
+        "snippet-typed prop must be offered, got: {labels:?}"
+    );
+    for rejected in ["notHeader", "extras"] {
+        assert!(
+            !labels.contains(&rejected),
+            "non-snippet root type must not be offered as a snippet slot, got: {labels:?}"
+        );
+    }
 }

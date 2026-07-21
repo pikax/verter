@@ -226,6 +226,8 @@ mod tests {
         VBindVar {
             expression: expr.to_string(),
             var_name: var_name.to_string(),
+            expr_start: 0,
+            expr_end: 0,
         }
     }
 

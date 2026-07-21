@@ -235,14 +235,25 @@ pub fn build_script_analysis_with_scope(
     }
 
     let program = &result.program;
-    build_script_analysis_with_scope_from_program(content, source_type, program, scope)
+    build_script_analysis_with_scope_from_program(
+        content,
+        source_type,
+        program,
+        scope,
+        !result.errors.is_empty(),
+    )
 }
 
+/// `parse_errors` is whether the program's parse RECOVERED from errors
+/// (`ParserReturn::errors` non-empty, `panicked` false). Error recovery can
+/// silently drop real code, so facts that PROVE non-usage (`macro_usage`)
+/// are withheld — the unused-declaration diagnostics fail open.
 pub fn build_script_analysis_with_scope_from_program(
     content: &str,
     source_type: SourceType,
     program: &Program<'_>,
     scope: AnalysisScope,
+    parse_errors: bool,
 ) -> ScriptAnalysisSnapshot {
     // The provider-less entry is the byte-identical pre-existing path: it
     // captures NO framework script candidates (empty active set) and discards
@@ -253,6 +264,7 @@ pub fn build_script_analysis_with_scope_from_program(
         source_type,
         program,
         scope,
+        parse_errors,
         &[],
     )
     .0
@@ -267,6 +279,7 @@ pub fn build_script_analysis_with_scope_from_program_with_owners(
     program: &Program<'_>,
     scope: AnalysisScope,
     owners: &TopLevelOwnerTable,
+    parse_errors: bool,
 ) -> ScriptAnalysisSnapshot {
     build_script_analysis_with_scope_from_program_with_providers_and_owners(
         content,
@@ -275,6 +288,7 @@ pub fn build_script_analysis_with_scope_from_program_with_owners(
         scope,
         &[],
         owners,
+        parse_errors,
     )
     .0
 }
@@ -294,6 +308,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers(
     source_type: SourceType,
     program: &Program<'_>,
     scope: AnalysisScope,
+    parse_errors: bool,
     active_providers: &[std::sync::Arc<dyn crate::analysis::framework_facts::ScriptFactProvider>],
 ) -> (
     ScriptAnalysisSnapshot,
@@ -307,6 +322,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers(
         scope,
         active_providers,
         &owners,
+        parse_errors,
     )
 }
 
@@ -318,6 +334,7 @@ pub fn build_script_analysis_with_scope_from_program_with_providers_and_owners(
     scope: AnalysisScope,
     active_providers: &[std::sync::Arc<dyn crate::analysis::framework_facts::ScriptFactProvider>],
     owners: &TopLevelOwnerTable,
+    parse_errors: bool,
 ) -> (
     ScriptAnalysisSnapshot,
     crate::analysis::framework_facts::FrameworkScriptCandidateSet,
@@ -335,7 +352,8 @@ pub fn build_script_analysis_with_scope_from_program_with_providers_and_owners(
         None,
         owners,
     );
-    let snapshot = build_script_analysis_inner(content, source_type, program, scope, owners);
+    let snapshot =
+        build_script_analysis_inner(content, source_type, program, scope, owners, parse_errors);
     (snapshot, candidates)
 }
 
@@ -345,6 +363,7 @@ fn build_script_analysis_inner(
     program: &Program<'_>,
     scope: AnalysisScope,
     owners: &TopLevelOwnerTable,
+    parse_errors: bool,
 ) -> ScriptAnalysisSnapshot {
     // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
@@ -705,11 +724,52 @@ fn build_script_analysis_inner(
     let nested_macro_calls = collect_nested_macro_calls(program, 0);
     let declaration_entries = collect_declaration_entries(content, program, owners);
 
+    // Script-side usage facts for macro-declared members (unused-declaration
+    // diagnostics). One extra typed pass, only for files that use Vue macros.
+    // A parse that RECOVERED from errors publishes NO usage facts: recovery
+    // can silently drop real reads/calls (e.g. an unterminated block comment
+    // swallowing the rest of the script), and facts built on a partial AST
+    // would prove non-usage that is not provable — the diagnostics fail open.
+    let macro_usage = if macros.is_empty() || parse_errors {
+        None
+    } else {
+        let props_binding = macros
+            .iter()
+            .find(|m| {
+                matches!(
+                    m.kind,
+                    AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+                )
+            })
+            .and_then(|m| m.binding_name.as_deref());
+        let emit_binding = macros
+            .iter()
+            .find(|m| matches!(m.kind, AnalyzedMacroKind::DefineEmits))
+            .and_then(|m| m.binding_name.as_deref());
+        let vue_value_imports: rustc_hash::FxHashSet<String> = imports
+            .iter()
+            .filter(|imp| imp.source == "vue" && !imp.is_type_only)
+            .flat_map(|imp| {
+                imp.bindings
+                    .iter()
+                    .filter(|b| !b.is_type_only)
+                    .map(|b| b.name.clone())
+            })
+            .collect();
+        Some(crate::analysis::macro_usage::collect_macro_usage(
+            program,
+            props_binding,
+            emit_binding,
+            &vue_value_imports,
+        ))
+    };
+
     ScriptAnalysisSnapshot {
         imports,
         module_references,
         bindings,
         macros,
+        macro_usage,
         macro_type_deps,
         vue_api_calls,
         dom_query_calls,
@@ -725,6 +785,9 @@ fn build_script_analysis_inner(
         store_definitions,
         is_typescript: source_type.is_typescript(),
         declaration_entries,
+        // Filled by the session-side style cross-reference
+        // (`mark_bindings_used_in_style`) when style blocks are analyzed.
+        style_vbind_roots: Vec::new(),
     }
 }
 

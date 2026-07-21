@@ -27,6 +27,11 @@ pub(super) fn is_config_file(path: &str) -> bool {
     if filename.starts_with("tsconfig") && filename.ends_with(".json") {
         return true;
     }
+    // The JavaScript project config — same ownership authority as tsconfig.json
+    // for JS-only trees; edits must rebuild the registry identically.
+    if filename == "jsconfig.json" {
+        return true;
+    }
     if filename == ".verterrc.json" || filename == "package.json" {
         return true;
     }
@@ -209,7 +214,7 @@ pub(super) fn build_workspace_components(
 /// upstream in `build_workspace_components` rather than emitting a bad name.
 ///
 /// This is identifier formatting of a filename, not semantic type logic.
-pub(super) fn to_pascal_case(s: &str) -> String {
+pub(crate) fn to_pascal_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for ch in s.chars() {
@@ -958,7 +963,7 @@ pub(super) fn event_name_match_rank(requested: &str, candidate: &str) -> Option<
 /// Rank an authored template attribute / directive arg name against a declaration
 /// name. Exact match wins; otherwise kebab ↔ camel equivalence (Vue's HTML-case
 /// contract) ranks as a secondary hit. Used for props, events, and slots.
-pub(super) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u8> {
+pub(crate) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u8> {
     if requested == candidate {
         return Some(0);
     }
@@ -972,7 +977,7 @@ pub(super) fn attr_name_match_rank(requested: &str, candidate: &str) -> Option<u
 /// defined slots, slot bindings, rename declarations) so the rank/span
 /// tie-break cannot drift between call sites. The candidate `value` rides
 /// along so a caller can keep a borrowed field instead of re-looking it up.
-pub(super) fn select_best_ranked_candidate<T>(
+pub(crate) fn select_best_ranked_candidate<T>(
     candidates: impl IntoIterator<Item = (u8, verter_span::Span, T)>,
 ) -> Option<(u8, verter_span::Span, T)> {
     let mut best: Option<(u8, verter_span::Span, T)> = None;
@@ -1398,12 +1403,18 @@ pub(crate) fn compute_verter_diagnostics_for_with_views(
             }
 
             // When lint is not explicitly configured, suppress lint diagnostics but
-            // keep component usage diagnostics (type-level, not lint rules).
+            // keep component usage diagnostics (type-level, not lint rules) and
+            // the unused-declaration diagnostics (fail-open populated, faded
+            // via Unnecessary — the default-on TS-unused experience for
+            // macro-declared members the provider cannot see).
             if !lint_explicitly_configured {
                 diags.retain(|d| match &d.code {
                     Some(NumberOrString::String(code)) => {
                         if code == "verter/unknown-prop"
                             || code == "verter/unknown-model"
+                            || code == "verter/no-unused-props"
+                            || code == "verter/no-unused-emit-declarations"
+                            || code == "verter/no-unused-slots"
                             || code == crate::features::diagnostics::TYPE_EXPANSION_BUDGET_CODE
                             || code == crate::features::diagnostics::TYPE_QUERY_DEPTH_LIMIT_CODE
                         {

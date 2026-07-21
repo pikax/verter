@@ -17,7 +17,7 @@
 mod helpers;
 mod macro_scope_check;
 mod macro_semantic_diagnostics;
-pub(crate) mod style_usage;
+pub mod style_usage;
 pub mod template_data;
 pub(crate) mod template_expr_overlay;
 pub mod types;
@@ -1163,6 +1163,7 @@ fn compile_inner(
             style_usage_complete: style_usage.complete,
             css_modules,
             template_used_vars: tsx_template_used_vars,
+            custom_elements: options.custom_elements.as_deref(),
         };
 
         // Unified single CodeTransform for both script and template.
@@ -1258,6 +1259,7 @@ fn compile_inner(
                         comments: options.comments.unwrap_or(!options.is_production),
                         is_jsx,
                         strict_slots: options.strict_slots,
+                        custom_elements: options.custom_elements.as_deref(),
                     };
                     ide::template::generate_ide_template(
                         template_ast,

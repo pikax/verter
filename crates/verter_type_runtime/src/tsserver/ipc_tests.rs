@@ -587,6 +587,9 @@ async fn tsserver_shutdown_completes_within_timeout() {
         stdin_tx,
         pending,
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -996,6 +999,9 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::clone(&pending),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1069,6 +1075,9 @@ async fn run_update_file_capture(
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -1227,6 +1236,9 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     // The exact command sequence of `TsserverTypeProvider::notify_carrier_changed`.
@@ -1382,6 +1394,9 @@ async fn run_resync_capture(
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
 
     let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -1529,6 +1544,9 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         stdin_tx,
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     };
 
     let file = "/project/src/App.vue.tsx";
@@ -2382,6 +2400,9 @@ fn resync_harness() -> ResyncHarness {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     });
     ResyncHarness {
         transport,
@@ -2587,6 +2608,9 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         stdin_tx: stdin_tx.clone(),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
     };
 
     let opened_files: Mutex<HashMap<String, OpenKind>> = Mutex::new(HashMap::new());
@@ -2691,4 +2715,471 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         "the stale captured bytes must not be resent after a close→reopen (the gate must skip \
          the superseded reopen), frames={frames:?}"
     );
+}
+
+// ── hang detection + reloadProjects storm bounding (D2) ───────────────
+
+/// Build a bare transport wired to a duplex whose "tsserver" side is never read
+/// (requests are accepted into the pipe but never answered), exposing the
+/// crash_notify + frame-capture surface a hang/storm test drives.
+struct StormHarness {
+    transport: Arc<TsserverTransport>,
+    stdin_tx: mpsc::Sender<TsserverStdinMessage>,
+    crash_notify: Arc<Notify>,
+    client_reader: tokio::io::DuplexStream,
+}
+
+fn storm_harness() -> StormHarness {
+    storm_harness_with_crash_notify(Arc::new(Notify::new()))
+}
+
+fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        crash_notify: Some(Arc::clone(&crash_notify)),
+        membership_recovery: Mutex::new(None),
+    });
+    StormHarness {
+        transport,
+        stdin_tx,
+        crash_notify,
+        client_reader,
+    }
+}
+
+struct RealReloadCarrier {
+    source_path: String,
+    companion_path: String,
+    content: &'static str,
+    hover_offset: u32,
+    expected_hover: &'static str,
+    changed_content: &'static str,
+    changed_hover: &'static str,
+}
+
+struct RealReloadHarness {
+    _project: tempfile::TempDir,
+    provider: TsserverTypeProvider,
+    carriers: Vec<RealReloadCarrier>,
+    project_file_name: String,
+    carrier_store_dir: std::path::PathBuf,
+}
+
+impl RealReloadHarness {
+    async fn new() -> Self {
+        use crate::resilient::resilient_tests::RECOVERY_CARRIERS;
+
+        let project = tempfile::tempdir().expect("create real reload project");
+        std::fs::write(
+            project.path().join("tsconfig.json"),
+            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["*.tsx"]}"#,
+        )
+        .expect("write real reload tsconfig");
+        let carriers: Vec<RealReloadCarrier> = RECOVERY_CARRIERS
+            .iter()
+            .map(|fixture| {
+                let source_name = std::path::Path::new(fixture.source_path)
+                    .file_name()
+                    .expect("fixture source file name");
+                let companion_name = std::path::Path::new(fixture.companion_path)
+                    .file_name()
+                    .expect("fixture companion file name");
+                let source_path = project.path().join(source_name);
+                let companion_path = project.path().join(companion_name);
+                std::fs::write(&companion_path, fixture.stale_disk_content)
+                    .expect("write stale reload carrier bytes");
+                RealReloadCarrier {
+                    source_path: source_path.to_string_lossy().replace('\\', "/"),
+                    companion_path: companion_path.to_string_lossy().replace('\\', "/"),
+                    content: fixture.content,
+                    hover_offset: fixture.hover_offset,
+                    expected_hover: fixture.expected_hover,
+                    changed_content: if fixture.source_path.ends_with(".vue") {
+                        "export const vueRecoveryValue: boolean = true;\nvueRecoveryValue;\n"
+                    } else {
+                        "export const svelteRecoveryValue: string = 'changed';\nsvelteRecoveryValue;\n"
+                    },
+                    changed_hover: if fixture.source_path.ends_with(".vue") {
+                        "const vueRecoveryValue: boolean"
+                    } else {
+                        "const svelteRecoveryValue: string"
+                    },
+                }
+            })
+            .collect();
+        let workspace_root = project.path().to_string_lossy().replace('\\', "/");
+        let project_file_name = project
+            .path()
+            .join("tsconfig.json")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let carrier_store_dir = project.path().join("carrier-store");
+        crate::resilient::resilient_tests::publish_unready_recovery_carrier_store(
+            &carrier_store_dir,
+            &project_file_name,
+            1,
+            carriers.iter().map(|carrier| {
+                (
+                    carrier.source_path.as_str(),
+                    carrier.companion_path.as_str(),
+                )
+            }),
+        );
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root above crates/");
+        let node_path = crate::discovery::find_node()
+            .expect("real reload tests require the workspace Node.js runtime");
+        let tsserver_path = crate::resilient::resilient_tests::real_tsserver_path(repo_root);
+        let plugin_path = crate::resilient::resilient_tests::build_real_tsserver_plugin(
+            repo_root,
+            project.path(),
+            &node_path,
+        )
+        .await;
+        let provider = TsserverTypeProvider::spawn(
+            &node_path,
+            &tsserver_path.to_string_lossy(),
+            &workspace_root,
+            Some(&plugin_path.to_string_lossy()),
+            Some(&carrier_store_dir.to_string_lossy()),
+            false,
+            None,
+        )
+        .await
+        .expect("spawn real reload tsserver");
+
+        Self {
+            _project: project,
+            provider,
+            carriers,
+            project_file_name,
+            carrier_store_dir,
+        }
+    }
+
+    async fn register_carriers(&self) {
+        for carrier in &self.carriers {
+            // No ordinary open: membership is contentless and engine bytes come
+            // exclusively from the plugin store across reloadProjects.
+            self.provider
+                .register_carrier_member(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    carrier.content,
+                    &self.project_file_name,
+                )
+                .await
+                .expect("register real reload carrier");
+        }
+    }
+
+    fn publish_ready(&self, epoch: u64, version: u64, changed: bool) {
+        crate::resilient::resilient_tests::publish_recovery_carrier_store(
+            &self.carrier_store_dir,
+            &self.project_file_name,
+            epoch,
+            version,
+            self.carriers.iter().map(|carrier| {
+                (
+                    carrier.source_path.as_str(),
+                    carrier.companion_path.as_str(),
+                    if changed {
+                        carrier.changed_content
+                    } else {
+                        carrier.content
+                    },
+                )
+            }),
+        );
+    }
+
+    async fn raw_quickinfo(&self, carrier: &RealReloadCarrier) -> Result<String, String> {
+        let (line, offset) = byte_offset_to_tsserver_pos(carrier.content, carrier.hover_offset);
+        let args = inject_project_file_name(
+            serde_json::json!({
+                "file": carrier.companion_path,
+                "line": line,
+                "offset": offset,
+            }),
+            &Some(self.project_file_name.clone()),
+        );
+        self.provider
+            .transport
+            .request("quickinfo", args)
+            .await
+            .map_err(|error| error.message)
+            .map(|body| {
+                body.get("displayString")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            })
+    }
+
+    async fn assert_raw_stale_on_disk(&self) {
+        for carrier in &self.carriers {
+            let display = self
+                .raw_quickinfo(carrier)
+                .await
+                .unwrap_or_else(|error| panic!("raw stale quickinfo failed: {error}"));
+            assert!(
+                display.contains(": null"),
+                "epoch-1 unready carrier must expose stale disk bytes before explicit recovery, got {display:?}"
+            );
+        }
+    }
+
+    async fn assert_raw_types(&self, changed: bool) {
+        for carrier in &self.carriers {
+            let expected = if changed {
+                carrier.changed_hover
+            } else {
+                carrier.expected_hover
+            };
+            let mut last = Err("raw quickinfo not attempted".to_string());
+            for delay_ms in [0u64, 100, 250, 500, 1000, 2000] {
+                if delay_ms != 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                last = self.raw_quickinfo(carrier).await;
+                if last
+                    .as_ref()
+                    .is_ok_and(|display| display.contains(expected) && !display.contains(": any"))
+                {
+                    break;
+                }
+            }
+            let display = last.unwrap_or_else(|error| {
+                panic!(
+                    "raw quickinfo never recovered {} as {expected}: {error}",
+                    carrier.source_path
+                )
+            });
+            assert!(
+                display.contains(expected),
+                "raw quickinfo must derive {expected} from the refreshed store, got {display:?}"
+            );
+            assert!(!display.contains(": any"));
+        }
+    }
+
+    async fn assert_raw_types_once(&self, changed: bool) {
+        for carrier in &self.carriers {
+            let expected = if changed {
+                carrier.changed_hover
+            } else {
+                carrier.expected_hover
+            };
+            let display = self
+                .raw_quickinfo(carrier)
+                .await
+                .unwrap_or_else(|error| panic!("raw quickinfo failed: {error}"));
+            assert!(
+                display.contains(expected),
+                "raw quickinfo must remain {expected}, got {display:?}"
+            );
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.provider
+            .shutdown()
+            .await
+            .expect("shutdown real tsserver");
+    }
+}
+
+/// D2: a wedged-but-alive tsserver (accepts requests, never responds) must be
+/// detected via consecutive timeouts and trigger a restart — not silently time
+/// out every request for the rest of the session.
+#[tokio::test]
+async fn consecutive_timeouts_fire_crash_notify() {
+    use crate::resilient::resilient_tests::RealRecoveryHarness;
+
+    let recovery = RealRecoveryHarness::new(0).await;
+    recovery.register_carriers().await;
+    let crash_notify = recovery.crash_notify();
+
+    let harness = storm_harness_with_crash_notify(Arc::clone(&crash_notify));
+    // Register the waiter BEFORE the timeouts so notify_waiters cannot be missed.
+    let waiter = {
+        let crash_notify = Arc::clone(&harness.crash_notify);
+        tokio::spawn(async move {
+            crash_notify.notified().await;
+        })
+    };
+
+    for _ in 0..HANG_THRESHOLD {
+        let result = harness
+            .transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+                std::time::Duration::from_millis(30),
+            )
+            .await;
+        assert!(result.is_err(), "an unanswered request must time out");
+    }
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+        .await
+        .expect("hang detection must fire crash_notify after HANG_THRESHOLD consecutive timeouts")
+        .expect("waiter task must not panic");
+
+    recovery.await_down().await;
+    recovery.assert_carriers_answer_typed().await;
+    assert_eq!(
+        recovery.spawn_attempts(),
+        1,
+        "wedge triggers one real respawn"
+    );
+    recovery.shutdown().await;
+}
+
+/// A successful response resets the consecutive-timeout counter, so an isolated
+/// timeout followed by healthy traffic never escalates to a spurious restart.
+#[tokio::test]
+async fn successful_response_resets_hang_counter() {
+    let harness = storm_harness();
+    // Two timeouts (below threshold) — the counter advances but must not fire.
+    for _ in 0..(HANG_THRESHOLD - 1) {
+        let _ = harness
+            .transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+                std::time::Duration::from_millis(30),
+            )
+            .await;
+    }
+    assert_eq!(
+        harness
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed),
+        HANG_THRESHOLD - 1,
+    );
+
+    // Issue a real request and resolve its pending entry from the "tsserver" side.
+    let request_transport = Arc::clone(&harness.transport);
+    let request_task = tokio::spawn(async move {
+        request_transport
+            .request_with_timeout(
+                "quickinfo",
+                serde_json::json!({ "file": "/w/App.vue.tsx", "line": 1, "offset": 1 }),
+                std::time::Duration::from_millis(500),
+            )
+            .await
+    });
+    // Let the request register its pending entry, then answer it.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    {
+        let mut pending = harness.transport.pending.lock().await;
+        let drained: Vec<_> = pending.drain().collect();
+        if let Some((_seq, tx)) = drained.into_iter().next() {
+            let _ = tx.send(serde_json::json!({"success": true, "body": null}));
+        }
+    }
+    let ok = request_task.await.expect("request task must not panic");
+    assert!(ok.is_ok(), "an answered request resolves Ok");
+    assert_eq!(
+        harness
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed),
+        0,
+        "a successful response resets the consecutive-timeout counter"
+    );
+}
+
+/// D2: a storm of concurrent cold-miss membership recoveries must coalesce into
+/// a single `reloadProjects` send, never one reload per concurrent query.
+#[tokio::test]
+async fn reload_projects_recovery_coalesces_under_concurrency() {
+    let harness = storm_harness();
+
+    let mut handles = Vec::new();
+    for _ in 0..32 {
+        let transport = Arc::clone(&harness.transport);
+        handles.push(tokio::spawn(async move {
+            recover_companion_membership(&transport).await;
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("recovery task must not panic");
+    }
+
+    let frames = drain_frames(&harness.stdin_tx, harness.client_reader).await;
+    let reloads = frames
+        .iter()
+        .filter(|frame| frame["command"] == "reloadProjects")
+        .count();
+    assert_eq!(
+        reloads, 1,
+        "32 concurrent cold-miss recoveries must coalesce into ONE reloadProjects, frames={frames:?}"
+    );
+}
+
+/// After the cooldown window a fresh recovery IS sent (the gate rate-limits, it
+/// does not permanently latch shut).
+#[tokio::test]
+async fn reload_projects_recovery_fires_again_after_cooldown() {
+    let harness = storm_harness();
+
+    recover_companion_membership(&harness.transport).await;
+    // Within the cooldown: a second recovery is suppressed.
+    recover_companion_membership(&harness.transport).await;
+    // Past the cooldown: a third recovery fires a second reload.
+    tokio::time::sleep(MEMBERSHIP_RECOVERY_COOLDOWN + std::time::Duration::from_millis(80)).await;
+    recover_companion_membership(&harness.transport).await;
+
+    let frames = drain_frames(&harness.stdin_tx, harness.client_reader).await;
+    let reloads = frames
+        .iter()
+        .filter(|frame| frame["command"] == "reloadProjects")
+        .count();
+    assert_eq!(
+        reloads, 2,
+        "the first and post-cooldown recoveries fire; the within-cooldown one is suppressed, frames={frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn real_reload_projects_recovery_refreshes_plugin_carriers() {
+    let real = RealReloadHarness::new().await;
+    real.register_carriers().await;
+    real.assert_raw_stale_on_disk().await;
+    real.publish_ready(2, 1, false);
+    recover_companion_membership(&real.provider.transport).await;
+    real.assert_raw_types(false).await;
+    real.shutdown().await;
+}
+
+#[tokio::test]
+async fn real_reload_projects_recovery_refreshes_after_cooldown() {
+    let real = RealReloadHarness::new().await;
+    real.register_carriers().await;
+    real.assert_raw_stale_on_disk().await;
+
+    real.publish_ready(2, 1, false);
+    recover_companion_membership(&real.provider.transport).await;
+    real.assert_raw_types(false).await;
+
+    real.publish_ready(3, 2, true);
+    // Suppressed inside the cooldown: the existing Program must remain on v1.
+    recover_companion_membership(&real.provider.transport).await;
+    real.assert_raw_types_once(false).await;
+
+    tokio::time::sleep(MEMBERSHIP_RECOVERY_COOLDOWN + std::time::Duration::from_millis(80)).await;
+    recover_companion_membership(&real.provider.transport).await;
+    real.assert_raw_types(true).await;
+    real.shutdown().await;
 }

@@ -5,10 +5,10 @@
 //! [`LazyOverlayCore`] separates the two timings the composite must keep independent:
 //!
 //! - **Lifecycle (OWNED-budgeted).** `open_file` / `update_file` etc. record the
-//!   carrier's current content via [`LazyOverlayCore::record_content`] — a plain sync
-//!   insert that NEVER establishes the SHARED transport. So opting into SHARED cannot
-//!   trip the OWNED file-lifecycle timing (the foreground TSX sync is budgeted far
-//!   below the SHARED establishment bound).
+//!   carrier's current content via [`LazyOverlayCore::record_content_at_priority`] —
+//!   a plain sync insert that NEVER establishes the SHARED transport. So opting into
+//!   SHARED cannot trip the OWNED file-lifecycle timing (the foreground TSX sync is
+//!   budgeted far below the SHARED establishment bound).
 //! - **Query (OFF the foreground-sync budget).** `get_diagnostics` establishes the
 //!   transport lazily ([`LazyOverlayCore::ensure`], bounded + singleflight +
 //!   liveness-evicting) and injects the carrier's recorded content
@@ -110,12 +110,22 @@ struct ShadowSafetyCache {
     safe: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OverlayPriority {
+    Background,
+    Normal,
+    Interactive,
+}
+
 /// The recorded state for one carrier companion: the LATEST content the lifecycle fed,
 /// the last content a query-time injection committed (with its transport epoch), and the
 /// cached shadow-safety decision (with the generation it was decided at).
 struct ContentRecord {
     /// The latest content the lifecycle recorded.
     content: Arc<str>,
+    /// The lifecycle authority that recorded `content`. A lower-priority producer
+    /// cannot overwrite bytes from a higher-priority editor lane.
+    priority: OverlayPriority,
     /// The last content a query-time injection committed (with its epoch), or `None` if
     /// never injected / reset on a transport re-establishment.
     injected: Option<InjectedRecord>,
@@ -187,16 +197,38 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
 
     /// Record a carrier's current content OFF the establishment critical path — a
     /// plain sync insert the OWNED lifecycle calls. NEVER establishes the transport;
-    /// the query path injects the recorded content lazily.
+    /// the query path injects the recorded content lazily. Test-only convenience:
+    /// production routes through [`Self::record_content_at_priority`] with the
+    /// caller's lifecycle-lane authority.
+    #[cfg(test)]
     pub(crate) fn record_content(&self, path: &str, content: &str) {
+        self.record_content_at_priority(path, content, OverlayPriority::Interactive);
+    }
+
+    /// The single publication point for recorded carrier content: a producer may
+    /// only replace bytes published at an equal-or-lower authority. A late
+    /// BACKGROUND record (sourced from an older disk snapshot) can never overwrite
+    /// INTERACTIVE editor bytes; the editor lane keeps absolute priority until the
+    /// record is retracted on close.
+    pub(crate) fn record_content_at_priority(
+        &self,
+        path: &str,
+        content: &str,
+        priority: OverlayPriority,
+    ) {
         let mut state = self.state.lock();
         match state.content.get_mut(path) {
-            Some(rec) => rec.content = Arc::from(content),
+            Some(rec) if priority >= rec.priority => {
+                rec.content = Arc::from(content);
+                rec.priority = priority;
+            }
+            Some(_) => {}
             None => {
                 state.content.insert(
                     path.to_string(),
                     ContentRecord {
                         content: Arc::from(content),
+                        priority,
                         injected: None,
                         shadow_safety: None,
                     },

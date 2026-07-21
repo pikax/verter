@@ -931,3 +931,333 @@ fn memo_bound_clears_on_overflow_and_keeps_answers_correct() {
     assert!(snap.owners_for_file("d:/elsewhere/f0.ts").is_empty());
     assert_eq!(snap.owners_memo.map.len(), 2);
 }
+
+// ── default_configured_owner_for_file (tsgo GetDefaultProject walk) ──
+
+/// Build a snapshot through the production sort + `id = ProjectId(index)`
+/// reassignment (via `build_workspace_snapshot_simple`), so the id-equals-index
+/// invariant the ownership walk relies on holds regardless of the ids the test
+/// helpers hand-assign. Assertions below key on `tsconfig_path`, never a raw id.
+fn built_snapshot(projects: Vec<OwnershipProject>) -> WorkspaceSnapshot {
+    crate::snapshot_builder::build_workspace_snapshot_simple(projects, SnapshotGeneration(1))
+}
+
+/// A solution-style config (`files: []`): empty include + empty materialized set,
+/// so `contains()` is false for every file. It owns nothing directly and only
+/// fans out to its declared `references`.
+fn solution_project(id: u32, root: &str, tsconfig: &str, refs: &[&str]) -> OwnershipProject {
+    let root_cp = CanonicalPath::new(root);
+    let spec = StaticMembershipSpec {
+        files: Vec::new(),
+        include: Vec::new(),
+        exclude: Vec::<CompiledGlob>::new().into(),
+    };
+    OwnershipProject {
+        id: ProjectId(id),
+        root: root_cp.clone(),
+        workspace_root: root_cp,
+        payload: ProjectPayload::Configured {
+            tsconfig_path: CanonicalPath::new(tsconfig),
+            membership: ConfiguredMembership {
+                spec,
+                materialized_files: FxHashSet::default(),
+            },
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: refs.iter().map(|r| CanonicalPath::new(r)).collect(),
+            workspace_aliases: Vec::new(),
+        },
+    }
+}
+
+fn with_disable_solution_searching(mut project: OwnershipProject) -> OwnershipProject {
+    if let ProjectPayload::Configured {
+        compiler_options, ..
+    } = &mut project.payload
+    {
+        compiler_options.disable_solution_searching = true;
+    } else {
+        panic!("with_disable_solution_searching only applies to Configured projects");
+    }
+    project
+}
+
+/// The primary bug layout: a solution `tsconfig.json` (`files: []`) references TWO
+/// leaves that BOTH include the `.vue`. tsgo `GetDefaultProject` never fails
+/// closed here — the FIRST leaf in the solution's declared `references` order
+/// that directly includes the carrier is the single default owner.
+#[test]
+fn dual_vue_claimant_solution_resolves_to_first_reference_order_leaf() {
+    let solution = solution_project(
+        0,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.json",
+        &[
+            "d:/ws/packages/ui/tsconfig.app.json",
+            "d:/ws/packages/ui/tsconfig.components.json",
+        ],
+    );
+    let app = configured_project(
+        1,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.app.json",
+        &["d:/ws/packages/ui/src/App.vue"],
+    );
+    let components = configured_project(
+        2,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.components.json",
+        &["d:/ws/packages/ui/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![solution, app, components]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/packages/ui/src/App.vue")
+        .expect("a dual-claimant configured topology must resolve a single default owner");
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/packages/ui/tsconfig.app.json"),
+        "the first leaf in the solution's declared references order wins (BFS from the \
+         nearest literal tsconfig.json solution)"
+    );
+}
+
+/// Reference-order determinism (CR-2): swapping the solution's `references` array
+/// deterministically changes the winner and matches tsgo's declared-order BFS.
+#[test]
+fn dual_vue_claimant_winner_follows_reference_declared_order() {
+    let solution = solution_project(
+        0,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.json",
+        // components FIRST this time
+        &[
+            "d:/ws/packages/ui/tsconfig.components.json",
+            "d:/ws/packages/ui/tsconfig.app.json",
+        ],
+    );
+    let app = configured_project(
+        1,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.app.json",
+        &["d:/ws/packages/ui/src/App.vue"],
+    );
+    let components = configured_project(
+        2,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.components.json",
+        &["d:/ws/packages/ui/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![solution, app, components]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/packages/ui/src/App.vue")
+        .expect("must resolve a single default owner");
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/packages/ui/tsconfig.components.json"),
+        "reordering references must deterministically change the BFS winner"
+    );
+}
+
+/// CR-1: the BFS entry is the nearest LITERAL `tsconfig.json` (the solution),
+/// never `tsconfig.app.json`, even though all three share the same project root.
+/// If the entry were picked by nearest-root the two leaves would be an unbroken
+/// tie; only the basename filter selects the solution as the entry.
+#[test]
+fn single_claimant_resolves_directly_without_walk() {
+    let solution = solution_project(
+        0,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.json",
+        &["d:/ws/packages/ui/tsconfig.app.json"],
+    );
+    let app = configured_project(
+        1,
+        "d:/ws/packages/ui",
+        "d:/ws/packages/ui/tsconfig.app.json",
+        &["d:/ws/packages/ui/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![solution, app]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/packages/ui/src/App.vue")
+        .expect("a single claimant wins directly");
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/packages/ui/tsconfig.app.json"),
+    );
+}
+
+/// CR-3: a malformed `A <-> B` reference cycle where BOTH claim the file resolves
+/// to a deterministic winner (the visited-set terminates the BFS) — NEVER a
+/// terminal "no owner".
+#[test]
+fn cyclic_reference_pair_resolves_deterministically_not_none() {
+    let solution = solution_project(
+        0,
+        "d:/ws",
+        "d:/ws/tsconfig.json",
+        &["d:/ws/tsconfig.a.json", "d:/ws/tsconfig.b.json"],
+    );
+    let a = with_references(
+        configured_project(1, "d:/ws", "d:/ws/tsconfig.a.json", &["d:/ws/src/App.vue"]),
+        &["d:/ws/tsconfig.b.json"],
+    );
+    let b = with_references(
+        configured_project(2, "d:/ws", "d:/ws/tsconfig.b.json", &["d:/ws/src/App.vue"]),
+        &["d:/ws/tsconfig.a.json"],
+    );
+    let snap = built_snapshot(vec![solution, a, b]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/src/App.vue")
+        .expect("a cyclic reference pair must still resolve a single owner, never None");
+    // BFS from the solution visits tsconfig.a.json first (declared order).
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/tsconfig.a.json"),
+        "the visited-set BFS resolves the cycle to the first declared claimant"
+    );
+}
+
+/// CR-4: when NO solution reference graph reaches the claimants, the fallback is
+/// the lexicographically-least `tsconfig_path` among the claimants — DISTINCT
+/// from any declared-reference order.
+#[test]
+fn no_reference_graph_falls_back_to_name_least_claimant() {
+    // Two sibling leaves both claim the file, with NO solution/reference edge.
+    let app = configured_project(
+        0,
+        "d:/ws",
+        "d:/ws/tsconfig.app.json",
+        &["d:/ws/src/App.vue"],
+    );
+    let test = configured_project(
+        1,
+        "d:/ws",
+        "d:/ws/tsconfig.test.json",
+        &["d:/ws/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![app, test]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/src/App.vue")
+        .expect("two claimants with no reference graph still resolve via the name-least fallback");
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/tsconfig.app.json"),
+        "firstConfiguredProject fallback = lexicographically-least tsconfig among claimants"
+    );
+}
+
+/// CR-4 negative: zero configured claimants ⇒ `None` (⇒ `NoProject` upstream),
+/// never an invented winner.
+#[test]
+fn no_configured_claimant_resolves_to_none() {
+    let app = configured_project(
+        0,
+        "d:/ws",
+        "d:/ws/tsconfig.app.json",
+        &["d:/ws/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![app, fallback_project(1, "d:/ws")]);
+
+    assert_eq!(
+        snap.default_configured_owner_for_file("d:/ws/src/Other.vue"),
+        None,
+        "a file no configured project includes has no default owner",
+    );
+}
+
+/// CR-2: the walk CLIMBS from the nearest solution to its ancestor solution when
+/// the nearest solution's reference subtree does not reach the claimants. The
+/// ancestor's declared order (components-first) picks the BFS winner — DISTINCT
+/// from the name-least fallback, so the climb is genuinely exercised.
+#[test]
+fn walk_climbs_to_ancestor_solution_when_nearest_has_no_claiming_reference() {
+    // Ancestor solution (ws root) references BOTH claiming leaves, components
+    // first; nearest solution (pkg) references nothing that claims the file. Two
+    // claimants force the reference walk (a single claimant short-circuits).
+    let ancestor_solution = solution_project(
+        0,
+        "d:/ws",
+        "d:/ws/tsconfig.json",
+        &[
+            "d:/ws/packages/pkg/tsconfig.components.json",
+            "d:/ws/packages/pkg/tsconfig.app.json",
+        ],
+    );
+    let nearest_solution = solution_project(
+        1,
+        "d:/ws/packages/pkg",
+        "d:/ws/packages/pkg/tsconfig.json",
+        &[],
+    );
+    let app = configured_project(
+        2,
+        "d:/ws/packages/pkg",
+        "d:/ws/packages/pkg/tsconfig.app.json",
+        &["d:/ws/packages/pkg/src/App.vue"],
+    );
+    let components = configured_project(
+        3,
+        "d:/ws/packages/pkg",
+        "d:/ws/packages/pkg/tsconfig.components.json",
+        &["d:/ws/packages/pkg/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![ancestor_solution, nearest_solution, app, components]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/packages/pkg/src/App.vue")
+        .expect("the climb to the ancestor solution must reach a claiming leaf");
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/packages/pkg/tsconfig.components.json"),
+        "the ancestor solution's declared reference order (components-first) decides",
+    );
+}
+
+/// CR-2: `disableSolutionSearching` on the nearest solution suppresses the climb;
+/// the walk then finds nothing and the name-least fallback (`tsconfig.app.json`)
+/// decides — DIFFERENT from the components-first BFS winner above, proving the
+/// climb was actually suppressed.
+#[test]
+fn disable_solution_searching_suppresses_climb() {
+    let ancestor_solution = solution_project(
+        0,
+        "d:/ws",
+        "d:/ws/tsconfig.json",
+        &[
+            "d:/ws/packages/pkg/tsconfig.components.json",
+            "d:/ws/packages/pkg/tsconfig.app.json",
+        ],
+    );
+    let nearest_solution = with_disable_solution_searching(solution_project(
+        1,
+        "d:/ws/packages/pkg",
+        "d:/ws/packages/pkg/tsconfig.json",
+        &[],
+    ));
+    let app = configured_project(
+        2,
+        "d:/ws/packages/pkg",
+        "d:/ws/packages/pkg/tsconfig.app.json",
+        &["d:/ws/packages/pkg/src/App.vue"],
+    );
+    let components = configured_project(
+        3,
+        "d:/ws/packages/pkg",
+        "d:/ws/packages/pkg/tsconfig.components.json",
+        &["d:/ws/packages/pkg/src/App.vue"],
+    );
+    let snap = built_snapshot(vec![ancestor_solution, nearest_solution, app, components]);
+
+    let owner = snap
+        .default_configured_owner_for_file("d:/ws/packages/pkg/src/App.vue")
+        .expect("even with the climb suppressed the fallback resolves a winner");
+    assert_eq!(
+        snap.tsconfig_path(owner).map(|p| p.as_str()),
+        Some("d:/ws/packages/pkg/tsconfig.app.json"),
+        "climb suppressed ⇒ BFS finds nothing ⇒ name-least fallback (app < components)",
+    );
+}

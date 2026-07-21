@@ -33,7 +33,9 @@
 use tower_lsp_server::ls_types::Diagnostic;
 
 use crate::provider_sync::{ProviderOwnerBinding, ProviderPathKind, ProviderSyncState};
-use crate::test_harness::{RealProviderTestSession, TestProviderKind, TestSessionBuilder};
+use crate::test_harness::{
+    real_provider_test, RealProviderTestSession, TestProviderKind, TestSessionBuilder,
+};
 
 const FIXTURE: &str = "external-ts-engine";
 
@@ -422,3 +424,42 @@ async fn carrier_in_multiroot_monorepo_resolves_cross_package_tsserver() {
     );
     session.shutdown().await;
 }
+
+// ── Dual-claimant solution (the release-blocking "no inference at all" bug) ──
+//
+// The `dual-vue-claimant` fixture is the exact failing layout: a solution
+// `tsconfig.json` (`files: [], references: […]`) referencing TWO leaves
+// (`tsconfig.app.json` + `tsconfig.components.json`) that BOTH `include` `src`.
+// Pre-fix the carrier was a terminal `Ambiguous(MultipleOwners)` — no IDE TSX
+// sync, every provider feature failed closed (null hover, 0 diagnostics, the
+// `@/` import + ambient both unresolved). Post-fix tsgo `GetDefaultProject` binds
+// it to the FIRST leaf in the solution's declared references order and it
+// type-checks normally. This runs per-route (tsserver + managed tsgo) — the
+// single provider-neutral owner selection consumed by both.
+//
+// DISCRIMINATING: revert the multi-claimant selection and the carrier resolves
+// `Ambiguous` again ⇒ the `@/` import surfaces TS2307 and the ambient TS2304, and
+// the hover below returns `None` — the exact pre-fix signature.
+real_provider_test!(
+    dual_vue_claimant_solution_resolves_to_single_default_owner_with_real_types,
+    fixture = "dual-vue-claimant",
+    async fn run(session) {
+        // (1) The carrier is Bound and type-checks: the `@/`-aliased import and the
+        // ambient global both resolve (no TS2307 / TS2304).
+        assert_carrier_resolves_configured(session, "src/AliasConsumer.vue").await;
+
+        // (2) Real types on hover — the multi-claimant carrier is served, not a
+        // null-hover fail-closed. `shape` has the aliased `AliasedShape` type.
+        let uri = session.open_fixture_file("src/AliasConsumer.vue").await;
+        session.ensure_synced(&uri).await;
+        let pos = session.find_position(&uri, "const shape", 6);
+        let hover = session.hover_text(&uri, pos).await;
+        assert!(
+            hover
+                .as_deref()
+                .is_some_and(|h| h.contains("AliasedShape") || h.contains("shape")),
+            "a dual-claimant carrier must return REAL hover types from its resolved \
+             owner (never null hover), got {hover:?}"
+        );
+    }
+);

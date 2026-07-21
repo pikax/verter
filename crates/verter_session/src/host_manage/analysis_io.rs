@@ -56,10 +56,11 @@ impl VerterHost {
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
-        imports: &[verter_semantic::analysis::AnalyzedImport],
-        macros: &[verter_semantic::analysis::AnalyzedMacro],
-        bindings: &[verter_semantic::analysis::AnalyzedBinding],
+        script_analysis: &verter_semantic::analysis::types::ScriptAnalysisSnapshot,
     ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        let imports = &script_analysis.imports;
+        let macros = &script_analysis.macros;
+        let bindings = &script_analysis.bindings;
         let ext_map = if !src_blocks.is_empty() {
             let mut map = rustc_hash::FxHashMap::default();
             for req in external_requests {
@@ -97,11 +98,19 @@ impl VerterHost {
         )?;
         let (imports, unions, props_name) =
             crate::host_resolve::template_converter_inputs(imports, macros, bindings);
+        let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
+            macros,
+            script_analysis.macro_usage.as_ref(),
+            &script_analysis.vue_api_calls,
+            bindings,
+            &script_analysis.style_vbind_roots,
+        );
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
             &raw,
             &imports,
             &unions,
             props_name.as_deref(),
+            Some(&unused_ctx),
         )))
     }
 
@@ -259,11 +268,19 @@ impl VerterHost {
             }
             let props_name = define_props.and_then(|dp| dp.binding_name.clone());
 
+            let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
+                &snapshot.macros,
+                snapshot.macro_usage.as_ref(),
+                &snapshot.vue_api_calls,
+                &snapshot.bindings,
+                &snapshot.style_vbind_roots,
+            );
             let tpl = crate::template_convert::convert_raw_to_analysis(
                 &raw,
                 &imports,
                 &unions,
                 props_name.as_deref(),
+                Some(&unused_ctx),
             );
             let tpl_arc = Arc::new(tpl);
             snapshot.template = Some(Arc::clone(&tpl_arc));
@@ -401,6 +418,7 @@ impl VerterHost {
                 // this source's script analysis with the moved
                 // generation's products.
                 let stored_styles = Arc::new(hd.parse.style_analyses.clone());
+                let stored_markup_tokens = Arc::new(hd.parse.markup_class_tokens.clone());
                 // Generation rail: accept the persisted template only
                 // at THIS branch's own source generation — a late
                 // persist stamped with a superseded generation must
@@ -437,7 +455,9 @@ impl VerterHost {
                 } else {
                     stored_styles
                 };
-                if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+                // Runs even with zero script bindings — the recorded
+                // `style_vbind_roots` also carry PROP liveness.
+                if !style_analyses.is_empty() {
                     script_analysis.mark_bindings_used_in_style(&style_analyses);
                 }
                 let snapshot = FileAnalysisSnapshot {
@@ -455,6 +475,9 @@ impl VerterHost {
                     script_binding_occurrences: Arc::new(
                         script_analysis.script_binding_occurrences,
                     ),
+                    macro_usage: script_analysis.macro_usage,
+                    style_vbind_roots: script_analysis.style_vbind_roots,
+                    markup_class_tokens: stored_markup_tokens,
                     export_signatures: Arc::new(export_sigs),
                     options_api: script_analysis.options_api,
                     store_usages: Arc::new(script_analysis.store_usages),
@@ -1432,6 +1455,9 @@ impl VerterHost {
             dom_query_calls: Arc::clone(&ad.arcs.dom_query_calls),
             css_var_manipulations: Arc::clone(&ad.arcs.css_var_manipulations),
             script_binding_occurrences: Arc::clone(&ad.arcs.script_binding_occurrences),
+            macro_usage: ad.script_analysis.macro_usage.clone(),
+            style_vbind_roots: ad.script_analysis.style_vbind_roots.clone(),
+            markup_class_tokens: Arc::clone(&ad.markup_class_tokens),
             export_signatures: Arc::new(ad.export_signatures.clone()),
             options_api: ad.script_analysis.options_api.clone(),
             store_usages: Arc::clone(&ad.arcs.store_usages),
@@ -2123,9 +2149,7 @@ impl VerterHost {
             override_with_parse.framework_parse.clone(),
             &override_with_parse.parse.src_blocks,
             &override_with_parse.parse.external_requests,
-            &override_with_parse.parse.script_analysis.imports,
-            &override_with_parse.parse.script_analysis.macros,
-            &override_with_parse.parse.script_analysis.bindings,
+            &override_with_parse.parse.script_analysis,
         )
     }
 

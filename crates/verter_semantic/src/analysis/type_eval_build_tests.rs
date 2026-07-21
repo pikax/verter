@@ -1840,8 +1840,7 @@ fn semantic_inference_budget_rejects_deep_return_expression() {
 
 #[test]
 fn semantic_inference_budget_rejects_excessive_work() {
-    let expression = std::iter::repeat("0")
-        .take(MAX_SEMANTIC_INFERENCE_WORK + 8)
+    let expression = std::iter::repeat_n("0", MAX_SEMANTIC_INFERENCE_WORK + 8)
         .collect::<Vec<_>>()
         .join(",");
     let source = format!("const wide = [{expression}];");

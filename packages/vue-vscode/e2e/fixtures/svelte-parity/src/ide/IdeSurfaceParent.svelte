@@ -1,5 +1,6 @@
 <script lang="ts">
   import IdeSurfaceChild from "./IdeSurfaceChild.svelte";
+  import { fade } from "svelte/transition";
 
   let label = $state("ide-label");
   let count = $state(2);
@@ -10,6 +11,13 @@
 
   function onChange(next: number): void {
     void next;
+  }
+
+  function highlight(node: HTMLElement, params: { color: string }) {
+    node.dataset.highlight = params.color;
+    return {
+      destroy() {},
+    };
   }
 
   interface IdePerson {
@@ -38,6 +46,10 @@
   {#if person}
     <span>{person.name}</span>
   {/if}
+
+  <!-- CUSTOM_DIRECTIVE_SITE -->
+  <p use:highlight={{ color: "red" }}>action</p>
+  <em transition:fade>transition</em>
 
   <!-- PROP_COMPLETE_SITE -->
   <!-- SNIPPET_NAME_COMPLETE_SITE -->

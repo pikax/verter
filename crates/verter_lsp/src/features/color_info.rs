@@ -12,6 +12,10 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// - Hex colors: `#rgb`, `#rrggbb`, `#rrggbbaa`
 /// - `rgb()`/`rgba()` functions
 /// - `hsl()`/`hsla()` functions
+///
+/// Color chips map ONLY to actual color VALUES: candidates inside comments or
+/// strings, and hex-shaped tokens in selector position (`#bad { }` — a valid
+/// ID selector that happens to be all hex digits), are never emitted.
 pub fn document_colors(
     source: &str,
     blocks: &[SfcBlock],
@@ -30,14 +34,79 @@ pub fn document_colors(
             None => continue,
         };
 
+        // Mask comment/string bytes so candidates inside them never chip.
+        let mask = css_comment_string_mask(content);
+
         // Scan for hex colors
-        scan_hex_colors(content, content_start, line_index, &mut colors);
+        scan_hex_colors(content, &mask, content_start, line_index, &mut colors);
 
         // Scan for rgb/rgba/hsl/hsla functions
-        scan_color_functions(content, content_start, line_index, &mut colors);
+        scan_color_functions(content, &mask, content_start, line_index, &mut colors);
     }
 
     colors
+}
+
+/// Byte mask over `content`: `true` for bytes inside a `/* ... */` comment or
+/// a quoted string.
+fn css_comment_string_mask(content: &str) -> Vec<bool> {
+    let bytes = content.as_bytes();
+    let mut mask = vec![false; bytes.len()];
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            let start = i;
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            mask[start..i].iter_mut().for_each(|m| *m = true);
+            continue;
+        }
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(bytes.len());
+            mask[start..i].iter_mut().for_each(|m| *m = true);
+            continue;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// Whether `offset` sits in a declaration VALUE position: scanning backwards
+/// (skipping masked comment/string bytes), a `:` appears before any `;`,
+/// `{`, `}`, AND that colon is a DECLARATION colon — the scan continues to a
+/// `{` or `;` (rule-body context) rather than a `}` or the block start
+/// (selector context). A hex-shaped ID selector (`#bad {`) fails outright;
+/// a pseudo-class'd selector (`a:hover #bad {`) fails because `:hover`'s
+/// colon sits in selector context; `color: #f00` passes.
+fn is_value_position(content: &str, mask: &[bool], offset: usize) -> bool {
+    let bytes = content.as_bytes();
+    let mut i = offset;
+    let mut seen_colon = false;
+    while i > 0 {
+        i -= 1;
+        if mask.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        match bytes[i] {
+            b':' => seen_colon = true,
+            b';' | b'{' => return seen_colon,
+            b'}' => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Generate color presentations for a given color.
@@ -108,6 +177,7 @@ pub fn color_presentations(color: &Color) -> Vec<ColorPresentation> {
 /// Scan for hex color patterns (#rgb, #rrggbb, #rrggbbaa).
 fn scan_hex_colors(
     content: &str,
+    mask: &[bool],
     base_offset: u32,
     line_index: &LineIndex,
     colors: &mut Vec<ColorInformation>,
@@ -116,7 +186,7 @@ fn scan_hex_colors(
     let mut i = 0;
 
     while i < bytes.len() {
-        if bytes[i] == b'#' {
+        if bytes[i] == b'#' && !mask.get(i).copied().unwrap_or(false) {
             let start = i;
             i += 1;
 
@@ -132,7 +202,9 @@ fn scan_hex_colors(
             let next_is_ident = i < bytes.len()
                 && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-');
 
-            if !next_is_ident {
+            // Only chip actual VALUES — a hex-shaped ID selector (`#bad {`)
+            // is not a color.
+            if !next_is_ident && is_value_position(content, mask, start) {
                 if let Some(color) = parse_hex_color(hex, hex_len) {
                     let abs_start = base_offset + start as u32;
                     let abs_end = base_offset + i as u32;
@@ -209,6 +281,7 @@ fn parse_hex_color(hex: &str, len: usize) -> Option<Color> {
 /// Scan for CSS color function calls: rgb(), rgba(), hsl(), hsla().
 fn scan_color_functions(
     content: &str,
+    mask: &[bool],
     base_offset: u32,
     line_index: &LineIndex,
     colors: &mut Vec<ColorInformation>,
@@ -219,6 +292,13 @@ fn scan_color_functions(
             let abs_pos = search_from + pos;
             // Ensure not preceded by alphanumeric (not part of another identifier)
             if abs_pos > 0 && content.as_bytes()[abs_pos - 1].is_ascii_alphanumeric() {
+                search_from = abs_pos + prefix.len();
+                continue;
+            }
+            // Never chip inside comments/strings, and only in VALUE position.
+            if mask.get(abs_pos).copied().unwrap_or(false)
+                || !is_value_position(content, mask, abs_pos)
+            {
                 search_from = abs_pos + prefix.len();
                 continue;
             }
@@ -485,5 +565,86 @@ mod tests {
             colors.is_empty(),
             "CSS ID selector #app should not be detected as color"
         );
+    }
+
+    /// A hex-shaped ID selector (`#bad` — all hex digits) is NOT a color;
+    /// the value inside its rule IS. Chips map only to actual color values.
+    #[test]
+    fn hex_shaped_id_selector_never_chips() {
+        let source = "<style>\n#bad { color: #f00; }\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let colors = document_colors(source, &blocks, &line_index);
+        assert_eq!(colors.len(), 1, "only the value chips, not the selector");
+        let start_off = line_index
+            .position_to_offset(&colors[0].range.start)
+            .unwrap() as usize;
+        let end_off = line_index.position_to_offset(&colors[0].range.end).unwrap() as usize;
+        assert_eq!(&source[start_off..end_off], "#f00");
+    }
+
+    /// A pseudo-class colon (`a:hover`) is NOT a declaration colon: a
+    /// hex-shaped ID selector after a pseudo-class never chips; the value
+    /// inside the rule still does.
+    #[test]
+    fn pseudo_class_colon_never_makes_a_selector_a_value_position() {
+        let source = "<style>\na:hover #bad { color: #f00; }\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let colors = document_colors(source, &blocks, &line_index);
+        assert_eq!(
+            colors.len(),
+            1,
+            "only the value chips, not the pseudo-class'd selector"
+        );
+        let start_off = line_index
+            .position_to_offset(&colors[0].range.start)
+            .unwrap() as usize;
+        let end_off = line_index.position_to_offset(&colors[0].range.end).unwrap() as usize;
+        assert_eq!(&source[start_off..end_off], "#f00");
+    }
+
+    /// The FIRST rule's chip range maps exactly onto the color VALUE — never
+    /// onto the class name above it (the observed decorator defect).
+    #[test]
+    fn first_rule_chip_maps_exactly_to_the_color_value() {
+        let source = "<style>\n.first {\n  color: #abc;\n}\n.second {\n  background: rgb(1, 2, 3);\n}\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let colors = document_colors(source, &blocks, &line_index);
+        assert_eq!(colors.len(), 2);
+        let texts: Vec<&str> = colors
+            .iter()
+            .map(|c| {
+                let s = line_index.position_to_offset(&c.range.start).unwrap() as usize;
+                let e = line_index.position_to_offset(&c.range.end).unwrap() as usize;
+                &source[s..e]
+            })
+            .collect();
+        assert!(texts.contains(&"#abc"), "got {texts:?}");
+        assert!(texts.contains(&"rgb(1, 2, 3)"), "got {texts:?}");
+        // Negative: no chip range starts on a class-name line.
+        for c in &colors {
+            let s = line_index.position_to_offset(&c.range.start).unwrap() as usize;
+            assert!(
+                !source[s..].starts_with(".first") && !source[s..].starts_with(".second"),
+                "a chip must never land on a selector"
+            );
+        }
+    }
+
+    /// Colors inside comments and strings never chip.
+    #[test]
+    fn colors_in_comments_and_strings_never_chip() {
+        let source =
+            "<style>\n/* #fff */\n.x { content: '#0f0'; }\n.y { /* rgb(1,2,3) */ color: red; }\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let colors = document_colors(source, &blocks, &line_index);
+        assert!(colors.is_empty(), "comment/string colors must not chip");
     }
 }

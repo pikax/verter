@@ -367,8 +367,12 @@ type ApiPipeListener = std::fs::File;
 #[cfg(windows)]
 fn bind_api_pipe() -> (String, ApiPipeListener) {
     use std::os::windows::io::FromRawHandle;
+    // `PIPE_ACCESS_DUPLEX` is a `FILE_FLAGS_AND_ATTRIBUTES` constant and lives in
+    // `Win32::Storage::FileSystem` (windows-sys 0.61); only the pipe-mode flags
+    // and `CreateNamedPipeW` are in `Win32::System::Pipes`.
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows_sys::Win32::System::Pipes::{
-        CreateNamedPipeW, PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
 
     let name = format!(r"\\.\pipe\verter-fake-api-{}", std::process::id());

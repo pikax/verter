@@ -30,7 +30,10 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         audit_enabled: true,
         lsp_method_timeouts: LspMethodTimeoutsConfig {
-            hover: Duration::from_millis(20),
+            audit_supersede: verter_session::LspMethodBudgets {
+                hover: Duration::from_millis(20),
+                ..verter_session::LspMethodBudgets::audit_supersede_defaults()
+            },
             ..LspMethodTimeoutsConfig::default()
         },
         ..HostConfig::default()
@@ -54,7 +57,6 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
         LspMethodTag::Hover,
         canonical.clone(),
         Some(position),
-        host.config().lsp_method_timeouts.hover,
         async move {
             // The body sleeps past the budget; the timeout in
             // `run_with_audit` wins the race.
@@ -136,7 +138,10 @@ async fn cancellation_drains_request_id_from_active_registry() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         audit_enabled: true,
         lsp_method_timeouts: LspMethodTimeoutsConfig {
-            hover: Duration::from_millis(20),
+            audit_supersede: verter_session::LspMethodBudgets {
+                hover: Duration::from_millis(20),
+                ..verter_session::LspMethodBudgets::audit_supersede_defaults()
+            },
             ..LspMethodTimeoutsConfig::default()
         },
         ..HostConfig::default()

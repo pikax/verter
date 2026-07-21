@@ -74,8 +74,9 @@ async fn main() {
     // ResilientTypeProvider's crash monitor to send user notifications.
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
 
-    // Provider selection: auto → detect TS version, pick provider
-    let (type_provider, provider_kind, suggest_tsgo, type_provider_reason) =
+    // Provider selection: identity-based serving order (editor tsgo → editor
+    // tsserver plugin → managed tsgo), with explicit operator overrides.
+    let (type_provider, provider_kind, type_provider_reason) =
         create_type_provider(&args, &client_cell, &host).await;
 
     let config = LspConfig {
@@ -83,7 +84,6 @@ async fn main() {
         type_provider,
         project_sync_mode: ProjectSyncMode::FullProject,
         type_provider_kind: provider_kind,
-        suggest_tsgo,
         mcp_port: mcp_actual_port,
         type_provider_reason,
         // Production keeps the imported-carrier prewarm (test-only suppression seam).
@@ -161,7 +161,10 @@ async fn main() {
     )
     .finish();
 
-    Server::new(stdin, stdout, socket).serve(service).await;
+    Server::new(stdin, stdout, socket)
+        .concurrency_level(verter_lsp::LSP_MAX_CONCURRENCY)
+        .serve(service)
+        .await;
 }
 
 /// Parsed CLI arguments.
@@ -306,7 +309,7 @@ impl CliArgs {
 /// receipt. Without either fact it constructs a stateful managed TSGO fallback
 /// that remains cold until the first connected demand.
 ///
-/// Returns `(provider, kind, suggest_tsgo, reason)` where `reason` preserves
+/// Returns `(provider, kind, reason)` where `reason` preserves
 /// selected-route provenance or explains why no provider could be started.
 async fn create_type_provider(
     args: &CliArgs,
@@ -315,7 +318,6 @@ async fn create_type_provider(
 ) -> (
     Option<Arc<dyn TypeProvider>>,
     TypeProviderKind,
-    bool,
     Option<String>,
 ) {
     tracing::info!(
@@ -354,7 +356,6 @@ async fn create_type_provider(
             (
                 None,
                 TypeProviderKind::None,
-                false,
                 Some("Disabled by configuration (--type-provider=off)".into()),
             )
         }
@@ -374,7 +375,6 @@ async fn create_type_provider(
             (
                 Some(provider),
                 TypeProviderKind::Tsgo,
-                false,
                 Some(if has_editor_rendezvous {
                     editor_native_preview_reason()
                 } else {
@@ -388,11 +388,11 @@ async fn create_type_provider(
             match try_spawn_tsgo(&ws_canonical, client_cell).await {
                 Ok(owned) => {
                     let tp = wrap_owned_admission(owned, host);
-                    (Some(tp), TypeProviderKind::Tsgo, false, None)
+                    (Some(tp), TypeProviderKind::Tsgo, None)
                 }
                 Err(reason) => {
                     tracing::warn!("TSGO unavailable — running in verter-only mode: {reason}");
-                    (None, TypeProviderKind::None, false, Some(reason))
+                    (None, TypeProviderKind::None, Some(reason))
                 }
             }
         }
@@ -400,12 +400,39 @@ async fn create_type_provider(
             if let Some(attestation) = &editor_tsserver {
                 return editor_tsserver_topology(attestation);
             }
-            // tsserver only — no fallback
             match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                Ok(tp) => (Some(tp), TypeProviderKind::Tsserver, false, None),
-                Err(reason) => {
+                Ok(tp) => (Some(tp), TypeProviderKind::Tsserver, None),
+                Err(TsserverSpawnError::NativeFamily { major }) => {
+                    // A TS7+ install is the native (tsgo) engine family — it is
+                    // never served over the Node tsserver protocol. Reclassify
+                    // the override to the managed TSGO route.
+                    tracing::warn!(
+                        "--type-provider=tsserver: workspace TypeScript {major}.x is the \
+                         native (TSGO) family; serving via managed TSGO"
+                    );
+                    match try_spawn_tsgo(&ws_canonical, client_cell).await {
+                        Ok(owned) => {
+                            let tp = wrap_owned_admission(owned, host);
+                            (
+                                Some(tp),
+                                TypeProviderKind::Tsgo,
+                                Some(format!(
+                                    "workspace TypeScript {major}.x is the native (TSGO) \
+                                     family; tsserver override reclassified to managed TSGO"
+                                )),
+                            )
+                        }
+                        Err(reason) => {
+                            tracing::warn!(
+                                "TSGO unavailable — running in verter-only mode: {reason}"
+                            );
+                            (None, TypeProviderKind::None, Some(reason))
+                        }
+                    }
+                }
+                Err(TsserverSpawnError::Unavailable(reason)) => {
                     tracing::warn!("tsserver unavailable — running in verter-only mode: {reason}");
-                    (None, TypeProviderKind::None, false, Some(reason))
+                    (None, TypeProviderKind::None, Some(reason))
                 }
             }
         }
@@ -421,8 +448,7 @@ async fn create_type_provider(
             (
                 Some(Arc::new(provider) as Arc<dyn TypeProvider>),
                 TypeProviderKind::Tsserver,
-                false,
-                None,
+                Some("extension-hosted TypeScript language service (Experiment E)".into()),
             )
         }
         _ => {
@@ -436,7 +462,6 @@ async fn create_type_provider(
                 return (
                     Some(provider),
                     TypeProviderKind::Tsgo,
-                    false,
                     Some(editor_native_preview_reason()),
                 );
             }
@@ -449,7 +474,6 @@ async fn create_type_provider(
             (
                 Some(provider),
                 TypeProviderKind::Tsgo,
-                false,
                 Some(lazy_managed_tsgo_reason()),
             )
         }
@@ -469,7 +493,6 @@ fn editor_tsserver_topology(
 ) -> (
     Option<Arc<dyn TypeProvider>>,
     TypeProviderKind,
-    bool,
     Option<String>,
 ) {
     tracing::info!(
@@ -480,7 +503,6 @@ fn editor_tsserver_topology(
     (
         None,
         TypeProviderKind::EditorTsserver,
-        false,
         Some(format!(
             "attested editor tsserver process {} across {} project(s)",
             attestation.pid,
@@ -666,17 +688,40 @@ fn try_attach_shared_tsgo(
     Some(overlay)
 }
 
+/// Why the tsserver route could not produce a tsserver provider.
+#[derive(Debug)]
+enum TsserverSpawnError {
+    /// The resolved candidate belongs to a TS7+ install — the native (tsgo)
+    /// engine family. It must classify as tsgo for serving-order purposes,
+    /// never spawn under the Node tsserver protocol.
+    NativeFamily { major: u32 },
+    /// tsserver genuinely unavailable (missing node/TypeScript, spawn failure).
+    Unavailable(String),
+}
+
 /// Try to spawn tsserver.
+///
+/// The native-family gate runs BEFORE any binary lookup or process spawn: a
+/// TS7+ (tsgo-family) candidate returns [`TsserverSpawnError::NativeFamily`]
+/// without touching node.
 async fn try_spawn_tsserver(
     args: &CliArgs,
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
-) -> Result<Arc<dyn TypeProvider>, String> {
-    let node_path = verter_lsp::tsserver::find_node()
-        .ok_or_else(|| "Node.js not found on PATH or standard locations".to_string())?;
+) -> Result<Arc<dyn TypeProvider>, TsserverSpawnError> {
     let tsserver_path =
         verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(workspace_root))
-            .ok_or_else(|| "TypeScript not installed in workspace".to_string())?;
+            .ok_or_else(|| {
+                TsserverSpawnError::Unavailable("TypeScript not installed in workspace".to_string())
+            })?;
+    if let Some(major) =
+        verter_type_runtime::discovery::tsserver_native_family_major(&tsserver_path)
+    {
+        return Err(TsserverSpawnError::NativeFamily { major });
+    }
+    let node_path = verter_lsp::tsserver::find_node().ok_or_else(|| {
+        TsserverSpawnError::Unavailable("Node.js not found on PATH or standard locations".into())
+    })?;
 
     tracing::info!(
         "found tsserver: {} (node: {})",
@@ -721,10 +766,10 @@ async fn try_spawn_tsserver(
             );
             Ok(Arc::new(resilient))
         }
-        Err(e) => Err(format!(
+        Err(e) => Err(TsserverSpawnError::Unavailable(format!(
             "found tsserver at {} (node: {node_path}), but spawn/initialize failed: {e}",
             tsserver_path.display()
-        )),
+        ))),
     }
 }
 

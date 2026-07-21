@@ -310,12 +310,11 @@ fn used_in_name_bearing_position(semantic: &Semantic, symbol_id: SymbolId) -> bo
                 }
             }
             AstKind::AssignmentTargetPropertyIdentifier(_) => return true,
-            AstKind::StaticMemberExpression(member) => {
+            AstKind::StaticMemberExpression(member)
                 if member.property.name.as_str() == "name"
-                    && member.object.span() == reference_span(nodes, reference.node_id())
-                {
-                    return true;
-                }
+                    && member.object.span() == reference_span(nodes, reference.node_id()) =>
+            {
+                return true;
             }
             _ => {}
         }

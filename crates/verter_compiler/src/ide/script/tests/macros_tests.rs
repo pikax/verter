@@ -1009,6 +1009,7 @@ fn define_props_type_content_is_source_mapped() {
         style_usage_complete: true,
         css_modules: vec![],
         template_used_vars: None,
+        custom_elements: None,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {

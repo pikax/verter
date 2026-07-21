@@ -25,6 +25,42 @@ use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
+/// Resolve a named export's declaration `Location` in a REAL source file through
+/// the host's export tables (re-export chains followed). Fail-closed `None` when
+/// the export, source, or position conversion is unavailable.
+fn host_export_location(
+    server: &VerterLanguageServer,
+    canonical_id: &str,
+    binding_name: &str,
+) -> Option<Location> {
+    let host = &server.documents.host;
+    let (resolved_id, start, end) = host
+        .get_export_span_follow_reexports(canonical_id, binding_name)
+        .or_else(|| {
+            let (s, e) = host.get_export_span(canonical_id, binding_name)?;
+            Some((canonical_id.to_string(), s, e))
+        })?;
+    let source = host.get_source(&resolved_id)?;
+    let encoding = server.position_encoding.read().clone();
+    let li = LineIndex::new(&source, encoding);
+    let range = Range {
+        start: li.offset_to_position(start)?,
+        end: li.offset_to_position(end)?,
+    };
+    // Absolute paths only (POSIX-rooted or Windows-drive); relative/virtual ids
+    // never become locations. The shared owner util percent-encodes, so a path
+    // with spaces/non-ASCII still parses into a valid `Uri` instead of silently
+    // dropping this definition leg.
+    let normalized = resolved_id.replace('\\', "/");
+    if !normalized.starts_with('/') && normalized.chars().nth(1) != Some(':') {
+        return None;
+    }
+    Some(Location {
+        uri: crate::uri::path_to_file_uri(&resolved_id)?,
+        range,
+    })
+}
+
 pub(super) async fn handle_goto_definition(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
@@ -45,7 +81,11 @@ pub(super) async fn handle_goto_definition(
     server.ensure_provider_synced(uri).await;
 
     if server.editor_owns_carrier_source_features() {
-        return Ok(None);
+        // CSS-native results have no TS correlate — the editor's TS plugin can
+        // never own them, so the server still serves EXACTLY the css leg.
+        return Ok(super::nav_features_css::editor_owned_css_definition(
+            server, uri, position,
+        ));
     }
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
@@ -185,16 +225,37 @@ pub(super) async fn handle_goto_definition(
         )?;
 
         // Fix up sentinel URIs: if the definition is in the same file, use the document URI
-        if let GotoDefinitionResponse::Scalar(ref mut loc) = def {
-            if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
-                loc.uri = uri.clone();
+        match def {
+            GotoDefinitionResponse::Scalar(ref mut loc) => {
+                if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
+                    loc.uri = uri.clone();
+                }
             }
+            GotoDefinitionResponse::Array(ref mut locs) => {
+                for loc in locs.iter_mut() {
+                    if loc.uri.as_str() == crate::features::definition::SAME_FILE_URI_STR {
+                        loc.uri = uri.clone();
+                    }
+                }
+            }
+            GotoDefinitionResponse::Link(_) => {}
         }
 
         Some(def)
     })();
 
     tracing::debug!("definition: verter found={}", verter_result.is_some());
+
+    // B4: a GLOBAL css class token (declared non-scoped / :global) extends its
+    // definition targets with every global declaration workspace-wide.
+    if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        return Ok(super::nav_features_css::merge_global_class_definitions(
+            server,
+            uri,
+            &class_name,
+            verter_result,
+        ));
+    }
 
     // If verter already resolved a cross-file definition, return it directly.
     // Querying TSGO with a synthetic TSX position often crashes it.
@@ -253,9 +314,126 @@ pub(super) async fn handle_goto_definition(
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
                         let negotiated_encoding = server.position_encoding.read().clone();
+                        let provider_had_defs = !type_defs.is_empty();
+                        // GlobalComponents fallback-const NAV PROBE offsets for
+                        // any same-file synthetic targets, located through the
+                        // compiler-owned emission-contract reader BEFORE the
+                        // merge consumes the response (fail-closed `None` for
+                        // every non-fallback-const target).
+                        let nav_probe_offsets: Vec<u32> = type_defs
+                            .iter()
+                            .filter(|d| d.path == ctx.tsx_path)
+                            .filter_map(|d| {
+                                verter_session::global_component_nav_probe_offset(
+                                    &ctx.tsx_content,
+                                    d.start,
+                                    d.end,
+                                )
+                            })
+                            .collect();
                         let merged = merge::merge_definitions_with_barrel_resolver(
                             verter_result,
                             type_defs,
+                            &ctx.tsx_path,
+                            &ctx.tsx_line_index,
+                            &ctx.mapper,
+                            &ctx.carrier_line_index,
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
+                            uri,
+                            &carrier_source_exists,
+                            Some(&barrel_resolver),
+                            negotiated_encoding.clone(),
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
+                        );
+                        // If the type provider resolved to a barrel file, follow
+                        // re-exports to the terminal declaration.
+                        let resolved = server.resolve_barrel_locations(merged);
+
+                        // Synthetic-target fallback: the provider RESOLVED the
+                        // identifier, but every returned declaration was dropped
+                        // by the fail-closed merge — the targets live in
+                        // unmapped generated text. When those targets are
+                        // GlobalComponents fallback consts (a template tag whose
+                        // binding is a synthesized const), re-issue `definition`
+                        // at the const's NAV PROBE member — the
+                        // (augmentation-merged) `GlobalComponents` interface
+                        // member — so the tag jumps to the user's real
+                        // registration declaration. An unregistered tag has no
+                        // member symbol: the probe yields nothing and the result
+                        // stays fail-closed EMPTY. Positions whose definition
+                        // the provider could not resolve at all (`type_defs`
+                        // empty) never enter this branch.
+                        let resolved_is_empty = match &resolved {
+                            None => true,
+                            Some(GotoDefinitionResponse::Array(locs)) => locs.is_empty(),
+                            Some(GotoDefinitionResponse::Link(links)) => links.is_empty(),
+                            Some(GotoDefinitionResponse::Scalar(_)) => false,
+                        };
+                        if !(provider_had_defs && resolved_is_empty) {
+                            return Ok(resolved);
+                        }
+                        tracing::debug!(
+                            "definition: all provider targets were synthetic — retrying {} \
+                             GlobalComponents nav probe(s)",
+                            nav_probe_offsets.len()
+                        );
+                        let mut probe_defs = Vec::new();
+                        for probe_offset in nav_probe_offsets {
+                            match tp.get_definition(&ctx.tsx_path, probe_offset).await {
+                                Ok(defs) => probe_defs.extend(defs),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "definition: GlobalComponents nav-probe query error: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        // Post-await validation (fail closed), same as above.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            return Ok(None);
+                        }
+                        if probe_defs.is_empty() {
+                            return Ok(None);
+                        }
+                        // A provider may follow the augmentation member THROUGH
+                        // `typeof C` to the component's synthesized API carrier
+                        // (`{name}.vue.verter.ts`) — a virtual path whose byte
+                        // offsets the fail-closed merge cannot map. Resolve that
+                        // leg natively: normalize the carrier path back to its
+                        // REAL source file and take the component's
+                        // default-export declaration span from the host's export
+                        // tables. Unresolvable legs drop (fail closed).
+                        let mut native_locations: Vec<Location> = Vec::new();
+                        probe_defs.retain(|d| {
+                            let normalized = merge::normalize_carrier_path_owned(
+                                &d.path,
+                                &carrier_source_exists,
+                            );
+                            if normalized == d.path {
+                                return true;
+                            }
+                            if let Some(loc) = host_export_location(server, &normalized, "default")
+                            {
+                                native_locations.push(loc);
+                            }
+                            false
+                        });
+                        if probe_defs.is_empty() {
+                            return Ok(if native_locations.is_empty() {
+                                None
+                            } else {
+                                Some(GotoDefinitionResponse::Array(native_locations))
+                            });
+                        }
+                        let merged = merge::merge_definitions_with_barrel_resolver(
+                            None,
+                            probe_defs,
                             &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
@@ -273,9 +451,24 @@ pub(super) async fn handle_goto_definition(
                                 })
                             },
                         );
-                        // If the type provider resolved to a barrel file, follow
-                        // re-exports to the terminal declaration.
-                        return Ok(server.resolve_barrel_locations(merged));
+                        let mut locations = match server.resolve_barrel_locations(merged) {
+                            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+                            Some(GotoDefinitionResponse::Array(locs)) => locs,
+                            Some(GotoDefinitionResponse::Link(links)) => links
+                                .into_iter()
+                                .map(|link| Location {
+                                    uri: link.target_uri,
+                                    range: link.target_selection_range,
+                                })
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        locations.extend(native_locations);
+                        return Ok(if locations.is_empty() {
+                            None
+                        } else {
+                            Some(GotoDefinitionResponse::Array(locations))
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("definition: type provider error: {e}");
@@ -479,7 +672,12 @@ pub(super) async fn handle_references(
     );
 
     if server.editor_owns_carrier_source_features() {
-        return Ok(None);
+        // CSS-native references have no TS correlate — the server still
+        // serves EXACTLY the css leg (same-file occurrences + the
+        // workspace-wide global-class extension).
+        return Ok(super::nav_features_css::editor_owned_css_references(
+            server, uri, position,
+        ));
     }
 
     // Virtual file: route directly through TSGO
@@ -596,6 +794,20 @@ pub(super) async fn handle_references(
         verter_result.as_ref().map_or(0, |v| v.len())
     );
 
+    // B4: workspace-wide references for GLOBAL css classes (declared in a
+    // non-scoped block or under :global). The provider has no CSS knowledge —
+    // this leg completes natively and returns. Scoped classes never enter
+    // (fail closed: same-file only via the native path above).
+    if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        let locations = super::nav_features_css::merge_global_class_references(
+            server,
+            uri,
+            &class_name,
+            verter_result.unwrap_or_default(),
+        );
+        return Ok((!locations.is_empty()).then_some(locations));
+    }
+
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
@@ -606,10 +818,7 @@ pub(super) async fn handle_references(
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
-                tracing::debug!(
-                    "references: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
+                tracing::debug!("references: querying tp at tsx offset {}", tsx_offset);
                 // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
                 // handle_goto_definition).
                 let foreign_ide_set = server.capture_foreign_carrier_ide_set();
@@ -705,6 +914,24 @@ fn inject_child_prop_declaration(
     }
 }
 
+/// The fail-closed error a rename / prepare-rename returns for a carrier owned by
+/// MULTIPLE configured projects. Non-silent (the editor surfaces the message), and
+/// carries NO edit — so a partial cross-project rename can never ship for the
+/// newly-resolved multi-claimant case.
+fn multi_claimant_rename_unavailable_error() -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        // LSP `RequestFailed` (-32803): the request failed for a known, user-facing
+        // reason (not a protocol/internal fault). tower-lsp has no named variant.
+        code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+        message: "verter: rename is unavailable for a carrier owned by multiple TypeScript \
+                  projects — a cross-project rename could leave the symbol dangling in sibling \
+                  projects. Give the carrier a single owning tsconfig (disambiguate its \
+                  include/references) to enable rename."
+            .into(),
+        data: None,
+    }
+}
+
 pub(super) async fn handle_prepare_rename(
     server: &VerterLanguageServer,
     params: TextDocumentPositionParams,
@@ -720,6 +947,13 @@ pub(super) async fn handle_prepare_rename(
     // Virtual file: not supported (no Verter rename context for generated code)
     if server.documents.get_virtual_source_uri(uri).is_some() {
         return Ok(None);
+    }
+
+    // Multi-claimant carrier: fail rename closed (see `handle_rename`) so the editor
+    // surfaces the reason BEFORE the user starts a rename that could partial-edit
+    // across sibling projects.
+    if server.carrier_is_multi_claimant(uri) {
+        return Err(multi_claimant_rename_unavailable_error());
     }
 
     let result = (|| {
@@ -753,6 +987,25 @@ pub(super) async fn handle_rename(
         return Ok(None);
     }
 
+    if server.editor_owns_carrier_source_features() {
+        return Ok(None);
+    }
+
+    // A carrier owned by MULTIPLE configured projects now resolves to a single tsgo
+    // default owner for per-file features (hover / definition / completion /
+    // references all serve), but a PROVIDER rename runs only within that one owner
+    // project. Renaming a symbol that ESCAPES the owner (exported + imported by a
+    // sibling configured project) would silently leave it dangling in the
+    // siblings — a partial cross-project rename. Cheaply proving escape is not
+    // feasible without the cross-project rename fan-out (not yet implemented), so rename
+    // FAILS CLOSED here with a clear message rather than shipping a partial edit;
+    // every other IDE feature still serves from the resolved owner. A
+    // uniquely-owned carrier renames normally. (Checked AFTER the editor-owned
+    // yield so an editor-plugin route still defers to the editor's own rename.)
+    if server.carrier_is_multi_claimant(uri) {
+        return Err(multi_claimant_rename_unavailable_error());
+    }
+
     // PRODUCTION sync-before-query: the cross-file rename declaration surfaces via
     // the imported component's `{carrier}.ts` PUBLIC-API surface, which the
     // provider must already hold before the query. Peer navigation handlers
@@ -762,10 +1015,6 @@ pub(super) async fn handle_rename(
     // pin the resulting generations under the fence.
     if !server.is_self_file_projection(uri) {
         server.ensure_provider_synced(uri).await;
-    }
-
-    if server.editor_owns_carrier_source_features() {
-        return Ok(None);
     }
 
     let verter_result = (|| {
@@ -1034,7 +1283,7 @@ pub(super) async fn handle_rename(
     // result is returned untouched. See `gate_cross_file_child_prop_rename`.
     Ok(
         gate_cross_file_child_prop_rename(result, &rename_class, new_name).map(|mut edit| {
-            merge::dedupe_rename_workspace_edit(&mut edit);
+            merge::dedupe_rename_workspace_edit_with_preferred(&mut edit, Some(uri));
             edit
         }),
     )

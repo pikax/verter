@@ -96,6 +96,7 @@ pub struct HostAnalysisData {
     pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
+    pub(crate) markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
     pub(crate) arcs: AnalysisArcs,
 }
 
@@ -351,6 +352,7 @@ impl StageExecutor for HostStageExecutor {
                     script_analysis: Arc::clone(&host_data.parse.script_analysis),
                     export_signatures: host_data.parse.export_signatures.clone(),
                     style_analyses: Arc::new(host_data.parse.style_analyses.clone()),
+                    markup_class_tokens: Arc::new(host_data.parse.markup_class_tokens.clone()),
                     arcs,
                 }),
             })

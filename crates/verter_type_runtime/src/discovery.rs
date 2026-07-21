@@ -27,6 +27,22 @@ pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
     major.parse::<u32>().ok()
 }
 
+/// TypeScript >= 7 is the native (tsgo) engine family. A "tsserver" launcher
+/// belonging to a 7+ install must classify as the tsgo family for
+/// recommendation and serving-order purposes — it is never served over the
+/// Node tsserver protocol.
+pub fn ts_major_is_native_family(major: u32) -> bool {
+    major >= 7
+}
+
+/// Classify a resolved tsserver candidate: `Some(major)` when the install it
+/// belongs to is the TS7+ native (tsgo) family, `None` when it is a servable
+/// 5.x/6.x tsserver or its version is unreadable (fail-open: classification
+/// requires positive evidence of the native family).
+pub fn tsserver_native_family_major(tsserver_path: &Path) -> Option<u32> {
+    detect_ts_major_version(tsserver_path).filter(|major| ts_major_is_native_family(*major))
+}
+
 /// Find the tsserver.js binary path.
 ///
 /// Search order (project TypeScript preferred over bundled/global):
@@ -282,6 +298,55 @@ mod tests {
     fn test_detect_ts_major_version_returns_none_for_missing() {
         let result = detect_ts_major_version(Path::new("/nonexistent/lib/tsserver.js"));
         assert_eq!(result, None);
+    }
+
+    /// Write a `typescript/` package layout with the given version and return
+    /// the tsserver.js path inside it (kept alive by returning the tempdir).
+    fn fake_typescript_install(version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_dir = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let tsserver_path = lib_dir.join("tsserver.js");
+        std::fs::write(&tsserver_path, "// tsserver").unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            format!(r#"{{ "name": "typescript", "version": "{version}" }}"#),
+        )
+        .unwrap();
+        (tmp, tsserver_path)
+    }
+
+    /// TS 7.x-family version-string matrix: every 7+ install (stable, rc,
+    /// beta, and beyond) classifies as the native (tsgo) engine family for
+    /// serving-order purposes; 5.x/6.x installs remain servable as tsserver.
+    #[test]
+    fn ts_version_matrix_classifies_native_family() {
+        let matrix: &[(&str, Option<u32>)] = &[
+            ("5.9.2", None),
+            ("6.0.0-beta.1", None),
+            ("7.0.0", Some(7)),
+            ("7.0.1-rc", Some(7)),
+            ("7.1.0-beta", Some(7)),
+            ("8.0.0", Some(8)),
+        ];
+        for (version, expected) in matrix {
+            let (_tmp, tsserver_path) = fake_typescript_install(version);
+            assert_eq!(
+                tsserver_native_family_major(&tsserver_path),
+                *expected,
+                "version {version} misclassified"
+            );
+        }
+    }
+
+    /// Fail-open: an unreadable/absent version never blocks the tsserver
+    /// route (classification requires positive evidence of the native family).
+    #[test]
+    fn unreadable_version_is_not_native_family() {
+        assert_eq!(
+            tsserver_native_family_major(Path::new("/nonexistent/lib/tsserver.js")),
+            None
+        );
     }
 
     #[test]

@@ -3,6 +3,16 @@
 // crate-wide so a regression fails the build, matching `verter_type_runtime`.
 #![deny(clippy::await_holding_lock)]
 
+/// Max concurrent in-flight requests the tower-lsp-server serve loop dispatches
+/// (`Server::concurrency_level`). tower-lsp-server 0.23 defaults to 4; a handful
+/// of slow semantic handlers then occupy every slot, the framed-stdin forwarder
+/// stalls, and the server stops reading client stdin entirely — so provider-free
+/// control requests (`$/verter/getStatistics`, `$/cancelRequest`) are STARVED and
+/// no client-side rescue can land. The always-on per-request deadline stops a
+/// handler occupying a slot forever; this generous cap additionally guarantees
+/// control requests get a slot immediately alongside a burst of semantic work.
+pub const LSP_MAX_CONCURRENCY: usize = 64;
+
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;
@@ -19,6 +29,7 @@ pub mod features;
 pub mod project_resolver;
 pub mod provider_surface_store;
 pub mod provider_sync;
+pub mod resync_singleflight;
 pub mod server;
 pub mod statistics;
 pub mod svelte_assets;
@@ -35,6 +46,8 @@ mod resilient_provider;
 mod uri;
 
 #[cfg(test)]
+mod hot_path_overhead_tests;
+#[cfg(test)]
 #[allow(
     unused_must_use,
     clippy::unused_enumerate_index,
@@ -48,6 +61,8 @@ mod real_provider_tests;
 mod resilient_provider_tests;
 #[cfg(test)]
 mod test_harness;
+#[cfg(test)]
+mod test_harness_gating;
 #[cfg(test)]
 mod test_utils;
 
@@ -311,9 +326,6 @@ pub struct LspConfig {
     pub project_sync_mode: ProjectSyncMode,
     /// Which type provider backend is active.
     pub type_provider_kind: TypeProviderKind,
-    /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
-    /// Set by `auto` mode when tsserver is chosen because TS 5.x was detected.
-    pub suggest_tsgo: bool,
     /// Actual MCP HTTP port (already bound). `None` when MCP is disabled.
     /// The LSP sends a `$/verter/mcpReady` notification during `initialized()`.
     pub mcp_port: Option<u16>,

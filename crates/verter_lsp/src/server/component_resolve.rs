@@ -1158,6 +1158,18 @@ impl VerterLanguageServer {
                     public_api.as_deref(),
                 ))
             }
+            hover::ChildHoverTarget::SlotAttribute(target) => {
+                let Some(child) =
+                    self.resolve_component_context(parent_uri, &target.import_source, None)
+                else {
+                    return Ok(None);
+                };
+                Ok(hover::build_child_slot_hover(
+                    &target.vue_attr,
+                    &target.slot_name,
+                    &child.analysis,
+                ))
+            }
         }
     }
 }

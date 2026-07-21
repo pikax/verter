@@ -29,7 +29,7 @@ pub fn merge_hover(
             // to avoid duplicate fenced blocks in the merged hover.
             let verter_text = extract_hover_text(&verter);
             let context = strip_leading_code_block(&verter_text);
-            let mut type_block = wrap_type_block(&type_info.contents);
+            let mut type_block = strip_synthetic_prefix(&wrap_type_block(&type_info.contents));
             if let Some(label) = vue_kind_label {
                 type_block = replace_kind_prefix(&type_block, label);
             }
@@ -54,7 +54,7 @@ pub fn merge_hover(
         }
         (Some(verter), None) => Some(verter),
         (None, Some(type_info)) => {
-            let mut type_block = wrap_type_block(&type_info.contents);
+            let mut type_block = strip_synthetic_prefix(&wrap_type_block(&type_info.contents));
             if let Some(label) = vue_kind_label {
                 type_block = replace_kind_prefix(&type_block, label);
             }
@@ -68,6 +68,18 @@ pub fn merge_hover(
         }
         (None, None) => None,
     }
+}
+
+/// Display-domain normalization: Verter's reserved synthetic-identifier prefix
+/// never reaches user-facing hover text — a provider hover over a
+/// GlobalComponents fallback const renders `GlobalComponentType<"Name">`, not
+/// `___VERTER___GlobalComponentType<"Name">`. Pure display rewrite on the
+/// provider's rendered type block (the same display-only class as
+/// [`replace_kind_prefix`]); it never feeds a semantic decision. The prefix is
+/// Verter's reserved namespace (`super::completion::VERTER_INTERNAL_PREFIX`),
+/// so no user identifier can legitimately contain it.
+fn strip_synthetic_prefix(content: &str) -> String {
+    content.replace(super::completion::VERTER_INTERNAL_PREFIX, "")
 }
 
 /// Wrap type content in a code fence if not already Markdown-formatted.

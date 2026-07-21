@@ -66,7 +66,7 @@ Potential improvement vectors:
 1. **Batch/pipeline tsserver requests** — currently sequential, one request at a time
 2. **Cache tsserver responses** — hover at same position shouldn't re-query if file unchanged
 3. **Speculative prefetch** — predict likely hover targets from cursor movement
-4. **TSGO backend** — Go-native TS checker, faster than tsserver but has known limitations (see CLAUDE.md TypeProvider section)
+4. **TSGO backend** — Go-native TS checker, Verter's preferred provider (one known gap: the TS6133 remove-unused quick fix is not yet ported)
 5. **Reduce Verter overhead** — the 0.2ms Verter-only path is already negligible; gains here are marginal
 
 ## How to Run the Benchmark

@@ -229,6 +229,13 @@ export * from "./semantic-oracle/index.js";
 // they do not re-implement comparison.
 export * from "./collectors/index.js";
 
+// The endurance/soak harness: editor-agnostic long-session LSP stability runs
+// (build-from-scratch typing, heavy-update loops, hover/definition storms,
+// soaks) with request accounting, latency/RSS metrics, scale-lane corpus
+// support, and JSON attestation receipts. Drives the real `verter-lsp` binary
+// over stdio; gated behind `test:endurance`, never the default hermetic run.
+export * from "./endurance/index.js";
+
 // The report generator: the terminal stage that consumes the collector event stream,
 // the differential outcomes, the scenario model, and the normalizers, and emits the
 // run's durable artifacts — the `dx-events.jsonl` stream, the deduped finding set with

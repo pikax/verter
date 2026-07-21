@@ -16,7 +16,13 @@ export default defineConfig({
   test: {
     globals: false,
     include: ["test/**/*.test.ts"],
-    exclude: ["**/node_modules/**", "**/dist/**"],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      // The endurance/soak lane is long-running and spawns the real verter-lsp
+      // binary; it runs only via `test:endurance` (vitest.endurance.config.ts).
+      "test/endurance.*.test.ts",
+    ],
     // Integration tests spawn a child process (a fake bridge/materializer over
     // stdio); a bounded timeout guards against a stuck child keeping the suite
     // alive.

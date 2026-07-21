@@ -7,7 +7,6 @@
 //! output.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{LspRequestPayload, RequestKind, RequestKindPayload};
@@ -70,7 +69,6 @@ async fn completion_audit_records_num_completion_items() {
             line: 0,
             character: 0,
         }),
-        Duration::from_secs(2),
         async move { Ok(7usize) },
         |payload, count| {
             payload.num_completion_items = Some(u32::try_from(*count).unwrap_or(u32::MAX));

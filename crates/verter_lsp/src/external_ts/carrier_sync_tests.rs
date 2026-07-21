@@ -58,6 +58,17 @@ fn owned_carrier_state() -> ProviderSyncState {
     }
 }
 
+/// A minimal live host over an in-memory workspace — the admission gate's equal-key
+/// differing-artifact refusal records the healing content transition through it.
+fn test_host() -> VerterHost {
+    let workspace: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec!["/workspace".to_string()],
+            default_resolve_extensions: None,
+        }));
+    VerterHost::new(HostConfig::default(), workspace)
+}
+
 /// Admit a carrier state through a FRESH coordinator (owner-loss barrier at 0). The
 /// single-commit tests below do not exercise the owner-loss barrier or a superseding peer;
 /// the F1 equal-key and F5 vacant-resurrection tests use an explicit SHARED coordinator so
@@ -68,7 +79,13 @@ fn commit_carrier_provider_state(
     state: ProviderSyncState,
     receipt: &ProviderReadyReceipt,
 ) {
-    let _ = CarrierTransactionCoordinator::new().admit_owned(states, canonical_id, state, receipt);
+    let _ = CarrierTransactionCoordinator::new().admit_owned(
+        &test_host(),
+        states,
+        canonical_id,
+        state,
+        receipt,
+    );
 }
 
 /// A resolved `ProjectBinding` (test-only seam) — the structural token a
@@ -1087,14 +1104,16 @@ fn ws_and_snapshot(
 fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
     // The scanner's tier classifier (`classify_from_snapshot`) and the session
     // carrier resolver (`WorkspaceProjectResolver::resolve`) BOTH derive from the
-    // SAME `WorkspaceSnapshot::configured_owner_resolution_for_file`, so they can
-    // never disagree on whether a carrier has a configured owner. Byte-equivalent on
-    // the OWNERSHIP axis: scanner `ProjectSource` <=> resolver
-    // `Bound`/`Ambiguous(MultipleOwners)`; scanner `Other` <=> resolver `NoProject`.
+    // SAME `WorkspaceSnapshot` ownership authority, so they can never disagree on
+    // whether a carrier has a configured owner. Byte-equivalent on the OWNERSHIP
+    // axis: scanner `ProjectSource` <=> resolver `Bound` (a multi-claimant carrier
+    // resolves to the single tsgo default owner, still `Bound`); scanner `Other`
+    // <=> resolver `NoProject`.
     //
-    // DISCRIMINATING: a scanner that reverted to glob patterns (`classify_tiers`), or
-    // a resolver that COLLAPSED a multiply-owned carrier to a single `Bound`, would
-    // break the agreement below.
+    // DISCRIMINATING: a scanner that reverted to glob patterns (`classify_tiers`),
+    // or a resolver that FAILED CLOSED on a multiply-owned carrier (the pre-fix
+    // terminal `Ambiguous(MultipleOwners)`, the release-blocking "no inference"
+    // bug), would break the agreement below.
     let ws_root = "d:/ws";
     let owned = "d:/ws/app/src/Owned.vue";
     let multi = "d:/ws/multi/src/Multi.vue";
@@ -1125,17 +1144,11 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
         let resolution = resolver.resolve(path, None);
         assert_eq!(tier, expect_tier, "scanner tier mismatch for {path}");
         // The invariant: scanner "is a project source" == resolver "has a configured
-        // owner" (Bound OR MultipleOwners-ambiguous), computed for the SAME path from
-        // the SAME snapshot.
+        // owner" (`Bound` — a multi-claimant carrier resolves to the single tsgo
+        // default owner, never a terminal Ambiguous), computed for the SAME path
+        // from the SAME snapshot.
         let scanner_owned = tier == Tier::ProjectSource;
-        let resolver_owned = matches!(
-            resolution,
-            CarrierOwnershipResolution::Bound(_)
-                | CarrierOwnershipResolution::Ambiguous {
-                    cause: AmbiguityCause::MultipleOwners,
-                    ..
-                }
-        );
+        let resolver_owned = matches!(resolution, CarrierOwnershipResolution::Bound(_));
         assert_eq!(
             scanner_owned, resolver_owned,
             "scanner tier and resolver ownership must agree for {path}: \
@@ -1144,7 +1157,8 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
     }
 
     // Anchor the equivalence to CONCRETE resolution states (so the agreement above is
-    // not a vacuous tautology), and pin the non-collapsing 2-candidate ambiguity.
+    // not a vacuous tautology), and pin the multi-claimant carrier to its single
+    // tsgo default owner.
     assert!(
         matches!(
             resolver.resolve(owned, None),
@@ -1153,16 +1167,18 @@ fn scanner_tier_and_resolver_ownership_are_byte_equivalent() {
         "the uniquely-owned carrier resolves Bound"
     );
     match resolver.resolve(multi, None) {
-        CarrierOwnershipResolution::Ambiguous { candidates, cause } => {
-            assert_eq!(cause, AmbiguityCause::MultipleOwners);
+        CarrierOwnershipResolution::Bound(binding) => {
+            // The nearest literal `tsconfig.json` (which directly includes the file)
+            // is the tsgo `GetDefaultProject` winner — never a terminal Ambiguous.
             assert_eq!(
-                candidates.len(),
-                2,
-                "both overlapping configs preserved (non-collapsing), got {candidates:?}"
+                binding.tsconfig_uri(),
+                "d:/ws/multi/tsconfig.json",
+                "the multiply-owned carrier binds to the literal tsconfig.json default owner"
             );
         }
         other => panic!(
-            "the multiply-owned carrier must resolve Ambiguous(MultipleOwners), got {other:?}"
+            "the multiply-owned carrier must resolve to a single Bound owner \
+             (tsgo GetDefaultProject), got {other:?}"
         ),
     }
     assert_eq!(
@@ -1189,30 +1205,27 @@ fn unresolved_carrier_emits_verter_project_diagnostic_bound_and_notready_silent(
         d.message
     );
 
-    // Ambiguous(MultipleOwners) → lists BOTH candidate configs.
-    let d = project_ownership_diagnostic(&CarrierOwnershipResolution::Ambiguous {
-        candidates: vec![
-            Arc::from("d:/ws/a/tsconfig.json"),
-            Arc::from("d:/ws/b/tsconfig.json"),
-        ],
-        cause: AmbiguityCause::MultipleOwners,
-    })
-    .expect("Ambiguous(MultipleOwners) must surface a diagnostic");
-    assert_eq!(d.source.as_deref(), Some("verter(project)"));
-    assert!(
-        d.message.contains("a/tsconfig.json") && d.message.contains("b/tsconfig.json"),
-        "the diagnostic must list BOTH candidate configs, got: {}",
-        d.message
-    );
-
-    // Ambiguous(disk-layout conflict) → empty candidates → a generic message, still
-    // sourced verter(project).
-    let d = project_ownership_diagnostic(&CarrierOwnershipResolution::Ambiguous {
-        candidates: Vec::new(),
-        cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
-    })
-    .expect("a disk-layout ambiguity must still surface a diagnostic");
-    assert_eq!(d.source.as_deref(), Some("verter(project)"));
+    // The ONLY `Ambiguous` a resolution now produces is a disk-layout carrier-path
+    // conflict (empty candidates) — the multiply-owned case resolves to the single tsgo
+    // default owner (`Bound`), never a candidate-listing `Ambiguous(MultipleOwners)`.
+    // Both disk-layout causes surface the same companion-path WARNING, verter(project).
+    for cause in [
+        AmbiguityCause::CarrierPathOccupiedByRealFile,
+        AmbiguityCause::SameStemRuneModule,
+    ] {
+        let d = project_ownership_diagnostic(&CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause,
+        })
+        .expect("a disk-layout ambiguity must still surface a diagnostic");
+        assert_eq!(d.source.as_deref(), Some("verter(project)"));
+        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+        assert!(
+            d.message.contains("companion path"),
+            "the disk-layout diagnostic must explain the companion-path cause, got: {}",
+            d.message
+        );
+    }
 
     // Bound / NotReady are NOT the user's problem → NO diagnostic.
     let binding = test_binding("d:/ws/tsconfig.json");
@@ -1227,16 +1240,160 @@ fn unresolved_carrier_emits_verter_project_diagnostic_bound_and_notready_silent(
 }
 
 #[tokio::test]
-async fn ambiguous_carrier_sync_registers_and_queries_no_provider() {
-    // An AMBIGUOUS carrier is TERMINAL (never served): the sync writes NO provider
-    // sync state AND never opens/loads/updates/closes a companion buffer on the
-    // provider. Driven through the real gateway entry with a live coordinator +
-    // MockTypeProvider. Two sibling tsconfigs in the SAME dir both `include ["**/*"]`
-    // ⇒ `src/Comp.vue` is multiply-owned ⇒ Ambiguous(MultipleOwners) ⇒ Unresolved.
+async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
+    // A carrier claimed by MULTIPLE sibling tsconfigs with NO reference graph is NO
+    // LONGER terminal: it resolves to the single tsgo-default owner via the CR-4
+    // fallback and is SERVED at the gateway. This is the carrier_sync analog of the
+    // passing snapshot test `no_reference_graph_falls_back_to_name_least_claimant`.
+    // Driven through the real
+    // gateway entry with a live coordinator + REAL IDE codegen so the owned publish
+    // produces a non-empty companion set (a bare no-documents/no-ide request would
+    // compile to nothing and settle `Pending` — a mock-path artifact, not terminal).
+    //
+    // DISCRIMINATING: a multi-claimant selection that failed closed to the terminal
+    // `Ambiguous(MultipleOwners)` makes `decision` the `NotOwned` arm (never
+    // `Published`) and the carrier is served under NO owner.
     let ws_root = unique_ws_root();
     let tsconfig_a = format!("{ws_root}/tsconfig.json");
     let tsconfig_b = format!("{ws_root}/tsconfig.app.json");
     let source = format!("{ws_root}/src/Comp.vue");
+
+    // The host owns the carrier SOURCE (real Vue content) so the owned publish compiles
+    // a real IDE companion.
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions {
+            roots: vec![ws_root.clone()],
+            default_resolve_extensions: None,
+        }));
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: source.clone(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">defineProps<{ label: string }>()</script><template><div>{{ label }}</div></template>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("load carrier");
+    let profile = CompileProfile::default();
+    let _ = host.ensure_ide_compiled(&source, &profile);
+    let ide = host.get_ide(&source, &profile).expect("IDE projection");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    // The ownership snapshot: TWO sibling tsconfigs in the SAME dir both `include
+    // ["**/*"]` ⇒ `src/Comp.vue` is multiply-owned ⇒ resolves to the name-least owner.
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let (_ws, snap) = ws_and_snapshot(
+        &ws_root,
+        &[
+            (tsconfig_a.as_str(), r#"["**/*"]"#),
+            (tsconfig_b.as_str(), r#"["**/*"]"#),
+        ],
+        &[source.as_str()],
+    );
+    // The SHARED provider-neutral owner authority (`default_configured_owner_for_file`)
+    // picks the single tsgo-default owner among the claimants. The gateway must serve
+    // under EXACTLY this owner — proving one shared selection, never a divergent pick.
+    let expected_owner = snap
+        .tsconfig_path(
+            snap.default_configured_owner_for_file(&source)
+                .expect("the multi-claimant carrier resolves to a single default owner"),
+        )
+        .map(|p| p.as_str().to_string())
+        .expect("the default owner carries a tsconfig path");
+    assert!(
+        expected_owner == tsconfig_a || expected_owner == tsconfig_b,
+        "the default owner must be one of the two real claimants, got {expected_owner}"
+    );
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
+
+    let resolver = NativeProjectResolver::new(vec![
+        IdeProjectConfig::new(ws_root.clone(), ws_root.clone(), Some(tsconfig_a.clone())),
+        IdeProjectConfig::new(ws_root.clone(), ws_root.clone(), Some(tsconfig_b.clone())),
+    ]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        canonical_id: &source,
+        is_jsx: ide.is_jsx,
+        ide: Some(&ide),
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+
+    // The multi-claimant carrier is SERVED (never terminal): a store-backed `Published`
+    // commit under the resolved owner.
+    let CarrierSyncDecision::Published {
+        committed_state, ..
+    } = decision
+    else {
+        panic!(
+            "a multi-claimant carrier now serves under its name-least owner (Published), \
+             never terminal NotOwned"
+        );
+    };
+    // The gateway serves under EXACTLY the shared authority's single default owner —
+    // never a divergent pick, never a fabricated binding.
+    assert_eq!(
+        committed_state.owner_binding,
+        ProviderOwnerBinding::Owned(expected_owner.clone()),
+        "the gateway must serve under the shared snapshot authority's single default owner"
+    );
+    let losing_owner = if expected_owner == tsconfig_a {
+        tsconfig_b.clone()
+    } else {
+        tsconfig_a.clone()
+    };
+    let ide_path = committed_state
+        .ide_path
+        .clone()
+        .expect("the owned carrier has an IDE companion path");
+    // Served in the store under the resolved owner — and NOT under the losing claimant.
+    assert!(
+        carrier_ready_in_store(&ws_root, &expected_owner, &ide_path),
+        "the carrier must be advertised in the store under its resolved single owner"
+    );
+    assert!(
+        !carrier_ready_in_store(&ws_root, &losing_owner, &ide_path),
+        "the carrier must NOT be advertised under the losing claimant"
+    );
+}
+
+#[tokio::test]
+async fn unowned_carrier_sync_is_terminal_unresolved_no_provider() {
+    // The terminal contract that REMAINS once multi-claimant carriers serve: a carrier
+    // under NO configured project (`NoProject`) is TERMINAL (never served) — the sync
+    // writes NO provider
+    // sync state AND never opens/loads/updates/closes a companion buffer on the
+    // provider, and its settle disposition is `Unresolved` (the owner-loss barrier
+    // advances). Only the multiply-owned case stopped being terminal; a genuinely
+    // unowned carrier still fails closed at the gateway. Driven through the real
+    // gateway entry with a live coordinator + MockTypeProvider. One configured project
+    // `include ["src/**/*"]`; the carrier lives OUTSIDE `src/` ⇒ NoProject.
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/outside/Comp.vue");
 
     let mock = MockTypeProvider::new();
     let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
@@ -1251,18 +1408,16 @@ async fn ambiguous_carrier_sync_registers_and_queries_no_provider() {
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
     let (_ws, snap) = ws_and_snapshot(
         &ws_root,
-        &[
-            (tsconfig_a.as_str(), r#"["**/*"]"#),
-            (tsconfig_b.as_str(), r#"["**/*"]"#),
-        ],
+        &[(tsconfig.as_str(), r#"["src/**/*"]"#)],
         &[source.as_str()],
     );
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
 
-    let resolver = NativeProjectResolver::new(vec![
-        IdeProjectConfig::new(ws_root.clone(), ws_root.clone(), Some(tsconfig_a.clone())),
-        IdeProjectConfig::new(ws_root.clone(), ws_root.clone(), Some(tsconfig_b.clone())),
-    ]);
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let surfaces = ProviderSurfaceStore::new();
     let admission = CarrierTransactionCoordinator::new();
@@ -1287,23 +1442,23 @@ async fn ambiguous_carrier_sync_registers_and_queries_no_provider() {
     })
     .await;
 
-    // An ambiguous carrier is terminal ⇒ a non-owned outcome whose settle disposition is
-    // `Unresolved` (never served; the owner-loss barrier advances).
+    // An unowned (NoProject) carrier is terminal ⇒ a non-owned outcome whose settle
+    // disposition is `Unresolved` (never served; the owner-loss barrier advances).
     let CarrierSyncDecision::NotOwned(not_owned) = decision else {
-        panic!("an ambiguous carrier is terminal ⇒ NotOwned (never served)");
+        panic!("an unowned (NoProject) carrier is terminal ⇒ NotOwned (never served)");
     };
     assert_eq!(
         admission.settle(not_owned, &source, None),
         SettleClass::Unresolved,
-        "an ambiguous carrier settles as Unresolved (terminal)"
+        "an unowned (NoProject) carrier settles as Unresolved (terminal)"
     );
     assert!(
         states.get(&source).is_none(),
-        "an ambiguous carrier must register NO provider sync state"
+        "an unowned carrier must register NO provider sync state"
     );
     assert!(
         mock.file_sync_calls().is_empty(),
-        "an ambiguous carrier must never open/load/update/close a companion buffer on the \
+        "an unowned carrier must never open/load/update/close a companion buffer on the \
          provider, got: {:?}",
         mock.file_sync_calls()
     );
@@ -1428,6 +1583,7 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
     // surface, flipping both the outcome and the surface assertion.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let ide_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1442,7 +1598,7 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
         "the first commit installs artifact A"
     );
@@ -1468,7 +1624,7 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r2),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r2),
         AdmitOutcome::Superseded,
         "an equal-key commit carrying a DIFFERENT artifact must be REFUSED (idempotent only \
          for the identical surface)"
@@ -1486,12 +1642,95 @@ fn admit_refuses_equal_key_commit_carrying_a_different_artifact() {
 }
 
 #[test]
+fn equal_key_differing_artifact_refusal_heals_the_revision_rail_for_the_requeue() {
+    // The equal-key differing-artifact refusal proves the source's freshness rail
+    // under-counted (two genuine artifacts share one key — e.g. identical source bytes
+    // compiled under a changed context). The gate must RECORD a content transition through
+    // the workspace authority, so the caller's requeue mints a strictly-newer key and
+    // admits the live artifact instead of livelocking on the equal key (the interactive
+    // definition/hover divergence under edit churn: a stale committed mapper was served
+    // while the provider text was already current, because every requeue re-minted the
+    // refused key).
+    //
+    // DISCRIMINATING: without the heal the rail never advances (the second assert fails)
+    // and the re-minted commit at the SAME key is refused again (the third assert fails).
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
+    let source = "/workspace/src/App.vue";
+    let ide_uri = "/workspace/src/App.vue.tsx";
+    let tsconfig = "/workspace/tsconfig.json";
+
+    // Seed the live rail: the content transition advances it, and every mint below
+    // uses the rail value (the production mint authority).
+    host.notify_upsert(
+        source,
+        Arc::<str>::from("<script setup>const appHeading = 'corpus';</script>"),
+    );
+    let rev = host.last_content_transition_generation(source);
+    assert!(rev > 0, "the seed upsert advances the freshness rail");
+
+    // Artifact A commits at (generation 1, the live rail).
+    let r1 = PendingProviderReady::authorize(
+        &test_binding_gen(tsconfig, 1),
+        rev,
+        0,
+        "tsgo",
+        &[ide_companion(ide_uri, "IDE ARTIFACT A\n", None, rev)],
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+    assert_eq!(
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
+        AdmitOutcome::Admitted,
+        "the first commit installs artifact A"
+    );
+
+    // A DIFFERENT artifact B at the SAME key is refused...
+    let rail_before = host.last_content_transition_generation(source);
+    let r2 = PendingProviderReady::authorize(
+        &test_binding_gen(tsconfig, 1),
+        rev,
+        0,
+        "tsgo",
+        &[ide_companion(ide_uri, "IDE ARTIFACT B (live)\n", None, rev)],
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+    assert_eq!(
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r2),
+        AdmitOutcome::Superseded,
+        "the equal-key differing artifact is still refused (never overwrites)"
+    );
+    // ...and the refusal ADVANCES the source's content-transition rail...
+    let rail_after = host.last_content_transition_generation(source);
+    assert!(
+        rail_after > rail_before,
+        "the equal-key refusal must heal the freshness rail ({rail_before} -> {rail_after})"
+    );
+
+    // ...so the requeue, minted at the healed rail, ADMITS the live artifact.
+    let r3 = PendingProviderReady::authorize(
+        &test_binding_gen(tsconfig, 1),
+        rail_after,
+        0,
+        "tsgo",
+        &[ide_companion(ide_uri, "IDE ARTIFACT B (live)\n", None, rev)],
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+    assert_eq!(
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r3),
+        AdmitOutcome::Admitted,
+        "the requeued transaction mints a strictly-newer key and admits the live artifact"
+    );
+}
+
+#[test]
 fn admit_idempotent_for_the_identical_artifact_at_an_equal_key() {
     // The negative companion to F1: re-committing the IDENTICAL artifact at the same
     // (generation, revision) is admitted (idempotent). The equal-key gate refuses only a
     // DIFFERENT artifact, never a duplicate of the committed one.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let ide_uri = "/workspace/src/App.vue.tsx";
     let make = || {
@@ -1505,11 +1744,11 @@ fn admit_idempotent_for_the_identical_artifact_at_an_equal_key() {
         .confirm_opened(&[ProviderPathKind::Ide])
     };
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &make()),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &make()),
         AdmitOutcome::Admitted
     );
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &make()),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &make()),
         AdmitOutcome::Admitted,
         "re-committing the identical artifact at the equal key is idempotent"
     );
@@ -1525,6 +1764,7 @@ fn admit_refuses_a_late_token_after_owner_loss_advanced_the_barrier() {
     // watermark and admits the obsolete owned receipt, resurrecting the old owner.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let ide_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1545,7 +1785,7 @@ fn admit_refuses_a_late_token_after_owner_loss_advanced_the_barrier() {
 
     // The late token commits into a VACANT slot; it must be REFUSED (no resurrection).
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &late),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &late),
         AdmitOutcome::Superseded,
         "a token captured before an owner-loss must be refused even into a vacant slot"
     );
@@ -1564,7 +1804,7 @@ fn admit_refuses_a_late_token_after_owner_loss_advanced_the_barrier() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &fresh),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &fresh),
         AdmitOutcome::Admitted,
         "a token authorized at the CURRENT barrier admits normally after the loss"
     );
@@ -1645,6 +1885,7 @@ fn admit_admits_equal_key_path_rebind_as_a_legitimate_flip() {
     // and drops a live path change in the content-decoupled case — tracked as a follow-up.)
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsconfig = "/workspace/tsconfig.json";
 
@@ -1659,7 +1900,7 @@ fn admit_admits_equal_key_path_rebind_as_a_legitimate_flip() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
 
@@ -1677,7 +1918,7 @@ fn admit_admits_equal_key_path_rebind_as_a_legitimate_flip() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, jsx_state, &r2),
+        coord.admit_owned(&host, &states, source, jsx_state, &r2),
         AdmitOutcome::Admitted,
         "a same-key commit at a DIFFERENT IDE path is a legitimate rebind and must ADMIT"
     );
@@ -1695,6 +1936,7 @@ fn admit_admits_a_jsx_tsx_flip_that_advances_the_revision() {
     // path and rebinds the committed IDE path.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsconfig = "/workspace/tsconfig.json";
 
@@ -1709,7 +1951,7 @@ fn admit_admits_a_jsx_tsx_flip_that_advances_the_revision() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
 
@@ -1727,7 +1969,7 @@ fn admit_admits_a_jsx_tsx_flip_that_advances_the_revision() {
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, jsx_state, &r2),
+        coord.admit_owned(&host, &states, source, jsx_state, &r2),
         AdmitOutcome::Admitted,
         "a jsx↔tsx flip that advances the revision admits through the strictly-newer path"
     );
@@ -1748,6 +1990,7 @@ fn advance_barrier_and_remove_refuses_a_late_owner_token_into_the_vacated_slot()
     // late token (old epoch) could admit into the vacated slot before the barrier advanced.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsx_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1762,7 +2005,7 @@ fn advance_barrier_and_remove_refuses_a_late_owner_token_into_the_vacated_slot()
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
     let late = PendingProviderReady::authorize(
@@ -1781,7 +2024,7 @@ fn advance_barrier_and_remove_refuses_a_late_owner_token_into_the_vacated_slot()
 
     // The late token (captured before the removal) is REFUSED into the vacated slot.
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &late),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &late),
         AdmitOutcome::Superseded,
         "a token captured before the advance-before-remove must be refused into the vacated slot"
     );
@@ -1824,6 +2067,7 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
     // state and never advanced the barrier, so a late owned token could resurrect the owner.
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let coord = CarrierTransactionCoordinator::new();
+    let host = test_host();
     let source = "/workspace/src/App.vue";
     let tsx_uri = "/workspace/src/App.vue.tsx";
     let tsconfig = "/workspace/tsconfig.json";
@@ -1838,7 +2082,7 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
     )
     .confirm_opened(&[ProviderPathKind::Ide]);
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &r1),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &r1),
         AdmitOutcome::Admitted,
     );
     let late = PendingProviderReady::authorize(
@@ -1869,7 +2113,7 @@ fn convert_to_unresolved_advances_barrier_clears_token_and_refuses_late_owner() 
 
     // A late owned token captured before the conversion is refused (the barrier advanced).
     assert_eq!(
-        coord.admit_owned(&states, source, owned_carrier_state(), &late),
+        coord.admit_owned(&host, &states, source, owned_carrier_state(), &late),
         AdmitOutcome::Superseded,
         "a late owned token captured before the owned→unresolved conversion is refused"
     );

@@ -373,6 +373,11 @@ fn walk_element<'a, 'alloc>(
     // Track whether dynamic <component :is> needs IIFE closing after element
     let mut needs_component_is_iife_close = false;
 
+    // Track whether a kebab component tag was rewritten to its PascalCase
+    // binding (open AND close), so the later close-tag case-mismatch fix does
+    // not double-overwrite the already-rewritten close name.
+    let mut kebab_tag_rewritten = false;
+
     // Convert tag for components
     match el.tag_type {
         TagType::Component => {
@@ -385,11 +390,67 @@ fn walk_element<'a, 'alloc>(
                     ctx.source,
                     ctx.out,
                     ctx.resolver,
+                    ctx.components,
                     &ctx.ts_directives_for_component_is,
                     emit_ctx,
                 ) {
                     emitted_tag_name = rewrite.tag_name;
                     needs_component_is_iife_close = rewrite.needs_iife_close;
+                }
+            } else if tag_name.contains('-')
+                && !crate::ide::matches_custom_element(ctx.options.custom_elements, tag_name)
+            {
+                // Rewrite a resolvable kebab component tag to its in-scope
+                // PascalCase binding (a local script binding or a
+                // GlobalComponents fallback const). A lowercase JSX identifier
+                // is an INTRINSIC-element lookup that never consults the
+                // emitted const — the rewrite makes the tag reference it, with
+                // the generated name mapped onto the authored kebab spans
+                // (per-segment mapped CodeTransform edits, see
+                // [`emit_mapped_kebab_pascal_rewrite`]) so hover/definition/
+                // rename keep working from EVERY letter of the source tag,
+                // including its last column. A kebab tag absent from the
+                // inventory stays as-authored (intrinsic lookup), as does a
+                // configured custom element (`custom_elements` prefix match —
+                // native by contract, never component-resolved).
+                if let Some(binding) = ctx
+                    .components
+                    .resolve(tag_name, el.tag_type, |n| ctx.resolver.get(n).is_some())
+                {
+                    if binding != tag_name {
+                        let pascal = ctx.out.alloc_str(&binding);
+                        // Mapped rewrite of the open tag-name span.
+                        emit_mapped_kebab_pascal_rewrite(
+                            ctx.out,
+                            el.tag_open.start + 1,
+                            el.tag_open.name_end,
+                            ctx.source,
+                            pascal,
+                        );
+                        // Rewrite the authored close name only when the body
+                        // will NOT be isolated: `isolate_vue_slot_body` deletes
+                        // the whole authored close span and emits the mapped
+                        // `</Pascal>` pair-close from `emitted_tag_name`, so a
+                        // second overwrite inside that span would conflict.
+                        let will_isolate = el
+                            .content
+                            .as_ref()
+                            .is_some_and(|content| !content.children.is_empty())
+                            && el.tag_close.is_some();
+                        if !will_isolate {
+                            if let Some(tag_close) = &el.tag_close {
+                                emit_mapped_kebab_pascal_rewrite(
+                                    ctx.out,
+                                    tag_close.start + 2,
+                                    tag_close.name_end,
+                                    ctx.source,
+                                    pascal,
+                                );
+                            }
+                        }
+                        emitted_tag_name = pascal;
+                        kebab_tag_rewritten = true;
+                    }
                 }
             }
         }
@@ -635,16 +696,30 @@ fn walk_element<'a, 'alloc>(
     //   → <>{"header"}{(({ title }) => (<>children</>))(CALL)}</>
     let slot_iife_info = build_slot_iife_info(id, el, ctx.source, ctx.ast);
     if let Some(ref slot_info) = slot_iife_info {
-        // Emit slot IIFE opening: {((params) => (<>
-        if has_isolated_slot_body {
-            // The generated mapped `</Tag>` sits at the same anchor. Keep both
-            // emissions in the ordered prepend channel so the empty pair closes
-            // before the slot IIFE begins.
-            ctx.out
-                .prepend_ordered_unmapped(el.tag_open.end - 1, &slot_info.open_text);
+        // Emit slot IIFE opening in three ordered parts through the mapped
+        // prepend channel (insertion order is preserved within one anchor):
+        //   unmapped `{(() => { const ` + MAPPED authored pattern + unmapped
+        //   ` = extractArgumentsFromRenderSlot(...); return (<>`.
+        // The pattern bytes are verbatim-authored, so they carry a source-map
+        // token — pattern-position hover maps into the generated destructure
+        // and the provider answers with the typed binding quickinfo (D4).
+        let anchor = if has_isolated_slot_body {
+            // The generated mapped `</Tag>` sits at the same anchor. Keep all
+            // emissions in the ordered prepend channel so the empty pair
+            // closes before the slot IIFE begins.
+            el.tag_open.end - 1
         } else {
-            ctx.out.prepend_alloc(el.tag_open.end, &slot_info.open_text);
-        }
+            el.tag_open.end
+        };
+        ctx.out
+            .prepend_ordered_unmapped(anchor, &slot_info.open_prefix);
+        ctx.out.prepend_alloc_mapped(
+            anchor,
+            slot_info.params_start,
+            &ctx.source[slot_info.params_start as usize..slot_info.params_end as usize],
+        );
+        ctx.out
+            .prepend_ordered_unmapped(anchor, &slot_info.open_suffix);
     }
 
     // Walk children — children inherit the condition scopes from this element
@@ -698,13 +773,18 @@ fn walk_element<'a, 'alloc>(
 
     // Fix closing tag case mismatch: Vue is case-insensitive for closing tags
     // (e.g., <Button>...</button>) but JSX requires exact case match. Rewrite the
-    // closing tag name to match the opening tag when they differ.
-    if let Some(tag_close) = &el.tag_close {
-        let open_name = &ctx.source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
-        let close_name = &ctx.source[tag_close.start as usize + 2..tag_close.name_end as usize];
-        if open_name != close_name && open_name.eq_ignore_ascii_case(close_name) {
-            ctx.out
-                .overwrite(tag_close.start + 2, tag_close.name_end, open_name);
+    // closing tag name to match the opening tag when they differ. Skipped when a
+    // kebab tag was rewritten to its PascalCase binding — that path already
+    // overwrote (or isolated) the close name.
+    if !kebab_tag_rewritten {
+        if let Some(tag_close) = &el.tag_close {
+            let open_name =
+                &ctx.source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize];
+            let close_name = &ctx.source[tag_close.start as usize + 2..tag_close.name_end as usize];
+            if open_name != close_name && open_name.eq_ignore_ascii_case(close_name) {
+                ctx.out
+                    .overwrite(tag_close.start + 2, tag_close.name_end, open_name);
+            }
         }
     }
 
@@ -845,8 +925,18 @@ fn isolate_vue_slot_body(
 
 /// Info for generating a v-slot scoped parameter IIFE wrapper.
 struct SlotIifeInfo {
-    /// Text to prepend after the open tag: `{((params) => (<>`
-    open_text: String,
+    /// Unmapped open prefix prepended after the open tag: `{(() => { const `
+    open_prefix: String,
+    /// Authored byte range of the destructure pattern — emitted between
+    /// `open_prefix` and `open_suffix` as a SOURCE-MAPPED prepend so IDE
+    /// features (hover on the destructured bindings) resolve the provider's
+    /// typed quickinfo at the authored pattern positions instead of landing
+    /// in an unmapped synthetic region (D4).
+    params_start: u32,
+    params_end: u32,
+    /// Unmapped open suffix prepended after the pattern:
+    /// ` = ___VERTER___extractArgumentsFromRenderSlot(...); return (<>`
+    open_suffix: String,
     /// Text to prepend before the close tag: `</>)(___VERTER___extractArgumentsFromRenderSlot(...))}`
     close_text: String,
 }
@@ -870,8 +960,6 @@ fn build_slot_iife_info(
         _ => return None, // No params
     };
 
-    let params = &source[vs as usize..ve as usize];
-
     // Determine the slot name
     let slot_name = if let (Some(arg_start), Some(arg_end)) = (v_slot.arg_start, v_slot.arg_end) {
         &source[arg_start as usize..arg_end as usize]
@@ -888,13 +976,17 @@ fn build_slot_iife_info(
         source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize].to_string()
     };
 
-    let open_text = format!(
-        "{{(() => {{ const {params} = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"); return (<>"
+    let open_prefix = "{(() => { const ".to_string();
+    let open_suffix = format!(
+        " = ___VERTER___extractArgumentsFromRenderSlot(___VERTER___instantiateComponent({comp_tag}, {{}}), \"{slot_name}\"); return (<>"
     );
     let close_text = "</>); })()}".to_string();
 
     Some(SlotIifeInfo {
-        open_text,
+        open_prefix,
+        params_start: vs,
+        params_end: ve,
+        open_suffix,
         close_text,
     })
 }
@@ -1643,18 +1735,80 @@ struct ComponentIsRewrite<'a> {
     needs_iife_close: bool,
 }
 
+/// Rewrite an authored kebab tag-name span to its PascalCase binding with
+/// PER-SEGMENT mapped edits instead of one whole-name overwrite.
+///
+/// A whole-name `Chunk::Overwritten` emits a single source-map token whose
+/// reverse run caps at the GENERATED length, so a longer kebab name rewritten
+/// to a shorter Pascal name leaves its tail columns unmapped (hover/definition/
+/// rename dead past the Pascal length). Per-segment emission keeps every
+/// unchanged byte an `Original` chunk (1:1 mapped): only each `-` separator is
+/// removed (a 1-column unmapped separator gap) and only a case-changing
+/// segment-head character is overwritten (1:1 mapped) — every LETTER of the
+/// authored tag name, including its last column, keeps a mapping.
+///
+/// The surgical path applies only when the per-segment composition reproduces
+/// `pascal` byte-for-byte (always true for `to_pascal_case`-derived bindings);
+/// any mismatch falls back to the single whole-span mapped overwrite.
+fn emit_mapped_kebab_pascal_rewrite<'alloc>(
+    out: &mut CodeGenOutput<'alloc>,
+    start: u32,
+    end: u32,
+    source: &str,
+    pascal: &'alloc str,
+) {
+    let authored = &source[start as usize..end as usize];
+
+    // Plan the per-segment ops and compose the reconstruction they produce.
+    // op = (span_start, span_end, replacement)
+    let mut ops: Vec<(u32, u32, String)> = Vec::new();
+    let mut composed = String::with_capacity(pascal.len());
+    let mut head_of_segment = true;
+    for (byte_idx, ch) in authored.char_indices() {
+        let at = start + byte_idx as u32;
+        if ch == '-' {
+            ops.push((at, at + 1, String::new()));
+            head_of_segment = true;
+            continue;
+        }
+        if head_of_segment {
+            head_of_segment = false;
+            let upper: String = ch.to_uppercase().collect();
+            if upper != ch.to_string() {
+                ops.push((at, at + ch.len_utf8() as u32, upper.clone()));
+            }
+            composed.push_str(&upper);
+        } else {
+            composed.push(ch);
+        }
+    }
+
+    if composed == pascal {
+        for (op_start, op_end, replacement) in ops {
+            let replacement = out.alloc_str(&replacement);
+            out.overwrite(op_start, op_end, replacement);
+        }
+    } else {
+        // Composition mismatch (non-`to_pascal_case` binding shape): keep the
+        // whole-name mapped overwrite.
+        out.overwrite(start, end, pascal);
+    }
+}
+
 /// Rewrite `<component :is="expr">` to use `extractRenderComponent`.
 /// Returns the emitted JSX tag identity when a static or dynamic `is` rewrite
 /// occurred; dynamic rewrites also require an IIFE close after the element.
 ///
 /// `ts_directives`: TS directive comment texts (e.g., `"@ts-expect-error"`) to inject
 /// inside the IIFE before `return`, so they suppress errors on the resolved component.
+#[allow(clippy::too_many_arguments)]
 fn rewrite_component_is<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
+    components: &TemplateComponentBindings,
     ts_directives: &[String],
     emit_ctx: EmitContext,
 ) -> Option<ComponentIsRewrite<'alloc>> {
@@ -1679,13 +1833,26 @@ fn rewrite_component_is<'alloc>(
             return None;
         }
 
-        rewrite_component_tag_name(el, target_tag, out);
+        // Resolve the target through the shared component inventory first: a
+        // kebab or PascalCase COMPONENT name (local binding or GlobalComponents
+        // fallback const) rewrites to its in-scope binding so the JSX resolves
+        // the const rather than an intrinsic. A native tag (`is="div"`) or an
+        // unresolvable name keeps the verbatim target (fail-closed).
+        let resolved_target = components
+            .resolve(target_tag, TagType::Component, |n| {
+                resolver.get(n).is_some()
+            })
+            .filter(|resolved| resolved != target_tag)
+            .map(|resolved| out.alloc_str(&resolved) as &str);
+        let emit_tag = resolved_target.unwrap_or(target_tag);
+
+        rewrite_component_tag_name(el, emit_tag, out);
 
         // Remove `is="..."`
         let is_prop_end = props::get_prop_end(is_prop);
         out.overwrite(is_prop.start, is_prop_end, "");
         return Some(ComponentIsRewrite {
-            tag_name: target_tag,
+            tag_name: emit_tag,
             needs_iife_close: false,
         });
     }

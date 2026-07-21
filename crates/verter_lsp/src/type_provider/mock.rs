@@ -135,6 +135,22 @@ mod inner {
         /// that kind was (wrongly) closed.
         fail_sync_paths: std::collections::HashSet<String>,
         hover_responses: Vec<(String, u32, Option<HoverInfo>)>,
+        /// Scripted transient hover failures: while > 0, each `get_hover`
+        /// RECORDS its call and returns `Err` (simulating a provider/transport
+        /// failure), decrementing the counter. Pins the no-silent-empty
+        /// recovery contract: a failed provider hover must resync+retry,
+        /// never vanish silently.
+        fail_next_hovers: usize,
+        /// When `true`, `get_definition` RECORDS its call and then returns a
+        /// future that NEVER resolves, simulating a wedged type provider (a
+        /// managed tsgo stuck in a busy dispatch loop). Drives the handler
+        /// deadline repro: without an always-on production request deadline the
+        /// definition handler parks on this forever.
+        hang_definition: bool,
+        /// As `hang_definition`, for `get_hover`.
+        hang_hover: bool,
+        /// As `hang_definition`, for `get_signature_help`.
+        hang_signature_help: bool,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -171,6 +187,31 @@ mod inner {
         /// paths close without blocking.
         #[allow(clippy::type_complexity)]
         close_block: Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// Test seam matching `close_block`, but for a one-shot `update_file`.
+        /// It lets concurrency tests pause an edit after the document registry
+        /// has accepted new source while the provider refresh is still in flight.
+        #[allow(clippy::type_complexity)]
+        update_block: Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// One-shot async gate for `open_file`, used to keep the winning
+        /// singleflight repair pending while every waiter is polled and queues.
+        #[allow(clippy::type_complexity)]
+        open_block: Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// One-shot async gate for `get_completions`, used to advance a carrier
+        /// document version while a completion request is genuinely suspended.
+        #[allow(clippy::type_complexity)]
+        completion_block: Option<(
             String,
             std::sync::Arc<tokio::sync::Notify>,
             std::sync::Arc<tokio::sync::Notify>,
@@ -225,6 +266,38 @@ mod inner {
         pub fn set_hover(&self, path: &str, offset: u32, info: Option<HoverInfo>) {
             let mut state = self.state.lock().unwrap();
             state.hover_responses.push((path.to_string(), offset, info));
+        }
+
+        /// Script the next `count` `get_hover` calls to fail with `Err`
+        /// (transient provider/transport failure) before normal responses
+        /// resume.
+        pub fn fail_next_hovers(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_hovers = count;
+        }
+
+        /// Make every subsequent `get_definition` RECORD its call and then hang
+        /// forever (a wedged type provider). The handler-deadline repro uses
+        /// this to prove the definition handler now fails closed on a deadline
+        /// instead of parking.
+        pub fn hang_definition(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_definition = true;
+        }
+
+        /// Wedge `get_hover` the same way [`Self::hang_definition`] wedges
+        /// definition: record the call, then never resolve.
+        pub fn hang_hover(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_hover = true;
+        }
+
+        /// Wedge `get_signature_help`. Signature help reaches the provider on a
+        /// keystroke, so a wedge here parks the handler on every `(` the user
+        /// types until the request deadline fires.
+        pub fn hang_signature_help(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_signature_help = true;
         }
 
         /// Configure completions for a specific path and offset.
@@ -462,6 +535,50 @@ mod inner {
                 Some((path.to_string(), arrived.clone(), release.clone()));
             (arrived, release)
         }
+
+        /// Test seam: pause the next `update_file` for `path`, signalling
+        /// `arrived` before awaiting `release`.
+        pub fn block_update_file(
+            &self,
+            path: &str,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().update_block =
+                Some((path.to_string(), arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        pub fn block_open_file(
+            &self,
+            path: &str,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().open_block =
+                Some((path.to_string(), arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        pub fn block_get_completions(
+            &self,
+            path: &str,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().completion_block =
+                Some((path.to_string(), arrived.clone(), release.clone()));
+            (arrived, release)
+        }
     }
 
     /// A `TypeProvider` that always returns errors.
@@ -644,7 +761,7 @@ mod inner {
             // it re-entered the mock. The callback runs synchronously here so its
             // effect (e.g. a `did_close`) is observable before the open's future is
             // even returned, which is the realistic mid-pass ordering.
-            let (fail, on_open) = {
+            let (fail, on_open, block) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::OpenFile {
                     path: path.to_string(),
@@ -657,12 +774,25 @@ mod inner {
                     }
                     _ => None,
                 };
-                (fail, on_open)
+                let block = match &state.open_block {
+                    Some((armed_path, _, _)) if armed_path == path => state
+                        .open_block
+                        .take()
+                        .map(|(_, arrived, release)| (arrived, release)),
+                    _ => None,
+                };
+                (fail, on_open, block)
             };
             if let Some(callback) = on_open {
                 callback();
             }
-            Box::pin(async move { fail_or_ok(fail, "open_file") })
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                fail_or_ok(fail, "open_file")
+            })
         }
 
         fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -676,13 +806,29 @@ mod inner {
         }
 
         fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::UpdateFile {
-                path: path.to_string(),
-                content: content.to_string(),
-            });
-            let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
-            Box::pin(async move { fail_or_ok(fail, "update_file") })
+            let (fail, block) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::UpdateFile {
+                    path: path.to_string(),
+                    content: content.to_string(),
+                });
+                let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+                let block = match &state.update_block {
+                    Some((armed_path, _, _)) if armed_path == path => state
+                        .update_block
+                        .take()
+                        .map(|(_, arrived, release)| (arrived, release)),
+                    _ => None,
+                };
+                (fail, block)
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                fail_or_ok(fail, "update_file")
+            })
         }
 
         fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
@@ -766,7 +912,7 @@ mod inner {
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
-            let (items, on_query) = {
+            let (items, on_query, block) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetCompletions {
                     path: path.to_string(),
@@ -784,7 +930,14 @@ mod inner {
                     }
                     _ => None,
                 };
-                (items, on_query)
+                let block = match &state.completion_block {
+                    Some((armed_path, _, _)) if armed_path == path => state
+                        .completion_block
+                        .take()
+                        .map(|(_, arrived, release)| (arrived, release)),
+                    _ => None,
+                };
+                (items, on_query, block)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
@@ -792,6 +945,10 @@ mod inner {
                 callback();
             }
             Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
                 Ok(CompletionResult {
                     items,
                     is_incomplete: false,
@@ -800,12 +957,18 @@ mod inner {
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-            let (result, on_query) = {
+            let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetHover {
                     path: path.to_string(),
                     offset,
                 });
+                let fail = if state.fail_next_hovers > 0 {
+                    state.fail_next_hovers -= 1;
+                    true
+                } else {
+                    false
+                };
                 let result = state
                     .hover_responses
                     .iter()
@@ -817,14 +980,26 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, fail, state.hang_hover)
             };
+            if hang {
+                // A wedged provider: never resolves. The handler must fail
+                // closed on its request deadline rather than park here.
+                return Box::pin(std::future::pending());
+            }
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient hover failure".to_string(),
+                    ));
+                }
+                Ok(result)
+            })
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
@@ -856,7 +1031,7 @@ mod inner {
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let (result, on_query) = {
+            let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
                     path: path.to_string(),
@@ -874,8 +1049,13 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, state.hang_definition)
             };
+            if hang {
+                // A wedged provider: never resolves. The handler must fail closed
+                // on its production deadline rather than park here forever.
+                return Box::pin(std::future::pending());
+            }
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
@@ -956,7 +1136,7 @@ mod inner {
             path: &str,
             offset: u32,
         ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-            let (result, on_query) = {
+            let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetSignatureHelp {
                     path: path.to_string(),
@@ -973,8 +1153,13 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, state.hang_signature_help)
             };
+            if hang {
+                // A wedged provider: never resolves. The handler must fail
+                // closed on its request deadline rather than park here.
+                return Box::pin(std::future::pending());
+            }
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {

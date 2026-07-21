@@ -313,8 +313,26 @@ afterAll(() => {
   );
   console.log(`editor-neutral LSP receipt: ${receiptPath}`);
 
-  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(73);
-  expect(EXPECTED_EXECUTIONS, "71 standard + custom on each route, plus shared topology").toBe(217);
+  // Accepted-universe ratification (self-declared-universe check per "Verification
+  // Must Prove Execution"). The inventory is independently discovered by
+  // createEditorNeutralContractInventory(); this pin ratifies its expected size so a
+  // silently added/dropped case fails the gate rather than passing unnoticed.
+  // Derivation of 89 (every contributing case is a required, adversarially-reviewed
+  // landed block — none accidental):
+  //   73  initial editor-neutral provider contract.
+  //   +9  → 82: the neutral-LSP hardening range (provider evidence, navigation
+  //        evidence, Svelte event-inference modes), the jsconfig lax-carrier family
+  //        across all three routes, the lax-js plain-file control, and the B8
+  //        tsgo-preferred provider-recommendation case.
+  //   +7  → 89: the B4 CSS class-intel cases (class hover/definition/references +
+  //        v-bind) across the applicable routes.
+  // EXPECTED_EXECUTIONS is COMPUTED from per-route applicability (see ROUTES.reduce
+  // above), never hardcoded; the .toBe(265) below is a drift-guard on that computation.
+  expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(89);
+  expect(
+    EXPECTED_EXECUTIONS,
+    "standard + custom on each applicable route, plus shared topology",
+  ).toBe(265);
   expect(
     counters.setupFailures,
     "every provider route must start; no route may be skipped",
@@ -331,7 +349,7 @@ afterAll(() => {
   ).toBe(EXPECTED_EXECUTIONS);
   expect(outcomes.filter((outcome) => outcome.status === "passed")).toHaveLength(counters.passed);
   expect(outcomes.filter((outcome) => outcome.status === "failed")).toHaveLength(counters.failed);
-  expect(inventoryGroups.byRoute).toEqual({ tsserver: 72, tsgo: 72, "shared-tsgo": 73 });
+  expect(inventoryGroups.byRoute).toEqual({ tsserver: 88, tsgo: 88, "shared-tsgo": 89 });
   expect(
     typeScriptCliControls,
     "both TypeScript >=7 authority controls must execute",

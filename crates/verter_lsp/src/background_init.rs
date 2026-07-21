@@ -64,6 +64,12 @@ pub(super) struct BackgroundInitArgs {
     /// The proactive declaration-overlay lifecycle owner (shared with the server's
     /// `did_close` lifecycle).
     pub(super) decl_overlay_owner: Arc<super::DeclOverlayOwner>,
+    /// Project-level coalescing singleflight for `resync_open_files`, shared with
+    /// the server so concurrent init generations collapse their resync sweeps.
+    pub(super) resync_coordinator: Arc<crate::resync_singleflight::ResyncCoordinator>,
+    /// Per-document import-set freshness memo, shared with the server so a
+    /// workspace installed here evicts entries keyed on the previous one.
+    pub(super) import_sync: Arc<super::ImportSyncMemo>,
 }
 
 struct PublishedWorkspaceBuild {
@@ -174,6 +180,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         carrier_publish_coordinator,
         carrier_transaction_coordinator,
         decl_overlay_owner,
+        resync_coordinator,
+        import_sync,
     } = args;
 
     let host = documents.host_arc();
@@ -203,6 +211,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 let ws_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = new_ws.clone();
                 host.set_workspace(ws_dyn);
                 *vfs_workspace.write() = Some(Arc::clone(&new_ws));
+                // The memo keys embed the previous workspace's content generation,
+                // which this fresh workspace restarts low.
+                import_sync.evict_all();
                 tracing::info!(
                     "VFS workspace created lazily in background_init with {} roots",
                     canonical_roots.len()
@@ -318,8 +329,20 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         }
 
         // Layer 2: Re-open all files with correct projectRootPath now that
-        // workspace folders and tsconfig paths are configured.
-        let _ = tp.resync_open_files().await;
+        // workspace folders and tsconfig paths are configured. Coalesced so a
+        // superseded init generation's resync folds into the live one instead of
+        // stacking a second full close+reopen sweep on the interactive lane.
+        //
+        // Ordering note: awaiting this no longer implies the sweep FINISHED. When
+        // another pass is already sweeping, this call folds into it and returns
+        // immediately. That is safe here because a folding pass is by definition
+        // concurrent with another one, and the generation check below refuses to
+        // publish a snapshot for anything but the live generation.
+        crate::resync_singleflight::resync_open_files_coalesced(
+            &resync_coordinator,
+            Arc::clone(tp),
+        )
+        .await;
     }
 
     // 4. Generation check → commit snapshot
@@ -368,7 +391,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     // so it picks up the newly available modules and clears stale TS2307 diagnostics.
     if aliased_imports_synced {
         if let Some(tp) = &type_provider {
-            let _ = tp.resync_open_files().await;
+            crate::resync_singleflight::resync_open_files_coalesced(
+                &resync_coordinator,
+                Arc::clone(tp),
+            )
+            .await;
         }
     }
 

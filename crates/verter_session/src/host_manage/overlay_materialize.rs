@@ -724,6 +724,7 @@ impl VerterHost {
                         job_raw_source.as_ref(),
                         source_type,
                         parsed.borrow_dependent(),
+                        parsed.had_errors(),
                     );
                     Some(VerterHost::build_snapshot_from_parse(parse))
                 } else {

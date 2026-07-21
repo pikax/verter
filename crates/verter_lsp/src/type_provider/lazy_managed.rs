@@ -63,14 +63,77 @@ struct DesiredState {
 
 /// A managed tsgo provider whose process is not created until a fallback query.
 ///
-/// The creation result is memoized, including failure, so one failed demand cannot
-/// create a process retry storm. A new LSP session constructs a fresh instance and may
-/// try again. Lifecycle calls made before activation update only [`DesiredState`].
+/// A successful activation is memoized for the session. A FAILED activation is
+/// NOT latched: it is retried after [`ACTIVATION_RETRY_COOLDOWN`] so a transient
+/// spawn/replay failure recovers (the next fallback query answers) instead of
+/// leaving the provider dead for the session — while the cooldown still prevents
+/// a hot respawn storm. A new LSP session constructs a fresh instance regardless.
+/// Lifecycle calls made before activation update only [`DesiredState`].
 pub struct LazyManagedTypeProvider {
     factory: Arc<Factory>,
-    provider: OnceCell<Result<Arc<dyn TypeProvider>, TypeProviderError>>,
+    provider: OnceCell<Arc<dyn TypeProvider>>,
     activation: AsyncMutex<()>,
     desired: Mutex<DesiredState>,
+    /// The last failed activation (when + error message). Consulted under the
+    /// activation mutex: a failure newer than [`ACTIVATION_RETRY_COOLDOWN`] is
+    /// returned WITHOUT re-running the factory (storm protection); an older one
+    /// is retried. Cleared on a successful activation.
+    last_activation_failure: Mutex<Option<(std::time::Instant, String)>>,
+}
+
+/// Minimum interval between managed-fallback activation attempts after a failure.
+/// Bounds the respawn rate so a persistently failing backend cannot hot-loop,
+/// while still letting a transient failure recover on a later query.
+pub(crate) const ACTIVATION_RETRY_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+/// Records the outcome of one activation attempt on EVERY exit path.
+///
+/// An attempt that is cancelled rather than completed — the caller's deadline
+/// expired and dropped the activation future while the factory was still running
+/// — is recorded as a failure on drop. Left unrecorded, the retry cooldown never
+/// arms and every subsequent request starts a fresh managed child.
+struct ActivationAttempt<'a> {
+    last_failure: &'a Mutex<Option<(std::time::Instant, String)>>,
+    settled: bool,
+}
+
+impl<'a> ActivationAttempt<'a> {
+    fn new(last_failure: &'a Mutex<Option<(std::time::Instant, String)>>) -> Self {
+        Self {
+            last_failure,
+            settled: false,
+        }
+    }
+
+    fn settle_success(&mut self) {
+        self.settled = true;
+        *self.lock_failure_slot() = None;
+    }
+
+    fn settle_failure(&mut self, message: String) {
+        self.settled = true;
+        *self.lock_failure_slot() = Some((std::time::Instant::now(), message));
+    }
+
+    /// Poison-tolerant: this is also taken from `Drop`, where a panicking
+    /// `unwrap` during unwind would abort the process.
+    fn lock_failure_slot(&self) -> std::sync::MutexGuard<'_, Option<(std::time::Instant, String)>> {
+        self.last_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Drop for ActivationAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            *self.lock_failure_slot() = Some((
+                std::time::Instant::now(),
+                "activation was cancelled before it completed".to_string(),
+            ));
+        }
+    }
 }
 
 impl LazyManagedTypeProvider {
@@ -85,21 +148,38 @@ impl LazyManagedTypeProvider {
             provider: OnceCell::new(),
             activation: AsyncMutex::new(()),
             desired: Mutex::new(DesiredState::default()),
+            last_activation_failure: Mutex::new(None),
         }
     }
 
     fn current(&self) -> Option<Arc<dyn TypeProvider>> {
-        self.provider
-            .get()
-            .and_then(|result| result.as_ref().ok())
-            .cloned()
+        self.provider.get().cloned()
     }
 
     async fn activate(&self) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
         let _activation = self.activation.lock().await;
-        if let Some(result) = self.provider.get() {
-            return result.clone();
+        if let Some(provider) = self.provider.get() {
+            return Ok(provider.clone());
         }
+        // Storm protection: a failure within the cooldown returns the cached error
+        // WITHOUT re-running the factory; an older failure is retried below.
+        {
+            let last = self.last_activation_failure.lock().unwrap();
+            if let Some((at, message)) = &*last {
+                if at.elapsed() < ACTIVATION_RETRY_COOLDOWN {
+                    return Err(TypeProviderError::new(format!(
+                        "managed fallback activation failed (retry pending): {message}"
+                    )));
+                }
+            }
+        }
+
+        // Every exit path from here must record an outcome, INCLUDING cancellation.
+        // The production request deadline drops the handler body, so an activation
+        // cancelled mid-factory never reaches the terminal arms below: without a
+        // drop record the cooldown never arms, the `OnceCell` stays unset, and the
+        // next request spawns another managed child — one per request, unbounded.
+        let mut attempt = ActivationAttempt::new(&self.last_activation_failure);
 
         let result = match (self.factory)().await {
             Ok(provider) => match self.replay(&provider).await {
@@ -116,8 +196,17 @@ impl LazyManagedTypeProvider {
             },
             Err(error) => Err(error),
         };
-        let _ = self.provider.set(result.clone());
-        result
+        match result {
+            Ok(provider) => {
+                attempt.settle_success();
+                let _ = self.provider.set(provider.clone());
+                Ok(provider)
+            }
+            Err(error) => {
+                attempt.settle_failure(error.message.clone());
+                Err(error)
+            }
+        }
     }
 
     async fn replay(&self, provider: &Arc<dyn TypeProvider>) -> Result<(), TypeProviderError> {

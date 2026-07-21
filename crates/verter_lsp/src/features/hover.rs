@@ -49,6 +49,7 @@ pub enum ChildHoverTarget {
     ComponentTag(ComponentTagHoverTarget),
     ImportBinding(ImportBindingHoverTarget),
     EventAttribute(ComponentEventHoverTarget),
+    SlotAttribute(SlotAttributeHoverTarget),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,21 @@ pub struct ComponentEventHoverTarget {
     pub component_name: String,
     pub import_source: String,
     pub event_name: String,
+    pub vue_attr: String,
+}
+
+/// A slot-name token on a component slot usage (`#header`, `v-slot:header`,
+/// `#default`, kebab `#my-slot`, or arg-less `v-slot` = default) whose typed
+/// hover comes from the CHILD's declared slots surface (defineSlots fields /
+/// template defined slots) — never from the generated TSX, where the authored
+/// name token lowers to a semantically dead string literal (D3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotAttributeHoverTarget {
+    pub component_name: String,
+    pub import_source: String,
+    /// Authored slot argument (`my-slot` as written; `default` when arg-less).
+    pub slot_name: String,
+    /// Display label in the authored spelling (`#my-slot` / `v-slot:my-slot`).
     pub vue_attr: String,
 }
 
@@ -109,12 +125,74 @@ pub fn hover_at_position(
     // This allows hover on tags even when analysis hasn't completed.
     match classify_cursor(offset, blocks) {
         SfcCursorContext::OpeningTag { block_index } => {
-            return sfc_tag_hover(source, &blocks[block_index], offset).map(|h| h.into());
+            if let Some(hover) = sfc_tag_hover(source, &blocks[block_index], offset) {
+                return Some(hover.into());
+            }
+            // A phantom custom block from the depth-ignorant scanner (an
+            // ordinary element like `<b v-my-thing>` after a nested
+            // `</template>` closed the real template block): the SFC attr
+            // table has nothing for it, but the typed element tree still
+            // owns the position as template markup (D6).
+            if let Some(template) = analysis.and_then(|a| a.template.as_deref()) {
+                if template
+                    .elements
+                    .iter()
+                    .any(|el| offset >= el.span.start && offset < el.span.end)
+                {
+                    return hover_in_template(
+                        offset as usize,
+                        source,
+                        analysis.unwrap(),
+                        line_index,
+                    );
+                }
+            }
+            // Carrier markup class tokens (Svelte root markup scanned as a
+            // custom block): show the declaring rule(s), fail closed otherwise.
+            if let Some(analysis) = analysis {
+                if let Some(token) =
+                    crate::features::references::markup_class_token_at(offset as usize, analysis)
+                {
+                    return class_css_rule_hover(&token.name.clone(), None, source, analysis)
+                        .map(Into::into);
+                }
+            }
+            return None;
         }
         SfcCursorContext::ClosingTag { block_index } => {
             return sfc_tag_name_hover(&blocks[block_index].tag_name).map(|h| h.into());
         }
-        SfcCursorContext::RootLevel => return None,
+        SfcCursorContext::RootLevel => {
+            // Vue template markup the depth-ignorant SFC scanner leaves in a
+            // dead zone (a nested `</template>` closes the scanned block
+            // early). The typed element tree is the authority for what is
+            // still template markup (D6); Svelte has no element IR here.
+            if let Some(template) = analysis.and_then(|a| a.template.as_deref()) {
+                if template
+                    .elements
+                    .iter()
+                    .any(|el| offset >= el.span.start && offset < el.span.end)
+                {
+                    return hover_in_template(
+                        offset as usize,
+                        source,
+                        analysis.unwrap(),
+                        line_index,
+                    );
+                }
+            }
+            // Carrier markup class tokens (Svelte root markup — no template
+            // element IR): show the declaring rule(s), fail closed otherwise.
+            if let Some(analysis) = analysis {
+                if let Some(token) =
+                    crate::features::references::markup_class_token_at(offset as usize, analysis)
+                {
+                    return class_css_rule_hover(&token.name.clone(), None, source, analysis)
+                        .map(Into::into);
+                }
+            }
+            return None;
+        }
         SfcCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
     }
 
@@ -125,14 +203,44 @@ pub fn hover_at_position(
     let block = blocks.iter().find(|b| {
         let (content_start, content_end) = b.content_range();
         offset >= content_start as usize && offset < content_end as usize
-    })?;
+    });
 
-    match block.tag_name.as_str() {
-        "script" => hover_in_script(offset, source, analysis, ssr_context),
-        "template" => hover_in_template(offset, source, analysis, line_index),
-        "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
-            .map(|h| h.into()),
-        _ => None,
+    match block {
+        Some(b) => match b.tag_name.as_str() {
+            "script" => hover_in_script(offset, source, analysis, ssr_context),
+            "template" => hover_in_template(offset, source, analysis, line_index),
+            "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
+                .map(|h| h.into()),
+            _ => {
+                // A phantom custom block from the depth-ignorant scanner (a
+                // component usage after a nested `</template>` closed the real
+                // template block). Its interior is still template markup when
+                // the typed element tree owns the offset (D6).
+                let template = analysis.template.as_deref()?;
+                if template
+                    .elements
+                    .iter()
+                    .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
+                {
+                    hover_in_template(offset, source, analysis, line_index)
+                } else {
+                    None
+                }
+            }
+        },
+        None => {
+            // No scanned block owns the offset — same dead-zone recovery.
+            let template = analysis.template.as_deref()?;
+            if template
+                .elements
+                .iter()
+                .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
+            {
+                hover_in_template(offset, source, analysis, line_index)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -238,6 +346,10 @@ pub fn child_hover_target_at_offset(
     if let Some(template) = analysis.template.as_deref() {
         if let Some(target) = component_event_hover_target(offset, template, analysis) {
             return Some(ChildHoverTarget::EventAttribute(target));
+        }
+
+        if let Some(target) = slot_attribute_hover_target(offset, template, analysis) {
+            return Some(ChildHoverTarget::SlotAttribute(target));
         }
 
         if let Some(target) = component_tag_hover_target(offset, source, template, analysis) {
@@ -502,14 +614,40 @@ fn hover_in_template(
         return Some(hover.into());
     }
 
-    // Check if cursor is on a v-slot / #name directive (slot consumer)
+    // Check if cursor is on a v-slot / #name directive NAME+ARG (slot consumer).
+    // Pattern positions inside the destructure are deliberately NOT answered
+    // here: they map into the generated TSX and the provider supplies the
+    // typed binding quickinfo (D4).
     if let Some(hover) = v_slot_hover(offset as u32, analysis) {
         return Some(hover.into());
+    }
+
+    // Slot destructure-pattern positions yield no Verter-native hover — the
+    // provider answers them with the typed binding quickinfo through the
+    // mapped pattern bytes (D4). This also prevents a pattern key that
+    // collides with a same-named script binding from showing the WRONG
+    // script-binding hover.
+    if is_inside_slot_pattern(offset as u32, analysis) {
+        return None;
     }
 
     // Check if cursor is on a template element tag name — show matching CSS rules
     if let Some(hover) = element_css_hover(offset as u32, analysis) {
         return Some(hover.into());
+    }
+
+    // Class-token hover: cursor on a `class="x"` entry / resolvable `:class`
+    // entry — show the declaring CSS rule(s). A recognized class token FAILS
+    // CLOSED when no rule declares it (no link, no same-named-binding hover).
+    if let Some(template) = analysis.template.as_deref() {
+        if let Some((crate::features::references::CssRefTarget::Class(name), element_idx)) =
+            crate::features::references::find_css_target_in_template_refs_with_element(
+                offset, source, template,
+            )
+        {
+            return class_css_rule_hover(&name, Some((element_idx, template)), source, analysis)
+                .map(Into::into);
+        }
     }
 
     // Check if cursor is on a component element tag name — show prop constness info
@@ -536,6 +674,23 @@ fn hover_in_template(
         return Some(hover);
     }
     if let Some(hover) = template_ref_hover(offset as u32, source, analysis, line_index) {
+        return Some(hover);
+    }
+
+    // D6: directive-NAME tokens. Built-ins get Volar-style doc hovers; custom
+    // directives (`v-my-thing` → `vMyThing`) get the resolved binding's typed
+    // hover. Both run BEFORE the attribute-name suppression below — the
+    // generated TSX erases/lowers directive names, so the provider can never
+    // describe the authored token.
+    if let Some(hover) = crate::features::hover_directive_names::builtin_directive_name_hover(
+        offset as u32,
+        analysis,
+    ) {
+        return Some(hover);
+    }
+    if let Some(hover) =
+        crate::features::hover_directive_names::custom_directive_name_hover(offset as u32, analysis)
+    {
         return Some(hover);
     }
 
@@ -665,6 +820,10 @@ pub fn merged_attribute_redirect_offset(
 
 /// Check if the given SFC offset is on slot-related syntax (outlet or v-slot directive).
 /// The type provider returns unhelpful `() any`/`string` for these positions.
+///
+/// Scoped to the slot NAME+ARG region: destructure-pattern positions are
+/// answered by the provider through the mapped pattern bytes (D4), so they are
+/// NOT slot syntax for merge-suppression purposes.
 pub fn is_on_slot_syntax(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
     let Some(template) = analysis.template.as_deref() else {
         return false;
@@ -679,15 +838,36 @@ pub fn is_on_slot_syntax(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
         return true;
     }
 
-    // v-slot / #name directives on elements
+    // v-slot / #name directive NAME+ARG region (never the pattern expression)
     for el in &template.elements {
         for dir in &el.directives {
-            if dir.name == "slot" && offset >= dir.span.start && offset < dir.span.end {
+            if dir.name != "slot" {
+                continue;
+            }
+            let (region_start, region_end) = slot_directive_name_arg_region(dir);
+            if offset >= region_start && offset < region_end {
                 return true;
             }
         }
     }
     false
+}
+
+/// Whether the offset sits inside a `v-slot` / `#name` destructure-pattern
+/// expression span (D4 — provider-answered positions).
+fn is_inside_slot_pattern(offset: u32, analysis: &FileAnalysisSnapshot) -> bool {
+    let Some(template) = analysis.template.as_deref() else {
+        return false;
+    };
+    template.elements.iter().any(|el| {
+        el.directives.iter().any(|dir| {
+            dir.name == "slot"
+                && dir
+                    .expression_span
+                    .as_ref()
+                    .is_some_and(|span| offset >= span.start && offset < span.end)
+        })
+    })
 }
 
 /// When hovering on a `<slot>` element (tag name, `name` attribute, or its value),
@@ -732,7 +912,12 @@ fn slot_outlet_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hov
     Some(make_hover(lines.join("\n\n")))
 }
 
-/// When hovering on a `v-slot` / `#name` directive, show slot content information.
+/// When hovering on a `v-slot` / `#name` directive NAME+ARG, show slot content
+/// information. This is the fallback surface for slots whose child component
+/// cannot be resolved; a resolvable child is answered by the typed
+/// [`build_child_slot_hover`] from the child's declared slots surface (D3).
+/// Destructure-pattern positions are excluded — the provider answers them
+/// with typed binding quickinfo through the mapped pattern bytes (D4).
 fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
     let template = analysis.template.as_deref()?;
 
@@ -741,7 +926,8 @@ fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
             if dir.name != "slot" {
                 continue;
             }
-            if offset < dir.span.start || offset >= dir.span.end {
+            let (region_start, region_end) = slot_directive_name_arg_region(dir);
+            if offset < region_start || offset >= region_end {
                 continue;
             }
 
@@ -771,6 +957,139 @@ fn v_slot_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
 }
 
 /// When hovering on a template element tag name, show matching CSS rules with specificity.
+/// CSS-ONLY hover: class-token rule hover (template attr entries + markup
+/// class tokens) and the native style-block hover. Served even when the
+/// editor owns carrier-source TS features — CSS-native results have no TS
+/// correlate, so the editor's TS plugin can never own them.
+pub fn css_only_hover_at_position(
+    position: &Position,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    line_index: &LineIndex,
+) -> Option<Hover> {
+    let analysis = analysis?;
+    let offset = line_index.position_to_offset(position)? as usize;
+
+    let in_style = blocks.iter().any(|b| {
+        b.tag_name == "style" && {
+            let (cs, ce) = b.content_range();
+            offset >= cs as usize && offset < ce as usize
+        }
+    });
+    if in_style {
+        return crate::css::css_hover(position, source, blocks, Some(analysis), line_index);
+    }
+
+    if let Some(template) = analysis.template.as_deref() {
+        if let Some((crate::features::references::CssRefTarget::Class(name), element_idx)) =
+            crate::features::references::find_css_target_in_template_refs_with_element(
+                offset, source, template,
+            )
+        {
+            return class_css_rule_hover(&name, Some((element_idx, template)), source, analysis);
+        }
+    }
+
+    if let Some(token) = crate::features::references::markup_class_token_at(offset, analysis) {
+        return class_css_rule_hover(&token.name.clone(), None, source, analysis);
+    }
+
+    None
+}
+
+/// Hover for a markup class token: render every CSS rule declaring the class
+/// (Volar-style `selector { declarations }` blocks), hierarchy-ranked against
+/// the origin element. Returns `None` when no rule declares the class.
+pub(crate) fn class_css_rule_hover(
+    name: &str,
+    element: Option<(
+        usize,
+        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    )>,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<Hover> {
+    use crate::features::definition::class_rule_match_rank;
+
+    // (rank, source order, rendered rule)
+    let mut entries: Vec<(u8, u32, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, u32)> = std::collections::HashSet::new();
+
+    for (style_idx, style) in analysis.styles.iter().enumerate() {
+        let Some(css) = style.css.as_ref() else {
+            continue;
+        };
+        for cls in &css.classes {
+            if cls.name != name || cls.span.start == 0 {
+                continue;
+            }
+            // Module-block rules are hashed-local: never rendered for a
+            // plain class token (fail closed).
+            if !crate::css::global_classes::class_plain_addressable(style, cls.span) {
+                continue;
+            }
+            let Some(si) = cls.selector_index else {
+                continue;
+            };
+            let Some(selector) = css.selectors.get(si as usize) else {
+                continue;
+            };
+            if !seen.insert((style_idx, si)) {
+                continue;
+            }
+            let rank = class_rule_match_rank(cls, css, element);
+            let body = selector
+                .rule_body_span
+                .and_then(|b| source.get(b.start as usize..b.end as usize))
+                .map(render_rule_body)
+                .unwrap_or_else(|| "{ … }".to_string());
+            let scope_label = if style.scoped { " (scoped)" } else { "" };
+            let rendered = format!("```css\n{} {}\n```{}", selector.text, body, scope_label);
+            entries.push((rank, cls.span.start, rendered));
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by_key(|e| (e.0, e.1));
+    const MAX_RULES: usize = 4;
+    let total = entries.len();
+    let mut parts: Vec<String> = entries
+        .into_iter()
+        .take(MAX_RULES)
+        .map(|(_, _, md)| md)
+        .collect();
+    if total > MAX_RULES {
+        parts.push(format!("…and {} more rule(s)", total - MAX_RULES));
+    }
+
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: parts.join("\n\n"),
+        }),
+        range: None,
+    })
+}
+
+/// Render a rule's brace-inclusive declaration block for hover display,
+/// truncating oversized bodies.
+fn render_rule_body(body: &str) -> String {
+    const MAX_BODY: usize = 400;
+    let trimmed = body.trim();
+    if trimmed.len() <= MAX_BODY {
+        return trimmed.to_string();
+    }
+    let mut cut = MAX_BODY;
+    while cut > 0 && !trimmed.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n  /* … */ }}", &trimmed[..cut])
+}
+
 fn element_css_hover(offset: u32, analysis: &FileAnalysisSnapshot) -> Option<Hover> {
     let template = analysis.template.as_deref()?;
 
@@ -979,6 +1298,162 @@ fn component_event_hover_target(
     None
 }
 
+/// The slot-NAME region of a `v-slot` / `#name` directive: the directive name
+/// plus its argument, EXCLUDING the destructure-pattern expression. Pattern
+/// positions map into the generated TSX (the pattern is emitted as verbatim
+/// mapped bytes inside the slot IIFE) and are answered by the provider's typed
+/// binding quickinfo (D4); only the name/arg region is Verter-owned (D3).
+fn slot_directive_name_arg_region(
+    dir: &verter_semantic::analysis::template::TemplateDirective,
+) -> (u32, u32) {
+    let end = dir
+        .arg_span
+        .as_ref()
+        .map(|span| span.end)
+        .unwrap_or(dir.name_end);
+    (dir.span.start, end)
+}
+
+/// Identify a slot-name token (`#header`, `v-slot:header`, `#default`, kebab
+/// `#my-slot`, arg-less `v-slot`) on a component slot usage, resolving the
+/// owning child component — the element itself for `<MyComp #header>`, or the
+/// parent component element for `<template #header>`.
+fn slot_attribute_hover_target(
+    offset: u32,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<SlotAttributeHoverTarget> {
+    for el in &template.elements {
+        for dir in &el.directives {
+            if dir.name != "slot" {
+                continue;
+            }
+            let (region_start, region_end) = slot_directive_name_arg_region(dir);
+            if offset < region_start || offset >= region_end {
+                continue;
+            }
+            let component = if el.is_component {
+                template.components.iter().find(|component| {
+                    component.span.start == el.span.start && component.span.end == el.span.end
+                })?
+            } else if el.tag == "template" {
+                let parent = el
+                    .parent_index
+                    .and_then(|idx| template.elements.get(idx as usize))?;
+                if !parent.is_component {
+                    continue;
+                }
+                template.components.iter().find(|component| {
+                    component.name == parent.tag
+                        || component.name == crate::server::to_pascal_case(&parent.tag)
+                })?
+            } else {
+                continue;
+            };
+            let import_source = component_import_source(component, analysis)?;
+            let slot_name = dir
+                .argument
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            let vue_attr = if dir.raw_name.starts_with('#') {
+                format!("#{slot_name}")
+            } else if dir.argument.is_some() {
+                format!("v-slot:{slot_name}")
+            } else {
+                "v-slot".to_string()
+            };
+            return Some(SlotAttributeHoverTarget {
+                component_name: component.name.clone(),
+                import_source,
+                slot_name,
+                vue_attr,
+            });
+        }
+    }
+    None
+}
+
+/// Build the typed slot-name hover from the CHILD's declared slots surface
+/// (D3): the slot's defineSlots signature — name, slot-props payload, return
+/// type — resolved with Vue's kebab↔camel equivalence (`#my-slot` → `mySlot`).
+/// Falls back to the child's template-defined slot names (untyped). A slot the
+/// child never declared yields `None` (fail-closed — no fabrication).
+pub fn build_child_slot_hover(
+    vue_attr: &str,
+    slot_name: &str,
+    child_analysis: &FileAnalysisSnapshot,
+) -> Option<Hover> {
+    let best = crate::server::select_best_ranked_candidate(
+        child_analysis
+            .macros
+            .iter()
+            .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+            .flat_map(|mac| mac.slot_fields.iter())
+            .filter_map(|slot_field| {
+                crate::server::attr_name_match_rank(slot_name, &slot_field.name)
+                    .map(|rank| (rank, slot_field.span, slot_field))
+            }),
+    );
+    if let Some((_, _, slot_field)) = best {
+        let props = if slot_field.bindings.is_empty() {
+            String::new()
+        } else {
+            let bindings = slot_field
+                .bindings
+                .iter()
+                .map(|binding| {
+                    format!(
+                        "{}: {}",
+                        binding.name,
+                        binding.type_annotation.as_deref().unwrap_or("unknown")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("(props: {{ {bindings} }})")
+        };
+        let return_type = slot_field.return_type.as_deref().unwrap_or("any");
+        let mut value = format!(
+            "```typescript\n(slot) {}{props}: {return_type}\n```",
+            slot_field.name
+        );
+        if let Some(description) = &slot_field.description {
+            value.push_str("\n\n");
+            value.push_str(description);
+        }
+        return Some(make_hover(value));
+    }
+
+    if let Some(child_template) = child_analysis.template.as_deref() {
+        let best = crate::server::select_best_ranked_candidate(
+            child_template
+                .defined_slots
+                .iter()
+                .filter_map(|defined_slot| {
+                    crate::server::attr_name_match_rank(slot_name, &defined_slot.name)
+                        .map(|rank| (rank, defined_slot.span, defined_slot))
+                }),
+        );
+        if let Some((_, _, defined_slot)) = best {
+            let mut lines = vec![format!("**Slot** `{vue_attr}`")];
+            if !defined_slot.binding_names.is_empty() {
+                lines.push(format!(
+                    "**Scoped props:** {}",
+                    defined_slot
+                        .binding_names
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            return Some(make_hover(lines.join("\n\n")));
+        }
+    }
+
+    None
+}
+
 /// Resolve the authored module source for a template component.
 ///
 /// The template analyzer normally stamps `import_source` directly. During an
@@ -1123,7 +1598,10 @@ fn vue_api_hover_at_offset(
     })
 }
 
-fn hover_for_word(word: &str, analysis: &FileAnalysisSnapshot) -> Option<VerterHoverResult> {
+pub(super) fn hover_for_word(
+    word: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<VerterHoverResult> {
     // Check bindings
     if let Some(binding) = analysis.bindings.iter().find(|b| b.name == word) {
         let vue_kind_label = reactivity_kind_label(binding);

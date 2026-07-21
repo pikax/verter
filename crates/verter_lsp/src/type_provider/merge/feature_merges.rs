@@ -69,8 +69,7 @@ fn resolve_pre_remapped_current_carrier_range(
     }
     let current_carrier_path = normalize_carrier_path(current_ide_path, carrier_source_exists);
     if current_carrier_path == current_ide_path
-        || verter_span::path::canonicalize_path_cow(path)
-            != verter_span::path::canonicalize_path_cow(current_carrier_path)
+        || !verter_span::path::fs_paths_equal(path, current_carrier_path)
     {
         return None;
     }
@@ -433,7 +432,14 @@ pub fn merge_rename_locations(
     // static rename half before provider locations were merged. Editors apply a
     // WorkspaceEdit literally; duplicate replacements at one range can corrupt
     // the second application rather than behaving idempotently.
-    dedupe_rename_workspace_edit(&mut edit);
+    dedupe_rename_workspace_edit_with_preferred(
+        &mut edit,
+        path_to_uri(normalize_carrier_path(
+            current_tsx_path,
+            carrier_source_exists,
+        ))
+        .as_ref(),
+    );
 
     // Return None if no edits
     if edit
@@ -454,6 +460,20 @@ pub fn merge_rename_locations(
 /// through [`merge_rename_locations`]. They still must not expose duplicate
 /// mutations to the editor.
 pub fn dedupe_rename_workspace_edit(edit: &mut WorkspaceEdit) {
+    dedupe_rename_workspace_edit_with_preferred(edit, None);
+}
+
+/// Canonicalize a rename transaction, grouping change entries by filesystem
+/// identity (the case-insensitive [`InjectedPathKey`] on Windows/macOS) but
+/// keying each group by a REAL member spelling — `preferred` (the initiating
+/// document / current carrier URI) whenever it is a group member — never the
+/// case-folded identity string itself. LSP URIs are case-sensitive: a strict
+/// client (Neovim) looks edits up by exact URI and silently drops edits keyed
+/// under a differently-cased spelling of the same file.
+pub fn dedupe_rename_workspace_edit_with_preferred(
+    edit: &mut WorkspaceEdit,
+    preferred: Option<&Uri>,
+) {
     fn text_edit_key(uri: &Uri, edit: &TextEdit) -> String {
         format!(
             "{}:{}:{}:{}:{}:{}",
@@ -470,15 +490,29 @@ pub fn dedupe_rename_workspace_edit(edit: &mut WorkspaceEdit) {
         #[allow(clippy::mutable_key_type)]
         let mut coalesced: std::collections::HashMap<Uri, Vec<TextEdit>> =
             std::collections::HashMap::new();
+        let mut spellings: std::collections::HashMap<verter_span::InjectedPathKey, Uri> =
+            std::collections::HashMap::new();
+        let mut spelling_of = |uri: &Uri| -> Uri {
+            if !uri.as_str().starts_with("file:") {
+                return uri.clone();
+            }
+            let path = verter_span::file_uri_to_path(uri.as_str());
+            let identity = verter_span::InjectedPathKey::new(&path);
+            if preferred == Some(uri) {
+                spellings.insert(identity.clone(), uri.clone());
+            }
+            spellings
+                .entry(identity)
+                .or_insert_with(|| uri.clone())
+                .clone()
+        };
+        // Register the preferred spelling first so every group member maps to it.
+        if let Some(preferred_uri) = preferred {
+            let _ = spelling_of(preferred_uri);
+        }
         for (uri, edits) in changes {
-            let canonical_uri = if uri.as_str().starts_with("file:") {
-                let path = verter_span::file_uri_to_path(uri.as_str());
-                let identity = verter_span::InjectedPathKey::new(&path);
-                crate::uri::path_to_file_uri(identity.as_str()).unwrap_or(uri)
-            } else {
-                uri
-            };
-            coalesced.entry(canonical_uri).or_default().extend(edits);
+            let key = spelling_of(&uri);
+            coalesced.entry(key).or_default().extend(edits);
         }
         edit.changes = Some(coalesced);
     }
@@ -698,13 +732,15 @@ pub fn merge_code_actions(
                 let edit_path = edit_path.as_ref();
 
                 if is_carrier_ide_path(edit_path) {
-                    // Same-file identity via the single canonical path owner (backslash→slash,
-                    // drive-letter case, `\\?\` extended prefix folded) — never a raw `==`. Only the
+                    // Same-file identity via the shared filesystem-identity primitive
+                    // (backslash→slash, drive-letter case, `\\?\` extended prefix, and the
+                    // whole-path case fold engines apply on case-insensitive filesystems) —
+                    // never a raw `==`. Only the
                     // CURRENT request's TSX is described by the in-context `mapper` / `tsx_line_index`
                     // / `preamble_reanchor`; a FOREIGN carrier `.tsx` has its own context (resolved
                     // via the external resolver) and is never classified through the current mapper.
-                    let is_current_file = verter_span::path::canonicalize_path_cow(edit_path)
-                        == verter_span::path::canonicalize_path_cow(current_tsx_path);
+                    let is_current_file =
+                        verter_span::path::fs_paths_equal(edit_path, current_tsx_path);
 
                     if is_current_file {
                         // A provider `addMissingImport` quickfix inserts a brand-new import at the

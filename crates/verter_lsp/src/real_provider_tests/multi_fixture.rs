@@ -38,8 +38,10 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _hw = session.open_fixture_file("src/components/HelloWorld.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        // Fail-closed under VERTER_REQUIRE_{TSGO,TSSERVER}: this hover is the
+        // evidence gating the retired composite-paths startup-warning claim,
+        // so a cold provider must never skip-as-pass on a require-mode run.
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 

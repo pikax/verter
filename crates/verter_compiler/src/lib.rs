@@ -73,6 +73,7 @@ pub(crate) mod ide;
 pub mod tsc;
 
 // Re-export the @verter/types declarations for the LSP and verter-tsc
+pub use ide::script::global_component_nav_probe_offset;
 pub use ide::script::VERTER_TYPES_AMBIENT_MODULE;
 pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
 pub use ide::script::VUE_JSX_RUNTIME_AUGMENTATION;

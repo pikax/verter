@@ -5,7 +5,21 @@
 export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
 export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
-export type ExtractRenderComponent<T> = T extends { new (): infer I }
+export declare function globalComponentsNav(): import("vue").GlobalComponents;
+export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents
+  ? import("vue").GlobalComponents[N]
+  : unknown;
+export type GlobalComponentKebabType<
+  N,
+  K extends string,
+> = N extends keyof import("vue").GlobalComponents
+  ? import("vue").GlobalComponents[N]
+  : K extends keyof import("vue").GlobalComponents
+    ? import("vue").GlobalComponents[K]
+    : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements
+      ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any
+      : (props: Record<string, any>) => any;
+export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I }
   ? I extends { $props: any }
     ? T
     : I extends HTMLElement
@@ -19,9 +33,11 @@ export type ExtractRenderComponent<T> = T extends { new (): infer I }
         : HTMLElement
     : T extends HTMLElement
       ? (props: {}) => T
-      : T extends keyof import("vue").NativeElements
-        ? (props: import("vue").NativeElements[T]) => JSX.Element
-        : (props: {}) => JSX.Element;
+      : T extends keyof import("vue").GlobalComponents
+        ? ExtractRenderComponent<import("vue").GlobalComponents[T]>
+        : T extends keyof import("vue").NativeElements
+          ? (props: import("vue").NativeElements[T]) => JSX.Element
+          : (props: {}) => JSX.Element;
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I }
@@ -128,6 +144,13 @@ export declare function checkRequiredSlots<T>(
   slots: T,
   provided: { [K in keyof T as undefined extends T[K] ? never : K]: true },
 ): void;
+
+declare module "vue" {
+  // Guarantee the augmentable GlobalComponents surface exists on EVERY Vue
+  // version (Vue <3.5 ships no GlobalComponents export); user/UI-kit
+  // augmentations merge in, and absence stays fail-closed `unknown`.
+  interface GlobalComponents {}
+}
 
 declare module "vue/jsx-runtime" {
   namespace JSX {

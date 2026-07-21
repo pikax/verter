@@ -45,6 +45,7 @@ pub use macros::{
     lower_macro_field_payload_at, lower_macro_field_payload_at_with_owners,
     MacroFieldPayloadLowering,
 };
+pub mod macro_usage;
 mod options;
 pub mod project_index;
 pub mod project_resolver;
@@ -102,20 +103,21 @@ pub use routes::{
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};
 pub use style::{
-    build_css_style_analysis, build_preprocessor_style_analysis, compute_structured_specificity,
-    parse_selector, AnalyzedSelector, AttributeOperator, AttributeSelector, CompoundSelector,
-    SelectorCombinator, SelectorPseudoClass, SpecialPseudoInput, SpecialPseudoKind,
-    StructuredSelector, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
-    VueStyleInput,
+    build_css_style_analysis, build_preprocessor_style_analysis, build_scanned_style_analysis,
+    compute_structured_specificity, parse_selector, AnalyzedSelector, AttributeOperator,
+    AttributeSelector, CompoundSelector, CssScanDialect, SelectorCombinator, SelectorPseudoClass,
+    SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
+    StyleAnalysisLang, StyleBlockAnalysis, VBindInput, VueStyleInput,
 };
 pub use template::{
     extract_dynamic_class_names, extract_dynamic_class_names_rich, parse_string_literal_union,
     unwrap_reactive_type, AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition,
     BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, DynamicClassName,
-    ElementNamespace, IfChain, MacroKind, PropValueConstness, TemplateAnalysisSnapshot,
-    TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage, TemplateDirective,
-    TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
-    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
+    ElementNamespace, IfChain, MacroKind, MarkupClassToken, PropValueConstness, SnippetDefinition,
+    SvelteDirectiveInfo, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
+    TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
+    TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
+    VForDirective, VModelDirective,
 };
 pub use top_level_owners::{
     DeclMap, DeclMapKey, TopLevelAttachedOwner, TopLevelOwnerRegion, TopLevelOwnerRegionError,

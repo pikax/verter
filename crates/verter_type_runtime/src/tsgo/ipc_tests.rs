@@ -120,22 +120,25 @@ async fn initialized_non_owning_transport_pulls_diagnostics_strictly() {
 /// Create an `LspTransport` for tests using a single channel for all priority lanes.
 fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
     LspTransport {
+        control_tx: mpsc::unbounded_channel().0,
         interactive_tx: stdin_tx.clone(),
         normal_tx: stdin_tx.clone(),
         background_tx: stdin_tx,
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(PendingRequests::default()),
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     }
 }
 
 /// Create an `LspTransport` for tests with shared pending map.
 fn test_transport_with_pending(
     stdin_tx: mpsc::Sender<StdinMessage>,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
 ) -> LspTransport {
     LspTransport {
+        control_tx: mpsc::unbounded_channel().0,
         interactive_tx: stdin_tx.clone(),
         normal_tx: stdin_tx.clone(),
         background_tx: stdin_tx,
@@ -143,7 +146,254 @@ fn test_transport_with_pending(
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         crash_notify: None,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     }
+}
+
+/// Create an `LspTransport` whose control lane is observable, so a test can
+/// assert on what cancellation actually emitted.
+fn test_transport_with_control(
+    stdin_tx: mpsc::Sender<StdinMessage>,
+    pending: Arc<PendingRequests>,
+) -> (LspTransport, mpsc::UnboundedReceiver<StdinMessage>) {
+    let (control_tx, control_rx) = mpsc::unbounded_channel();
+    (
+        LspTransport {
+            control_tx,
+            interactive_tx: stdin_tx.clone(),
+            normal_tx: stdin_tx.clone(),
+            background_tx: stdin_tx,
+            pending,
+            next_id: AtomicI64::new(1),
+            consecutive_failures: AtomicU32::new(0),
+            crash_notify: None,
+            teardown_intent: Arc::new(AtomicBool::new(false)),
+        },
+        control_rx,
+    )
+}
+
+/// Decode the JSON body of a framed stdin message.
+fn frame_body(msg: &StdinMessage) -> serde_json::Value {
+    let StdinMessage::Frame(bytes) = msg else {
+        panic!("expected a framed message, got a control signal");
+    };
+    let text = String::from_utf8(bytes.clone()).expect("frame is utf8");
+    let body = text
+        .split_once("\r\n\r\n")
+        .expect("frame has a header/body split")
+        .1;
+    serde_json::from_str(body).expect("frame body is json")
+}
+
+// ===========================================================================
+// Drop-cancellation of an in-flight provider request.
+//
+// A request deadline scaled to a human fires while the engine's round-trip is
+// still outstanding — that is the point of it. Dropping the caller's future is
+// therefore the ordinary way a request ends, and it has to leave the transport
+// and the engine clean: no pending-map entry for an answer nobody will read,
+// and a cancellation telling the engine to stop producing it.
+// ===========================================================================
+
+/// Dropping a caller's in-flight request future must release its pending-map
+/// slot. Without this the slot survives for the life of the session whenever the
+/// engine never answers — one leaked entry per abandoned request.
+#[tokio::test]
+async fn dropping_an_in_flight_request_releases_its_pending_slot() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel(16);
+    let pending = Arc::new(PendingRequests::default());
+    let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
+
+    {
+        let mut fut = Box::pin(transport.request_with_priority(
+            "textDocument/hover",
+            serde_json::json!({}),
+            30,
+            ProviderPriority::Interactive,
+        ));
+        // Poll once so the id is registered and the future is parked on the
+        // response that never comes.
+        tokio::select! {
+            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        assert_eq!(
+            pending.len(),
+            1,
+            "the in-flight request must hold exactly one pending slot"
+        );
+    }
+
+    assert_eq!(
+        pending.len(),
+        0,
+        "dropping the caller's future must release the pending slot, not leak it"
+    );
+}
+
+/// Dropping a caller's in-flight request future must tell the engine to stop.
+/// An abandoned request the engine is still computing steals time from the
+/// requests that replaced it.
+#[tokio::test]
+async fn dropping_an_in_flight_request_cancels_it_at_the_engine() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel(16);
+    let pending = Arc::new(PendingRequests::default());
+    let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
+
+    {
+        let mut fut = Box::pin(transport.request_with_priority(
+            "textDocument/definition",
+            serde_json::json!({}),
+            30,
+            ProviderPriority::Interactive,
+        ));
+        tokio::select! {
+            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+    }
+
+    let sent = stdin_rx.try_recv().expect("the request frame was enqueued");
+    let request_id = frame_body(&sent)
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .expect("the request carries an id");
+
+    let cancel = control_rx
+        .try_recv()
+        .expect("dropping an in-flight request must emit a cancellation");
+    let body = frame_body(&cancel);
+    assert_eq!(
+        body.get("method").and_then(|v| v.as_str()),
+        Some("$/cancelRequest"),
+        "the emitted control frame must be a cancellation, got {body}"
+    );
+    assert_eq!(
+        body.pointer("/params/id").and_then(|v| v.as_i64()),
+        Some(request_id),
+        "the cancellation must name the abandoned request's own id, got {body}"
+    );
+}
+
+/// The cancellation must ride the control lane, never the lane the request used.
+/// A request is typically cancelled BECAUSE its lane stopped draining; a cancel
+/// queued behind the work it cancels is not a cancel.
+#[tokio::test]
+async fn cancellation_does_not_queue_behind_the_lane_it_cancels() {
+    // Capacity 1, and it is already full: the interactive lane cannot accept
+    // another byte.
+    let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
+    let pending = Arc::new(PendingRequests::default());
+    let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
+
+    {
+        let mut fut = Box::pin(transport.request_with_priority(
+            "textDocument/hover",
+            serde_json::json!({}),
+            30,
+            ProviderPriority::Interactive,
+        ));
+        tokio::select! {
+            _ = &mut fut => panic!("no response was ever written; the request cannot complete"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+        // Do not drain the interactive lane — it stays full across the drop.
+    }
+
+    assert!(
+        control_rx.try_recv().is_ok(),
+        "the cancellation must be deliverable while the request's own lane is full"
+    );
+    assert!(
+        stdin_rx.try_recv().is_ok(),
+        "the original request frame is still sitting on the blocked lane"
+    );
+}
+
+/// A request that was ANSWERED must not emit a cancellation on the way out.
+/// Cancelling a completed id is noise at best, and at worst cancels a later
+/// request that reused the id.
+#[tokio::test]
+async fn an_answered_request_emits_no_cancellation() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel(16);
+    let pending = Arc::new(PendingRequests::default());
+    let (transport, mut control_rx) = test_transport_with_control(stdin_tx, Arc::clone(&pending));
+
+    let answerer = {
+        let pending = Arc::clone(&pending);
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if let Some(tx) = pending.take(1) {
+                    let _ = tx.send(serde_json::json!({ "id": 1, "result": "ok" }));
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            panic!("the request never registered its pending slot");
+        })
+    };
+
+    let result = transport
+        .request_with_priority(
+            "textDocument/hover",
+            serde_json::json!({}),
+            30,
+            ProviderPriority::Interactive,
+        )
+        .await
+        .expect("the answered request succeeds");
+    assert_eq!(result, serde_json::json!("ok"));
+    answerer.await.unwrap();
+
+    assert!(
+        stdin_rx.try_recv().is_ok(),
+        "the request frame was enqueued"
+    );
+    assert!(
+        control_rx.try_recv().is_err(),
+        "an answered request must emit no cancellation"
+    );
+    assert_eq!(pending.len(), 0, "the answered request holds no slot");
+}
+
+/// The hop must be bounded by the caller's ambient request deadline, not by its
+/// own configured timeout, whenever the deadline is tighter. This is what makes
+/// the inner bound fire first and the failure attribute to the engine.
+#[tokio::test]
+async fn a_hop_times_out_inside_the_callers_request_deadline() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel(16);
+    let pending = Arc::new(PendingRequests::default());
+    let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
+
+    let started = std::time::Instant::now();
+    // Configured timeout 30s; ambient deadline 400ms. The deadline must win.
+    let result = crate::deadline::with_deadline(
+        std::time::Duration::from_millis(400),
+        transport.request_with_priority(
+            "textDocument/hover",
+            serde_json::json!({}),
+            30,
+            ProviderPriority::Interactive,
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    let err = result.expect_err("an unanswered hop must fail, never hang");
+    assert!(
+        err.to_string().contains("timed out"),
+        "the failure must attribute to the provider hop timing out, got: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(400),
+        "the hop must fire strictly INSIDE the request deadline, took {elapsed:?}"
+    );
+    assert_eq!(
+        pending.len(),
+        0,
+        "a timed-out hop must release its pending slot"
+    );
 }
 
 /// RAII guard that forces the type-runtime trace ON (routed to a throwaway
@@ -2421,13 +2671,12 @@ async fn test_read_loop_exits_on_eof() {
     // Wait for the process to exit (stdout will close)
     let _ = child.wait().await;
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    let (_stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
     // The read_loop should exit quickly on EOF, not hang
@@ -2436,8 +2685,9 @@ async fn test_read_loop_exits_on_eof() {
         pending,
         diagnostics_cache,
         contents_cache,
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -2456,16 +2706,15 @@ async fn test_read_loop_exits_on_eof() {
 /// This must result in a "response channel closed" error, not a hang.
 #[tokio::test]
 async fn test_pending_request_channel_closed_on_read_loop_exit() {
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
 
     // Register a pending request manually
     let (tx, rx) = oneshot::channel();
-    pending.lock().await.insert(42, tx);
+    pending.insert(42, tx);
 
     // Drop the sender side by removing it — simulates read_loop exiting
     // and the pending HashMap being dropped/cleared
-    pending.lock().await.remove(&42);
+    pending.take(42);
     // tx is now dropped, so rx should get an error
 
     let result = rx.await;
@@ -2486,8 +2735,7 @@ async fn test_provider_operations_fail_after_process_death() {
     // Wait for the process to exit
     let _ = child.wait().await;
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
     let transport = Arc::new(test_transport_with_pending(
@@ -2505,8 +2753,9 @@ async fn test_provider_operations_fail_after_process_death() {
         Arc::clone(&pending),
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     let provider = TsgoTypeProvider {
@@ -2515,6 +2764,7 @@ async fn test_provider_operations_fail_after_process_death() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // All operations should NOT hang, which is the critical invariant.
@@ -2574,8 +2824,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
     let (mut child, stdin, stdout) = spawn_short_lived_process().await;
     let _ = child.wait().await;
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
     let transport = Arc::new(test_transport_with_pending(
@@ -2591,8 +2840,9 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         Arc::clone(&pending),
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
     let provider = TsgoTypeProvider {
         transport,
@@ -2600,6 +2850,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::clone(&contents_cache),
         diagnostics_cache,
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // Insert under a mixed-case, backslash-separated Windows-style path.
@@ -2695,6 +2946,7 @@ async fn test_drop_kills_child_process() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // Drop the provider — Drop impl should call start_kill().
@@ -2730,6 +2982,7 @@ async fn test_child_pid_returns_id() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     // After the process has exited, id() returns None.
@@ -2838,30 +3091,44 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
     let (client_stdout_reader, mut mock_stdout_writer) = tokio::io::duplex(64 * 1024);
     let (mock_stdin_reader, _client_stdin_writer) = tokio::io::duplex(64 * 1024);
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Set up the channel-based writer
+    // Set up the multi-lane writer: the read loop's auto-responses to the child's
+    // server→client requests ride the UNBOUNDED control lane, and client requests
+    // ride the interactive lane — both drained by one writer to the mock's stdin.
+    let (control_tx, control_rx) = mpsc::unbounded_channel::<StdinMessage>();
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
-    tokio::spawn(stdin_writer_loop_single(mock_stdin_reader, stdin_rx));
+    let (_normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(64);
+    let (_background_tx, background_rx) = mpsc::channel::<StdinMessage>(64);
+    tokio::spawn(stdin_writer_loop(
+        mock_stdin_reader,
+        control_rx,
+        stdin_rx,
+        normal_rx,
+        background_rx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+    ));
 
     let transport = Arc::new(test_transport_with_pending(
         stdin_tx.clone(),
         Arc::clone(&pending),
     ));
 
-    // Start the read loop
+    // Start the read loop — server→client auto-responses go through control_tx.
     tokio::spawn(read_loop(
         client_stdout_reader,
         Arc::clone(&pending),
         diagnostics_cache,
         contents_cache,
-        stdin_tx,
+        control_tx,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     // Spawn a mock "TSGO" task that reads requests from mock_stdout_writer
@@ -2950,8 +3217,7 @@ async fn timed_out_request_is_removed_from_pending() {
     // Create a channel where the receiver is immediately dropped (simulating a dead writer)
     let (stdin_tx, _stdin_rx) = mpsc::channel::<StdinMessage>(16);
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
 
     let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
 
@@ -2981,7 +3247,7 @@ async fn timed_out_request_is_removed_from_pending() {
     // We need to actually wait for the internal timeout.
     // Instead, let's drop the transport and verify cleanup doesn't panic.
     // Better approach: verify that pending has at most the 1 entry that was inserted.
-    let count = pending.lock().await.len();
+    let count = pending.len();
     assert!(
         count <= 1,
         "pending map should have at most 1 entry, got {count}"
@@ -2996,8 +3262,7 @@ async fn shutdown_completes_within_timeout_when_provider_unresponsive() {
     // Create a channel where we just drop the receiver (simulating unresponsive TSGO)
     let (stdin_tx, _rx) = mpsc::channel::<StdinMessage>(16);
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
 
     let transport = Arc::new(test_transport_with_pending(stdin_tx, pending));
 
@@ -3153,8 +3418,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
 
     let (client_stdout_reader, mut mock_writer) = tokio::io::duplex(64 * 1024);
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -3167,7 +3431,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         Arc::from("const x = 1;"),
     );
 
-    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    let (_stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(
         tokio::io::duplex(1024).1,
         stdin_rx,
@@ -3178,8 +3442,9 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         pending,
         Arc::clone(&diagnostics_cache),
         Arc::clone(&contents_cache),
-        stdin_tx,
+        mpsc::unbounded_channel().0,
         None,
+        Arc::new(AtomicBool::new(false)),
     ));
 
     // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
@@ -3386,7 +3651,7 @@ fn resolvable_completion(label: &str) -> Completion {
 /// honored). Stops when the channel closes.
 async fn spawn_resolve_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
     seen: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     while let Some(msg) = stdin_rx.recv().await {
@@ -3413,7 +3678,7 @@ async fn spawn_resolve_responder(
                 .unwrap_or("?")
                 .to_string();
             if let Some(id) = id {
-                if let Some(tx) = pending.lock().await.remove(&id) {
+                if let Some(tx) = pending.take(id) {
                     let _ = tx.send(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -3435,8 +3700,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
     // Real child only satisfies the `child` field; all I/O is the channel.
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
 
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(256);
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tokio::spawn(spawn_resolve_responder(
@@ -3452,6 +3716,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     let total = MAX_COMPLETION_DETAIL_ENRICH + 70;
@@ -3511,8 +3776,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
 #[tokio::test]
 async fn get_completion_details_enriches_full_small_list() {
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
     let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tokio::spawn(spawn_resolve_responder(
@@ -3527,6 +3791,7 @@ async fn get_completion_details_enriches_full_small_list() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     let items: Vec<Completion> = (0..5)
@@ -3556,7 +3821,7 @@ async fn get_completion_details_enriches_full_small_list() {
 /// enrichment is a non-edit field.
 async fn spawn_label_details_only_responder(
     mut stdin_rx: mpsc::Receiver<StdinMessage>,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
 ) {
     while let Some(msg) = stdin_rx.recv().await {
         let StdinMessage::Frame(bytes) = msg else {
@@ -3571,7 +3836,7 @@ async fn spawn_label_details_only_responder(
         };
         if json.get("method").and_then(|v| v.as_str()) == Some("completionItem/resolve") {
             if let Some(id) = json.get("id").and_then(|v| v.as_i64()) {
-                if let Some(tx) = pending.lock().await.remove(&id) {
+                if let Some(tx) = pending.take(id) {
                     let _ = tx.send(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -3595,8 +3860,7 @@ async fn spawn_label_details_only_responder(
 #[tokio::test]
 async fn resolve_completion_returns_some_when_only_label_details_present() {
     let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
-    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(spawn_label_details_only_responder(
         stdin_rx,
@@ -3609,6 +3873,7 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
     };
 
     let handle = CompletionResolveData::Lsp {
@@ -3640,11 +3905,501 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
     drop(provider);
 }
 
-// ---------------------------------------------------------------------------
-// rc-only PATH/npx-cache discovery: the npx-cache tier resolves ONLY the rc
-// `@typescript/typescript-*` `tsc` native binary. The legacy native-preview
-// discovery routes — a `tsgo` binary on `PATH` and the `.bin/tsgo` npm shim —
-// are GONE: a global `tsgo` is the retired native-preview engine, so leaving
-// either route would let production silently launch the legacy engine when the
-// workspace rc `tsc` is absent. Discovery fails closed instead.
-// ---------------------------------------------------------------------------
+// ─── Fabricated-position deletion + teardown-intent crash-signal disarm ───
+
+/// A contents-cache miss must FAIL CLOSED: no `(0, byte-offset)` fabricated
+/// position may ever be sent to the engine (a malformed position is a
+/// documented tsgo-crasher). Every positional feature returns its empty
+/// result AND the wire stays silent.
+#[tokio::test]
+async fn contents_cache_miss_fails_closed_without_fabricating_positions() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+
+    // Deliberately NOT loaded/opened: the contents cache has no entry.
+    let path = if cfg!(windows) {
+        "D:/w/Missing.vue.tsx"
+    } else {
+        "/w/Missing.vue.tsx"
+    };
+
+    let hover = provider.get_hover(path, 10).await;
+    assert!(
+        matches!(hover, Ok(None)),
+        "hover on a contents-cache miss fails closed, got {hover:?}"
+    );
+    let completions = provider.get_completions(path, 10, None).await.unwrap();
+    assert!(
+        completions.items.is_empty() && !completions.is_incomplete,
+        "completions on a miss fail closed, got {completions:?}"
+    );
+    assert!(
+        provider.get_definition(path, 10).await.unwrap().is_empty(),
+        "definition on a miss fails closed"
+    );
+    assert!(
+        provider
+            .get_type_definition(path, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "type definition on a miss fails closed"
+    );
+    assert!(
+        provider.get_references(path, 10).await.unwrap().is_empty(),
+        "references on a miss fails closed"
+    );
+    assert!(
+        provider
+            .get_rename_locations(path, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rename locations on a miss fail closed"
+    );
+    let signature_help = provider.get_signature_help(path, 10).await;
+    assert!(
+        matches!(signature_help, Ok(None)),
+        "signature help on a miss fails closed, got {signature_help:?}"
+    );
+    assert!(
+        provider
+            .get_document_highlights(path, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "document highlights on a miss fail closed"
+    );
+
+    // NEGATIVE CONTROL: none of the calls above may have put a request on the
+    // wire — the engine never sees a fabricated position.
+    let mut buf = [0u8; 512];
+    let wire = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        relay_side.read(&mut buf),
+    )
+    .await;
+    assert!(
+        wire.is_err(),
+        "no request frame may be sent on a contents-cache miss, got {:?} bytes",
+        wire.map(|read| read.unwrap_or_default())
+    );
+}
+
+/// The positive control for the fail-closed suite: WITH cached contents the
+/// hover request IS sent (the fail-closed path discriminates on the cache
+/// miss, not on some always-empty stub).
+#[tokio::test]
+async fn contents_cache_hit_still_sends_the_hover_request() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+
+    let path = if cfg!(windows) {
+        "D:/w/Present.vue.tsx"
+    } else {
+        "/w/Present.vue.tsx"
+    };
+    provider
+        .load_file(path, "const present = 1;\n")
+        .await
+        .expect("load cached contents");
+
+    let hover_task = tokio::spawn(async move { provider.get_hover(path, 6).await });
+
+    // The didOpen + hover frames must arrive on the wire.
+    let mut framer = MessageFramer::new();
+    let mut chunk = [0u8; 8192];
+    let mut saw_hover = false;
+    'outer: for _ in 0..64 {
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            relay_side.read(&mut chunk),
+        )
+        .await
+        .expect("wire produced frames")
+        .expect("wire readable");
+        if n == 0 {
+            break;
+        }
+        framer.push(&chunk[..n]);
+        while let Some(message) = framer.next_message().expect("parse frames") {
+            if message.get("method").and_then(|m| m.as_str()) == Some("textDocument/hover") {
+                saw_hover = true;
+                break 'outer;
+            }
+        }
+    }
+    assert!(saw_hover, "a cache HIT must still send the hover request");
+    hover_task.abort();
+}
+
+/// A deliberate `shutdown()` disarms the EOF crash signal: the torn-down
+/// child's stdout EOF must NOT wake the resilient monitor (which would mint a
+/// spurious "crashed. Restarting" notification and respawn an engine into a
+/// dying session).
+#[tokio::test]
+async fn shutdown_disarms_the_eof_crash_signal() {
+    let (provider_side, relay_side) = tokio::io::duplex(4096);
+    let (read, write) = tokio::io::split(provider_side);
+    let crash_notify = Arc::new(Notify::new());
+    let provider =
+        TsgoTypeProvider::from_transport_parts(read, write, None, Some(Arc::clone(&crash_notify)));
+
+    provider.shutdown().await.expect("shutdown");
+    // The engine-side EOF that teardown produces.
+    drop(relay_side);
+
+    let fired = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        crash_notify.notified(),
+    )
+    .await;
+    assert!(
+        fired.is_err(),
+        "a deliberate shutdown's EOF must NOT fire the crash signal"
+    );
+}
+
+/// The positive control: WITHOUT a shutdown, the same EOF still fires the
+/// crash signal (the disarm discriminates on teardown intent, not on a dead
+/// signal path).
+#[tokio::test]
+async fn eof_without_shutdown_still_fires_the_crash_signal() {
+    let (provider_side, relay_side) = tokio::io::duplex(4096);
+    let (read, write) = tokio::io::split(provider_side);
+    let crash_notify = Arc::new(Notify::new());
+    let _provider =
+        TsgoTypeProvider::from_transport_parts(read, write, None, Some(Arc::clone(&crash_notify)));
+
+    drop(relay_side);
+
+    let fired =
+        tokio::time::timeout(std::time::Duration::from_secs(5), crash_notify.notified()).await;
+    assert!(
+        fired.is_ok(),
+        "an unexpected EOF (no teardown intent) must fire the crash signal"
+    );
+}
+
+/// `shutdown`/`exit` are declared WITHOUT params in LSP; a `"params": null`
+/// body makes strict engines (tsgo) log
+/// `InvalidParams: expected no params, got null` on every teardown. The frame
+/// builder must omit the key entirely for null params and keep it otherwise.
+#[test]
+fn jsonrpc_body_omits_null_params_and_keeps_real_params() {
+    let exit = jsonrpc_body(None, "exit", &serde_json::Value::Null);
+    assert!(
+        exit.get("params").is_none(),
+        "null params must be OMITTED, got {exit}"
+    );
+    assert_eq!(exit.get("method").and_then(|m| m.as_str()), Some("exit"));
+    assert!(exit.get("id").is_none(), "a notification carries no id");
+
+    let shutdown = jsonrpc_body(Some(7), "shutdown", &serde_json::Value::Null);
+    assert!(
+        shutdown.get("params").is_none(),
+        "null request params must be OMITTED, got {shutdown}"
+    );
+    assert_eq!(shutdown.get("id").and_then(|id| id.as_i64()), Some(7));
+
+    let hover = jsonrpc_body(
+        Some(8),
+        "textDocument/hover",
+        &serde_json::json!({ "position": { "line": 1, "character": 2 } }),
+    );
+    assert!(
+        hover.get("params").is_some(),
+        "real params must be preserved, got {hover}"
+    );
+}
+
+// ===========================================================================
+// Bidirectional stdio-pipe deadlock: every request stays bounded, and a child
+// that stops reading its stdin is detected.
+//
+// These build an `LspTransport` over a duplex whose "child" side NEVER reads,
+// with a tiny lane capacity, so the writer's stdin write stalls exactly as it
+// does against a busy managed tsgo. The invariants: a request behind a full lane
+// resolves within its own deadline instead of parking ahead of it, and a writer
+// that cannot hand over a single byte fires `crash_notify` instead of parking
+// silently.
+// ===========================================================================
+
+/// An interactive request must stay bounded even when the stdin writer is stalled
+/// on a busy child and the interactive lane is full: the lane send and the
+/// response wait share ONE deadline, so a full lane can no longer park a request
+/// before its response timeout has even started.
+#[tokio::test]
+async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_full_lane() {
+    // 16-byte duplex + a child that never reads → the writer's first `write_all`
+    // parks immediately; the interactive lane (capacity 2) then fills.
+    let (provider_side, child_side) = tokio::io::duplex(16);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let _child_side = child_side; // held open, never read → writer stalls
+
+    let crash_notify = std::sync::Arc::new(Notify::new());
+    let provider = std::sync::Arc::new(TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        Some(std::sync::Arc::clone(&crash_notify)),
+        2,                                  // tiny interactive lane
+        std::time::Duration::from_secs(30), // long watchdog: NOT the escape hatch here
+    ));
+
+    // Register the crash-notify waiter BEFORE firing requests. `notify_waiters()`
+    // wakes only already-registered waiters (it stores no permit), exactly as the
+    // resilient crash monitor awaits it in production; `enable()` registers now so
+    // a later fire is not lost to a poll-after-notify race.
+    let crash = crash_notify.notified();
+    tokio::pin!(crash);
+    crash.as_mut().enable();
+
+    // Fire more concurrent interactive requests than the lane can hold. Each
+    // carries a 1s per-request budget; every one MUST resolve (with an error)
+    // within a bounded window, never park forever.
+    let mut handles = Vec::new();
+    for i in 0..8u32 {
+        let transport = std::sync::Arc::clone(&provider.transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .request_with_priority(
+                    "textDocument/hover",
+                    serde_json::json!({
+                        "textDocument": { "uri": "file:///w/a.tsx" },
+                        "position": { "line": 0, "character": i }
+                    }),
+                    1,
+                    ProviderPriority::Interactive,
+                )
+                .await
+        }));
+    }
+
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        let mut out = Vec::new();
+        for h in handles {
+            out.push(h.await.expect("request task panicked"));
+        }
+        out
+    })
+    .await;
+
+    let results =
+        joined.expect(
+            "every interactive request must resolve within its deadline even when the writer is stalled behind a full lane",
+        );
+    assert_eq!(results.len(), 8);
+    for r in results {
+        assert!(
+            r.is_err(),
+            "a stalled child answers nothing — each request must fail closed, got {r:?}"
+        );
+    }
+    // A stdin-enqueue stall must count toward hang detection just like a response
+    // timeout: with 8 failures over HANG_THRESHOLD, the restart signal fires.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), crash)
+            .await
+            .is_ok(),
+        "consecutive send/response failures past HANG_THRESHOLD must fire crash_notify"
+    );
+    assert!(
+        provider
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed)
+            >= HANG_THRESHOLD,
+        "send/response stalls must increment the hang-detection counter"
+    );
+}
+
+/// The writer-stall watchdog fires `crash_notify` when the child stops reading
+/// its stdin, so the resilient restart machinery recovers the session instead of
+/// the writer parking silently in its stdin write forever.
+#[tokio::test]
+async fn writer_stall_watchdog_fires_crash_notify_when_the_child_stops_reading_stdin() {
+    let (provider_side, child_side) = tokio::io::duplex(16);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let _child_side = child_side; // held open, never read → stdin fills, writer stalls
+
+    let crash_notify = std::sync::Arc::new(Notify::new());
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        Some(std::sync::Arc::clone(&crash_notify)),
+        4,
+        std::time::Duration::from_millis(200), // short watchdog for a fast test
+    );
+
+    // Register the waiter before triggering the stall (notify_waiters stores no
+    // permit).
+    let crash = crash_notify.notified();
+    tokio::pin!(crash);
+    crash.as_mut().enable();
+
+    // Enqueue a frame far larger than the 16-byte duplex buffer so the writer's
+    // `write_all` cannot complete against a child that never reads.
+    let big = "x".repeat(8192);
+    let _ = provider.update_file("/w/a.tsx", &big).await;
+
+    let fired = tokio::time::timeout(std::time::Duration::from_secs(3), crash).await;
+    assert!(
+        fired.is_ok(),
+        "the writer-stall watchdog must fire crash_notify when the child stops reading stdin"
+    );
+}
+
+/// The local `versions` / `contents` ledger is this provider's record of what the
+/// child engine was actually told. A `didOpen` the transport REFUSED never reached
+/// the child, so recording it strands the document permanently: the next
+/// `update_file` reads the ledger, sees an "already open" entry, and sends a
+/// `didChange` for a document the engine never opened. Nothing short of a full
+/// restart re-establishes it — tsgo's `resync_open_files` is a trait no-op, and
+/// the writer-stall watchdog covers a parked `write_all`, not a refused enqueue.
+#[tokio::test]
+async fn a_refused_didopen_leaves_no_synced_entry_in_the_local_ledger() {
+    // 16-byte duplex + a child that never reads → the writer parks on its first
+    // `write_all`, so the one-frame interactive lane saturates and stays full.
+    let (provider_side, child_side) = tokio::io::duplex(16);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let _child_side = child_side;
+
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        None,
+        1,                                  // one-frame lane
+        std::time::Duration::from_secs(30), // long watchdog: NOT the escape hatch here
+    );
+
+    // Larger than the duplex buffer, so the writer's first `write_all` cannot
+    // complete and no lane slot is ever released.
+    let payload = "x".repeat(4096);
+
+    let accepted_path = "/w/accepted.tsx";
+    provider
+        .open_file(accepted_path, &payload)
+        .await
+        .expect("the first didOpen is accepted into the empty lane");
+
+    // Keep pushing until the transport refuses one: that refusal is the subject.
+    let mut refused_path = None;
+    for index in 0..64 {
+        let path = format!("/w/refused{index}.tsx");
+        if provider.open_file(&path, &payload).await.is_err() {
+            refused_path = Some(path);
+            break;
+        }
+    }
+    let refused_path =
+        refused_path.expect("the lane must actually saturate, else this test proves nothing");
+
+    // Positive control: an ACCEPTED didOpen IS recorded, so the assertions below
+    // discriminate a refused sync from a provider that records nothing at all.
+    assert!(
+        provider.versions.lock().await.contains_key(accepted_path),
+        "an accepted didOpen must be recorded in the version ledger"
+    );
+    assert!(
+        provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(accepted_path)),
+        "an accepted didOpen must be recorded in the contents ledger"
+    );
+
+    assert!(
+        !provider.versions.lock().await.contains_key(&refused_path),
+        "a REFUSED didOpen must leave no version entry: the entry makes the next \
+         update_file send a didChange for a document the engine never opened"
+    );
+    assert!(
+        !provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(&refused_path)),
+        "a REFUSED didOpen must leave no cached contents claiming the child holds them"
+    );
+}
+
+/// The writer-stall watchdog must bound time WITHOUT PROGRESS, not the total time
+/// to write a buffer.
+///
+/// A child that keeps accepting bytes — merely slowly, exactly as a real engine
+/// does while cold-loading a large project through a ~64KB pipe — must NEVER trip
+/// it, even when the whole write takes many multiples of the window. A false trip
+/// kills the child, respawns it, and replays the same bulk write into the same
+/// stall.
+#[tokio::test]
+async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() {
+    // A 64-byte duplex forces the writer to hand the frame over in small pieces.
+    let (provider_side, mut child_side) = tokio::io::duplex(64);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+
+    let crash_notify = std::sync::Arc::new(Notify::new());
+    let provider = TsgoTypeProvider::from_transport_parts_configured(
+        provider_read,
+        provider_write,
+        None,
+        Some(std::sync::Arc::clone(&crash_notify)),
+        16,
+        // The window bounds ONE no-progress stretch. Every sip below lands well
+        // inside it; the whole write takes far longer than it.
+        std::time::Duration::from_millis(120),
+    );
+
+    // Register before the write starts (`notify_waiters` stores no permit).
+    let crash = crash_notify.notified();
+    tokio::pin!(crash);
+    crash.as_mut().enable();
+
+    let payload_len = 8192usize;
+    let drained = tokio::spawn(async move {
+        let mut seen = 0usize;
+        let mut chunk = [0u8; 256];
+        while seen < payload_len {
+            // Steady, slow progress: each pause is inside the window, but the
+            // cumulative write time is roughly an order of magnitude beyond it.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            match child_side.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => seen += n,
+                Err(_) => break,
+            }
+        }
+        seen
+    });
+
+    let payload = "x".repeat(payload_len);
+    provider
+        .update_file("/w/a.tsx", &payload)
+        .await
+        .expect("the frame must enqueue");
+
+    // Well past several whole windows: a watchdog measuring TOTAL write time has
+    // long since tripped by here, while a progress-based one has not.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(700), crash)
+            .await
+            .is_err(),
+        "a child that keeps accepting bytes must never trip the writer-stall watchdog"
+    );
+
+    // Positive control: the child genuinely received the whole frame, so the
+    // no-crash assertion cannot pass vacuously against a writer that wrote nothing.
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(15), drained)
+        .await
+        .expect("the slow child must finish draining the frame")
+        .expect("drain task panicked");
+    assert!(
+        seen >= payload_len,
+        "the child must actually have received the payload, got {seen} of {payload_len} bytes"
+    );
+}

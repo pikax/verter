@@ -60,9 +60,8 @@ fn editor_tsserver_topology_owns_no_semantic_child() {
 
     assert!(topology.0.is_none());
     assert_eq!(topology.1, TypeProviderKind::EditorTsserver);
-    assert!(!topology.2);
     assert!(topology
-        .3
+        .2
         .as_deref()
         .is_some_and(|reason| reason.contains("4242")));
 }
@@ -146,4 +145,32 @@ async fn configured_workspace_admits_then_spawns() {
         log.exists(),
         "a configured workspace passes admission and the resolver then spawns candidates"
     );
+}
+
+/// A TS7-family workspace install (here a 7.0.1-rc) resolved by the
+/// explicit `--type-provider=tsserver` route classifies as the native
+/// (tsgo) family BEFORE any binary lookup or spawn — the typed
+/// `NativeFamily` error is the reclassification signal the tsserver arm
+/// turns into the managed-TSGO route.
+#[tokio::test]
+async fn tsserver_route_reclassifies_ts7_family_install_before_any_spawn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ts_dir = tmp.path().join("node_modules").join("typescript");
+    fs::create_dir_all(ts_dir.join("lib")).unwrap();
+    fs::write(ts_dir.join("lib").join("tsserver.js"), "// launcher").unwrap();
+    fs::write(
+        ts_dir.join("package.json"),
+        r#"{ "name": "typescript", "version": "7.0.1-rc" }"#,
+    )
+    .unwrap();
+
+    let args = CliArgs::parse_from(["--type-provider=tsserver".to_string()]);
+    let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
+    match try_spawn_tsserver(&args, tmp.path().to_str().unwrap(), &client_cell).await {
+        Ok(_) => panic!("a native-family install must never spawn as tsserver"),
+        Err(err) => assert!(
+            matches!(err, TsserverSpawnError::NativeFamily { major: 7 }),
+            "expected NativeFamily {{ major: 7 }}, got {err:?}"
+        ),
+    }
 }

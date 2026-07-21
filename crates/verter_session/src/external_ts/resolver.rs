@@ -426,20 +426,6 @@ impl<'a> WorkspaceProjectResolver<'a> {
         }
     }
 
-    /// Map ambiguous configured-project ids to their candidate tsconfig URIs, so a
-    /// later `verter(project)` diagnostic can list the configs that overlap on the
-    /// source. A fallback id (never a configured owner) contributes nothing.
-    fn candidate_tsconfig_uris(&self, ids: &[ProjectId]) -> Vec<Arc<str>> {
-        ids.iter()
-            .filter_map(|id| match &self.snapshot.project(*id).payload {
-                ProjectPayload::Configured { tsconfig_path, .. } => {
-                    Some(Arc::<str>::from(tsconfig_path.as_str()))
-                }
-                ProjectPayload::Fallback { .. } => None,
-            })
-            .collect()
-    }
-
     /// The §2.2 / §2.6-step-4 carrier-path conflict pass. Given ANY carrier
     /// `source_uri` (regardless of its owner-resolution state), return
     /// `Some(cause)` if the source must be downgraded to `Ambiguous` (fail closed)
@@ -561,10 +547,25 @@ impl ExternalTsProjectResolver for WorkspaceProjectResolver<'_> {
             .configured_owner_resolution_for_file(source_uri)
         {
             ConfiguredOwnerResolution::None => CarrierOwnershipResolution::NoProject,
-            ConfiguredOwnerResolution::Ambiguous(ids) => CarrierOwnershipResolution::Ambiguous {
-                candidates: self.candidate_tsconfig_uris(&ids),
-                cause: AmbiguityCause::MultipleOwners,
-            },
+            // A multi-claimant configured topology is NO LONGER terminal (tsgo
+            // `GetDefaultProject` never fails closed when >= 1 project contains
+            // the file). Select the single tsgo default owner from the shared,
+            // provider-neutral snapshot walk and bind it through the SAME witness
+            // path as the `Unique` arm. `default_configured_owner_for_file`
+            // recomputes the full claimant set (not the pruned `ids`), so the
+            // walk sees every containing project, and resolves reference cycles
+            // deterministically via its visited set — never a terminal Ambiguous.
+            ConfiguredOwnerResolution::Ambiguous(_ids) => {
+                match self.snapshot.default_configured_owner_for_file(source_uri) {
+                    Some(id) => match self.binding_for(id, source_uri) {
+                        Some(binding) => CarrierOwnershipResolution::Bound(binding),
+                        None => CarrierOwnershipResolution::NoProject,
+                    },
+                    // No configured owner survives the walk (only reachable if the
+                    // claimant set vanished between resolutions): fail closed.
+                    None => CarrierOwnershipResolution::NoProject,
+                }
+            }
             ConfiguredOwnerResolution::Unique(id) => match self.binding_for(id, source_uri) {
                 Some(binding) => CarrierOwnershipResolution::Bound(binding),
                 // A configured owner that is somehow not Configured: fail closed

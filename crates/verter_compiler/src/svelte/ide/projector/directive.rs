@@ -323,12 +323,25 @@ impl TemplateProjector<'_, '_> {
             return;
         }
         let node_hint = self.host_element_hint(el);
-        let fn_name = dir.local.clone();
+        // The local directly follows the `transition:`/`in:`/`out:` prefix in
+        // the attribute span; it keeps its AUTHORED BYTES (mapped) inside the
+        // synthetic call so hover/definition on the transition function
+        // resolves to the script/import declaration (D6 — previously the name
+        // was swallowed into synthetic text and hover surfaced the
+        // `__verter_transition` shim).
+        let keyword_len = match dir.kind {
+            SvelteDirectiveKind::Transition => "transition:".len() as u32,
+            SvelteDirectiveKind::In => "in:".len() as u32,
+            SvelteDirectiveKind::Out => "out:".len() as u32,
+            _ => unreachable!("rewrite_transition_directive handles transition/in/out"),
+        };
+        let local_start = attr.span.start + keyword_len;
+        let local_end = local_start + dir.local.len() as u32;
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
             // F11: a store-sub in the transition params (`transition:fn={$p}`).
             self.rewrite_store_subs_in(expr);
             // `transition:fn[|mods]={` →
-            // `{...(__verter_transition({fn}({hint}, ` ; trailing `}` →
+            // `{...(__verter_transition(fn` + `({hint}, ` ; trailing `}` →
             // `)), {})}`. The params expression `p` stays mapped (its inner type
             // errors + hover survive). A Svelte transition function is invoked at
             // RUNTIME as `fn(node, params, { direction })`, but the PUBLIC TYPES of
@@ -339,19 +352,20 @@ impl TemplateProjector<'_, '_> {
             // projected call is `fn(node, params)` (host node + params): a custom
             // transition that DECLARES an `options` param keeps it optional (the
             // `custom_transition_with_optional_options_…` gate fixture pins this).
-            self.ct.overwrite(
-                attr.span.start,
-                expr.start,
-                &format!("{{...(__verter_transition({fn_name}({node_hint}, "),
-            );
+            self.ct
+                .overwrite(attr.span.start, local_start, "{...(__verter_transition(");
+            self.ct
+                .overwrite(local_end, expr.start, &format!("({node_hint}, "));
             self.ct.overwrite(expr.end, attr.span.end, ")), {})}");
             return;
         }
         // No params: call `fn(NODE_HINT)`.
-        self.ct.overwrite(
-            attr.span.start,
+        self.ct
+            .overwrite(attr.span.start, local_start, "{...(__verter_transition(");
+        self.overwrite_directive_tail(
+            local_end,
             attr.span.end,
-            &format!("{{...(__verter_transition({fn_name}({node_hint})), {{}})}}"),
+            &format!("({node_hint})), {{}})}}"),
         );
     }
 
@@ -376,28 +390,36 @@ impl TemplateProjector<'_, '_> {
             return;
         }
         let node_hint = self.host_element_hint(el);
-        let fn_name = dir.local.clone();
         let directions = match self.dialect {
             SvelteIdeDialect::TypeScript => "(null! as { from: DOMRect; to: DOMRect })",
             SvelteIdeDialect::JavaScript => {
                 "(/** @type {{ from: DOMRect, to: DOMRect }} */ (/** @type {unknown} */ (null)))"
             }
         };
+        // The local keeps its AUTHORED BYTES (mapped) inside the synthetic
+        // call so hover/definition on the animate function resolves to the
+        // script/import declaration (D6).
+        let local_start = attr.span.start + "animate:".len() as u32;
+        let local_end = local_start + dir.local.len() as u32;
         if let Some(SvelteAttributeValue::Expression(expr)) = dir.value {
             // F11: a store-sub in the animate params (`animate:fn={$p}`).
             self.rewrite_store_subs_in(expr);
+            self.ct
+                .overwrite(attr.span.start, local_start, "{...(__verter_animate(");
             self.ct.overwrite(
-                attr.span.start,
+                local_end,
                 expr.start,
-                &format!("{{...(__verter_animate({fn_name}({node_hint}, {directions}, "),
+                &format!("({node_hint}, {directions}, "),
             );
             self.ct.overwrite(expr.end, attr.span.end, ")), {})}");
             return;
         }
-        self.ct.overwrite(
-            attr.span.start,
+        self.ct
+            .overwrite(attr.span.start, local_start, "{...(__verter_animate(");
+        self.overwrite_directive_tail(
+            local_end,
             attr.span.end,
-            &format!("{{...(__verter_animate({fn_name}({node_hint}, {directions})), {{}})}}"),
+            &format!("({node_hint}, {directions})), {{}})}}"),
         );
     }
 

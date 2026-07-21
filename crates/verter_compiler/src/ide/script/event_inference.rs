@@ -26,6 +26,7 @@ pub(super) fn apply_event_handler_param_inference(
     source: &str,
     content_start: u32,
     available_bindings: &FxHashSet<String>,
+    custom_elements: Option<&[String]>,
     out: &mut CodeGenOutput<'_>,
 ) {
     let Some(template_ast) = template_ast else {
@@ -33,7 +34,7 @@ pub(super) fn apply_event_handler_param_inference(
     };
 
     let handler_type_hints =
-        collect_event_handler_type_hints(template_ast, source, available_bindings);
+        collect_event_handler_type_hints(template_ast, source, available_bindings, custom_elements);
     if handler_type_hints.is_empty() {
         return;
     }
@@ -144,6 +145,7 @@ fn collect_event_handler_type_hints(
     ast: &TemplateAst,
     source: &str,
     available_bindings: &FxHashSet<String>,
+    custom_elements: Option<&[String]>,
 ) -> FxHashMap<String, Vec<String>> {
     let mut hints = FxHashMap::default();
 
@@ -154,11 +156,14 @@ fn collect_event_handler_type_hints(
     // The same GlobalComponents fallback inventory the template/spread paths consume, so a
     // globally-registered component's simple handler types through its emitted
     // `InstanceType<typeof Pascal>["$props"]` const — consistent with the spread path.
-    let components = TemplateComponentBindings::new(collect_global_component_fallbacks(
-        Some(ast),
-        source,
-        |n| available_bindings.contains(n),
-    ));
+    let components = TemplateComponentBindings::new(
+        collect_global_component_fallbacks(Some(ast), source, custom_elements, |n| {
+            available_bindings.contains(n)
+        })
+        .into_iter()
+        .map(|f| f.pascal)
+        .collect(),
+    );
 
     for &child in content.children.iter() {
         collect_event_handler_type_hints_from_node(

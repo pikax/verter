@@ -10,7 +10,8 @@
 //!    even under `jsx: "preserve"`;
 //! 2. the COMPLETE audited Svelte 5 rune surface as ambient `declare`s
 //!    (`$props`/`$bindable`/`$state`/`$derived`/`$effect`/`$inspect`/`$host`,
-//!    every namespace member, and `import type { Snippet } from "svelte"`) —
+//!    every namespace member, and the aliased `import type { Snippet as
+//!    __VerterSnippet } from "svelte"`) —
 //!    rune CALL SITES stay verbatim, the prelude only TYPES them;
 //! 3. the projection checkers/declarators: `__verter_attach` (the
 //!    `{@attach}` target), the `__verter_snippet` brand declarator, and the
@@ -258,8 +259,8 @@ pub const RUNE_AMBIENT_PRELUDE_VERSION: u32 = 1;
 /// The component prelude's leading imports + rune-section header. Component
 /// mode only — the `Snippet`/`Attachment` imports back the projection
 /// checkers, which a non-component module never references.
-const COMPONENT_RUNE_IMPORTS_AND_HEADER: &str = r#"import type { Snippet } from "svelte";
-import type { Attachment } from "svelte/attachments";
+const COMPONENT_RUNE_IMPORTS_AND_HEADER: &str = r#"import type { Snippet as __VerterSnippet } from "svelte";
+import type { Attachment as __VerterAttachment } from "svelte/attachments";
 // --- Svelte 5 runes (ambient; call sites stay verbatim) ---
 "#;
 
@@ -267,7 +268,7 @@ import type { Attachment } from "svelte/attachments";
 /// order (`$props` + its namespace, `$bindable`). A standalone rune module
 /// never calls these (they need a component instance), so the module prelude
 /// omits them.
-const COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"declare function $props<T = Record<string, unknown>>(): T;
+const COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"declare function $props<T = Record<string, any>>(): T;
 declare namespace $props {
   function id(): string;
 }
@@ -477,7 +478,7 @@ const JS_COMPONENT_HEADER: &str = r#"// @ts-check
 "#;
 
 const JS_COMPONENT_ONLY_RUNES_PROPS_BINDABLE: &str = r#"/**
- * @template [T=Record<string, unknown>]
+ * @template [T=Record<string, any>]
  * @returns {T}
  */
 function $props() {
@@ -668,8 +669,8 @@ const $$slots = /** @type {Record<string, boolean>} */ ({});
 /// `__verter_*` helpers + the host-element / event helper types. Component
 /// mode only; a non-component module never references any of them.
 const COMPONENT_PROJECTION_CHECKERS: &str = r#"// --- Verter projection checkers/declarators ---
-declare function __verter_attach<E extends EventTarget>(attachment: Attachment<E>): void;
-declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): Snippet<Params>;
+declare function __verter_attach<E extends EventTarget>(attachment: __VerterAttachment<E>): void;
+declare function __verter_snippet<Params extends unknown[]>(render: (...args: Params) => unknown): __VerterSnippet<Params>;
 declare function __verter_void(...values: unknown[]): void;
 // F6 experimental await-EXPRESSION projection (`{await e}` in markup / inside a
 // rune). `__verter_render` STAYS SYNC — a markup `await e` is rewritten to
@@ -780,7 +781,7 @@ declare function __verter_component<C>(component: C):
 // in lexical scope in the prelude).
 declare function __verter_dynamic_component<
   C extends import("svelte").Component<any, any, any> | (abstract new (...args: never[]) => { $props: any })
->(component: C): (props: __VerterComponentProps<C> & { children?: unknown }) => ReturnType<Snippet>;
+>(component: C): (props: __VerterComponentProps<C> & { children?: unknown }) => ReturnType<__VerterSnippet>;
 // --- F13 component `on:event={handler}` payload checking. A COMPONENT element's
 // `on:select={h}` projects to `{...(__verter_event(Child, "select", h), {})}` —
 // the helper resolves native Svelte 5 `on${event}` callback props. A private
@@ -962,10 +963,39 @@ mod tests {
         }
     }
 
+    /// The un-annotated `$props()` default is `Record<string, any>` — the
+    /// reference svelte2tsx ambient types `$props()` as `any`, so a plain-JS
+    /// component's standard `{@render body?.()}` over an untyped `$props()`
+    /// member must be callable (a `Record<string, unknown>` default surfaced
+    /// a false `TS2349 not callable` on every untyped snippet render).
+    /// Annotated TS components are unaffected (they bind `T`).
+    #[test]
+    fn props_rune_defaults_to_any_members_for_unannotated_components() {
+        let p = render_prelude(SvelteJsxNamespace::Html, true);
+        assert!(
+            p.contains("declare function $props<T = Record<string, any>>(): T;"),
+            "un-annotated $props() members must be reference-lax (any)"
+        );
+        assert!(
+            !p.contains("$props<T = Record<string, unknown>>"),
+            "the unknown-member default produced false TS2349 on JS snippet renders"
+        );
+    }
+
     #[test]
     fn prelude_declares_the_three_checkers_and_imports_snippet() {
         let p = render_prelude(SvelteJsxNamespace::Html, true);
-        assert!(p.contains("import type { Snippet } from \"svelte\""));
+        // ALIASED out of the user namespace: a user script importing the
+        // standard `Snippet`/`Attachment` names must never collide with the
+        // prelude (TS2300 Duplicate identifier on the carrier).
+        assert!(p.contains("import type { Snippet as __VerterSnippet } from \"svelte\""));
+        assert!(p.contains(
+            "import type { Attachment as __VerterAttachment } from \"svelte/attachments\""
+        ));
+        assert!(
+            !p.contains("import type { Snippet } from"),
+            "the bare user-namespace Snippet binding must not be claimed"
+        );
         assert!(p.contains("declare function __verter_attach"));
         assert!(p.contains("declare function __verter_snippet"));
         assert!(p.contains("declare function __verter_void"));
@@ -1113,7 +1143,9 @@ mod tests {
                 // The historical layout: pragma, then the imports, then the rune
                 // surface in source order, then the checkers, then (legacy) magic.
                 assert!(via_mode.starts_with(namespace.pragma_line()));
-                assert!(via_mode.contains("import type { Snippet } from \"svelte\""));
+                assert!(
+                    via_mode.contains("import type { Snippet as __VerterSnippet } from \"svelte\"")
+                );
                 // The component-only runes precede $state in source order.
                 let props_at = via_mode.find("declare function $props").unwrap();
                 let state_at = via_mode.find("declare function $state").unwrap();

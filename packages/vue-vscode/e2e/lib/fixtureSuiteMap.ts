@@ -36,6 +36,7 @@ const LEGACY_SUITE_GLOBS = [
   "startupBenchmark.test",
   "style-block.test",
   "svelte-carrier-parity.test",
+  "svelte-grammar.test",
   "timing.test",
   "_teardown.test",
 ] as const;
