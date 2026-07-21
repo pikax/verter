@@ -607,6 +607,11 @@ mod inner {
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
         }
 
+        /// Every file op fails; a background load is no exception.
+        fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+            self.open_file(path, content)
+        }
+
         fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
