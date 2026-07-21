@@ -21,7 +21,7 @@
  * refuse anyway). No `vscode` import — the whole surface is unit-testable without
  * the extension host.
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { randomBytes } from "crypto";
 
@@ -140,6 +140,11 @@ export function nativePreviewTsdkCandidates(opts: {
 
   const seen = new Set<string>();
   return ordered.filter(({ dir }) => (seen.has(dir) ? false : (seen.add(dir), true)));
+}
+
+/** Whether a directory BASENAME is a Verter rendezvous control dir. */
+export function isVerterSharedControlDirName(name: string): boolean {
+  return /^verter-shared-[0-9a-fA-F]+$/.test(name);
 }
 
 /**
@@ -291,28 +296,111 @@ export const RELAY_REAL_TSGO_ENV = "VERTER_RELAY_REAL_TSGO";
 export const RELAY_CONTROL_DIR_ENV = "VERTER_RELAY_CONTROL_DIR";
 export const RELAY_SESSION_KEY_ENV = "VERTER_RELAY_SESSION_KEY";
 
+/** The scoped package name the staged tsdk publishes (drives the resolved layout). */
+export const STAGED_TSDK_PACKAGE = "@typescript/native-preview";
+
+/** The unscoped stem of {@link STAGED_TSDK_PACKAGE} — the platform-package prefix. */
+const STAGED_TSDK_STEM = "native-preview";
+
 /**
- * Stage a Native Preview tsdk directory containing a `tsgo` executable whose bytes
- * are the Verter relay shim. Native Preview owns the actual process spawn and argv;
- * the shim receives its real-engine/rendezvous inputs through the environment.
+ * Stage a Native Preview tsdk whose engine bytes are the Verter relay shim.
+ *
+ * Native Preview does NOT spawn `<tsdk>/tsgo`. Its tsdk validator reads
+ * `<tsdk>/package.json` (or its parent's), requires a `name` plus a matching
+ * `bin` entry, and then stats the platform package beside it:
+ *
+ * ```text
+ * <node_modules>/@typescript/<name>-<platform>-<arch>/lib/<tsgo|tsc>[.exe]
+ * ```
+ *
+ * A bare directory holding a single `tsgo` executable therefore can never be
+ * selected — which is why the editor-attach tier never armed. This stages the
+ * exact tree the validator accepts:
+ *
+ * ```text
+ * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview/package.json
+ * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview-<os>-<arch>/lib/tsgo[.exe]
+ * ```
+ *
+ * `dir` is the value to write to `typescript.native-preview.tsdk`; `executable`
+ * is where the shim bytes land. Native Preview owns the actual process spawn and
+ * argv; the shim receives its real-engine/rendezvous inputs through the
+ * environment.
  */
 export function prepareEditorTsdk(opts: {
   shimPath: string;
   controlDir: string;
   platform?: NodeJS.Platform;
+  arch?: string;
   mkdir?: (path: string) => void;
   copy?: (source: string, destination: string) => void;
+  writeFile?: (path: string, content: string) => void;
   chmod?: (path: string, mode: number) => void;
 }): { dir: string; executable: string } {
   const platform = opts.platform ?? process.platform;
-  const dir = join(opts.controlDir, "editor-tsdk");
-  const executable = join(dir, platform === "win32" ? "tsgo.exe" : "tsgo");
-  (opts.mkdir ?? ((path) => void mkdirSync(path, { recursive: true })))(dir);
+  const arch = opts.arch ?? process.arch;
+  const mkdir = opts.mkdir ?? ((path: string) => void mkdirSync(path, { recursive: true }));
+
+  const modules = join(opts.controlDir, "editor-tsdk", "node_modules");
+  const dir = join(modules, ...STAGED_TSDK_PACKAGE.split("/"));
+  const engineName = platform === "win32" ? "tsgo.exe" : "tsgo";
+  const engineDir = join(modules, "@typescript", `${STAGED_TSDK_STEM}-${platform}-${arch}`, "lib");
+  const executable = join(engineDir, engineName);
+
+  mkdir(dir);
+  mkdir(engineDir);
+  (opts.writeFile ?? ((path: string, content: string) => writeFileSync(path, content)))(
+    join(dir, "package.json"),
+    `${JSON.stringify(
+      {
+        name: STAGED_TSDK_PACKAGE,
+        version: STAGED_TSDK_VERSION,
+        bin: { tsgo: join("..", `${STAGED_TSDK_STEM}-${platform}-${arch}`, "lib", engineName) },
+      },
+      null,
+      2,
+    )}\n`,
+  );
   (opts.copy ?? copyFileSync)(opts.shimPath, executable);
   if (platform !== "win32") {
     (opts.chmod ?? chmodSync)(executable, 0o755);
   }
   return { dir, executable };
+}
+
+/**
+ * The version the staged tsdk manifest reports. Native Preview only displays it;
+ * it is deliberately marked as the relay so the editor's version picker cannot
+ * present the staged tree as a real TypeScript install.
+ */
+export const STAGED_TSDK_VERSION = "0.0.0-verter-relay";
+
+/**
+ * The stale `verter-shared-<key>` control dirs under a temp root that this
+ * session may delete.
+ *
+ * Staging created one control dir per session and never removed it; 96 orphans
+ * (256 MB) accumulated on the reporting machine. Selection is deliberately
+ * narrow — a `verter-shared-<hex>` basename, never the LIVE session's key, and
+ * older than `maxAgeMs` so a concurrent editor window's rendezvous is left
+ * alone.
+ */
+export function orphanedControlDirs(opts: {
+  entries: string[];
+  currentSessionKey?: string;
+  now: number;
+  maxAgeMs: number;
+  modifiedAt: (name: string) => number | undefined;
+}): string[] {
+  const live = opts.currentSessionKey
+    ? `verter-shared-${opts.currentSessionKey}`.toLowerCase()
+    : undefined;
+  return opts.entries.filter((name) => {
+    if (!isVerterSharedControlDirName(name)) return false;
+    if (live && name.toLowerCase() === live) return false;
+    const modified = opts.modifiedAt(name);
+    return modified !== undefined && opts.now - modified >= opts.maxAgeMs;
+  });
 }
 
 /** The exact child environment that binds an editor-owned shim to this rendezvous. */

@@ -34,7 +34,7 @@ import {
 } from "vscode-languageclient/node";
 
 import { basename, join, normalize, resolve, sep } from "path";
-import { appendFileSync, existsSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 
 import type { PatchClient, NotificationParams } from "@verter/language-shared";
@@ -84,7 +84,9 @@ import { addShowRecentAuditRecordsCommand } from "./audit";
 import {
   buildRelayEditorEnv,
   isShimAdvertisement,
+  isVerterSharedControlDirName,
   nativePreviewTsdkCandidates,
+  orphanedControlDirs,
   planSharedTsgo,
   prepareEditorTsdk,
   typeProviderRoutesTsgo,
@@ -1372,13 +1374,17 @@ async function establishSharedTsgo(
       tsdkCandidates,
       workspaceRoot,
     });
+    // Previous sessions' rendezvous dirs are swept regardless of the plan's outcome —
+    // staging leaked one per session and they accumulated indefinitely.
+    sweepOrphanedControlDirs(plan.engaged ? plan.sessionKey : undefined, log);
     if (!plan.engaged) {
       log?.info(`[shared-tsgo] not engaged — ${plan.reason}`);
       return NO_SHARED_TSGO;
     }
 
-    // Stage relay bytes under the executable name Native Preview selects. The editor
-    // performs the process spawn; Verter supplies only inherited rendezvous metadata.
+    // Stage the npm-shaped tsdk tree Native Preview's validator accepts, with the
+    // relay bytes at the engine path it stats. The editor performs the process spawn;
+    // Verter supplies only inherited rendezvous metadata.
     const staged = prepareEditorTsdk({
       shimPath: plan.shimPath,
       controlDir: plan.controlDir,
@@ -1429,11 +1435,72 @@ async function establishSharedTsgo(
         disposed = true;
         controller.dispose();
         restoreEnvironment();
+        removeControlDir(plan.controlDir, log);
       },
     };
   } catch (err) {
     log?.warn(`[shared-tsgo] establish failed; continuing to the next serving tier: ${err}`);
     return NO_SHARED_TSGO;
+  }
+}
+
+/** Remove one `verter-shared-<key>` rendezvous dir this extension created. */
+function removeControlDir(directory: string, log?: LogOutputChannel): void {
+  const target = resolve(directory);
+  const tempRoot = resolve(tmpdir());
+  if (!target.startsWith(`${tempRoot}${sep}`) || !isVerterSharedControlDirName(basename(target))) {
+    log?.warn(`[shared-tsgo] refused to remove unexpected rendezvous path: ${target}`);
+    return;
+  }
+  try {
+    rmSync(target, { recursive: true, force: true });
+  } catch (error) {
+    log?.warn(`[shared-tsgo] failed to remove rendezvous path ${target}: ${error}`);
+  }
+}
+
+/** How long an unclaimed rendezvous dir may sit before this session sweeps it. */
+const ORPHANED_CONTROL_DIR_MAX_AGE_MS = 3_600_000;
+
+/**
+ * Delete stale `verter-shared-*` rendezvous dirs left by previous sessions.
+ *
+ * Every session created one and none were ever removed. The live session's own
+ * key and anything younger than {@link ORPHANED_CONTROL_DIR_MAX_AGE_MS} are
+ * skipped so a concurrent editor window's rendezvous survives.
+ */
+function sweepOrphanedControlDirs(currentSessionKey: string | undefined, log?: LogOutputChannel) {
+  const tempRoot = resolve(tmpdir());
+  let entries: string[];
+  try {
+    entries = readdirSync(tempRoot);
+  } catch {
+    return;
+  }
+  const stale = orphanedControlDirs({
+    entries,
+    currentSessionKey,
+    now: Date.now(),
+    maxAgeMs: ORPHANED_CONTROL_DIR_MAX_AGE_MS,
+    modifiedAt: (name) => {
+      try {
+        return statSync(join(tempRoot, name)).mtimeMs;
+      } catch {
+        return undefined;
+      }
+    },
+  });
+  let removed = 0;
+  for (const name of stale) {
+    try {
+      rmSync(join(tempRoot, name), { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // A dir held open by a live peer session is left alone.
+    }
+  }
+  if (removed > 0) {
+    log?.info(`[shared-tsgo] swept ${removed} orphaned rendezvous dir(s) from ${tempRoot}`);
   }
 }
 

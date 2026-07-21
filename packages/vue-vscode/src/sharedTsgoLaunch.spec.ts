@@ -14,6 +14,7 @@ import {
   lspArgsPropagated,
   mintSessionKey,
   nativePreviewTsdkCandidates,
+  orphanedControlDirs,
   parseArmedControlDir,
   planSharedTsgo,
   prepareEditorTsdk,
@@ -217,6 +218,43 @@ describe("nativePreviewTsdkCandidates (W5/FIX-1: every source, never collapsed)"
   });
 });
 
+describe("orphanedControlDirs (W5/FIX-2: staging must not leak)", () => {
+  const now = 1_000_000_000_000;
+  const hour = 3_600_000;
+
+  // ── DISCRIMINATING: only `verter-shared-<hex>` entries are ever selected, the
+  //    LIVE session is never selected, and a fresh dir from a concurrent session
+  //    is never selected. 96 orphans / 256 MB accumulated because nothing swept. ──
+  it("selects only stale verter-shared dirs, never the live session or foreign entries", () => {
+    const got = orphanedControlDirs({
+      entries: [
+        "verter-shared-aaaa",
+        "verter-shared-bbbb",
+        "verter-shared-cccc",
+        "verter-editor-tsserver-dddd",
+        "some-other-temp-dir",
+        "verter-shared-NOTHEX",
+      ],
+      currentSessionKey: "aaaa",
+      now,
+      maxAgeMs: hour,
+      modifiedAt: (name) => (name === "verter-shared-cccc" ? now - 60_000 : now - 5 * hour),
+    });
+    expect(got).toEqual(["verter-shared-bbbb"]);
+  });
+  it("selects nothing when there is nothing stale", () => {
+    expect(
+      orphanedControlDirs({
+        entries: ["verter-shared-aaaa"],
+        currentSessionKey: "aaaa",
+        now,
+        maxAgeMs: hour,
+        modifiedAt: () => now - 5 * hour,
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe("rendezvous construction", () => {
   it("mints a 128-bit hex session key", () => {
     const key = mintSessionKey((n) => Buffer.alloc(n, 0xab));
@@ -267,23 +305,59 @@ describe("buildShimSpawnArgs", () => {
 });
 
 describe("prepareEditorTsdk", () => {
-  it("stages the relay bytes under Native Preview's tsgo executable name", () => {
+  // ── DISCRIMINATING (W5/FIX-2): Native Preview does NOT spawn `<tsdk>/tsgo`.
+  //    Its tsdk validator reads `<tsdk>/package.json`, requires `name` + a
+  //    `bin` entry, and then stats
+  //    `<node_modules>/@typescript/<name>-<platform>-<arch>/lib/<bin>[.exe]`.
+  //    A bare directory holding one `tsgo.exe` can never be selected, which is
+  //    why tier 1 never armed. The staged tree must satisfy that contract.
+  //    (Evidence: TypeScriptTeam.native-preview 0.20260708.2 dist bundle.) ───────
+  it("stages an npm-shaped tsdk Native Preview can actually resolve", () => {
     const made: string[] = [];
     const copied: Array<[string, string]> = [];
+    const written: Array<[string, string]> = [];
     const staged = prepareEditorTsdk({
       shimPath: "/ext/bin/verter-relay-shim",
       controlDir: "/tmp/session",
       platform: "linux",
+      arch: "x64",
       mkdir: (path) => made.push(path),
       copy: (source, destination) => copied.push([source, destination]),
+      writeFile: (path, content) => written.push([path, content]),
       chmod: () => {},
     });
-    expect(staged).toEqual({
-      dir: join("/tmp/session", "editor-tsdk"),
-      executable: join("/tmp/session", "editor-tsdk", "tsgo"),
-    });
-    expect(made).toEqual([staged.dir]);
+
+    const modules = join("/tmp/session", "editor-tsdk", "node_modules");
+    expect(staged.dir).toBe(join(modules, "@typescript", "native-preview"));
+    expect(staged.executable).toBe(
+      join(modules, "@typescript", "native-preview-linux-x64", "lib", "tsgo"),
+    );
+    // The shim bytes land at the exact path Native Preview stats.
     expect(copied).toEqual([["/ext/bin/verter-relay-shim", staged.executable]]);
+    // The manifest the validator parses: scoped name + a `tsgo` bin entry.
+    expect(written).toHaveLength(1);
+    expect(written[0][0]).toBe(join(staged.dir, "package.json"));
+    const manifest = JSON.parse(written[0][1]);
+    expect(manifest.name).toBe("@typescript/native-preview");
+    expect(typeof manifest.version).toBe("string");
+    expect(manifest.bin).toHaveProperty("tsgo");
+    // Both directories are created before anything is written into them.
+    expect(made).toContain(staged.dir);
+    expect(made).toContain(join(modules, "@typescript", "native-preview-linux-x64", "lib"));
+  });
+
+  it("suffixes the staged engine with .exe on win32", () => {
+    const staged = prepareEditorTsdk({
+      shimPath: "C:\\ext\\bin\\verter-relay-shim.exe",
+      controlDir: "C:\\tmp\\session",
+      platform: "win32",
+      arch: "x64",
+      mkdir: () => {},
+      copy: () => {},
+      writeFile: () => {},
+      chmod: () => {},
+    });
+    expect(staged.executable.endsWith("tsgo.exe")).toBe(true);
   });
 });
 
