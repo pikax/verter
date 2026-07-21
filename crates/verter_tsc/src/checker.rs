@@ -554,12 +554,23 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-/// The four ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
+/// The ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
 /// virtual in-project paths under `base`.
+///
+/// `__verter_types.d.ts` is a SCRIPT-style shim (no top-level import/export) so
+/// its `declare module "@verter/types"` is a globally-visible ambient module. A
+/// `declare module` for a REAL external module (`vue`, `vue/jsx-runtime`) must NOT
+/// live in that script shim — there it DEFINES a replacement module and erases the
+/// real one's exports (the `TS2305`/`TS2694` "has no exported member" class). Each
+/// such augmentation is therefore served as its own MODULE carrier
+/// (`import "<mod>"; declare module "<mod>" { … } export {};`), where it augments.
 fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     let mut vue_jsx_runtime_augment = String::from("import \"vue/jsx-runtime\";\n");
     vue_jsx_runtime_augment.push_str(verter_compiler::VUE_JSX_RUNTIME_AUGMENTATION);
     vue_jsx_runtime_augment.push_str("\nexport {};\n");
+    let mut vue_global_components_augment = String::from("import \"vue\";\n");
+    vue_global_components_augment.push_str(verter_compiler::VUE_GLOBAL_COMPONENTS_AUGMENTATION);
+    vue_global_components_augment.push_str("\nexport {};\n");
     vec![
         (
             slash(&base.join("vue-shims.d.ts")),
@@ -576,6 +587,10 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
         (
             slash(&base.join("vue-jsx-runtime-augment.d.ts")),
             vue_jsx_runtime_augment,
+        ),
+        (
+            slash(&base.join("vue-global-components-augment.d.ts")),
+            vue_global_components_augment,
         ),
     ]
 }

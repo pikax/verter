@@ -561,3 +561,121 @@ fn verter_tsc_diagnostic_set_parity() {
     );
     drop(temp_dir);
 }
+
+/// Focused regression: the batch `--api` typecheck resolves `vue`'s `export *`
+/// members — ZERO erased-vue-export diagnostics.
+///
+/// A `declare module "vue"` served inside a SCRIPT-style ambient `.d.ts` shim (a
+/// `.d.ts` with no top-level `import`/`export`, hence globally-visible ambient)
+/// DEFINES a replacement `vue` module instead of augmenting the real one, erasing
+/// every real `vue` export (`defineComponent`, `ref`, `Ref`, `PublicProps`,
+/// `HTMLAttributes`, …). That produced a storm of TS2305 (`Module '"vue"' has no
+/// exported member`) / TS2694 (`Namespace '"vue"' has no exported member`)
+/// spurious errors across EVERY carrier (91 over this fixture). The fix serves
+/// each such augmentation as its own MODULE carrier (`import "vue"; declare module
+/// "vue" { … } export {};`) — a file with a top-level `import`/`export` — where
+/// `declare module "vue"` AUGMENTS the real module. (`@verter/types`, Verter's own
+/// virtual module, legitimately stays a script-style ambient: augmenting a real
+/// external module is the ONLY case that must move to a module carrier.)
+///
+/// This pins the bug class DIRECTLY and independently of the full multiset oracle
+/// above: it FAILS on the pre-fix tree (≥1 erased-vue-export diagnostic — 91 here)
+/// and PASSES post-fix (0), and it stays green across legitimate vue-version /
+/// diagnostic drift that would force a re-pin of `EXPECTED`. The positive rail (the
+/// intentional `NonExistent` import error MUST still surface) proves the typecheck
+/// actually ran rather than silently suppressing its output.
+///
+/// SKIP-vs-FAIL matches the parity oracle: absent fixture deps or a genuinely
+/// absent gated `--api` engine SKIP; a present engine HARD-ASSERTS.
+#[test]
+fn vue_export_star_members_resolve_without_spurious_errors() {
+    // PREFLIGHT 1 — fixture deps (node_modules/vue). `None` ⇒ SKIP.
+    let (temp_dir, temp_path) = match setup_temp_project() {
+        Some(t) => t,
+        None => return,
+    };
+
+    // PREFLIGHT 2 — the gated `--api` engine. Absent ⇒ SKIP (never assert against
+    // a missing engine); threaded to the subprocess via `VERTER_TSGO_BIN`.
+    let gated_engine = match resolve_gated_engine() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "SKIP: gated tsgo `--api` engine (typescript@7.0.2) not found — set \
+                 VERTER_TSGO_BIN or run `pnpm install --frozen-lockfile` in the workspace"
+            );
+            drop(temp_dir);
+            return;
+        }
+    };
+
+    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let output = Command::new(bin)
+        .env("VERTER_TSGO_BIN", &gated_engine)
+        .arg("--noEmit")
+        .arg("-p")
+        .arg(temp_path.join("tsconfig.json"))
+        .output()
+        .expect("failed to execute verter-tsc");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let diags = parse_diagnostics(&stdout);
+
+    // The typecheck must actually have run over the intentional-error fixture.
+    assert!(
+        !diags.is_empty(),
+        "REGRESSION: verter-tsc parsed ZERO diagnostics over the intentional-error fixture \
+         (gated engine present at {}).\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}",
+        gated_engine.display()
+    );
+
+    // The erased-vue-export bug class: a `declare module "vue"` in a script-style
+    // ambient shim shadows the real `vue`, so its `export *` members report TS2305
+    // / TS2694 "has no exported member". ZERO are allowed. (A legitimate TS2305
+    // from the fixture's OWN `NonExistent` import is on the `types` module, not on
+    // `vue`, so this predicate does not match it.)
+    let spurious: Vec<&Diag> = diags
+        .iter()
+        .filter(|d| {
+            matches!(d.ts_code, 2305 | 2694)
+                && (d
+                    .message
+                    .contains("Module '\"vue\"' has no exported member")
+                    || d.message
+                        .contains("Namespace '\"vue\"' has no exported member"))
+        })
+        .collect();
+    assert!(
+        spurious.is_empty(),
+        "REGRESSION: {} erased-vue-export diagnostic(s) — a `declare module \"vue\"` is \
+         shadowing the real `vue` module (served inside a script-style ambient shim instead of \
+         an `import \"vue\"; … export {{}};` MODULE carrier).\nSpurious:\n{}",
+        spurious.len(),
+        spurious
+            .iter()
+            .map(|d| format!(
+                "  {}({},{}): TS{} {}",
+                d.file, d.line, d.col, d.ts_code, d.message
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Positive rail: the intentional `NonExistent` import error (TS2305 on the
+    // fixture's OWN `types` module, NOT on `vue`) must still surface — proves real
+    // vue-export resolution did not blanket-suppress the diagnostic set.
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.ts_code == 2305 && d.message.contains("NonExistent")),
+        "the intentional `NonExistent` import error vanished — the typecheck did not run as \
+         expected.\nSTDOUT:\n{stdout}"
+    );
+
+    eprintln!(
+        "VUE EXPORT-STAR OK: 0 erased-vue-export diagnostics over {} live diagnostics",
+        diags.len()
+    );
+    drop(temp_dir);
+}
