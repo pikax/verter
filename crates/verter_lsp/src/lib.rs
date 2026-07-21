@@ -13,6 +13,63 @@
 /// control requests get a slot immediately alongside a burst of semantic work.
 pub const LSP_MAX_CONCURRENCY: usize = 64;
 
+/// Stack size for the thread that runs the tokio runtime and therefore polls
+/// `Server::serve`.
+///
+/// `tower-lsp-server` drives every request through `buffer_unordered`, so all
+/// handler futures are polled INLINE on whichever thread called `block_on` —
+/// not on runtime workers. Under `#[tokio::main]` that thread is the process
+/// main thread, whose stack on Windows/MSVC is the linker default of **1 MiB**
+/// (`SizeOfStackReserve` in the PE optional header); Rust does not raise it, and
+/// `RUST_MIN_STACK` cannot — that variable only affects `std::thread`-spawned
+/// threads.
+///
+/// Measured peak consumption of a healthy `textDocument/definition`, from the
+/// serve thread's base to the deepest frame, and constant across a 10-line SFC,
+/// a mid-sized component and a 1200-line component with a large import closure
+/// (i.e. bounded by code shape, not by input):
+///
+/// | profile | handler entry | peak  |
+/// |---------|---------------|-------|
+/// | release | 115 KiB       | 117 KiB |
+/// | debug   | 1817 KiB      | 1857 KiB |
+///
+/// Release therefore fits inside 1 MiB with room to spare. Debug does not: the
+/// same request needs ~1.8 MiB because unoptimized `async fn` state machines
+/// nest inline and their poll frames are not compacted, so a debug server on
+/// Windows died on its first request regardless of what that request did.
+///
+/// 8 MiB is chosen as defence in depth, not as a correctness condition: ~70x
+/// headroom over the release peak and ~4.4x over the debug peak, while staying
+/// small enough to be an ordinary thread rather than a licence for unbounded
+/// recursion. A runaway recursion must still be fixed at its source — no stack
+/// size survives one.
+pub const SERVE_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Run `body` on a thread with [`SERVE_THREAD_STACK_BYTES`] of stack and return
+/// its value, propagating a panic to the caller.
+///
+/// This is the server's entry point: it exists so the thread that polls
+/// `Server::serve` has an explicitly sized stack instead of inheriting the
+/// platform's main-thread default.
+pub fn run_on_serve_thread<F, T>(body: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("verter-lsp-serve".to_string())
+        .stack_size(SERVE_THREAD_STACK_BYTES)
+        .spawn(body)
+        .expect("serve thread must spawn")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+#[cfg(test)]
+#[path = "serve_thread_tests.rs"]
+mod serve_thread_tests;
+
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;
