@@ -33,6 +33,7 @@ import {
   type StyleBlockInfo,
   type StyleLang,
 } from "./styleBlockScanner";
+import { directStyleDocumentText } from "./styleDocumentText";
 import { transpile, type TranspileResult } from "./transpiler";
 import { resolvePreprocessor, type PreprocessorCache } from "./preprocessorResolver";
 
@@ -329,16 +330,13 @@ export class CssService {
       return TextDocument.create(`${sfcUri}.style.${block.index}.css`, "css", 1, transpiled.css);
     }
 
-    // For direct languages (css, scss, less, postcss), use virtual file content.
-    // Fall back to extracting content directly from the SFC source when the LSP
-    // doesn't provide style virtual files (e.g., when the compile profile doesn't
-    // include the STYLE target — the IDE profile only includes TSX).
-    const vf = entry.virtualFiles.get(block.index);
-    // Use virtual file content only if it's non-empty and has the correct language.
-    // Empty code with lang "js" indicates a failed compilation (MissingVirtualNode).
-    const code = vf?.code
-      ? vf.code
-      : entry.source.slice(block.contentStartOffset, block.contentEndOffset);
+    // For direct languages (css, scss, less, postcss), the CSS service MUST
+    // parse the VERBATIM authored slice: `toCssPosition`/`toSfcPosition` are
+    // pure line arithmetic, valid only for byte-identical text. The compiled
+    // style virtual file (scoped selector rewrites, v-bind() → var() rewrites,
+    // trimming) shifts lines/columns and mis-maps every range — the color
+    // decorator rendered on the FIRST class name instead of the color value.
+    const code = directStyleDocumentText(entry.source, block);
 
     const langId = block.lang === "postcss" ? "css" : block.lang;
     return TextDocument.create(`${sfcUri}.style.${block.index}.${langId}`, langId, 1, code);

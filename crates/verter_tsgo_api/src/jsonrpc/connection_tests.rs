@@ -283,3 +283,30 @@ async fn is_closed_reflects_connection_death() {
         "a connection whose peer EOFed must report is_closed() == true"
     );
 }
+
+/// The frame builder must OMIT the `params` key for null params (LSP
+/// `shutdown`/`exit` declare NO params; `"params": null` makes strict engines
+/// log `InvalidParams: expected no params, got null` on every teardown) and
+/// keep real params intact.
+#[test]
+fn jsonrpc_message_omits_null_params_and_keeps_real_params() {
+    let exit = super::jsonrpc_message(None, "exit", &serde_json::Value::Null);
+    assert!(
+        exit.get("params").is_none(),
+        "null notification params must be OMITTED, got {exit}"
+    );
+    assert!(exit.get("id").is_none(), "a notification carries no id");
+
+    let shutdown = super::jsonrpc_message(Some(3), "shutdown", &serde_json::Value::Null);
+    assert!(
+        shutdown.get("params").is_none(),
+        "null request params must be OMITTED, got {shutdown}"
+    );
+    assert_eq!(shutdown.get("id").and_then(|id| id.as_i64()), Some(3));
+
+    let initialized = super::jsonrpc_message(None, "initialized", &serde_json::json!({}));
+    assert!(
+        initialized.get("params").is_some(),
+        "an empty-object param is REAL and must be preserved, got {initialized}"
+    );
+}

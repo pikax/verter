@@ -782,6 +782,7 @@ fn build_svelte_snapshot_from_eval_source(
         script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
+        markup_class_tokens: Vec::new(),
         preprocessor_requests: Vec::new(),
     };
 
@@ -806,6 +807,7 @@ fn build_svelte_snapshot_from_eval_source(
                     source_type,
                     program.borrow_dependent(),
                     owners,
+                    program.had_errors(),
                 )
             } else {
                 match top_level_owner_table(program.borrow_dependent(), Some(artifact)) {
@@ -815,6 +817,7 @@ fn build_svelte_snapshot_from_eval_source(
                         source_type,
                         program.borrow_dependent(),
                         &owners,
+                        program.had_errors(),
                     ),
                     Err(error) => fatal_snapshot(Some(&error)),
                 }
@@ -844,6 +847,7 @@ fn build_svelte_snapshot_from_eval_source(
                         source_type,
                         &result.program,
                         &owners,
+                        !result.errors.is_empty(),
                     ),
                     Err(error) => fatal_snapshot(Some(&error)),
                 }
@@ -863,6 +867,12 @@ fn build_svelte_snapshot_from_eval_source(
         custom: Vec::new(),
     };
     snapshot.descriptor = descriptor;
+    // Svelte style + markup class facts — the carrier analog of the Vue
+    // style-analysis / template-element class inventory. Svelte styles are
+    // scoped by default; per-selector `:global(...)` opt-outs are recorded by
+    // the scanner as special pseudos.
+    snapshot.style_analyses = build_svelte_style_analyses(source, &parsed.styles, &style_langs);
+    snapshot.markup_class_tokens = collect_svelte_markup_class_tokens(source, &parsed.template);
     snapshot.meta = FileMeta {
         has_script: false,
         has_template: false,
@@ -876,6 +886,143 @@ fn build_svelte_snapshot_from_eval_source(
     };
     snapshot.preprocessor_requests = preprocessor_requests;
     snapshot
+}
+
+/// Build [`verter_semantic::analysis::StyleBlockAnalysis`] facts for a Svelte
+/// component's `<style>` blocks: scoped-by-default, scanned through the shared
+/// dialect-aware CSS scanner (css/scss/less), carrier-absolute spans.
+pub(crate) fn build_svelte_style_analyses(
+    source: &str,
+    styles: &[verter_compiler::svelte::parser::SvelteStyle],
+    style_langs: &[Option<String>],
+) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    styles
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, style)| {
+            let span = style.content?;
+            let content = source.get(span.start as usize..span.end as usize)?;
+            let lang = match style_langs.get(idx).and_then(|l| l.as_deref()) {
+                None | Some("css") | Some("postcss") => {
+                    verter_semantic::analysis::StyleAnalysisLang::Css
+                }
+                Some("scss") => verter_semantic::analysis::StyleAnalysisLang::Scss,
+                Some("sass") => verter_semantic::analysis::StyleAnalysisLang::Sass,
+                Some("less") => verter_semantic::analysis::StyleAnalysisLang::Less,
+                Some("stylus") => verter_semantic::analysis::StyleAnalysisLang::Stylus,
+                Some(_) => verter_semantic::analysis::StyleAnalysisLang::Unknown,
+            };
+            let analysis = verter_semantic::analysis::build_scanned_style_analysis(
+                lang,
+                content,
+                verter_semantic::analysis::VueStyleInput::default(),
+                // Svelte styles are component-scoped by default.
+                true,
+                false,
+                None,
+                span.start,
+            );
+            if let Some(css) = &analysis.css {
+                css.debug_assert_valid_spans(source.len() as u32);
+            }
+            Some(analysis)
+        })
+        .collect()
+}
+
+/// Collect resolvable markup class tokens from a Svelte template AST:
+/// whitespace-separated names in static `class="a b"` values and the local
+/// name of every `class:x` directive. Dynamic (`class={expr}`) and mixed
+/// values are skipped — fail closed, never a guessed token.
+pub(crate) fn collect_svelte_markup_class_tokens(
+    source: &str,
+    nodes: &[verter_compiler::svelte::parser::SvelteNode],
+) -> Vec<verter_semantic::analysis::MarkupClassToken> {
+    use verter_compiler::svelte::parser::{
+        SvelteAttributeKind, SvelteAttributeValue, SvelteDirectiveKind, SvelteNode,
+    };
+
+    fn walk(
+        source: &str,
+        nodes: &[SvelteNode],
+        out: &mut Vec<verter_semantic::analysis::MarkupClassToken>,
+    ) {
+        for node in nodes {
+            match node {
+                SvelteNode::Element(el) => {
+                    for attr in &el.attributes {
+                        match &attr.kind {
+                            SvelteAttributeKind::Plain {
+                                name,
+                                value: Some(SvelteAttributeValue::Text(value_span)),
+                                ..
+                            } if name == "class" => {
+                                let Some(text) =
+                                    source.get(value_span.start as usize..value_span.end as usize)
+                                else {
+                                    continue;
+                                };
+                                // Whitespace-split with exact positions.
+                                let bytes = text.as_bytes();
+                                let mut i = 0usize;
+                                while i < bytes.len() {
+                                    if bytes[i].is_ascii_whitespace() {
+                                        i += 1;
+                                        continue;
+                                    }
+                                    let start = i;
+                                    while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                                        i += 1;
+                                    }
+                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                        name: text[start..i].to_string(),
+                                        span: verter_span::Span::new(
+                                            value_span.start + start as u32,
+                                            value_span.start + i as u32,
+                                        ),
+                                        from_directive: false,
+                                    });
+                                }
+                            }
+                            SvelteAttributeKind::Directive(dir)
+                                if dir.kind == SvelteDirectiveKind::Class
+                                    && !dir.local.is_empty() =>
+                            {
+                                // `class:x` — the local name starts right after
+                                // the `class:` prefix of the attribute span.
+                                let start = attr.span.start + "class:".len() as u32;
+                                let end = start + dir.local.len() as u32;
+                                // Verify against the source before trusting the
+                                // arithmetic (fail closed on any drift).
+                                if source.get(start as usize..end as usize)
+                                    == Some(dir.local.as_str())
+                                {
+                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                        name: dir.local.clone(),
+                                        span: verter_span::Span::new(start, end),
+                                        from_directive: true,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    walk(source, &el.children, out);
+                }
+                SvelteNode::Block(block) => {
+                    walk(source, &block.children, out);
+                    for clause in &block.clauses {
+                        walk(source, &clause.children, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(source, nodes, &mut out);
+    out
 }
 
 /// Where a framework carrier snapshot build gets its script PROGRAM from — the
@@ -1430,6 +1577,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
                     owners,
                     /* needs_exports */ true,
                     analysis_scope.needs_script_analysis(),
+                    program.had_errors(),
                 ),
                 None => vue_script_walks_for_sfc(
                     program.source_str(),
@@ -1438,6 +1586,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
                     parsed,
                     /* needs_exports */ true,
                     analysis_scope.needs_script_analysis(),
+                    program.had_errors(),
                 ),
             }
         }
@@ -1456,8 +1605,11 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     // the snapshot enters host-owned storage.
     absolutize_macro_payload_anchors(&mut script_analysis.macros, canonical_id);
 
-    // Cross-reference: mark script bindings that are referenced by CSS v-bind() in style blocks
-    if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
+    // Cross-reference: mark script bindings that are referenced by CSS
+    // v-bind() in style blocks. Runs even with zero script bindings — the
+    // recorded `style_vbind_roots` also carry PROP liveness (style v-bind
+    // resolves props by bare name through the render context).
+    if !style_analyses.is_empty() {
         script_analysis.mark_bindings_used_in_style(&style_analyses);
     }
 
@@ -1504,6 +1656,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         script_analysis: Arc::new(script_analysis),
         export_signatures,
         style_analyses,
+        markup_class_tokens: Vec::new(),
         preprocessor_requests,
     }
 }
@@ -1625,17 +1778,26 @@ fn build_single_style_analysis(
     let scope_id = verter_compiler::compile::get_hash(&component_name);
     let prepass_result = verter_compiler::css::prepass::prepass(css_content, &scope_id);
 
-    // Build VueStyleInput from prepass results
+    // Build VueStyleInput from prepass results. Each v-bind carries its
+    // authored expression span (SFC-absolute) and the SOUND OXC-derived free
+    // identifier roots — the single owning usage fact consumed by liveness
+    // marking and compile-input assembly.
     let vue_input = verter_semantic::analysis::VueStyleInput {
         v_binds: prepass_result
             .v_bind_vars
             .iter()
-            .map(|vb| verter_semantic::analysis::VBindInput {
-                expression: vb.expression.clone(),
-                quoted: false,
-                start: content_offset,
-                end: content_offset,
-                generated_var_name: Some(vb.var_name.clone()),
+            .map(|vb| {
+                let roots =
+                    verter_compiler::compile::style_usage::expression_free_roots(&vb.expression);
+                verter_semantic::analysis::VBindInput {
+                    expression: vb.expression.clone(),
+                    quoted: false,
+                    start: content_offset + vb.expr_start,
+                    end: content_offset + vb.expr_end,
+                    generated_var_name: Some(vb.var_name.clone()),
+                    roots_complete: roots.is_some(),
+                    expr_roots: roots.unwrap_or_default(),
+                }
             })
             .collect(),
         special_pseudos: vec![],
@@ -1645,18 +1807,7 @@ fn build_single_style_analysis(
 
     let analysis_lang = match style.lang {
         Some(verter_compiler::parser::types::StyleLang::Css) | None => {
-            let analysis = verter_semantic::analysis::build_css_style_analysis(
-                css_content,
-                vue_input,
-                style.scoped,
-                style.module,
-                module_name.as_deref(),
-                content_offset,
-            );
-            if let Some(css) = &analysis.css {
-                css.debug_assert_valid_spans(sfc_source_len);
-            }
-            return analysis;
+            verter_semantic::analysis::StyleAnalysisLang::Css
         }
         Some(verter_compiler::parser::types::StyleLang::Scss) => {
             verter_semantic::analysis::StyleAnalysisLang::Scss
@@ -1674,14 +1825,22 @@ fn build_single_style_analysis(
             verter_semantic::analysis::StyleAnalysisLang::Unknown
         }
     };
-    verter_semantic::analysis::build_preprocessor_style_analysis(
+    // CSS, SCSS and Less run the brace-based scanner (dialect-aware) so class
+    // and selector facts exist for every brace-based style block; indented
+    // languages (Sass, Stylus) keep the Vue-features-only analysis.
+    let analysis = verter_semantic::analysis::build_scanned_style_analysis(
         analysis_lang,
+        css_content,
         vue_input,
         style.scoped,
         style.module,
         module_name.as_deref(),
         content_offset,
-    )
+    );
+    if let Some(css) = &analysis.css {
+        css.debug_assert_valid_spans(sfc_source_len);
+    }
+    analysis
 }
 
 /// Run a closure with panic safety, returning a warning diagnostic if it panics.
@@ -1777,6 +1936,7 @@ fn vue_script_walks_from_program(
     owners: &verter_semantic::analysis::TopLevelOwnerTable,
     needs_exports: bool,
     needs_script_analysis: bool,
+    parse_errors: bool,
 ) -> VueScriptOutputs {
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
@@ -1811,6 +1971,7 @@ fn vue_script_walks_from_program(
                     program,
                     verter_semantic::analysis::AnalysisScope::all(),
                     owners,
+                    parse_errors,
                 )
             }),
         );
@@ -1830,6 +1991,7 @@ fn vue_script_walks_for_sfc(
     parsed: &ParsedSfc,
     needs_exports: bool,
     needs_script_analysis: bool,
+    parse_errors: bool,
 ) -> VueScriptOutputs {
     match vue_top_level_owner_table(program, parsed) {
         Ok(owners) => vue_script_walks_from_program(
@@ -1839,6 +2001,7 @@ fn vue_script_walks_for_sfc(
             &owners,
             needs_exports,
             needs_script_analysis,
+            parse_errors,
         ),
         Err(error) => VueScriptOutputs {
             export_signatures: Vec::new(),
@@ -1922,6 +2085,7 @@ fn build_vue_script_outputs(
         parsed,
         needs_exports,
         needs_script_analysis,
+        !parse_result.errors.is_empty(),
     );
     // Keep production diagnostic order: parse first, then the walks.
     let mut panic_diags = outputs.panic_diags;
@@ -2137,9 +2301,17 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
+    parse_errors: bool,
 ) -> ParseSnapshot {
     let owners = verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len());
-    build_snapshot_from_program_with_owners(canonical_id, source, source_type, program, &owners)
+    build_snapshot_from_program_with_owners(
+        canonical_id,
+        source,
+        source_type,
+        program,
+        &owners,
+        parse_errors,
+    )
 }
 
 fn build_snapshot_from_program_with_owners(
@@ -2148,6 +2320,7 @@ fn build_snapshot_from_program_with_owners(
     source_type: SourceType,
     program: &Program<'_>,
     owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    parse_errors: bool,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
     let slices = SliceHashes::default();
@@ -2171,6 +2344,7 @@ fn build_snapshot_from_program_with_owners(
                 | verter_semantic::analysis::AnalysisScope::EXPORT_SIGNATURES
                 | verter_semantic::analysis::AnalysisScope::SCRIPT_USAGES,
             owners,
+            parse_errors,
         );
     // Producer-side locator absolutization: fill the analyzer's empty-sentinel
     // macro-payload anchors with THIS snapshot's producing canonical before
@@ -2190,6 +2364,7 @@ fn build_snapshot_from_program_with_owners(
         script_analysis: Arc::new(script_analysis),
         export_signatures,
         style_analyses: Vec::new(),
+        markup_class_tokens: Vec::new(),
         preprocessor_requests: Vec::new(),
     }
 }
@@ -2229,11 +2404,18 @@ pub(crate) fn parse_non_sfc_snapshot(
             script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            markup_class_tokens: Vec::new(),
             preprocessor_requests: Vec::new(),
         };
     }
 
-    build_non_sfc_snapshot_from_program(canonical_id, source, source_type, &result.program)
+    build_non_sfc_snapshot_from_program(
+        canonical_id,
+        source,
+        source_type,
+        &result.program,
+        !result.errors.is_empty(),
+    )
 }
 
 #[cfg(test)]
@@ -3277,6 +3459,227 @@ watch(count, (value, oldValue) => {
             "content should contain '.a {{ .b', got: {}",
             req.content
         );
+    }
+
+    /// SCSS style blocks scan to full CSS facts (classes with exact
+    /// SFC-absolute spans, rule body spans) — the class-intelligence
+    /// features light up for `lang="scss"` blocks.
+    #[test]
+    fn scss_style_block_produces_scanned_css_facts() {
+        let source = "<template><div class=\"card\">x</div></template>\n<style lang=\"scss\" scoped>\n.card {\n  .title { color: red; }\n}\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        assert_eq!(snap.style_analyses.len(), 1);
+        let style = &snap.style_analyses[0];
+        assert_eq!(
+            style.lang,
+            verter_semantic::analysis::StyleAnalysisLang::Scss
+        );
+        let css = style
+            .css
+            .as_ref()
+            .expect("scss block must carry scanned CSS facts");
+        let title = css
+            .classes
+            .iter()
+            .find(|c| c.name == "title")
+            .expect("nested scss class extracted");
+        assert_eq!(
+            &source[title.span.start as usize..title.span.end as usize],
+            "title",
+            "nested class span is SFC-absolute and exact"
+        );
+        assert!(
+            css.selectors.iter().all(|s| s.rule_body_span.is_some()),
+            "closed rules carry body spans"
+        );
+    }
+
+    /// DISCRIMINATING pair for the sound v-bind usage fact: `v-bind(a + b)`
+    /// marks BOTH `a` and `b` used-in-style (the retired `.split('.')` text
+    /// probe produced the literal "a + b" and marked neither), while a truly
+    /// unused binding stays unmarked.
+    #[test]
+    fn v_bind_complex_expression_marks_every_root_used_in_style() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst a = 1\nconst b = 2\nconst unused = 3\n</script>\n<style>\n.x { width: v-bind(a + b); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        let binding = |name: &str| {
+            snap.script_analysis
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap_or_else(|| panic!("binding {name}"))
+        };
+        assert!(
+            binding("a").used_in_style,
+            "root `a` of `a + b` is style-used"
+        );
+        assert!(
+            binding("b").used_in_style,
+            "root `b` of `a + b` is style-used"
+        );
+        assert!(
+            !binding("unused").used_in_style,
+            "a binding not referenced by any v-bind stays unmarked"
+        );
+        assert!(
+            snap.script_analysis
+                .style_vbind_roots
+                .contains(&"a".to_string())
+                && snap
+                    .script_analysis
+                    .style_vbind_roots
+                    .contains(&"b".to_string()),
+            "the B5 liveness feed carries both roots: {:?}",
+            snap.script_analysis.style_vbind_roots
+        );
+    }
+
+    /// The pair's positive leg: a binding used ONLY in style `v-bind()` is
+    /// used_in_style (no unused diagnostic); member roots count.
+    #[test]
+    fn v_bind_only_style_usage_counts_as_used() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst color = 'red'\nconst theme = { main: 'blue' }\n</script>\n<style>\n.x { color: v-bind(color); background: v-bind(theme.main); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        let binding = |name: &str| {
+            snap.script_analysis
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .unwrap()
+        };
+        assert!(binding("color").used_in_style);
+        assert!(
+            binding("theme").used_in_style,
+            "member-expression root counts"
+        );
+    }
+
+    /// An unparseable v-bind expression fails OPEN: every binding is treated
+    /// as style-used (no false unused diagnostic can fire).
+    #[test]
+    fn v_bind_unparseable_expression_fails_open() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst a = 1\n</script>\n<style>\n.x { color: v-bind(@@@); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        let a = snap
+            .script_analysis
+            .bindings
+            .iter()
+            .find(|b| b.name == "a")
+            .unwrap();
+        assert!(
+            a.used_in_style,
+            "an unparseable v-bind marks every binding live (fail open)"
+        );
+    }
+
+    /// Analyzed v-binds carry REAL SFC-absolute expression spans (the token
+    /// the IDE hover/completion anchors on), not a degenerate content-offset
+    /// pair.
+    #[test]
+    fn v_bind_carries_real_expression_span() {
+        let source = "<template><div>x</div></template>\n<script setup>\nconst color = 'red'\n</script>\n<style>\n.x { color: v-bind(color); }\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        assert_eq!(snap.style_analyses.len(), 1);
+        let vb = &snap.style_analyses[0].v_binds[0];
+        assert_eq!(
+            &source[vb.start as usize..vb.end as usize],
+            "color",
+            "v-bind span covers exactly the authored expression"
+        );
+        assert_eq!(vb.expr_roots, vec!["color".to_string()]);
+        assert!(vb.roots_complete);
+    }
+
+    /// Svelte `<style>` blocks scan to scoped-by-default CSS facts with
+    /// carrier-absolute spans, and `:global(...)` selectors are recorded as
+    /// Global special pseudos.
+    #[test]
+    fn svelte_style_analyses_scoped_by_default_with_global_pseudo() {
+        let source = "<script>let x = 1;</script>\n<div class=\"card\"></div>\n<style>\n.card { color: red; }\n:global(.reset) { margin: 0; }\n</style>\n";
+        let parsed = verter_compiler::svelte::parser::parse_svelte(source);
+        let styles = build_svelte_style_analyses(source, &parsed.styles, &[None]);
+        assert_eq!(styles.len(), 1);
+        let style = &styles[0];
+        assert!(style.scoped, "svelte styles are scoped by default");
+        let css = style.css.as_ref().expect("scanned css facts");
+        let card = css.classes.iter().find(|c| c.name == "card").unwrap();
+        assert_eq!(
+            &source[card.span.start as usize..card.span.end as usize],
+            "card",
+            "carrier-absolute exact span"
+        );
+        let global = style
+            .special_pseudos
+            .iter()
+            .find(|p| p.kind == verter_semantic::analysis::SpecialPseudoKind::Global)
+            .expect(":global recorded");
+        assert_eq!(
+            &source[global.start as usize..global.end as usize],
+            ":global(.reset)"
+        );
+        // The .reset class inside :global is still an addressable declaration.
+        assert!(css.classes.iter().any(|c| c.name == "reset"));
+    }
+
+    /// Svelte markup class tokens: `class="a b"` entries split with exact
+    /// spans; `class:x` directives carry the local name span; dynamic values
+    /// are skipped (fail closed).
+    #[test]
+    fn svelte_markup_class_tokens_exact_spans() {
+        let source = "<div class=\"card active\" class:open={cond}>\n  {#if cond}<span class=\"inner\"></span>{/if}\n  <b class={dynamic}></b>\n</div>\n";
+        let parsed = verter_compiler::svelte::parser::parse_svelte(source);
+        let tokens = collect_svelte_markup_class_tokens(source, &parsed.template);
+        let by_name: Vec<(&str, bool)> = tokens
+            .iter()
+            .map(|t| (t.name.as_str(), t.from_directive))
+            .collect();
+        assert_eq!(
+            by_name,
+            vec![
+                ("card", false),
+                ("active", false),
+                ("open", true),
+                ("inner", false),
+            ],
+            "dynamic class={{expr}} yields NO token"
+        );
+        for t in &tokens {
+            assert_eq!(
+                &source[t.span.start as usize..t.span.end as usize],
+                t.name,
+                "token span must cover exactly the authored name"
+            );
+        }
+    }
+
+    /// End-to-end: the svelte snapshot carries style analyses + markup tokens.
+    #[test]
+    fn svelte_snapshot_carries_style_and_markup_class_facts() {
+        // Route through the real carrier snapshot build.
+        let source = "<script>let n = 1;</script>\n<div class=\"card\"></div>\n<style>.card { color: red; }</style>\n";
+        let (snapshot, _artifact) = carrier_parse_snapshot(
+            "test.svelte",
+            source,
+            AnalysisScope::LSP,
+            &verter_language::FileLanguage::svelte(),
+            &crate::types::MetaProvenance::default(),
+        )
+        .expect("svelte carrier dispatch yields a snapshot");
+        assert_eq!(snapshot.style_analyses.len(), 1);
+        assert!(snapshot.style_analyses[0].scoped);
+        assert!(snapshot.style_analyses[0].css.is_some());
+        assert_eq!(snapshot.markup_class_tokens.len(), 1);
+        assert_eq!(snapshot.markup_class_tokens[0].name, "card");
+    }
+
+    /// Indented Sass stays fail-closed: Vue features only, no scanned CSS.
+    #[test]
+    fn sass_style_block_stays_unscanned() {
+        let source =
+            "<template><div>x</div></template>\n<style lang=\"sass\">\n.a\n  color: red\n</style>";
+        let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
+        assert_eq!(snap.style_analyses.len(), 1);
+        assert!(snap.style_analyses[0].css.is_none());
     }
 
     /// @ai-generated - preprocessor request for custom block with lang

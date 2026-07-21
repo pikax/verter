@@ -7,7 +7,6 @@
 //! audited LSP run, and asserts the file holds the produced record.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use verter_audit::payloads::tags::LspMethodTag;
 use verter_lsp::audit_harness;
@@ -37,7 +36,6 @@ async fn audited_lsp_run_appends_jsonline_to_trace_out_when_env_var_set() {
             line: 1,
             character: 1,
         }),
-        Duration::from_secs(2),
         async move { Ok(1u8) },
         |payload, _value| {
             payload.response_size_bytes = 1;

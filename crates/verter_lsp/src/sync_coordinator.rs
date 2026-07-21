@@ -61,7 +61,12 @@ impl SyncCoordinatorHandle {
 /// Shared state the coordinator needs to perform syncs and publish diagnostics.
 pub struct SyncCoordinatorDeps {
     pub documents: Arc<DocumentRegistry>,
-    pub project_sync: ProjectSync,
+    /// The in-process provider connection. `None` on routes with no in-process
+    /// provider child (editor-owned tsserver plugin serving, verter-only
+    /// mode): the debounced PUBLISH half still runs — Verter-owned
+    /// diagnostics (lint, unused-declaration hints, template errors) never
+    /// depend on a provider — while the provider-sync half is skipped.
+    pub project_sync: Option<ProjectSync>,
     pub needs_provider_sync: Arc<DashSet<String>>,
     pub pending_snapshot_provider_sync: Arc<DashSet<String>>,
     pub client: Client,
@@ -98,6 +103,7 @@ const DEBOUNCE_MS: u64 = 300;
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
     let (tx, rx) = mpsc::unbounded_channel();
+    tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
     tokio::spawn(coordinator_loop(rx, deps));
     SyncCoordinatorHandle { tx }
 }
@@ -115,6 +121,10 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
             msg = rx.recv() => {
                 match msg {
                     Some(signal) => {
+                        tracing::debug!(
+                            "sync_coordinator: signal {}",
+                            signal.canonical_id
+                        );
                         // Reset timer for this file
                         pending_files.insert(
                             signal.canonical_id,
@@ -164,7 +174,13 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
 }
 
 /// Perform the actual sync: sync TSX/DTS to the type provider.
+///
+/// A provider-less route (`deps.project_sync == None`) has nothing to sync —
+/// the caller still publishes Verter-owned diagnostics afterwards.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
+    let Some(project_sync) = deps.project_sync.as_ref() else {
+        return;
+    };
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     let Some(snapshot) = ({
         let ws = deps.vfs_workspace.read();
@@ -199,7 +215,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         if let Some(uri) = deps.documents.canonical_id_to_uri(canonical_id) {
             crate::server::sync_self_file_shadow_state(
                 &deps.documents,
-                &deps.project_sync,
+                project_sync,
                 &deps.provider_sync_states,
                 Some(&snapshot),
                 &uri,
@@ -210,7 +226,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         } else if snapshot.ownership_ready {
             // A genuinely non-open rune module is removed once ready.
             clear_provider_sync_state(
-                &deps.project_sync,
+                project_sync,
                 deps.documents.provider_surfaces(),
                 &deps.provider_sync_states,
                 canonical_id,
@@ -280,6 +296,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
             if deps.carrier_transaction_coordinator.admit_owned(
+                deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -313,9 +330,9 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 if let Some(ide_path) = committed_state.ide_path.clone() {
                     tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
                     let result = if committed_state.ide_background_loaded {
-                        deps.project_sync.sync_tsx(&ide_path, &ide.code).await
+                        project_sync.sync_tsx(&ide_path, &ide.code).await
                     } else {
-                        deps.project_sync.open_tsx(&ide_path, &ide.code).await
+                        project_sync.open_tsx(&ide_path, &ide.code).await
                     };
                     match result {
                         Ok(()) => {
@@ -323,8 +340,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                             synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes
                             // just synced (interactive queries capture this surface).
-                            let provider_code = deps
-                                .project_sync
+                            let provider_code = project_sync
                                 .synced_tsx_content(&ide_path)
                                 .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
                             crate::provider_surface_store::record_carrier_ide_surface(
@@ -361,9 +377,9 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             if let Some(api) = api {
                 if let Some(dts_path) = committed_state.api_path.clone() {
                     let result = if committed_state.api_background_loaded {
-                        deps.project_sync.sync_dts(&dts_path, &api.code).await
+                        project_sync.sync_dts(&dts_path, &api.code).await
                     } else {
-                        deps.project_sync.open_dts(&dts_path, &api.code).await
+                        project_sync.open_dts(&dts_path, &api.code).await
                     };
                     match result {
                         Ok(()) => {
@@ -397,7 +413,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 let ide_surface = committed_state
                     .ide_path
                     .as_deref()
-                    .and_then(|path| deps.project_sync.synced_tsx_surface(path));
+                    .and_then(|path| project_sync.synced_tsx_surface(path));
                 let receipt = pending.confirm_opened_with_ide_surface(&synced_kinds, ide_surface);
                 // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
                 // transaction reclaimed the source, or an owner-loss advanced the barrier)
@@ -407,6 +423,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned(
+                    deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -417,7 +434,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                         .insert(canonical_id.to_string());
                 } else {
                     close_stale_paths(
-                        &deps.project_sync,
+                        project_sync,
                         deps.documents.provider_surfaces(),
                         &non_decl_close_targets(&genuinely_stale),
                     )
@@ -440,11 +457,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             );
             if class.runs_buffer_cleanup() {
                 if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
-                    preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref())
-                        .await;
+                    preserve_open_unresolved_carrier(
+                        deps,
+                        project_sync,
+                        canonical_id,
+                        is_jsx,
+                        ide.as_ref(),
+                    )
+                    .await;
                 } else if snapshot.ownership_ready {
                     clear_provider_sync_state(
-                        &deps.project_sync,
+                        project_sync,
                         deps.documents.provider_surfaces(),
                         &deps.provider_sync_states,
                         canonical_id,
@@ -480,6 +503,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 /// or closes the TSX.
 async fn preserve_open_unresolved_carrier(
     deps: &SyncCoordinatorDeps,
+    project_sync: &ProjectSync,
     canonical_id: &str,
     is_jsx: bool,
     ide: Option<&verter_session::IdeResponse>,
@@ -508,17 +532,16 @@ async fn preserve_open_unresolved_carrier(
     let mut ide_synced = false;
     if let (Some(ide), Some(ide_path)) = (ide, target.ide_path.clone()) {
         let result = if target.ide_background_loaded {
-            deps.project_sync.sync_tsx(&ide_path, &ide.code).await
+            project_sync.sync_tsx(&ide_path, &ide.code).await
         } else {
-            deps.project_sync.open_tsx(&ide_path, &ide.code).await
+            project_sync.open_tsx(&ide_path, &ide.code).await
         };
         match result {
             Ok(()) => {
                 ide_synced = true;
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface).
-                let provider_code = deps
-                    .project_sync
+                let provider_code = project_sync
                     .synced_tsx_content(&ide_path)
                     .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
                 crate::provider_surface_store::record_carrier_ide_surface(
@@ -546,7 +569,7 @@ async fn preserve_open_unresolved_carrier(
     commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
     if let Some(dropped) = commit.dropped_api {
         close_stale_paths(
-            &deps.project_sync,
+            project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&dropped)),
         )
@@ -554,7 +577,7 @@ async fn preserve_open_unresolved_carrier(
     }
     if let Some(stale) = commit.stale_ide_after_success {
         close_stale_paths(
-            &deps.project_sync,
+            project_sync,
             deps.documents.provider_surfaces(),
             &non_decl_close_targets(std::slice::from_ref(&stale)),
         )
@@ -731,17 +754,45 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         Ok(u) => u,
         Err(_) => return,
     };
+    let diagnostics = compute_merged_diagnostics(deps, canonical_id, &uri).await;
+    deps.client
+        .publish_diagnostics(uri, diagnostics, None)
+        .await;
+}
 
+/// Compute the merged (Verter lint + `verter(project)` ownership + TypeScript
+/// type) diagnostics for a synced file WITHOUT publishing. Split from
+/// [`publish_merged_diagnostics`] so tests can observe the merged set directly
+/// (the coordinator otherwise pushes to the client socket, which a test cannot
+/// read) — the same compute/publish split the request-side
+/// `compute_full_diagnostics` uses.
+async fn compute_merged_diagnostics(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri: &Uri,
+) -> Vec<Diagnostic> {
     // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
     let mut verter_diags = {
         let vfs_ws = deps.vfs_workspace.read();
         compute_verter_diagnostics_for_with_views(
             &deps.documents,
-            &uri,
+            uri,
             &deps.cached_verter_diags,
             vfs_ws.as_deref(),
         )
     };
+
+    // Surface the `verter(project)` ownership diagnostic on the DEBOUNCED publish
+    // path — `did_open` / `did_change` route through this coordinator, NOT through
+    // the request-only `compute_full_diagnostics`, so an unresolved carrier
+    // (terminal `NoProject` / disk-layout carrier-path conflict) is now explained
+    // on open AND edit. A resolved carrier (`Bound`, including a resolved
+    // multi-claimant) and a bootstrap `NotReady` stay silent — the shared owner
+    // authority decides, never a path-shape heuristic.
+    verter_diags.extend(crate::external_ts::project_ownership_diagnostics_for(
+        deps.documents.host(),
+        canonical_id,
+    ));
 
     // A `.svelte` file whose owner workspace has NO `svelte`
     // install fails CLOSED (module-not-found on the shim's `svelte` import) —
@@ -776,10 +827,13 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         }
     }
 
-    // When a TypeProvider is active, suppress component usage diagnostics
-    // (unknown-prop, unknown-model) since the TypeProvider validates props
-    // via the generated TSX and is the source of truth.
-    if deps.type_provider.is_some() {
+    // When a type provider serves this session, suppress component usage
+    // diagnostics (unknown-prop, unknown-model) since the provider validates
+    // props via the generated TSX and is the source of truth. Gated on the
+    // serving KIND, not the in-process provider object: the editor-owned
+    // tsserver plugin route validates props through the editor's tsserver
+    // while `type_provider` is `None` in-process.
+    if !matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
         verter_diags.retain(|d| match &d.code {
             Some(NumberOrString::String(code)) => {
                 code != "verter/unknown-prop" && code != "verter/unknown-model"
@@ -797,16 +851,11 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     // `ide_path` a self-file document never has).
     if let Some(tp) = &deps.type_provider {
         if crate::server::self_file_language_for(canonical_id).is_some() {
-            let diagnostics =
-                self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
-            return deps
-                .client
-                .publish_diagnostics(uri, diagnostics, None)
-                .await;
+            return self_file_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
         }
     }
 
-    let diagnostics = if let Some(tp) = &deps.type_provider {
+    if let Some(tp) = &deps.type_provider {
         let encoding = deps.position_encoding.read().clone();
         carrier_provider_diagnostics(
             &deps.documents,
@@ -819,16 +868,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         .await
     } else {
         verter_diags
-    };
-
-    tracing::info!(
-        "sync_coordinator: publishing {} diagnostics for {}",
-        diagnostics.len(),
-        canonical_id
-    );
-    deps.client
-        .publish_diagnostics(uri, diagnostics, None)
-        .await;
+    }
 }
 
 /// Merge a carrier's provider type diagnostics into `verter_diags` for a

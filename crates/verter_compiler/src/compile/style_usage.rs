@@ -6,14 +6,15 @@
 //! reference would demote a genuinely-used binding to a type-only read and
 //! produce a false-positive TS6133.
 //!
-//! The host-side `style_v_bind_vars` extraction splits each expression string on
-//! `.` and keeps the first segment — correct for `v-bind(foo.bar)` (root `foo`)
-//! but UNSOUND for any non-member expression (`v-bind(a + b)` yields the literal
-//! `"a + b"`, matching no binding, so `a`/`b` are silently dropped). This module
-//! re-derives style usage from the typed AST instead: each `v-bind()` expression
-//! is parsed with OXC and its free identifier roots are collected. If ANY
-//! `v-bind()` expression fails to parse cleanly, style usage is marked
-//! INCOMPLETE and the caller fails open (keeps every binding live).
+//! This module is the sole style-usage derivation: each `v-bind()` expression
+//! is parsed with OXC and its free identifier roots are collected
+//! (`collect_expression_free_refs` — the same producer that feeds
+//! `AnalyzedStyleVBind.expr_roots`). String splitting on the expression text
+//! is forbidden here: a `.`-split root extraction is only correct for member
+//! expressions and silently drops roots of any other shape (`v-bind(a + b)`
+//! must yield `a` AND `b`). If ANY `v-bind()` expression fails to parse
+//! cleanly, style usage is marked INCOMPLETE and the caller fails open (keeps
+//! every binding live).
 
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
@@ -64,6 +65,20 @@ pub fn extract_style_v_bind_usage<'a>(
     }
 
     StyleVBindUsage { used, complete }
+}
+
+/// The free identifier roots of one `v-bind()` expression, OXC-parsed —
+/// the SOUND per-expression fact producers store on analyzed v-binds
+/// (`AnalyzedVBind.expr_roots`). Returns `None` on a parse failure (the
+/// caller records the expression's roots as UNKNOWN and fails open).
+pub fn expression_free_roots(expr_text: &str) -> Option<Vec<String>> {
+    let mut used = FxHashSet::default();
+    if !collect_expr_identifier_roots(expr_text, &mut used) {
+        return None;
+    }
+    let mut roots: Vec<String> = used.into_iter().collect();
+    roots.sort_unstable();
+    Some(roots)
 }
 
 /// Parse `expr_text` as a TS expression and union its free identifier roots into

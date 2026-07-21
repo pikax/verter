@@ -50,138 +50,6 @@ pub fn host_public_api_result_to_ffi(
     }
 }
 
-#[cfg(test)]
-mod public_api_tests {
-    use super::*;
-    use verter_compiler::tsc::{
-        TscFailureSubject, TscGenerationError, TscInvalidOutcome, TscUnavailableOutcome,
-    };
-    use verter_macro_dto::{
-        MacroFailure, MacroInvalidReason, MacroPartialReason, UnresolvedReason, UnsupportedReason,
-    };
-
-    #[test]
-    fn public_api_failure_preserves_closed_structured_identity() {
-        let result = host_public_api_result_to_ffi(Err(host::PublicApiProjectionError::from(
-            verter_compiler::tsc::TscGenerationError::UnsupportedDeclarationShape {
-                subject: TscFailureSubject::Macro { syntax_index: 7 },
-                reason: verter_compiler::tsc::TscDeclarationShapeReason::UnsupportedEnumShape,
-            },
-        )));
-
-        assert!(result.value.is_none());
-        let error = result.error.expect("failure must occupy the error rail");
-        assert_eq!(error.code, "tsc-generation");
-        assert_eq!(error.detail_code, "unsupported-declaration-shape");
-        assert_eq!(
-            error.subject,
-            PublicApiProjectionSubject::Macro { syntax_index: 7 }
-        );
-        assert_eq!(
-            error.declaration_shape_reason.as_deref(),
-            Some("unsupported-enum-shape")
-        );
-        assert_eq!(error.member_ordinal, None);
-        assert_eq!(error.outcome_kind, None);
-        assert_eq!(error.outcome_reason, None);
-        assert_eq!(error.outcome_diagnostic, None);
-    }
-
-    #[test]
-    fn public_api_failure_preserves_all_unavailable_outcome_arms() {
-        let cases = [
-            (
-                TscUnavailableOutcome::Partial(MacroFailure::new(
-                    MacroPartialReason::IncompleteTraversal,
-                    Some("partial detail".to_string()),
-                )),
-                "partial",
-                "incomplete-traversal",
-                "partial detail",
-            ),
-            (
-                TscUnavailableOutcome::Unresolved(MacroFailure::new(
-                    UnresolvedReason::AmbiguousReference,
-                    Some("unresolved detail".to_string()),
-                )),
-                "unresolved",
-                "ambiguous-reference",
-                "unresolved detail",
-            ),
-            (
-                TscUnavailableOutcome::Unsupported(MacroFailure::new(
-                    UnsupportedReason::SemanticConstruct,
-                    Some("unsupported detail".to_string()),
-                )),
-                "unsupported",
-                "semantic-construct",
-                "unsupported detail",
-            ),
-            (
-                TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(MacroFailure::new(
-                    MacroInvalidReason::NonObjectRoot,
-                    Some("invalid detail".to_string()),
-                ))),
-                "invalid",
-                "non-object-root",
-                "invalid detail",
-            ),
-        ];
-
-        for (syntax_index, (outcome, kind, reason, diagnostic)) in cases.into_iter().enumerate() {
-            let result = host_public_api_result_to_ffi(Err(host::PublicApiProjectionError::from(
-                TscGenerationError::UnavailableOutcome {
-                    subject: TscFailureSubject::Macro {
-                        syntax_index: syntax_index as u32,
-                    },
-                    outcome,
-                },
-            )));
-            let error = result.error.expect("failure must occupy the error rail");
-
-            assert!(result.value.is_none());
-            assert_eq!(error.code, "tsc-generation");
-            assert_eq!(error.detail_code, "unavailable-outcome");
-            assert_eq!(
-                error.subject,
-                PublicApiProjectionSubject::Macro {
-                    syntax_index: syntax_index as u32,
-                }
-            );
-            assert_eq!(error.declaration_shape_reason, None);
-            assert_eq!(error.member_ordinal, None);
-            assert_eq!(error.outcome_kind.as_deref(), Some(kind));
-            assert_eq!(error.outcome_reason.as_deref(), Some(reason));
-            assert_eq!(error.outcome_diagnostic.as_deref(), Some(diagnostic));
-        }
-    }
-
-    #[test]
-    fn public_api_failure_preserves_script_setup_attrs_subject() {
-        let source_range = verter_span::Span::new(31, 37);
-        let result = host_public_api_result_to_ffi(Err(host::PublicApiProjectionError::from(
-            TscGenerationError::UnavailableOutcome {
-                subject: TscFailureSubject::ScriptSetupAttrs { source_range },
-                outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(
-                    verter_compiler::tsc::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
-                )),
-            },
-        )));
-
-        let error = result.error.expect("failure must occupy the error rail");
-        assert_eq!(
-            error.subject,
-            PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
-        );
-        assert_eq!(error.outcome_kind.as_deref(), Some("invalid"));
-        assert_eq!(
-            error.outcome_reason.as_deref(),
-            Some("malformed-or-recovered-type-syntax")
-        );
-        assert_eq!(error.outcome_diagnostic, None);
-    }
-}
-
 pub fn host_preprocessor_request_to_ffi(req: &host::PreprocessorRequest) -> FfiPreprocessorRequest {
     FfiPreprocessorRequest {
         block_type: host_block_type_to_string(req.block_type),
@@ -439,5 +307,137 @@ pub fn host_error_to_string(err: &host::HostError) -> String {
         // Catch-all for scheduler-related errors (feature-gated in verter_session).
         #[allow(unreachable_patterns)]
         other => format!("HostError: {}", other),
+    }
+}
+
+#[cfg(test)]
+mod public_api_tests {
+    use super::*;
+    use verter_compiler::tsc::{
+        TscFailureSubject, TscGenerationError, TscInvalidOutcome, TscUnavailableOutcome,
+    };
+    use verter_macro_dto::{
+        MacroFailure, MacroInvalidReason, MacroPartialReason, UnresolvedReason, UnsupportedReason,
+    };
+
+    #[test]
+    fn public_api_failure_preserves_closed_structured_identity() {
+        let result = host_public_api_result_to_ffi(Err(host::PublicApiProjectionError::from(
+            verter_compiler::tsc::TscGenerationError::UnsupportedDeclarationShape {
+                subject: TscFailureSubject::Macro { syntax_index: 7 },
+                reason: verter_compiler::tsc::TscDeclarationShapeReason::UnsupportedEnumShape,
+            },
+        )));
+
+        assert!(result.value.is_none());
+        let error = result.error.expect("failure must occupy the error rail");
+        assert_eq!(error.code, "tsc-generation");
+        assert_eq!(error.detail_code, "unsupported-declaration-shape");
+        assert_eq!(
+            error.subject,
+            PublicApiProjectionSubject::Macro { syntax_index: 7 }
+        );
+        assert_eq!(
+            error.declaration_shape_reason.as_deref(),
+            Some("unsupported-enum-shape")
+        );
+        assert_eq!(error.member_ordinal, None);
+        assert_eq!(error.outcome_kind, None);
+        assert_eq!(error.outcome_reason, None);
+        assert_eq!(error.outcome_diagnostic, None);
+    }
+
+    #[test]
+    fn public_api_failure_preserves_all_unavailable_outcome_arms() {
+        let cases = [
+            (
+                TscUnavailableOutcome::Partial(MacroFailure::new(
+                    MacroPartialReason::IncompleteTraversal,
+                    Some("partial detail".to_string()),
+                )),
+                "partial",
+                "incomplete-traversal",
+                "partial detail",
+            ),
+            (
+                TscUnavailableOutcome::Unresolved(MacroFailure::new(
+                    UnresolvedReason::AmbiguousReference,
+                    Some("unresolved detail".to_string()),
+                )),
+                "unresolved",
+                "ambiguous-reference",
+                "unresolved detail",
+            ),
+            (
+                TscUnavailableOutcome::Unsupported(MacroFailure::new(
+                    UnsupportedReason::SemanticConstruct,
+                    Some("unsupported detail".to_string()),
+                )),
+                "unsupported",
+                "semantic-construct",
+                "unsupported detail",
+            ),
+            (
+                TscUnavailableOutcome::Invalid(TscInvalidOutcome::Macro(MacroFailure::new(
+                    MacroInvalidReason::NonObjectRoot,
+                    Some("invalid detail".to_string()),
+                ))),
+                "invalid",
+                "non-object-root",
+                "invalid detail",
+            ),
+        ];
+
+        for (syntax_index, (outcome, kind, reason, diagnostic)) in cases.into_iter().enumerate() {
+            let result = host_public_api_result_to_ffi(Err(host::PublicApiProjectionError::from(
+                TscGenerationError::UnavailableOutcome {
+                    subject: TscFailureSubject::Macro {
+                        syntax_index: syntax_index as u32,
+                    },
+                    outcome,
+                },
+            )));
+            let error = result.error.expect("failure must occupy the error rail");
+
+            assert!(result.value.is_none());
+            assert_eq!(error.code, "tsc-generation");
+            assert_eq!(error.detail_code, "unavailable-outcome");
+            assert_eq!(
+                error.subject,
+                PublicApiProjectionSubject::Macro {
+                    syntax_index: syntax_index as u32,
+                }
+            );
+            assert_eq!(error.declaration_shape_reason, None);
+            assert_eq!(error.member_ordinal, None);
+            assert_eq!(error.outcome_kind.as_deref(), Some(kind));
+            assert_eq!(error.outcome_reason.as_deref(), Some(reason));
+            assert_eq!(error.outcome_diagnostic.as_deref(), Some(diagnostic));
+        }
+    }
+
+    #[test]
+    fn public_api_failure_preserves_script_setup_attrs_subject() {
+        let source_range = verter_span::Span::new(31, 37);
+        let result = host_public_api_result_to_ffi(Err(host::PublicApiProjectionError::from(
+            TscGenerationError::UnavailableOutcome {
+                subject: TscFailureSubject::ScriptSetupAttrs { source_range },
+                outcome: TscUnavailableOutcome::Invalid(TscInvalidOutcome::AuthoredTypeSyntax(
+                    verter_compiler::tsc::TscInvalidAuthoredTypeReason::MalformedOrRecoveredTypeSyntax,
+                )),
+            },
+        )));
+
+        let error = result.error.expect("failure must occupy the error rail");
+        assert_eq!(
+            error.subject,
+            PublicApiProjectionSubject::ScriptSetupAttrs { source_range }
+        );
+        assert_eq!(error.outcome_kind.as_deref(), Some("invalid"));
+        assert_eq!(
+            error.outcome_reason.as_deref(),
+            Some("malformed-or-recovered-type-syntax")
+        );
+        assert_eq!(error.outcome_diagnostic, None);
     }
 }

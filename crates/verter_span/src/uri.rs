@@ -10,14 +10,35 @@
 
 /// Convert a filesystem path to a `file://` URI string.
 ///
-/// Normalizes backslashes to forward slashes.
+/// Normalizes backslashes to forward slashes and PERCENT-ENCODES every byte
+/// that is not a valid RFC 3986 path character (spaces, `%`, `#`, `?`,
+/// non-ASCII UTF-8, …). Without the encoding, a workspace path containing a
+/// space produced an invalid URI that strict parsers (`fluent-uri` behind the
+/// LSP `Uri` type) reject — silently dropping the location that carried it.
+/// `/` and the drive `:` stay literal; [`file_uri_to_path`] percent-decodes,
+/// so the pair round-trips.
+///
 /// Produces `file:///C:/...` (Windows) or `file:///home/...` (Unix).
 pub fn path_to_file_uri_string(path: &str) -> String {
     let normalized = path.replace('\\', "/");
-    if normalized.starts_with('/') {
-        format!("file://{normalized}")
+    let mut encoded = String::with_capacity(normalized.len());
+    for byte in normalized.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => encoded.push(byte as char),
+            // RFC 3986 unreserved marks + path separators/segment chars that
+            // stay literal in a file URI path.
+            b'-' | b'.' | b'_' | b'~' | b'/' | b':' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+            | b'*' | b'+' | b',' | b';' | b'=' | b'@' => encoded.push(byte as char),
+            _ => {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
     } else {
-        format!("file:///{normalized}")
+        format!("file:///{encoded}")
     }
 }
 
@@ -249,6 +270,32 @@ mod tests {
             path_to_file_uri_string("/home/user/App.vue"),
             "file:///home/user/App.vue"
         );
+    }
+
+    #[test]
+    fn path_to_file_uri_string_percent_encodes_spaces_and_roundtrips() {
+        // A space is invalid in a URI: unencoded it fails strict `Uri` parses
+        // and the location silently drops. Encode, and round-trip through the
+        // decoder.
+        let uri = path_to_file_uri_string(r"C:\My Projects\demo app\App.vue");
+        assert_eq!(uri, "file:///C:/My%20Projects/demo%20app/App.vue");
+        assert_eq!(file_uri_to_path(&uri), "C:/My Projects/demo app/App.vue");
+    }
+
+    #[test]
+    fn path_to_file_uri_string_percent_encodes_non_ascii_and_hash() {
+        let uri = path_to_file_uri_string("/home/café/a#b.vue");
+        assert_eq!(uri, "file:///home/caf%C3%A9/a%23b.vue");
+        assert_eq!(file_uri_to_path(&uri), "/home/café/a#b.vue");
+    }
+
+    #[test]
+    fn path_to_file_uri_string_percent_encodes_literal_percent() {
+        // A literal `%` must escape to `%25`, else the decoder mis-reads the
+        // following bytes as an escape sequence.
+        let uri = path_to_file_uri_string("/home/user/50%off.vue");
+        assert_eq!(uri, "file:///home/user/50%25off.vue");
+        assert_eq!(file_uri_to_path(&uri), "/home/user/50%off.vue");
     }
 
     #[test]

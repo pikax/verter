@@ -6157,3 +6157,381 @@ fn quote_module_export_name_is_a_complete_ts_string_literal_encoder() {
         );
     }
 }
+
+// ── Quoted / non-identifier prop keys in the public API carrier ──────────────
+//
+// A `defineProps` type literal may declare members whose names are NOT valid TS
+// identifiers (`"onLate-signal"`, `"data-x"`, `"404"`). The synthesized public
+// API carrier must re-quote those keys inside the SINGLE `new(props?: ...)`
+// parameter object. Rendering them bare produces INVALID TypeScript
+// (`{ onLate-signal?: ... }`), which providers error-recover into a corrupted
+// constructor — a phantom second required parameter and an `any` instance —
+// silently disabling consumer prop type-checking.
+
+/// Split the parameter list of every `new(...)` construct signature in `code`
+/// at paren/brace/bracket/angle depth zero and return the per-signature
+/// top-level parameter counts.
+///
+/// `=>` is a single arrow token, NOT a type-argument close: the trailing `>` of
+/// an arrow must not decrement depth, or a function-typed parameter (`(x) =>
+/// void`) poisons the walk — depth would fall to zero early, the scan would
+/// break at the parameter object's own `}`, and it would report only a prefix
+/// (never seeing a second top-level parameter leaked AFTER a function-typed
+/// prop). Type strings in this domain contain no comparison operators, so a `>`
+/// immediately preceded by `=` is unambiguously an arrow.
+fn construct_signature_param_counts(code: &str) -> Vec<usize> {
+    let mut counts = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = code[search_from..].find("new(") {
+        let open = search_from + rel + "new(".len() - 1;
+        let bytes = code.as_bytes();
+        let mut depth = 0i32;
+        let mut params = 0usize;
+        let mut saw_non_ws = false;
+        let mut idx = open;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'(' | b'{' | b'[' | b'<' => depth += 1,
+                // The `>` tail of `=>` is an arrow, not a depth close.
+                b'>' if idx > 0 && bytes[idx - 1] == b'=' => saw_non_ws = true,
+                b')' | b'}' | b']' | b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b',' if depth == 1 => params += 1,
+                b if !b.is_ascii_whitespace() => saw_non_ws = true,
+                _ => {}
+            }
+            idx += 1;
+        }
+        if saw_non_ws {
+            params += 1;
+        }
+        counts.push(params);
+        search_from = open + 1;
+    }
+    counts
+}
+
+#[test]
+fn tsc_codegen_quoted_hyphenated_prop_key_stays_quoted_single_ctor_param() {
+    // Mirrors packages/vue-vscode/e2e/fixtures/single-project/src/GlobalEmitComp.vue.
+    let r = gen_tsc_with(
+        r#"<script setup lang="ts">
+defineProps<{
+  onPing?: (payload: { pingCode: string; pingCount: number }) => void;
+  "onLate-signal"?: (sig: { sigName: string; sigLevel: number }) => void;
+}>()
+</script><template><div>global emit comp</div></template>"#,
+        &[props_fixture(
+            "",
+            &[
+                authored_prop(
+                    "onPing",
+                    true,
+                    "(payload: { pingCode: string; pingCount: number }) => void",
+                    0,
+                    0,
+                ),
+                authored_prop(
+                    "onLate-signal",
+                    true,
+                    "(sig: { sigName: string; sigLevel: number }) => void",
+                    0,
+                    1,
+                ),
+            ],
+        )],
+    );
+
+    // The quoted member name survives INSIDE the props object literal.
+    assert!(
+        r.contains("\"onLate-signal\"?:"),
+        "the quoted hyphenated prop key must be preserved (quoted) in the \
+         synthesized props object: got {}",
+        r
+    );
+    // NEGATIVE: the bare (unquoted) member never appears — it is invalid TS and
+    // is exactly what corrupts provider parsing.
+    assert!(
+        !r.contains(" onLate-signal?:") && !r.contains(";onLate-signal?:"),
+        "the hyphenated key must never render unquoted (invalid TS member): got {}",
+        r
+    );
+    // STRUCTURE: every construct signature has exactly ONE top-level parameter
+    // (`props?`) — the quoted key never leaks out as a second parameter.
+    let counts = construct_signature_param_counts(&r);
+    assert!(
+        !counts.is_empty() && counts.iter().all(|&c| c == 1),
+        "every `new(...)` signature must have exactly one `props?` parameter, \
+         got counts {:?} in: {}",
+        counts,
+        r
+    );
+    // The untouched identifier sibling still renders bare.
+    assert!(
+        r.contains("onPing?:"),
+        "identifier keys stay unquoted: got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_awkward_prop_keys_requote_data_dash_and_numeric() {
+    let r = gen_tsc_with(
+        r#"<script setup lang="ts">
+defineProps<{
+  "data-x"?: string;
+  "404": number;
+  plain: boolean;
+}>()
+</script><template/>"#,
+        &[props_fixture(
+            "",
+            &[
+                authored_prop("data-x", true, "string", 0, 0),
+                authored_prop("404", false, "number", 0, 1),
+                authored_prop("plain", false, "boolean", 0, 2),
+            ],
+        )],
+    );
+
+    assert!(
+        r.contains("\"data-x\"?:"),
+        "`data-x` must stay quoted: got {}",
+        r
+    );
+    assert!(
+        r.contains("\"404\":"),
+        "numeric-like key must stay quoted: got {}",
+        r
+    );
+    assert!(
+        !r.contains(" data-x?:") && !r.contains("; 404:"),
+        "awkward keys must never render bare: got {}",
+        r
+    );
+    let counts = construct_signature_param_counts(&r);
+    assert!(
+        !counts.is_empty() && counts.iter().all(|&c| c == 1),
+        "single `props?` parameter regardless of awkward keys, got {:?} in: {}",
+        counts,
+        r
+    );
+    assert!(
+        r.contains("plain: boolean"),
+        "identifier key untouched: {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_testing_mode_quoted_prop_key_stays_quoted() {
+    // The Testing-mode carrier renders the same full-props surface and must
+    // apply the same re-quoting.
+    let r = gen_tsc_mode_with(
+        r#"<script setup lang="ts">
+defineProps<{
+  onPing?: () => void;
+  "onLate-signal"?: (sig: { sigName: string }) => void;
+}>()
+</script><template/>"#,
+        TscMode::Testing,
+        &[props_fixture(
+            "",
+            &[
+                authored_prop("onPing", true, "() => void", 0, 0),
+                authored_prop(
+                    "onLate-signal",
+                    true,
+                    "(sig: { sigName: string }) => void",
+                    0,
+                    1,
+                ),
+            ],
+        )],
+    )
+    .code;
+
+    assert!(
+        r.contains("\"onLate-signal\"?:"),
+        "testing carrier preserves the quoted key: got {}",
+        r
+    );
+    assert!(
+        !r.contains(" onLate-signal?:"),
+        "testing carrier never renders the key bare: got {}",
+        r
+    );
+    let counts = construct_signature_param_counts(&r);
+    assert!(
+        !counts.is_empty() && counts.iter().all(|&c| c == 1),
+        "testing carrier keeps one `props?` parameter, got {:?} in: {}",
+        counts,
+        r
+    );
+}
+
+// ── D9 fix: complete member-key coverage, sound scan, cooked-spelling ─────────
+
+#[test]
+fn render_member_key_operates_on_cooked_value_never_guesses_already_quoted() {
+    use super::script::render_member_key;
+
+    // A genuinely bare identifier stays bare — no over-quote regression on
+    // valid keys.
+    assert_eq!(render_member_key("plainKey"), "plainKey");
+    assert_eq!(render_member_key("$_ident0"), "$_ident0");
+
+    // A hyphenated / non-identifier cooked key is re-quoted through the shared
+    // encoder.
+    assert_eq!(render_member_key("data-x"), "\"data-x\"");
+
+    // A numeric-like key (not a valid identifier) is quoted, not emitted bare.
+    assert_eq!(render_member_key("404"), "\"404\"");
+
+    // THE cooked/source conflation: the source key `'"x"'` COOKS to the
+    // three-character value `"x"` (quote, x, quote). The old `already_quoted`
+    // heuristic saw the leading+trailing quote and passed it through as key
+    // `x` — silently dropping the real quote characters. Operating on the
+    // COOKED value, it must render as the literal whose VALUE is `"x"`, i.e.
+    // the escaped `"\"x\""`.
+    assert_eq!(render_member_key("\"x\""), "\"\\\"x\\\"\"");
+
+    // A keyword is not a legal bare member-name-as-identifier in this context's
+    // conservative classifier, so it is quoted (always-valid TS).
+    assert_eq!(render_member_key("class"), "\"class\"");
+}
+
+#[test]
+fn string_literal_escapers_preserve_quote_style_and_escape_specials() {
+    use super::script::{escape_string_literal_body, quote_single_string_literal};
+
+    // Single-quoted context escapes `'` and `\` but leaves `"` raw.
+    assert_eq!(quote_single_string_literal("plain"), "'plain'");
+    assert_eq!(quote_single_string_literal("a'b"), "'a\\'b'");
+    assert_eq!(quote_single_string_literal("a\\b"), "'a\\\\b'");
+    assert_eq!(quote_single_string_literal("say \"hi\""), "'say \"hi\"'");
+
+    // The active delimiter is escaped; the opposite quote passes through raw.
+    assert_eq!(escape_string_literal_body("a\"b", '\''), "a\"b");
+    assert_eq!(escape_string_literal_body("a\"b", '"'), "a\\\"b");
+    assert_eq!(escape_string_literal_body("a'b", '\''), "a\\'b");
+
+    // Control chars / line terminators never emitted raw.
+    assert_eq!(escape_string_literal_body("a\nb", '\''), "a\\nb");
+    assert_eq!(escape_string_literal_body("a\u{0001}b", '"'), "a\\u0001b");
+}
+
+#[test]
+fn construct_signature_param_counts_counts_across_function_typed_params() {
+    // The oracle must survive `=>` in a function-typed parameter. A synthetic
+    // two-parameter construct signature whose FIRST parameter is a
+    // function-typed object exercises the exact shape the unsound scan
+    // (decrementing depth on every `>`, including each `=>`) could not see: it
+    // broke at the props object's `}` and reported only ONE parameter, so it
+    // could never detect a leaked `, onLate: any` AFTER a function-typed prop.
+    let two_param = "class C {\n  \
+        new(props?: { onPing?: (p: { c: number }) => void }, onLate: any): Instance\n}";
+    assert_eq!(
+        construct_signature_param_counts(two_param),
+        vec![2],
+        "the scan must count BOTH top-level parameters across the function-typed \
+         first parameter's `=>`"
+    );
+
+    // A single-parameter signature that itself contains multiple arrows still
+    // counts as one parameter.
+    let one_param = "class C {\n  \
+        new(props?: { a?: () => void; b?: (x: number) => string }): Instance\n}";
+    assert_eq!(
+        construct_signature_param_counts(one_param),
+        vec![1],
+        "a lone `props?` parameter with inner arrows is one parameter"
+    );
+}
+
+#[test]
+fn tsc_codegen_quoted_expose_key_stays_quoted_public() {
+    // defineExpose with a quoted, hyphenated key. Pre-fix the expose member was
+    // pushed bare (`data-x: typeof val`) inside `ShallowUnwrapRef<{ … }>` — the
+    // same invalid-TS member corruption the props path was fixed for.
+    let r = gen_tsc(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const val = ref(42)
+defineExpose({ "data-x": val })
+</script><template/>"#,
+    );
+
+    assert!(
+        r.contains("\"data-x\": typeof val"),
+        "quoted expose key must stay quoted: got {}",
+        r
+    );
+    assert!(
+        !r.contains(" data-x: typeof") && !r.contains("{ data-x:") && !r.contains("; data-x:"),
+        "expose key must never render bare (invalid TS member): got {}",
+        r
+    );
+}
+
+#[test]
+fn tsc_codegen_quoted_expose_key_stays_quoted_declaration() {
+    // The Declaration carrier emits the same instance shape but with a
+    // placeholder member type (`unknown`); the key must still be quoted.
+    let d = gen_tsc_declaration(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const val = ref(42)
+defineExpose({ "data-x": val })
+</script><template/>"#,
+    );
+
+    assert!(
+        d.contains("\"data-x\": unknown"),
+        "quoted expose key must stay quoted in the declaration carrier: got {}",
+        d
+    );
+    assert!(
+        !d.contains(" data-x: unknown") && !d.contains("{ data-x:"),
+        "declaration expose key must never render bare: got {}",
+        d
+    );
+}
+
+#[test]
+fn tsc_codegen_quoted_define_options_key_stays_quoted() {
+    // A non-identifier defineOptions key flows to `options_extras` and was
+    // pushed bare into the runtime `defineComponent({ … })` object literal —
+    // invalid JS/TS. It must be re-quoted.
+    let sfc = r#"<script setup lang="ts">
+defineOptions({ "custom-opt": true })
+</script><template/>"#;
+
+    let public = gen_tsc(sfc);
+    assert!(
+        public.contains("\"custom-opt\": true"),
+        "quoted defineOptions key must stay quoted (public): got {}",
+        public
+    );
+    assert!(
+        !public.contains(" custom-opt: true"),
+        "defineOptions key must never render bare (public): got {}",
+        public
+    );
+
+    let testing = gen_tsc_testing(sfc);
+    assert!(
+        testing.contains("\"custom-opt\": true"),
+        "quoted defineOptions key must stay quoted (testing): got {}",
+        testing
+    );
+    assert!(
+        !testing.contains(" custom-opt: true"),
+        "defineOptions key must never render bare (testing): got {}",
+        testing
+    );
+}

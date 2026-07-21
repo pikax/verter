@@ -256,16 +256,13 @@ async fn namespaced_component_tag_resolves_member_props_tsgo() {
     session.shutdown().await;
 }
 
-// TRACKED GAP (tsgo-only): tsgo's pull-diagnostics for a Verter-generated carrier
-// `.tsx` do NOT resolve tsconfig `paths` aliases, so a `@/`-aliased import
-// surfaces `TS2307 Cannot find module '@/...'` in the merged diagnostics —
-// even though tsgo HOVER on the same carrier resolves `@/` correctly, and
-// tsserver's diagnostics DO resolve it. The carrier-diagnostics program tsgo
-// builds is missing the tsconfig path-mapping the hover request has. This test
-// asserts the DESIRED behavior (no TS2307 for the `@/` module) so it FAILS
-// today on tsgo and PASSES once tsgo's carrier-diagnostics program is configured
-// with the project's path mappings; it is discriminating, not a stub.
-#[ignore = "ESCALATED tsgo-provider-program gap: tsgo's pull-diagnostics program for the carrier .tsx omits the tsconfig `paths` mapping the hover program has (emits TS2307 for @/ where hover + tsserver-diagnostics resolve it) — a tsgo provider program-construction wiring issue in the TypeProvider layer, not a Verter-owned analysis/codegen/resolver fix"]
+// Regression guard (formerly a tracked tsgo-only gap, freshly DISPROVEN):
+// tsgo's pull-diagnostics for a Verter-generated carrier `.tsx` now resolve
+// tsconfig `paths` aliases — the merged diagnostics carry NO
+// `TS2307 Cannot find module '@/...'` for the aliased import, matching hover
+// and tsserver-diagnostics behavior. Non-vacuity: the same merged set DOES
+// carry the benign no-node_modules `2307 Cannot find module 'vue'`, proving
+// the pull-diagnostics pipeline is live when the alias assertion runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn carrier_diagnostics_resolve_path_alias_tsgo() {
     let Some(session) =
@@ -279,7 +276,7 @@ async fn carrier_diagnostics_resolve_path_alias_tsgo() {
     let uri = session.open_fixture_file("src/AppBarrel.vue").await;
     session.open_fixture_file("src/components/MyComp.vue").await;
     if session
-        .wait_until_ready(&uri, "{{ count }}", 3, "count")
+        .require_or_skip_ready(&uri, "{{ count }}", 3, "count")
         .await
     {
         let diags = session.merged_diagnostics(&uri).await;

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
@@ -897,7 +897,7 @@ fn test_css_nav_template_id_to_style() {
 }
 
 #[test]
-fn test_css_nav_dynamic_class_skipped() {
+fn test_css_nav_dynamic_class_object_key_navigates() {
     let source = "<template>\n  <div :class=\"{ active: true }\"></div>\n</template>\n\n<style>\n.active { }\n</style>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -978,11 +978,21 @@ fn test_css_nav_dynamic_class_skipped() {
         None,
         None,
     );
-    // Should NOT navigate — it's a dynamic class binding
-    assert!(
-        result.is_none(),
-        "dynamic :class should not trigger CSS navigation"
-    );
+    // A resolvable `:class` object KEY navigates to its declaring rule —
+    // the key names a class, not a script binding.
+    let result = result.expect(":class object key with a matching rule must navigate");
+    if let GotoDefinitionResponse::Scalar(loc) = result {
+        // Should land exactly on "active" inside `.active { }` in style.
+        let style_active_offset = source.rfind("active").unwrap() as u32;
+        let expected_start = line_index.offset_to_position(style_active_offset).unwrap();
+        let expected_end = line_index
+            .offset_to_position(style_active_offset + "active".len() as u32)
+            .unwrap();
+        assert_eq!(loc.range.start, expected_start);
+        assert_eq!(loc.range.end, expected_end);
+    } else {
+        panic!("expected scalar location for the single declaring rule");
+    }
 }
 
 #[test]
@@ -1075,8 +1085,15 @@ fn test_css_nav_style_to_template() {
     );
 
     if let Some(GotoDefinitionResponse::Scalar(loc)) = result {
-        let expected_start = line_index.offset_to_position(class_attr_start).unwrap();
+        // Exact value-token range: the "btn" inside class="btn", not the
+        // whole attribute.
+        let token_start = source.find("class=\"btn\"").unwrap() as u32 + "class=\"".len() as u32;
+        let expected_start = line_index.offset_to_position(token_start).unwrap();
+        let expected_end = line_index
+            .offset_to_position(token_start + "btn".len() as u32)
+            .unwrap();
         assert_eq!(loc.range.start, expected_start);
+        assert_eq!(loc.range.end, expected_end);
     } else {
         panic!("expected scalar location");
     }
@@ -2808,4 +2825,682 @@ fn test_script_context_vue_import_default_fallback() {
     } else {
         panic!("expected scalar location");
     }
+}
+
+// =====================================================================
+// B4: hierarchy-aware multi-target class navigation + fail-closed
+// =====================================================================
+
+/// Minimal element builder for CSS-navigation tests.
+fn css_nav_element(
+    tag: &str,
+    class_value: &str,
+    attr_span: verter_span::Span,
+    el_span: verter_span::Span,
+    parent_index: Option<u32>,
+    nesting_depth: u16,
+) -> verter_semantic::analysis::template::TemplateElement {
+    use verter_semantic::analysis::template::*;
+    TemplateElement {
+        tag: tag.to_string(),
+        namespace: ElementNamespace::Html,
+        attributes: vec![TemplateAttribute {
+            name: "class".to_string(),
+            value: Some(class_value.to_string()),
+            is_dynamic: false,
+            span: attr_span,
+            name_end: attr_span.start + 5,
+            value_span: None,
+        }],
+        nesting_depth,
+        parent_index,
+        span: el_span,
+        ..Default::default()
+    }
+}
+
+/// Two rules declare `.title`; the one whose selector matches the elements
+/// ancestry ranks first; ALL declaration locations are returned.
+#[test]
+fn css_class_definition_returns_all_declaring_rules_hierarchy_first() {
+    let source = "<template>\n  <div class=\"card\"><span class=\"title\"></span></div>\n</template>\n<style scoped>\n.other .title { color: blue; }\n.card .title { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+
+    let card_attr = source.find("class=\"card\"").unwrap() as u32;
+    let title_attr = source.find("class=\"title\"").unwrap() as u32;
+    let div_start = source.find("<div").unwrap() as u32;
+    let span_start = source.find("<span").unwrap() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![
+                    css_nav_element(
+                        "div",
+                        "card",
+                        verter_span::Span::new(card_attr, card_attr + 12),
+                        verter_span::Span::new(div_start, div_start + 60),
+                        None,
+                        0,
+                    ),
+                    css_nav_element(
+                        "span",
+                        "title",
+                        verter_span::Span::new(title_attr, title_attr + 13),
+                        verter_span::Span::new(span_start, span_start + 25),
+                        Some(0),
+                        1,
+                    ),
+                ],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    // Cursor on "title" inside class="title"
+    let cursor = source.find("class=\"title\"").unwrap() + 7;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("class with two declaring rules must navigate");
+
+    let locations = match result {
+        GotoDefinitionResponse::Array(locs) => locs,
+        other => panic!("expected Array of declaration locations, got {other:?}"),
+    };
+    assert_eq!(locations.len(), 2, "both declaring rules are targets");
+
+    // First target = the hierarchy-matching `.card .title` rule token.
+    let card_title_token = source.find(".card .title").unwrap() + ".card .".len();
+    let expected_first = line_index
+        .offset_to_position(card_title_token as u32)
+        .unwrap();
+    assert_eq!(
+        locations[0].range.start, expected_first,
+        "hierarchy-matching rule ranks first"
+    );
+
+    // Second target = the non-matching `.other .title` declaration.
+    let other_title_token = source.find(".other .title").unwrap() + ".other .".len();
+    let expected_second = line_index
+        .offset_to_position(other_title_token as u32)
+        .unwrap();
+    assert_eq!(locations[1].range.start, expected_second);
+}
+
+/// A class token with NO declaring rule fails closed even when a script
+/// binding shares the name — never a mis-mapped jump into the script.
+#[test]
+fn css_class_definition_fails_closed_on_no_rule_despite_binding_collision() {
+    let source = "<template>\n  <div class=\"primary\"></div>\n</template>\n<script setup>\nconst primary = 1\n</script>\n<style scoped>\n.unrelated { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"primary\"").unwrap() as u32;
+    let binding_start = source.find("const primary").unwrap() as u32 + 6;
+
+    let analysis = FileAnalysisSnapshot {
+        bindings: vec![AnalyzedBinding {
+            name: "primary".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(binding_start, binding_start + 7),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![css_nav_element(
+                    "div",
+                    "primary",
+                    verter_span::Span::new(attr, attr + 15),
+                    verter_span::Span::new(attr - 7, attr + 17),
+                    None,
+                    0,
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    let cursor = source.find("class=\"primary\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
+    assert!(
+        result.is_none(),
+        "a class token without a rule must produce NO definition (not the binding)"
+    );
+}
+
+/// `:deep(.inner)` inner classes are reachable targets from the template.
+#[test]
+fn css_class_definition_reaches_deep_inner_class() {
+    let source = "<template>\n  <div class=\"inner\"></div>\n</template>\n<style scoped>\n.wrap :deep(.inner) { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"inner\"").unwrap() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![css_nav_element(
+                    "div",
+                    "inner",
+                    verter_span::Span::new(attr, attr + 13),
+                    verter_span::Span::new(attr - 7, attr + 15),
+                    None,
+                    0,
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    let cursor = source.find("class=\"inner\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect(":deep inner class must be a reachable declaration target");
+
+    let expected = source.find(":deep(.inner)").unwrap() + ":deep(.".len();
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+/// Nested SCSS classes are definition targets with exact spans.
+#[test]
+fn css_class_definition_reaches_nested_scss_class() {
+    let source = "<template>\n  <div class=\"title\"></div>\n</template>\n<style lang=\"scss\" scoped>\n.card {\n  .title { color: red; }\n}\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"title\"").unwrap() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![css_nav_element(
+                    "div",
+                    "title",
+                    verter_span::Span::new(attr, attr + 13),
+                    verter_span::Span::new(attr - 7, attr + 15),
+                    None,
+                    0,
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
+            verter_semantic::analysis::StyleAnalysisLang::Scss,
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    let cursor = source.find("class=\"title\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("nested scss class must be a definition target");
+
+    let expected = source.find(".title { color: red;").unwrap() + 1;
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+/// A kebab-case class token navigates even with the caret ON the hyphen
+/// (no identifier word at that position — the positional path must serve it).
+#[test]
+fn css_class_definition_kebab_token_at_hyphen_position() {
+    let source = "<template>\n  <div class=\"my-card\"></div>\n</template>\n<style scoped>\n.my-card { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"my-card\"").unwrap() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![css_nav_element(
+                    "div",
+                    "my-card",
+                    verter_span::Span::new(attr, attr + 15),
+                    verter_span::Span::new(attr - 7, attr + 17),
+                    None,
+                    0,
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    // Caret exactly on the hyphen of my-card.
+    let cursor = source.find("class=\"my-card\"").unwrap() + 7 + "my".len();
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("kebab class token must navigate from the hyphen position");
+
+    let expected = source.find(".my-card {").unwrap() + 1;
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// B4: Svelte markup class intelligence (markup tokens, no template IR)
+// =====================================================================
+
+/// Build a Svelte-shaped analysis snapshot: no template element IR, markup
+/// class tokens + scoped-by-default scanned styles.
+fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
+    let blocks = scan_sfc_blocks(source);
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+
+    // Markup tokens: every `class="..."` value word + every `class:x` local.
+    let mut tokens = Vec::new();
+    let mut search = 0usize;
+    while let Some(rel) = source[search..].find("class=\"") {
+        let val_start = search + rel + 7;
+        let val_end = val_start + source[val_start..].find('"').unwrap();
+        // Only markup-side tokens (before the style block).
+        if (val_start as u32) < scs {
+            let mut pos = val_start;
+            for word in source[val_start..val_end].split_whitespace() {
+                let ws = source[pos..val_end].find(word).unwrap() + pos;
+                tokens.push(verter_semantic::analysis::MarkupClassToken {
+                    name: word.to_string(),
+                    span: verter_span::Span::new(ws as u32, (ws + word.len()) as u32),
+                    from_directive: false,
+                });
+                pos = ws + word.len();
+            }
+        }
+        search = val_end + 1;
+    }
+    let mut search = 0usize;
+    while let Some(rel) = source[search..].find("class:") {
+        let name_start = search + rel + 6;
+        let name_end = name_start
+            + source[name_start..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(source.len() - name_start);
+        if (name_start as u32) < scs {
+            tokens.push(verter_semantic::analysis::MarkupClassToken {
+                name: source[name_start..name_end].to_string(),
+                span: verter_span::Span::new(name_start as u32, name_end as u32),
+                from_directive: true,
+            });
+        }
+        search = name_end;
+    }
+
+    FileAnalysisSnapshot {
+        template: None,
+        markup_class_tokens: std::sync::Arc::new(tokens),
+        styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
+            verter_semantic::analysis::StyleAnalysisLang::Css,
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            true, // svelte: scoped by default
+            false,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    }
+}
+
+/// Svelte `class="card"` navigates to the component style rule's class token.
+#[test]
+fn svelte_class_attr_definition_to_style_rule() {
+    let source = "<div class=\"card\"></div>\n<style>\n.card { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find("class=\"card\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("svelte class token must navigate to its rule");
+
+    let expected = source.find(".card {").unwrap() + 1;
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+/// Svelte `class:open` directives navigate to the `.open` rule.
+#[test]
+fn svelte_class_directive_definition_to_style_rule() {
+    let source = "<div class:open={cond}></div>\n<style>\n.open { display: block; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find("class:open").unwrap() + 7;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("svelte class: directive must navigate to its rule");
+
+    let expected = source.find(".open {").unwrap() + 1;
+    let expected_pos = line_index.offset_to_position(expected as u32).unwrap();
+    match result {
+        GotoDefinitionResponse::Scalar(loc) => assert_eq!(loc.range.start, expected_pos),
+        other => panic!("expected scalar, got {other:?}"),
+    }
+}
+
+/// A svelte class token with no declaring rule fails closed.
+#[test]
+fn svelte_class_token_without_rule_fails_closed() {
+    let source = "<div class=\"ghost\"></div>\n<style>\n.real { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find("class=\"ghost\"").unwrap() + 8;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
+    assert!(
+        result.is_none(),
+        "rule-less svelte class token: no definition"
+    );
+}
+
+/// From the style side, `.card` navigates to every markup usage token.
+#[test]
+fn svelte_style_class_definition_to_markup_usages() {
+    let source = "<div class=\"card\"></div>\n<span class=\"card\"></span>\n<style>\n.card { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let analysis = svelte_css_analysis(source);
+
+    let cursor = source.find(".card {").unwrap() + 2;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    )
+    .expect("style class must navigate to markup usages");
+
+    let locations = match result {
+        GotoDefinitionResponse::Array(locs) => locs,
+        GotoDefinitionResponse::Scalar(loc) => vec![loc],
+        other => panic!("unexpected response {other:?}"),
+    };
+    assert_eq!(locations.len(), 2, "both markup usages are targets");
+}
+
+/// FAIL-CLOSED: a `<style module>` rule is NOT a definition target for a
+/// plain `class="btn"` token — module classes compile to hashed local names
+/// addressable only through the TS-owned `$style.*` surface. The identical
+/// non-module block is the discriminating control.
+#[test]
+fn module_class_rule_is_not_a_same_file_definition_target() {
+    for (style_tag, module_expected_none) in [("<style module>", true), ("<style>", false)] {
+        let source = format!(
+            "<template>\n  <div class=\"btn\"></div>\n</template>\n{style_tag}\n.btn {{ color: red; }}\n</style>\n"
+        );
+        let source = source.as_str();
+        let blocks = scan_sfc_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        let (scs, sce) = style_block.content_range();
+        let style_css = &source[scs as usize..sce as usize];
+        let attr = source.find("class=\"btn\"").unwrap() as u32;
+        let div_start = source.find("<div").unwrap() as u32;
+
+        let analysis = FileAnalysisSnapshot {
+            template: Some(
+                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                    elements: vec![css_nav_element(
+                        "div",
+                        "btn",
+                        verter_span::Span::new(attr, attr + 11),
+                        verter_span::Span::new(div_start, div_start + 22),
+                        None,
+                        0,
+                    )],
+                    ..Default::default()
+                })
+                .into(),
+            ),
+            styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+                style_css,
+                verter_semantic::analysis::VueStyleInput::default(),
+                false,
+                module_expected_none,
+                None,
+                scs,
+            )])
+            .into(),
+            ..Default::default()
+        };
+
+        let cursor = source.find("class=\"btn\"").unwrap() + 7;
+        let position = line_index.offset_to_position(cursor as u32).unwrap();
+        let result = css_only_definition_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&analysis),
+            &line_index,
+        );
+        if module_expected_none {
+            assert!(
+                result.is_none(),
+                "a module-declared class must fail closed for plain class tokens: {result:?}"
+            );
+        } else {
+            assert!(
+                result.is_some(),
+                "control: the identical non-module rule IS a definition target"
+            );
+        }
+    }
+}
+
+/// FAIL-CLOSED: a class token INSIDE a `<style module>` block is not a
+/// css-native navigation origin (style → usages stays dead); `$style.*`
+/// navigation is TS-owned.
+#[test]
+fn module_style_class_token_is_not_a_navigation_origin() {
+    let source = "<template>\n  <div class=\"btn\"></div>\n</template>\n<style module>\n.btn { color: red; }\n</style>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+    let (scs, sce) = style_block.content_range();
+    let style_css = &source[scs as usize..sce as usize];
+    let attr = source.find("class=\"btn\"").unwrap() as u32;
+    let div_start = source.find("<div").unwrap() as u32;
+
+    let analysis = FileAnalysisSnapshot {
+        template: Some(
+            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                elements: vec![css_nav_element(
+                    "div",
+                    "btn",
+                    verter_span::Span::new(attr, attr + 11),
+                    verter_span::Span::new(div_start, div_start + 22),
+                    None,
+                    0,
+                )],
+                ..Default::default()
+            })
+            .into(),
+        ),
+        styles: (vec![verter_semantic::analysis::build_css_style_analysis(
+            style_css,
+            verter_semantic::analysis::VueStyleInput::default(),
+            false,
+            true,
+            None,
+            scs,
+        )])
+        .into(),
+        ..Default::default()
+    };
+
+    // Cursor on "btn" in the module block's `.btn` selector.
+    let cursor = source.find(".btn { color").unwrap() + 1;
+    let position = line_index.offset_to_position(cursor as u32).unwrap();
+    let result =
+        css_only_definition_at_position(&position, source, &blocks, Some(&analysis), &line_index);
+    assert!(
+        result.is_none(),
+        "a module class token must not navigate to plain-class usages: {result:?}"
+    );
 }

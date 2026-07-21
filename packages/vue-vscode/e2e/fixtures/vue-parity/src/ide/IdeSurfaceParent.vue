@@ -18,6 +18,10 @@ function onMyEvent(payload: string): void {
 
 const myPropValue = "kebab-prop";
 
+function vMyThing(el: HTMLElement, binding: { value: string }) {
+  el.dataset.myThing = binding.value;
+}
+
 interface IdePerson {
   name: string;
   age: number;
@@ -57,6 +61,10 @@ const person: IdePerson | null = { name: "Ada", age: 36 };
     <div v-if="person">
       <span>{{ person.name }}</span>
     </div>
+
+    <!-- CUSTOM_DIRECTIVE_SITE -->
+    <b v-my-thing="label">directive</b>
+    <i v-nope="label">unknown directive</i>
 
     <!-- PROP_COMPLETE_SITE -->
     <!-- SLOT_NAME_COMPLETE_SITE -->

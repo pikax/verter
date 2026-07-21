@@ -51,8 +51,27 @@ pub enum TemplateCursorContext {
     },
     /// v-model modifier: `v-model.laz|`
     VModelModifier { existing_modifiers: Vec<String> },
-    /// Directive argument: `v-slot:|name` or `v-bind:|prop`
+    /// Directive argument: `v-bind:|prop`
     DirectiveArgument { directive: String, tag_name: String },
+    /// Slot NAME position on a `v-slot` / `#` shorthand: `<template #|>`,
+    /// `<template v-slot:|>`, `<template #he|>`, `<MyComp #|>` (D5). The
+    /// child component's declared slots surface supplies the items.
+    SlotName {
+        /// Tag owning the slot attribute (`template` or the component tag).
+        tag_name: String,
+        /// Whether the slot attribute sits directly on a component element.
+        is_component: bool,
+    },
+    /// Svelte `{#snippet |` block-head name position inside a component (D5):
+    /// completing the snippet-slot name the child accepts (its snippet-typed
+    /// props).
+    SvelteSnippetName {
+        /// The enclosing component tag.
+        tag_name: String,
+    },
+    /// Svelte `{@render |}` callee position (D5): completing an in-scope
+    /// snippet name (local `{#snippet}` declarations + snippet-typed props).
+    SvelteRenderCallee,
     /// Expression inside a dynamic prop: `:prop="expr|"`
     /// Or v-if/v-show/v-for/v-slot expression
     Expression {
@@ -119,6 +138,30 @@ pub enum StyleCursorContext {
     General,
 }
 
+/// Framework ownership of root markup. Vue templates live only inside an
+/// explicit `<template>` SFC block; Svelte markup lives at carrier root (where
+/// `<template>` itself is an ordinary element).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierTemplateLanguage {
+    Vue,
+    Svelte,
+}
+
+impl CarrierTemplateLanguage {
+    pub fn from_uri(uri: &str) -> Option<Self> {
+        let language = verter_session::LanguageRegistry::global()
+            .classify_static(uri)
+            .static_resolution();
+        if language.is_svelte() {
+            Some(Self::Svelte)
+        } else if language.is_framework_carrier() {
+            Some(Self::Vue)
+        } else {
+            None
+        }
+    }
+}
+
 // =============================================================================
 // Layer 1: AST-Based Structural Detection
 // =============================================================================
@@ -133,12 +176,63 @@ pub fn classify_cursor_context(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
+    classify_cursor_context_for_language(offset, source, blocks, analysis, None)
+}
+
+pub fn classify_cursor_context_for_language(
+    offset: u32,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    language: Option<CarrierTemplateLanguage>,
+) -> CursorContext {
+    // Svelte has no Vue-style `<template>` or custom SFC blocks: all paired
+    // root elements/components are ordinary template markup. Only script/style
+    // participate in SFC block classification.
+    let svelte_blocks = (language == Some(CarrierTemplateLanguage::Svelte)).then(|| {
+        blocks
+            .iter()
+            .filter(|block| matches!(block.tag_name.as_str(), "script" | "style"))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let blocks = svelte_blocks.as_deref().unwrap_or(blocks);
+
     // Step 1: SFC block detection using existing scanner
     match classify_cursor(offset, blocks) {
-        SfcCursorContext::RootLevel => return CursorContext::RootLevel,
+        SfcCursorContext::RootLevel => {
+            return classify_root_or_template_context(offset, source, blocks, analysis, language);
+        }
         SfcCursorContext::OpeningTag { block_index } => {
+            let block = &blocks[block_index];
+            // D5: an unterminated nested `<template #…` (slot outlet being
+            // typed) can surface here as a phantom SFC block opening tag
+            // because the depth-ignorant scanner closed the real template
+            // block at an earlier nested `</template>`. Recover the slot-name
+            // context from source before treating it as an SFC block tag.
+            if language == Some(CarrierTemplateLanguage::Vue) {
+                if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+                    return CursorContext::Template(ctx);
+                }
+            }
+            let has_explicit_template_block = blocks.iter().any(|item| item.tag_name == "template");
+            let inside_template_content = blocks.iter().any(|item| {
+                let (start, end) = item.content_range();
+                item.tag_name == "template" && offset >= start && offset <= end
+            });
+            if language == Some(CarrierTemplateLanguage::Vue)
+                && has_explicit_template_block
+                && !inside_template_content
+                && block
+                    .tag_name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_uppercase())
+            {
+                return CursorContext::RootLevel;
+            }
             return CursorContext::BlockOpeningTag {
-                tag_name: blocks[block_index].tag_name.clone(),
+                tag_name: block.tag_name.clone(),
             };
         }
         SfcCursorContext::ClosingTag { .. } => return CursorContext::BlockClosingTag,
@@ -151,17 +245,238 @@ pub fn classify_cursor_context(
         offset >= cs && offset <= ce
     }) {
         Some(b) => b,
-        None => return CursorContext::RootLevel,
+        None => {
+            return classify_root_or_template_context(offset, source, blocks, analysis, language);
+        }
     };
 
     match block.tag_name.as_str() {
         "script" => CursorContext::Script,
         "template" => classify_template_context(offset, source, analysis),
         "style" => classify_style_context(offset, blocks, analysis),
-        tag_name => CursorContext::CustomBlock {
-            tag_name: tag_name.to_string(),
-        },
+        tag_name => {
+            // D5: the depth-ignorant SFC scanner closes the real template
+            // block at the first nested `</template>`, so a component usage
+            // after a closed nested slot template surfaces here as a phantom
+            // custom block. A slot-name token inside it is template markup —
+            // recover the slot-name context from source for Vue.
+            if language == Some(CarrierTemplateLanguage::Vue) {
+                if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+                    return CursorContext::Template(ctx);
+                }
+            }
+            CursorContext::CustomBlock {
+                tag_name: tag_name.to_string(),
+            }
+        }
     }
+}
+
+/// Svelte markup lives at SFC root level rather than inside a `<template>`
+/// block. When semantic analysis places the cursor inside an element, classify
+/// that root span through the normal template path; genuine SFC root positions
+/// remain root-level.
+fn classify_root_or_template_context(
+    offset: u32,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    language: Option<CarrierTemplateLanguage>,
+) -> CursorContext {
+    let has_explicit_template_block = blocks.iter().any(|block| block.tag_name == "template");
+    let inside_explicit_template = blocks.iter().any(|block| {
+        let (start, end) = block.content_range();
+        block.tag_name == "template"
+            && offset >= start
+            && (offset < end
+                || (offset == end
+                    && block.close_tag_start == block.close_tag_end
+                    && end as usize == source.len()))
+    });
+    let is_template_position = analysis
+        .and_then(|snapshot| snapshot.template.as_ref())
+        .is_some_and(|template| {
+            find_deepest_element(offset, &template.elements).is_some()
+                || template
+                    .components
+                    .iter()
+                    .any(|component| offset >= component.span.start && offset < component.span.end)
+        });
+    // Svelte block-head completion contexts (D5): `{#snippet |` (slot-name the
+    // enclosing component accepts) and `{@render |` (in-scope snippet callee).
+    // These fire on a bounded same-line scan before the generic classification;
+    // both positions are otherwise indistinguishable from text content.
+    if language == Some(CarrierTemplateLanguage::Vue) {
+        if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+            return CursorContext::Template(ctx);
+        }
+    }
+    if language == Some(CarrierTemplateLanguage::Svelte) {
+        let line_start = source[..offset as usize]
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        let before_cursor = &source[line_start..offset as usize];
+        // The marker must be the LAST thing before the cursor: `{#snippet `
+        // or `{@render ` followed only by an in-progress identifier.
+        let snippet_head = before_cursor.rfind("{#snippet ").is_some_and(|idx| {
+            before_cursor[idx + "{#snippet ".len()..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '$')
+        });
+        if snippet_head {
+            let tag_name = analysis
+                .and_then(|snapshot| snapshot.template.as_ref())
+                .and_then(|template| {
+                    template
+                        .components
+                        .iter()
+                        .filter(|component| {
+                            offset >= component.span.start && offset < component.span.end
+                        })
+                        .min_by_key(|component| component.span.end - component.span.start)
+                        .map(|component| component.name.clone())
+                })
+                .or_else(|| nearest_open_component_tag(source, offset))
+                .unwrap_or_default();
+            return CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name });
+        }
+        let render_head = before_cursor.rfind("{@render ").is_some_and(|idx| {
+            before_cursor[idx + "{@render ".len()..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+        });
+        if render_head {
+            return CursorContext::Template(TemplateCursorContext::SvelteRenderCallee);
+        }
+    }
+    let semantic_position_is_owned = match language {
+        Some(CarrierTemplateLanguage::Vue) => inside_explicit_template,
+        Some(CarrierTemplateLanguage::Svelte) | None => true,
+    };
+    if is_template_position && semantic_position_is_owned {
+        classify_template_context(offset, source, analysis)
+    } else {
+        // Error-tolerant Svelte analysis may not retain an element/component
+        // node for an opening tag that is still being typed. Preserve the
+        // structurally unambiguous uppercase component-tag context from source.
+        let fallback = classify_template_text_fallback(offset, source);
+        let is_incomplete_component = match &fallback {
+            TemplateCursorContext::TagName { partial } => partial
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_uppercase()),
+            TemplateCursorContext::AttributeName { is_component, .. } => *is_component,
+            _ => false,
+        };
+        let source_position_is_owned = match language {
+            Some(CarrierTemplateLanguage::Vue) => inside_explicit_template,
+            Some(CarrierTemplateLanguage::Svelte) => true,
+            None => !has_explicit_template_block || inside_explicit_template,
+        };
+        if is_incomplete_component && source_position_is_owned {
+            CursorContext::Template(fallback)
+        } else {
+            CursorContext::RootLevel
+        }
+    }
+}
+
+/// Backwards source scan for the nearest enclosing component open tag before
+/// `offset` (skipping closing tags) — the incomplete-parse recovery for the
+/// `{#snippet |` owner when analysis has not retained the component usage.
+fn nearest_open_component_tag(source: &str, offset: u32) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut i = (offset as usize).min(source.len());
+    while i > 0 {
+        i -= 1;
+        if bytes[i] != b'<' {
+            continue;
+        }
+        let tag_start = i + 1;
+        if tag_start < source.len() && bytes[tag_start] == b'/' {
+            continue;
+        }
+        let mut tag_end = tag_start;
+        while tag_end < source.len()
+            && (bytes[tag_end].is_ascii_alphanumeric()
+                || bytes[tag_end] == b'-'
+                || bytes[tag_end] == b'_')
+        {
+            tag_end += 1;
+        }
+        let name = source.get(tag_start..tag_end)?;
+        if name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase())
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// D5 slot-name context from source: the cursor sits after a `#partial` or
+/// `v-slot:partial` token inside an open tag. Robust to error-tolerant parses
+/// that dropped the still-typed element/directive; a `>` crossed before the
+/// owning `<` means the cursor is in element CONTENT, never a tag.
+fn slot_name_context_from_source(
+    offset: u32,
+    source: &str,
+    analysis: Option<&FileAnalysisSnapshot>,
+) -> Option<TemplateCursorContext> {
+    let bytes = source.as_bytes();
+    let mut i = (offset as usize).min(source.len());
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b'<' => break,
+            b'>' | b'{' | b'}' => return None,
+            _ => {}
+        }
+    }
+    if bytes.get(i) != Some(&b'<') {
+        return None;
+    }
+    let tag_start = i + 1;
+    if bytes.get(tag_start) == Some(&b'/') {
+        return None;
+    }
+    let mut tag_end = tag_start;
+    while tag_end < source.len()
+        && (bytes[tag_end].is_ascii_alphanumeric()
+            || bytes[tag_end] == b'-'
+            || bytes[tag_end] == b'_')
+    {
+        tag_end += 1;
+    }
+    let tag_name = source.get(tag_start..tag_end)?.to_string();
+    if tag_name.is_empty() || (offset as usize) <= tag_end {
+        return None;
+    }
+    // The whitespace-delimited token immediately before the cursor.
+    let slice = source.get(tag_end..offset as usize)?;
+    let token = slice.split_whitespace().last()?;
+    if token.contains('=') || (!token.starts_with('#') && !token.starts_with("v-slot:")) {
+        return None;
+    }
+    let is_component = tag_name
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_uppercase())
+        || analysis
+            .and_then(|snapshot| snapshot.template.as_ref())
+            .is_some_and(|template| {
+                template
+                    .components
+                    .iter()
+                    .any(|component| component.name == tag_name)
+            });
+    Some(TemplateCursorContext::SlotName {
+        tag_name,
+        is_component,
+    })
 }
 
 /// Classify cursor position within a template block using AST data.
@@ -170,6 +485,13 @@ fn classify_template_context(
     source: &str,
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
+    // D5 slot-name token scan — a trailing `#partial` / `v-slot:partial`
+    // immediately before the cursor in an open tag. Runs before the AST
+    // classification: error-tolerant parsing may not retain the element or
+    // directive for a tag that is still being typed.
+    if let Some(ctx) = slot_name_context_from_source(offset, source, analysis) {
+        return CursorContext::Template(ctx);
+    }
     let template = match analysis.and_then(|a| a.template.as_ref()) {
         Some(t) => t,
         None => {
@@ -347,6 +669,12 @@ fn classify_in_opening_tag(
         // Check argument span
         if let Some(ref arg_span) = dir.arg_span {
             if offset >= arg_span.start && offset < arg_span.end {
+                if dir.name == "slot" {
+                    return CursorContext::Template(TemplateCursorContext::SlotName {
+                        tag_name: el.tag.clone(),
+                        is_component: el.is_component,
+                    });
+                }
                 return CursorContext::Template(TemplateCursorContext::DirectiveArgument {
                     directive: dir.name.clone(),
                     tag_name: el.tag.clone(),
@@ -549,7 +877,9 @@ fn classify_style_context(
                 - 1;
             if let Some(style_analysis) = analysis.styles.get(style_idx) {
                 for vb in &style_analysis.v_binds {
-                    if offset >= vb.start && offset < vb.end {
+                    // Inclusive end: the caret sits AT the expression end while
+                    // typing, and an empty `v-bind(|)` has start == end.
+                    if offset >= vb.start && offset <= vb.end {
                         return CursorContext::Style(StyleCursorContext::VBind);
                     }
                 }

@@ -29,9 +29,13 @@ use crate::type_provider::protocol::{
 /// Rename edits are returned under the shared filesystem identity, not the raw provider spelling.
 /// On case-insensitive hosts, test lookups must therefore fold synthetic path case as production
 /// does before constructing the expected URI.
+/// The rename-edit URI contract: each edit is keyed by a REAL member spelling
+/// of its target path (the provider-reported path's own case, or — when the
+/// initiating document is in the group — the initiating URI), never the
+/// case-folded filesystem-identity string. LSP URIs are case-sensitive, so
+/// clients must be able to key edits by the exact URI they know.
 fn rename_identity_uri(path: &str) -> Uri {
-    let identity = verter_span::InjectedPathKey::new(path);
-    path_to_uri(identity.as_str()).expect("fixture path produces a file URI")
+    path_to_uri(path).expect("fixture path produces a file URI")
 }
 
 // ── Position mapping tests ─────────────────────────────────────
@@ -241,6 +245,57 @@ fn merge_hover_neither() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let result = merge_hover(None, None, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_none());
+}
+
+/// The provider's rendered type block never leaks Verter's reserved synthetic
+/// prefix: a GlobalComponents fallback-const hover renders
+/// `GlobalComponentKebabType<…>`, not `___VERTER___GlobalComponentKebabType<…>`
+/// — in BOTH merge arms (type-only, and type+verter).
+#[test]
+fn merge_hover_strips_synthetic_prefix_from_type_block() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let type_hover = HoverInfo {
+        contents:
+            "const GlobalCountComp: ___VERTER___GlobalComponentKebabType<\"GlobalCountComp\", \"global-count-comp\">"
+                .to_string(),
+        range_start: None,
+        range_end: None,
+    };
+
+    let result = merge_hover(
+        None,
+        Some(type_hover.clone()),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    );
+    let text = extract_hover_text(&result.unwrap());
+    assert!(
+        !text.contains("___VERTER___"),
+        "synthetic prefix must not reach hover text: {text}"
+    );
+    assert!(
+        text.contains("GlobalComponentKebabType<\"GlobalCountComp\""),
+        "the type itself stays rendered: {text}"
+    );
+
+    let verter = make_verter_hover("**GlobalCountComp** (GlobalComponent)");
+    let merged = merge_hover(
+        Some(verter),
+        Some(type_hover),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    );
+    let merged_text = extract_hover_text(&merged.unwrap());
+    assert!(
+        !merged_text.contains("___VERTER___"),
+        "synthetic prefix must not reach merged hover text: {merged_text}"
+    );
 }
 
 // ── Completion merge tests ─────────────────────────────────────

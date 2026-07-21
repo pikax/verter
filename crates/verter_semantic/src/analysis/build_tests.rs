@@ -2290,6 +2290,8 @@ fn mark_bindings_used_in_style_simple() {
             start: 0,
             end: 5,
             generated_var_name: None,
+            expr_roots: vec!["color".into()],
+            roots_complete: true,
         }],
         ..Default::default()
     }];
@@ -2315,6 +2317,8 @@ fn mark_bindings_used_in_style_member_expression() {
             start: 0,
             end: 11,
             generated_var_name: None,
+            expr_roots: vec!["theme".into()],
+            roots_complete: true,
         }],
         ..Default::default()
     }];
@@ -2338,6 +2342,8 @@ fn mark_bindings_used_in_style_multiple_blocks() {
                 start: 0,
                 end: 1,
                 generated_var_name: None,
+                expr_roots: vec!["a".into()],
+                roots_complete: true,
             }],
             ..Default::default()
         },
@@ -2348,6 +2354,8 @@ fn mark_bindings_used_in_style_multiple_blocks() {
                 start: 0,
                 end: 1,
                 generated_var_name: None,
+                expr_roots: vec!["c".into()],
+                roots_complete: true,
             }],
             ..Default::default()
         },
@@ -2387,6 +2395,8 @@ fn mark_bindings_used_in_style_quoted_expression() {
             start: 0,
             end: 5,
             generated_var_name: None,
+            expr_roots: vec!["color".into()],
+            roots_complete: true,
         }],
         ..Default::default()
     }];
@@ -2482,6 +2492,7 @@ const props = defineProps<SetupProps>();
         &parsed.program,
         AnalysisScope::all(),
         &owners,
+        !parsed.errors.is_empty(),
     );
 
     assert_eq!(snapshot.imports[0].owner, module);
@@ -2526,6 +2537,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
         &parsed.program,
         AnalysisScope::all(),
         &module_owners,
+        !parsed.errors.is_empty(),
     );
     let instance = build_script_analysis_with_scope_from_program_with_owners(
         source,
@@ -2533,6 +2545,7 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
         &parsed.program,
         AnalysisScope::all(),
         &instance_owners,
+        !parsed.errors.is_empty(),
     );
 
     assert_ne!(
@@ -2571,6 +2584,7 @@ const instanceProps = defineProps<Props>();
         &parsed.program,
         AnalysisScope::all(),
         &owners,
+        !parsed.errors.is_empty(),
     );
 
     assert_eq!(snapshot.macros.len(), 2);
@@ -2603,6 +2617,7 @@ fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
             &parsed.program,
             AnalysisScope::all(),
             &owners,
+            !parsed.errors.is_empty(),
         )
     };
 

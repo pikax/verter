@@ -455,6 +455,7 @@ defineEmits<ChildEmits>()
 ///  * scalar == batch byte identity, AND
 ///  * the augmented PROP member `extra` stays SHALLOW (absent) — documents the
 ///    shallow-by-default boundary.
+///
 /// Mutation recipe: single-quote terminal literals, replace the `AugEmits`
 /// handler parameters with `()`, or retarget the event name. The exact emit +
 /// handler pair must fail; the shallow `AugProps` assertion remains a control.

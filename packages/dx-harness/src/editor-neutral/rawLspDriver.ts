@@ -53,6 +53,11 @@ export interface RawEditorNeutralLspDriverOptions {
 interface StatusNotification {
   readonly kind?: string;
   readonly reason?: string;
+  readonly recommendation?: {
+    readonly preferred: string;
+    readonly reason: string;
+    readonly knownGaps: readonly string[];
+  };
 }
 
 interface StartedNotification {
@@ -541,6 +546,7 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
       route: this.route,
       publicKind: publicKind as ProviderAttestation["publicKind"],
       reason: status.reason,
+      recommendation: status.recommendation,
       startedKinds: this.started
         .map((notification) => notification.kind)
         .filter((kind): kind is string => typeof kind === "string"),

@@ -174,6 +174,10 @@ fn slot_definition_dynamic_name_binding_is_not_materialized() {
             .map(|slot| slot.name.as_str())
             .collect::<Vec<_>>()
     );
+    assert!(
+        data.has_dynamic_slot_outlet,
+        "a `:name` dynamic outlet must set the fail-open flag for unused-slot population"
+    );
 }
 
 #[test]
@@ -186,6 +190,32 @@ fn slot_definition_dynamic_name_v_bind_is_not_materialized() {
             .iter()
             .map(|slot| slot.name.as_str())
             .collect::<Vec<_>>()
+    );
+    assert!(
+        data.has_dynamic_slot_outlet,
+        "a `v-bind:name` dynamic outlet must set the fail-open flag for unused-slot population"
+    );
+}
+
+#[test]
+fn slot_outlet_dynamic_argument_sets_dynamic_outlet_flag() {
+    // `<slot :[key]="v">` — a DYNAMIC directive ARGUMENT (distinct from the
+    // dynamic-VALUE `:name="expr"` form). The bound attribute name is not
+    // statically known, so the outlet inventory cannot be bounded:
+    // unused-slot diagnostics must fail open.
+    let data = extract(r#"<template><slot :[dynamicName]="value" /></template>"#);
+    assert!(
+        data.has_dynamic_slot_outlet,
+        "a dynamic-argument bind on a slot outlet must set the fail-open flag"
+    );
+}
+
+#[test]
+fn slot_outlet_static_scoped_bindings_do_not_set_dynamic_outlet_flag() {
+    let data = extract(r#"<template><slot name="header" :item="row" /></template>"#);
+    assert!(
+        !data.has_dynamic_slot_outlet,
+        "static-name outlets with static scoped bindings are fully bounded"
     );
 }
 
@@ -958,5 +988,95 @@ fn bound_ref_not_included_in_component_props() {
     assert!(
         !child.props.iter().any(|p| p.name == "ref"),
         ":ref should NOT be extracted as a component prop"
+    );
+}
+
+// ── Unused-declaration extraction facts (producer side) ──
+//
+// The population layer (`verter_session::template_convert`) consumes these
+// facts from hand-built `RawTemplateData` in its own tests; the tests below
+// prove the REAL extractor produces them from source, end-to-end.
+
+#[test]
+fn member_reads_capture_dollar_slots_literal_member() {
+    let data = extract(r#"<template><div v-if="$slots.header">x</div></template>"#);
+    assert!(
+        data.member_reads
+            .iter()
+            .any(|read| read.root == "$slots" && read.member == "header"),
+        "a template `$slots.header` read must enter member_reads: {:?}",
+        data.member_reads
+    );
+    // The consumed-root model: the `$slots` occurrence and the member read
+    // share the root span, so population can prove the root never escapes.
+    let read = data
+        .member_reads
+        .iter()
+        .find(|read| read.root == "$slots")
+        .unwrap();
+    assert!(
+        data.binding_occurrences
+            .iter()
+            .any(|occ| occ.name == "$slots" && occ.span.start == read.root_span.start),
+        "the `$slots` root occurrence must be recorded at the member-read root span"
+    );
+}
+
+#[test]
+fn template_dollar_emit_occurrence_is_recorded() {
+    // `$emit` is not filtered as a global/v-for local — its occurrence is the
+    // fail-open fact that suppresses unused-emit diagnostics.
+    let data = extract(r#"<template><button @click="$emit('close')">x</button></template>"#);
+    assert!(
+        data.binding_occurrences
+            .iter()
+            .any(|occ| occ.name == "$emit"),
+        "a template `$emit(...)` call must record the `$emit` occurrence: {:?}",
+        data.binding_occurrences
+            .iter()
+            .map(|occ| occ.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn template_emit_binding_occurrence_is_recorded() {
+    // Calling the `defineEmits` return binding from the template is the
+    // standard emit pattern; its occurrence must be recorded so population
+    // can fail open on it.
+    let data = extract_with_script(
+        r#"<template><button @click="emit('close')">x</button></template>"#,
+        "const emit = defineEmits(['close'])",
+    );
+    assert!(
+        data.binding_occurrences
+            .iter()
+            .any(|occ| occ.name == "emit"),
+        "a template `emit(...)` call must record the binding occurrence: {:?}",
+        data.binding_occurrences
+            .iter()
+            .map(|occ| occ.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn broken_template_expression_sets_expression_errors_flag() {
+    // A mid-edit broken expression makes the identifier inventory unreliable;
+    // the completeness bit is the fail-open gate for unused-declaration
+    // population.
+    let data = extract(r#"<template><div v-if="count &&">x</div></template>"#);
+    assert!(
+        data.has_expression_errors,
+        "a template expression parse error must set has_expression_errors"
+    );
+}
+
+#[test]
+fn complete_template_expressions_leave_expression_errors_unset() {
+    let data = extract(r#"<template><div v-if="count">x</div></template>"#);
+    assert!(
+        !data.has_expression_errors,
+        "well-formed expressions must not set the fail-open bit"
     );
 }

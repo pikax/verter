@@ -410,10 +410,10 @@ pub use resolver_store::{
 // per-host on `VerterHost::provenance().session_overlay_cows` (own-host gate metric).
 
 // Downstream re-exports (LSP/MCP/FFI): the standalone @verter/types .d.ts
-// content, CompileTarget, and the dependency-neutral public-API projection
-// subject — adapters must not depend on compiler/protocol internals.
+// content, CompileTarget, the public-API projection subject, and the
+// GlobalComponents fallback-const NAV-PROBE locator (compiler-owned).
 pub use verter_compiler::compile::CompileTarget;
-pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
+pub use verter_compiler::{global_component_nav_probe_offset, VERTER_TYPES_STANDALONE_DTS};
 pub use verter_protocol::types::PublicApiProjectionSubject;
 
 use std::sync::Arc;

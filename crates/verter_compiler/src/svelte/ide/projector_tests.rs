@@ -109,6 +109,32 @@ fn ide_carrier_exports_public_facade_default_with_typed_props() {
 }
 
 #[test]
+fn ide_carrier_facade_preserves_quoted_hyphenated_prop_keys_verbatim() {
+    // PARITY pin for the Vue quoted-prop carrier fix: Svelte's public facade
+    // copies the `$props()` annotation VERBATIM (no per-member re-render), so
+    // a quoted non-identifier key (`"data-x"`) cannot lose its quotes. The Vue
+    // corruption mechanism (per-member constructor synthesis from resolved
+    // prop entries) does not exist on this path — this test pins the verbatim
+    // pass-through so a future member-level re-render cannot regress it.
+    let code = project(
+        "<script lang=\"ts\">let { \"data-x\": dx, plain }: { \"data-x\"?: string; plain: boolean } = $props();</script>\n<div>{plain}</div>",
+    );
+    assert!(
+        code.contains("type __VerterPublicProps = { \"data-x\"?: string; plain: boolean };"),
+        "the quoted key must survive verbatim in the public facade:\n{code}"
+    );
+    // NEGATIVE: the key never renders bare (invalid TS member syntax).
+    let facade = code
+        .split_once("type __VerterPublicProps")
+        .map(|(_, facade)| facade)
+        .expect("public facade suffix");
+    assert!(
+        !facade.contains(" data-x?:") && !facade.contains("{ data-x"),
+        "the hyphenated key must never appear unquoted in the facade:\n{code}"
+    );
+}
+
+#[test]
 fn ide_carrier_facade_degrades_untyped_props_to_permissive_record() {
     // An untyped `$props()` (or no instance script) degrades the public facade
     // `$props` to a permissive `Record<string, unknown>` (LOCAL — no resolver).

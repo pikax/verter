@@ -330,21 +330,17 @@ pub(crate) fn project_ownership_diagnostic(
              types are unavailable. Add it to a tsconfig `include`/`files` entry."
                 .to_string()
         }
-        CarrierOwnershipResolution::Ambiguous { candidates, .. } if candidates.is_empty() => {
+        // A resolution now produces `Ambiguous` ONLY for a disk-layout carrier-path
+        // conflict (a real file or same-stem module occupies the generated companion
+        // path) — always with EMPTY candidates. The multiply-owned case resolves to the
+        // single tsgo default owner (`Bound`), so `Ambiguous` never carries candidate
+        // configs and the former multi-config candidate-listing branch is unreachable.
+        CarrierOwnershipResolution::Ambiguous { .. } => {
             "verter: this carrier's owning TypeScript project is ambiguous (a real file or a \
              same-stem module occupies its generated companion path), so its cross-file types \
              are unavailable."
                 .to_string()
         }
-        CarrierOwnershipResolution::Ambiguous { candidates, .. } => format!(
-            "verter: multiple configured TypeScript projects claim this carrier, so its owner \
-             is ambiguous and its cross-file types are unavailable. Candidate configs: {}",
-            candidates
-                .iter()
-                .map(|c| c.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
         CarrierOwnershipResolution::Bound(_) | CarrierOwnershipResolution::NotReady => {
             return None;
         }
@@ -356,6 +352,39 @@ pub(crate) fn project_ownership_diagnostic(
         message,
         ..Default::default()
     })
+}
+
+/// The `verter(project)` ownership diagnostics for a carrier `canonical_id`,
+/// resolved from the ONE shared carrier-ownership authority. Empty for a
+/// non-carrier document, and — via `ObservePublishedReadiness` — for a `Bound`
+/// (now including a resolved multi-claimant carrier) or `NotReady` carrier: only
+/// a genuine terminal `NoProject` or a disk-layout carrier-path conflict
+/// surfaces a warning.
+///
+/// Shared by BOTH the full-diagnostics path
+/// ([`crate::server::Server::compute_full_diagnostics`]) and the debounced
+/// coordinator publish path ([`crate::sync_coordinator`]), so an unresolved
+/// carrier is explained on `did_open` / `did_change`, not only on a
+/// full-diagnostics request. Driven from the typed [`CarrierOwnershipResolution`]
+/// — never a path-shape heuristic.
+pub(crate) fn project_ownership_diagnostics_for(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
+    if !verter_workspace::resolver::path_is_carrier(canonical_id) {
+        return Vec::new();
+    }
+    let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
+        host,
+        canonical_id,
+        std::sync::Arc::from(""),
+        crate::tsgo::project_binding::OwnershipReadinessMode::ObservePublishedReadiness,
+    ) else {
+        return Vec::new();
+    };
+    project_ownership_diagnostic(&resolution)
+        .into_iter()
+        .collect()
 }
 
 /// Resolve the carrier's ownership EXACTLY ONCE for a sync pass — the single captured
@@ -917,11 +946,15 @@ impl CarrierTransactionCoordinator {
     ///   it reproduces the identical committed artifact (the same receipt-attested IDE
     ///   surface). An equal-key commit carrying a DIFFERENT artifact is refused, so a
     ///   torn/superseded production sharing a revision can never overwrite the committed
-    ///   surface. KNOWN LIMITATION (tracked for the carrier-sync-concurrency hardening
-    ///   block): this differing-artifact refusal keys on generation/revision, so an ingress
-    ///   that resyncs a watched file WITHOUT advancing the revision (e.g. a watched-file
-    ///   resync) can leave a genuinely-newer artifact refused at the equal key and admit the
-    ///   stale surface until an ingress advances the revision.
+    ///   surface. That refusal also PROVES the revision rail under-counted (two genuine
+    ///   artifacts share one key — e.g. same source bytes compiled under a changed context,
+    ///   or an ingress that resynced without advancing the rail), so the gate RECORDS a
+    ///   content transition for the source through the workspace authority before returning:
+    ///   the caller's requeue then mints a strictly-newer key and admits the live artifact
+    ///   instead of livelocking on the equal key until an unrelated edit advances the rail
+    ///   (the previously tracked known limitation — the interactive definition/hover
+    ///   divergence under edit churn where a stale committed mapper was served while the
+    ///   provider text was already current).
     ///
     /// Returns [`AdmitOutcome::Superseded`] (never overwriting) on any refusal; the caller
     /// must requeue. The primary interactive paths requeue on `Superseded`; the
@@ -929,6 +962,7 @@ impl CarrierTransactionCoordinator {
     /// the carrier-sync-concurrency hardening block.
     pub(crate) fn admit_owned(
         &self,
+        host: &VerterHost,
         states: &DashMap<String, ProviderSyncState>,
         source: &str,
         mut state: ProviderSyncState,
@@ -1008,7 +1042,11 @@ impl CarrierTransactionCoordinator {
                     // Equal generation/revision at the SAME path is idempotent ONLY for the
                     // identical surface: a same-path DIFFERENT artifact is a torn/superseded
                     // production sharing a source revision and is refused, so it can never
-                    // overwrite the committed surface.
+                    // overwrite the committed surface. The conflict also proves the source's
+                    // freshness rail under-counted (two genuine artifacts share one key), so
+                    // the rail is advanced through the workspace authority — the caller's
+                    // requeue mints a strictly-newer key and admits the live artifact instead
+                    // of livelocking on the equal key.
                     if incoming.is_same_key(&current)
                         && same_ide_path
                         && next_ide_surface != prior_ide_surface
@@ -1018,10 +1056,11 @@ impl CarrierTransactionCoordinator {
                              receipt carries the committed generation/revision (generation {:?}, \
                              revision {}) but a DIFFERENT artifact at the SAME IDE path — an \
                              equal-key commit is idempotent only for the identical surface; not \
-                             overwriting",
+                             overwriting (recorded a content transition to heal the rail)",
                             incoming.ownership_generation,
                             incoming.source_revision,
                         );
+                        host.record_content_transition(source);
                         return AdmitOutcome::Superseded;
                     }
                 }

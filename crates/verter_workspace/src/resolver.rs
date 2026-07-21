@@ -37,6 +37,12 @@ pub struct IdeProjectCompilerOptions {
     /// (TypeScript treats `checkJs` as turning on JS type-checking, which
     /// requires the JS files to be project members).
     pub check_js: bool,
+    /// `compilerOptions.disableSolutionSearching` — when a solution config sets
+    /// it, default-project selection does NOT climb from that solution to its
+    /// ancestor solution (mirrors tsgo `DisableSolutionSearching`). Default
+    /// `false`. Consumed by
+    /// [`WorkspaceSnapshot::default_configured_owner_for_file`](crate::workspace_snapshot::WorkspaceSnapshot::default_configured_owner_for_file).
+    pub disable_solution_searching: bool,
 }
 
 impl IdeProjectCompilerOptions {

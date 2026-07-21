@@ -1,6 +1,8 @@
 // CSS language features for <style> blocks.
 // Completions, hover, selector matching, and Vue-specific CSS intelligence.
 
+pub(crate) mod global_classes;
+
 use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
@@ -150,6 +152,73 @@ pub fn css_completions(
     } else {
         Some(items)
     }
+}
+
+/// Completions INSIDE `v-bind(|)`: the setup-scope bindings by bare name.
+/// Reactive bindings list first; every item carries the binding kind as its
+/// native detail (upgraded to the provider-typed detail by the handler when
+/// the declaration position maps). Never a word-fallback item.
+pub fn v_bind_scope_completions(analysis: &FileAnalysisSnapshot) -> Option<Vec<CompletionItem>> {
+    let mut items: Vec<CompletionItem> = Vec::new();
+    let mut reactive: Vec<&verter_semantic::analysis::AnalyzedBinding> = Vec::new();
+    let mut plain: Vec<&verter_semantic::analysis::AnalyzedBinding> = Vec::new();
+    for binding in &analysis.bindings {
+        if binding.span.start == 0 && binding.span.end == 0 {
+            continue;
+        }
+        if binding.is_reactive {
+            reactive.push(binding);
+        } else {
+            plain.push(binding);
+        }
+    }
+    for (order, binding) in reactive.iter().chain(plain.iter()).enumerate() {
+        items.push(CompletionItem {
+            label: binding.name.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some(if binding.is_reactive {
+                format!("setup binding ({:?})", binding.reactivity_kind)
+            } else {
+                "setup binding".to_string()
+            }),
+            sort_text: Some(format!("{order:03}")),
+            insert_text: Some(binding.name.clone()),
+            ..Default::default()
+        });
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+/// The style `v-bind()` whose expression span contains `offset`, with its
+/// root binding's DECLARATION span. The v-bind token has no TSX projection
+/// (style blocks are removed from the generated surface), so provider-typed
+/// display anchors on the declaration instead. `None` when the offset is not
+/// on a v-bind expression or no matching script binding exists.
+pub(crate) fn v_bind_decl_target_at(
+    offset: u32,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<(String, verter_span::Span)> {
+    for style in analysis.styles.iter() {
+        for vb in &style.v_binds {
+            if vb.start < vb.end && offset >= vb.start && offset <= vb.end {
+                // NOTE: `expr_roots` is a sorted set, so a multi-root
+                // expression (`v-bind(width ?? fallback)`) anchors on the
+                // alphabetically-first root's declaration, not the first in
+                // source order — a display-anchor choice only.
+                let root = vb.expr_roots.first()?;
+                let binding = analysis.bindings.iter().find(|b| b.name == *root)?;
+                if binding.span.start == 0 && binding.span.end == 0 {
+                    return None;
+                }
+                return Some((vb.expression.clone(), binding.span));
+            }
+        }
+    }
+    None
 }
 
 /// Provide hover information for CSS at the given position.

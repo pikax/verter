@@ -367,6 +367,211 @@ real_provider_test!(
     }
 );
 
+// ---------------------------------------------------------------------------
+// Unused DECLARED props / events / slots — Verter-owned, provider-stable
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    diagnostics_vue_unused_declared_members_are_verter_owned_and_never_duplicated,
+    fixture = "vue-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/diagnostics/UnusedDeclarations.vue")
+            .await;
+        assert!(
+            session
+                .wait_until_ready(&uri, "fire\"", 2, "fire")
+                .await,
+            "the Vue carrier must materialize before diagnostics are asserted"
+        );
+        session.ensure_synced(&uri).await;
+        let diagnostics = session.merged_diagnostics(&uri).await;
+        // NOTE: no error-clean assertion — the real-provider harness serves the
+        // fixture without provisioned node_modules, so the macro GLOBALS
+        // (`defineProps` etc.) surface benign TS2304s here exactly like the
+        // sibling macro fixtures. The unused-declaration contract is
+        // code-scoped and provider-independent.
+
+        // Verter owns the three member-level diagnostics — identical on every
+        // provider route (the provider cannot see type members as unused).
+        for (code, member) in [
+            ("verter/no-unused-props", "deadProp"),
+            ("verter/no-unused-emit-declarations", "deadEvent"),
+            ("verter/no-unused-slots", "deadSlot"),
+        ] {
+            let matching = diagnostics
+                .iter()
+                .filter(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some(code))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "exactly one {code} for {member}; got {diagnostics:?}"
+            );
+            let expected_start = session.find_position(&uri, member, 0);
+            let expected_end = session.find_position(&uri, member, member.len());
+            assert_eq!(matching[0].range.start, expected_start, "{code} anchors on {member}");
+            assert_eq!(matching[0].range.end, expected_end);
+            assert!(
+                matching[0]
+                    .tags
+                    .as_ref()
+                    .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY)),
+                "{code} must carry the Unnecessary tag; got {:?}",
+                matching[0].tags
+            );
+        }
+
+        // Non-duplication: the provider reports NO unused-identifier (TS6133)
+        // here — every script local is live; type members are Verter's alone.
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("6133")),
+            "no provider 6133 may double-report a declared member; got {diagnostics:?}"
+        );
+
+        // Negatives: used members are never flagged.
+        for live in ["liveProp", "liveEvent", "liveSlot"] {
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(live)),
+                "`{live}` is used and must not be flagged; got {diagnostics:?}"
+            );
+        }
+    }
+);
+
+real_provider_test!(
+    diagnostics_vue_destructured_props_stay_provider_owned_without_verter_duplicate,
+    fixture = "vue-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/diagnostics/UnusedDestructuredProps.vue")
+            .await;
+        assert!(
+            session
+                .wait_until_ready(&uri, "liveOne }}", 4, "liveOne")
+                .await,
+            "the Vue carrier must materialize before diagnostics are asserted"
+        );
+        session.ensure_synced(&uri).await;
+        let diagnostics = session.merged_diagnostics(&uri).await;
+
+        // The destructured member's liveness is PROVIDER-owned (TS6133 via the
+        // ISSUE-7 omission model) — Verter must not double-report it.
+        let verter_unused = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                lsp_diagnostic_code(diagnostic).as_deref() == Some("verter/no-unused-props")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            verter_unused.is_empty(),
+            "destructured defineProps members are provider-owned; Verter must stay silent, got {diagnostics:?}"
+        );
+
+        let provider_unused = diagnostics
+            .iter()
+            .filter(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("6133"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            provider_unused.len(),
+            1,
+            "exactly the dead destructured member gets the provider 6133; got {diagnostics:?}"
+        );
+        let expected_start = session.find_position(&uri, "deadOne", 0);
+        assert_eq!(provider_unused[0].range.start, expected_start);
+    }
+);
+
+real_provider_test!(
+    diagnostics_svelte_unused_snippet_prop_gets_provider_unused_with_tag,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/diagnostics/UnusedSnippetProp.svelte")
+            .await;
+        session.ensure_synced(&uri).await;
+
+        let provider_path = session
+            .provider_sync_state(&uri)
+            .and_then(|state| state.ide_path)
+            .expect("a synced Svelte carrier must have a committed IDE provider path");
+        let provider_diagnostics = diagnostics_until_nonempty(session, &provider_path).await;
+        let diagnostics = session.merged_diagnostics(&uri).await;
+
+        // The unused snippet-typed prop is a plain destructured local in the
+        // projected script — natively TS6133-eligible on every provider route.
+        let unused = diagnostics
+            .iter()
+            .filter(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("6133"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unused.len(),
+            1,
+            "exactly the never-rendered snippet prop must be unused; public={diagnostics:?}; provider={provider_diagnostics:?}"
+        );
+        let expected_start = session.find_position(&uri, "header", 0);
+        let expected_end = session.find_position(&uri, "header", "header".len());
+        assert_eq!(unused[0].range.start, expected_start);
+        assert_eq!(unused[0].range.end, expected_end);
+        assert!(
+            unused[0]
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY)),
+            "the faded Unnecessary tag must survive the merge; got {:?}",
+            unused[0].tags
+        );
+
+        // Negative: the `{@render body?.()}`-consumed member stays live, and
+        // no Vue-macro unused-declaration diagnostic may appear on Svelte.
+        let body_start = session.find_position(&uri, "body", 0);
+        assert!(
+            unused.iter().all(|diagnostic| {
+                diagnostic.range.end <= body_start || diagnostic.range.start > body_start
+            }),
+            "`body` is consumed by {{@render}} and must not be unused; got {diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|diagnostic| {
+                lsp_diagnostic_code(diagnostic)
+                    .as_deref()
+                    .is_some_and(|code| code.starts_with("verter/no-unused-"))
+            }),
+            "Vue-macro unused-declaration diagnostics must never fire on Svelte; got {diagnostics:?}"
+        );
+
+        // JS mode: an untyped `$props()` destructure member behaves the same.
+        let js_uri = session
+            .open_fixture_file("src/diagnostics/UnusedSnippetPropJs.svelte")
+            .await;
+        session.ensure_synced(&js_uri).await;
+        let js_diagnostics = session.merged_diagnostics(&js_uri).await;
+        let js_unused = js_diagnostics
+            .iter()
+            .filter(|diagnostic| lsp_diagnostic_code(diagnostic).as_deref() == Some("6133"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            js_unused.len(),
+            1,
+            "the JS-mode unused snippet prop must be reported; got {js_diagnostics:?}"
+        );
+        let js_expected_start = session.find_position(&js_uri, "header", 0);
+        assert_eq!(js_unused[0].range.start, js_expected_start);
+        assert!(
+            js_unused[0]
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.contains(&DiagnosticTag::UNNECESSARY)),
+            "JS-mode unused keeps the Unnecessary tag; got {:?}",
+            js_unused[0].tags
+        );
+    }
+);
+
 /// Pull diagnostics for an open provider file, retrying briefly while the
 /// inferred project warms up (a cold tsserver/TSGO project can return an empty
 /// set on the first request before the program is built).

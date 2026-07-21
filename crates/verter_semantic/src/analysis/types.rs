@@ -259,6 +259,11 @@ pub struct ScriptAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_binding_occurrences: Vec<ScriptBindingOccurrence>,
 
+    /// Script-side usage facts for macro-declared members (unused-declaration
+    /// diagnostics). `None` for files without Vue macros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_usage: Option<crate::analysis::macro_usage::MacroUsageFacts>,
+
     /// SFC-absolute byte offset of the first top-level `await` expression (if any).
     /// Used by lint rules to detect lifecycle hooks/watchers called after await.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +305,16 @@ pub struct ScriptAnalysisSnapshot {
     /// Populated during `build_script_analysis`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declaration_entries: Vec<LocalDeclarationEntry>,
+
+    /// Root identifiers referenced by `<style>` `v-bind()` expressions
+    /// (`"color"` from `v-bind(color)`, `"theme"` from `v-bind(theme.color)`),
+    /// recorded by [`Self::mark_bindings_used_in_style`]. CSS `v-bind()`
+    /// resolves through the component's render context, which includes PROPS
+    /// by bare name — so the unused-declaration population consumes this set
+    /// for prop-member liveness, not just script-binding `used_in_style`.
+    /// Sorted + deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_vbind_roots: Vec<String>,
 }
 
 impl ScriptAnalysisSnapshot {
@@ -307,28 +322,49 @@ impl ScriptAnalysisSnapshot {
     ///
     /// For each `v-bind(expr)` found in style analysis, extracts the root identifier
     /// (e.g., `"color"` from `v-bind(color)`, `"theme"` from `v-bind(theme.color)`)
-    /// and sets `used_in_style = true` on the matching binding.
+    /// and sets `used_in_style = true` on the matching binding. The full root
+    /// set is also retained on [`Self::style_vbind_roots`] — style `v-bind()`
+    /// can reference PROPS by bare name (no script binding exists for those),
+    /// and prop-member liveness needs the raw set.
     pub fn mark_bindings_used_in_style(
         &mut self,
         style_analyses: &[crate::analysis::style::StyleBlockAnalysis],
     ) {
-        // Collect all root identifiers from v-bind() expressions across all style blocks.
-        let referenced: rustc_hash::FxHashSet<&str> = style_analyses
-            .iter()
-            .flat_map(|s| &s.v_binds)
-            .map(|vb| {
-                // Extract root identifier: "theme.color" → "theme", "color" → "color"
-                vb.expression
-                    .split_once('.')
-                    .map_or(vb.expression.as_str(), |(root, _)| root)
-            })
-            // Also handle bracket access: "obj['key']" → "obj"
-            .map(|root| {
-                root.split_once('[')
-                    .map_or(root, |(before_bracket, _)| before_bracket)
-            })
-            .filter(|name| !name.is_empty())
-            .collect();
+        // The SOUND per-expression root facts recorded by the producer
+        // (`AnalyzedVBind.expr_roots`, OXC-derived) are the sole usage
+        // authority — never a text split of the expression.
+        let mut referenced: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+        let mut any_v_bind = false;
+        let mut all_complete = true;
+        for vb in style_analyses.iter().flat_map(|s| &s.v_binds) {
+            any_v_bind = true;
+            if !vb.roots_complete {
+                all_complete = false;
+            }
+            referenced.extend(
+                vb.expr_roots
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|n| !n.is_empty()),
+            );
+        }
+
+        if !any_v_bind {
+            return;
+        }
+
+        let mut roots: Vec<String> = referenced.iter().map(|name| name.to_string()).collect();
+        roots.sort_unstable();
+        self.style_vbind_roots = roots;
+
+        if !all_complete {
+            // An unparseable v-bind expression: fail OPEN — every binding is
+            // treated as style-used so no false unused diagnostic can fire.
+            for binding in &mut self.bindings {
+                binding.used_in_style = true;
+            }
+            return;
+        }
 
         if referenced.is_empty() {
             return;

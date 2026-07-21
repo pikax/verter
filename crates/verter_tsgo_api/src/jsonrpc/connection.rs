@@ -31,6 +31,23 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::jsonrpc::framing::{encode_message, MessageFramer};
 
+/// Build a JSON-RPC message body, OMITTING the `params` key entirely when the
+/// caller has none (`Value::Null`). LSP methods like `shutdown`/`exit` declare
+/// NO params; sending `"params": null` makes strict engines (tsgo) log
+/// `InvalidParams: expected no params, got null` while handling every teardown.
+fn jsonrpc_message(id: Option<i64>, method: &str, params: &serde_json::Value) -> serde_json::Value {
+    let mut msg = serde_json::Map::new();
+    msg.insert("jsonrpc".into(), serde_json::Value::from("2.0"));
+    if let Some(id) = id {
+        msg.insert("id".into(), serde_json::Value::from(id));
+    }
+    msg.insert("method".into(), serde_json::Value::from(method));
+    if !params.is_null() {
+        msg.insert("params".into(), params.clone());
+    }
+    serde_json::Value::Object(msg)
+}
+
 /// A handler invoked for each server→client request the peer sends (e.g. the
 /// `tsgo --lsp` server's `workspace/configuration` / `client/registerCapability`).
 /// It returns the `result` value to answer with. The default
@@ -185,12 +202,7 @@ impl JsonRpcConnection {
             armed: true,
         };
 
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
+        let msg = jsonrpc_message(Some(id), method, &params);
         self.out_tx
             .send(Outbound::Frame(encode_message(&msg)))
             .await
@@ -222,11 +234,7 @@ impl JsonRpcConnection {
     /// Send a JSON-RPC notification (no response expected), e.g. the `--lsp`
     /// `initialized` lifecycle notification or `$/cancelRequest`.
     pub async fn notify(&self, method: &str, params: serde_json::Value) -> TsgoApiResult<()> {
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
+        let msg = jsonrpc_message(None, method, &params);
         self.out_tx
             .send(Outbound::Frame(encode_message(&msg)))
             .await

@@ -16,6 +16,7 @@ import type {
   Comment,
   Directive,
   Fragment,
+  GlobalComponents,
   GlobalDirectives,
   HTMLAttributes,
   NativeElements,
@@ -31,7 +32,18 @@ export declare function createMacroReturn<T>(): T;
 export type OmitConstructorSignature<T> = { [K in keyof T]: T[K] };
 
 // IDE template helpers
-export type ExtractRenderComponent<T> = T extends { new (): infer I }
+export declare function globalComponentsNav(): GlobalComponents;
+export type GlobalComponentType<N> = N extends keyof GlobalComponents
+  ? GlobalComponents[N]
+  : unknown;
+export type GlobalComponentKebabType<N, K extends string> = N extends keyof GlobalComponents
+  ? GlobalComponents[N]
+  : K extends keyof GlobalComponents
+    ? GlobalComponents[K]
+    : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements
+      ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any
+      : (props: Record<string, any>) => any;
+export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I }
   ? I extends { $props: any }
     ? T
     : I extends HTMLElement
@@ -45,9 +57,11 @@ export type ExtractRenderComponent<T> = T extends { new (): infer I }
         : HTMLElement
     : T extends HTMLElement
       ? (props: {}) => T
-      : T extends keyof NativeElements
-        ? (props: NativeElements[T]) => JSX.Element
-        : (props: {}) => JSX.Element;
+      : T extends keyof GlobalComponents
+        ? ExtractRenderComponent<GlobalComponents[T]>
+        : T extends keyof NativeElements
+          ? (props: NativeElements[T]) => JSX.Element
+          : (props: {}) => JSX.Element;
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I }
@@ -260,3 +274,10 @@ export declare function defineExpose_Box<Exposed extends Record<string, any> = R
 
 // defineSlots
 export declare function defineSlots_Box<S extends Record<string, any> = Record<string, any>>(): S;
+
+declare module "vue" {
+  // Guarantee the augmentable GlobalComponents surface exists on EVERY Vue
+  // version (Vue <3.5 ships no GlobalComponents export); user/UI-kit
+  // augmentations merge in, and absence stays fail-closed `unknown`.
+  interface GlobalComponents {}
+}

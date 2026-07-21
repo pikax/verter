@@ -77,7 +77,9 @@
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-textdocument": "^1.0.12",
-    "vscode-languageserver-types": "^3.17.5"
+    "vscode-languageserver-types": "^3.17.5",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   },
   "contributes": {
     "mcpServerDefinitionProviders": [
@@ -302,6 +304,11 @@
           "default": "",
           "description": "Path to TypeScript SDK directory (e.g., node_modules/typescript/lib). Leave empty to auto-detect."
         },
+        "verter.providerRecommendations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a one-time notification when a preferred type provider (TSGO) is recommended over the active one. Dismissals are remembered per workspace."
+        },
         "verter.experimental.conditionalRootNarrowing": {
           "type": "boolean",
           "default": false,
@@ -479,7 +486,8 @@
         ],
         "extensions": [
           ".svelte"
-        ]
+        ],
+        "configuration": "./languages/svelte-language-configuration.json"
       },
       {
         "id": "vue-html",
@@ -535,6 +543,21 @@
           "source.json": "json",
           "source.php": "php",
           "source.graphql": "graphql"
+        }
+      },
+      {
+        "language": "svelte",
+        "scopeName": "source.svelte",
+        "path": "./syntaxes/svelte.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.ts": "typescript",
+          "source.js": "javascript",
+          "source.css": "css",
+          "source.css.scss": "scss",
+          "source.css.less": "less",
+          "source.sass": "sass",
+          "source.stylus": "stylus",
+          "source.css.postcss": "vue-postcss"
         }
       },
       {

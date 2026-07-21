@@ -183,6 +183,38 @@ impl VerterLanguageServer {
             .is_some_and(|projection| projection.is_self_file())
     }
 
+    /// Whether `uri` is a carrier owned by MULTIPLE configured projects (a genuine
+    /// tsconfig overlap resolved to a single tsgo default owner for per-file
+    /// features). A PROVIDER rename runs only within that one owner project, so a
+    /// symbol that ESCAPES the owner (exported + imported by a sibling configured
+    /// project) would rename partially and leave the symbol dangling in the
+    /// siblings. Cheaply detecting escape is not feasible without the cross-project
+    /// rename fan-out (not yet implemented), so rename fails CLOSED for this case — this
+    /// predicate is the gate. A uniquely-owned carrier (`Unique`), an unowned one
+    /// (`None`), and a non-carrier all return `false` (rename unaffected).
+    ///
+    /// Gated on `ownership_ready`: a bootstrap snapshot's overlap is not yet
+    /// authoritative, so it never trips the gate.
+    pub(super) fn carrier_is_multi_claimant(&self, uri: &Uri) -> bool {
+        let host = self.documents.host();
+        let canonical = crate::documents::uri_to_canonical_id(uri);
+        if !verter_workspace::resolver::path_is_carrier(&canonical) {
+            return false;
+        }
+        let Some(published) = host.workspace_read().published_root() else {
+            return false;
+        };
+        if !published.ownership_ready {
+            return false;
+        }
+        matches!(
+            published
+                .snapshot
+                .configured_owner_resolution_for_file(&canonical),
+            verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Ambiguous(_)
+        )
+    }
+
     /// Find the Vue URI corresponding to an IDE path.
     pub(super) fn carrier_uri_from_ide_path(&self, ide_path: &str) -> Option<Uri> {
         let snapshot = self.published_resolver()?;
@@ -330,6 +362,7 @@ impl VerterLanguageServer {
         receipt: &crate::external_ts::ProviderReadyReceipt,
     ) {
         if self.carrier_transaction_coordinator.admit_owned(
+            self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             state,
@@ -509,6 +542,7 @@ impl VerterLanguageServer {
         // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
         // buffers. Only an admitted commit closes them.
         if self.carrier_transaction_coordinator.admit_owned(
+            self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             committed_state,

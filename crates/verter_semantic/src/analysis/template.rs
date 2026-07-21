@@ -67,6 +67,28 @@ pub struct TemplateAnalysisSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emit_definitions: Vec<AnalyzedEmitDefinition>,
 
+    /// Declared `defineSlots` members with resolved usage (outlet present or
+    /// programmatic access). Populated only when usage can be statically
+    /// bounded — fail-open (empty) otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_declarations: Vec<AnalyzedSlotDeclaration>,
+
+    /// True when any template expression failed to parse — the identifier
+    /// inventory is then incomplete and usage-driven diagnostics fail open.
+    #[serde(default)]
+    pub has_expression_errors: bool,
+
+    /// Static member reads on identifier roots inside template expressions
+    /// (`props.title`, `$slots.header`). A root consumed by a member read is
+    /// NOT a whole-object escape; matched against occurrences by root span.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_reads: Vec<TemplateMemberRead>,
+
+    /// A `<slot :name="expr">` dynamic outlet exists — the outlet set cannot
+    /// be statically bounded (suppresses unused-slot diagnostics).
+    #[serde(default)]
+    pub has_dynamic_slot_outlet: bool,
+
     /// Comment directives (`@verter:disable`, `@verter:todo`, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comment_directives: Vec<CommentDirective>,
@@ -79,6 +101,50 @@ pub struct TemplateAnalysisSnapshot {
     /// All CSS variable names set in template inline styles (static + dynamic, deduped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub css_var_names: Vec<String>,
+
+    /// Svelte `{#snippet name(params)}` declarations in this component's
+    /// template (empty for Vue). Powers `{@render |}` callee completion (D5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snippet_definitions: Vec<SnippetDefinition>,
+
+    /// Svelte element directives (`use:x`, `transition:fn`, `bind:prop`, …) in
+    /// this component's template (empty for Vue). Powers the D6
+    /// directive-keyword doc hovers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub svelte_directives: Vec<SvelteDirectiveInfo>,
+}
+
+/// A Svelte `{#snippet name(params)}` declaration (typed template IR).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetDefinition {
+    /// Snippet name (`"row"`, `"header"`).
+    pub name: String,
+    /// SFC-absolute byte span of the snippet name.
+    pub span: Span,
+    /// The `(params)` text without the parens, when present (e.g. `"item: number"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params_text: Option<String>,
+}
+
+/// A Svelte element directive attribute (`use:action`, `transition:fn`,
+/// `bind:prop`, `class:name`, `style:prop`, `on:event`, `let:item`, …) as
+/// typed template IR. Powers the D6 directive-keyword doc hovers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SvelteDirectiveInfo {
+    /// The keyword (`use`, `transition`, `in`, `out`, `animate`, `bind`,
+    /// `class`, `style`, `on`, `let`, or an unrecognised prefix verbatim).
+    pub keyword: String,
+    /// The local name (the part after the `:`, before any `|modifier`).
+    pub local: String,
+    /// The full attribute span.
+    pub span: Span,
+    /// Byte offset end of the keyword (before the `:`).
+    pub keyword_end: u32,
+    /// The local name span.
+    pub local_span: Span,
+    /// The value expression span, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_span: Option<Span>,
 }
 
 // =============================================================================
@@ -1170,6 +1236,21 @@ pub struct TemplateAttribute {
     pub value_span: Option<Span>,
 }
 
+/// A resolvable class-name token in carrier markup — the typed usage fact for
+/// carriers WITHOUT a template element IR (Svelte). Each token names one class
+/// with the exact byte span of the authored name (a `class="a b"` value yields
+/// one token per name; a `class:x` directive yields one directive token).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkupClassToken {
+    /// The class name.
+    pub name: String,
+    /// Carrier-absolute byte span of the authored name.
+    pub span: Span,
+    /// `true` for a `class:x` directive token, `false` for a `class="x"` entry.
+    pub from_directive: bool,
+}
+
 // =============================================================================
 // If Chains
 // =============================================================================
@@ -1185,6 +1266,32 @@ pub struct IfChain {
 // =============================================================================
 // Prop & Emit Definitions
 // =============================================================================
+
+/// A static member read on an identifier root inside a template expression.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMemberRead {
+    /// The root identifier (`props` in `props.title`).
+    pub root: String,
+    /// The literal member name.
+    pub member: String,
+    /// File-absolute span of the root identifier (matches the corresponding
+    /// binding occurrence span).
+    pub root_span: verter_span::Span,
+}
+
+/// A declared `defineSlots` member with resolved usage for the linter.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedSlotDeclaration {
+    /// Slot name (`"default"`, `"header"`, …).
+    pub name: String,
+    /// SFC-absolute byte span of the slot name in the `defineSlots` declaration.
+    pub span: verter_span::Span,
+    /// Whether an outlet (`<slot>` / `<slot name="x">`, conditional included)
+    /// or a bounded programmatic access uses this slot.
+    pub used: bool,
+}
 
 /// Props analysis enriched for linter.
 #[derive(Debug, Clone, PartialEq, Eq)]

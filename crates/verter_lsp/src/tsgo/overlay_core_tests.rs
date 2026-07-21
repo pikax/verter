@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::traits::ProviderFuture;
 
-use super::{InjectedRecord, LazyOverlayCore, OverlayTransport};
+use super::{InjectedRecord, LazyOverlayCore, OverlayPriority, OverlayTransport};
 use crate::tsgo::transport_cell::EstablishedTransport;
 
 /// A transport double: records each injection/retraction and reports controllable
@@ -247,6 +247,37 @@ async fn query_path_establishes_and_injects_latest_recorded_content() {
         established.transport.ops(),
         vec!["/ws/Foo.vue.tsx=content-v2".to_string()],
         "the query path injects the LATEST recorded content (fail-closed to OWNED until established)"
+    );
+}
+
+/// A workspace-scanner publication can finish after a foreground edit even though it
+/// was sourced from the older disk snapshot. Late background bytes must not replace
+/// the interactive carrier injected by the next SHARED feature query.
+#[tokio::test]
+async fn late_background_record_cannot_overwrite_interactive_content() {
+    let core = LazyOverlayCore::<FakeTransport>::new();
+    core.record_content("/ws/App.vue.tsx", "interactive-current");
+    core.record_content_at_priority(
+        "/ws/App.vue.tsx",
+        "background-stale",
+        OverlayPriority::Background,
+    );
+
+    let established = core
+        .ensure(
+            Some(((), 1u64)),
+            |_generation| Some("nonce-1".to_string()),
+            |(), _generation| async { Some(Arc::new(FakeTransport::alive())) },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("query-time establishment");
+    core.inject_dirty(&established, "/ws/App.vue.tsx", 1).await;
+
+    assert_eq!(
+        established.transport.ops(),
+        vec!["/ws/App.vue.tsx=interactive-current".to_string()],
+        "a late background publication must not replace foreground editor bytes"
     );
 }
 

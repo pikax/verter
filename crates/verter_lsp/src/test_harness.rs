@@ -37,92 +37,13 @@ fn real_provider_session_gate() -> &'static Arc<tokio::sync::Semaphore> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Provider kind
-// ---------------------------------------------------------------------------
-
-/// Which real type provider to spawn.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum TestProviderKind {
-    Tsserver,
-    Tsgo,
-}
-
-impl TestProviderKind {
-    /// The require-mode env var that turns this provider's absence into a HARD
-    /// failure instead of a graceful skip. CI sets `VERTER_REQUIRE_TSGO=1` (see
-    /// `.github/workflows/ci.yml`), so the tsgo real-provider parity tests
-    /// genuinely gate there and can never skip-as-pass on a runner where the
-    /// asset is expected. `VERTER_REQUIRE_TSSERVER` is the analogous knob for
-    /// the tsserver variant.
-    fn require_env(self) -> &'static str {
-        match self {
-            TestProviderKind::Tsserver => "VERTER_REQUIRE_TSSERVER",
-            TestProviderKind::Tsgo => "VERTER_REQUIRE_TSGO",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            TestProviderKind::Tsserver => "tsserver",
-            TestProviderKind::Tsgo => "tsgo",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Require-mode (fail-closed) provider gating
-// ---------------------------------------------------------------------------
-
-/// What an absent provider means for a real-provider test: a HARD failure when
-/// the run requires that provider (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`, e.g.
-/// strict CI), else a graceful skip. Pure so both branches are unit-tested
-/// regardless of whether the provider happens to be installed on the running
-/// machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderAbsence {
-    /// Required but missing — the test must FAIL (never skip-as-pass).
-    HardFail,
-    /// Not required — record a skip and degrade gracefully.
-    SkipWithReason,
-}
-
-/// Pure decision: given whether the provider is required, how should its
-/// absence be handled.
-pub(crate) fn provider_absence_outcome(required: bool) -> ProviderAbsence {
-    if required {
-        ProviderAbsence::HardFail
-    } else {
-        ProviderAbsence::SkipWithReason
-    }
-}
-
-/// Read the require-mode env var for a provider kind (`"1"` ⇒ required).
-fn provider_required(kind: TestProviderKind) -> bool {
-    std::env::var(kind.require_env())
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
-/// Resolve an absent-provider situation: under require-mode this PANICS (the
-/// fail-closed gate); otherwise it prints a skip marker and returns `None` so
-/// the caller returns early. A skip is never reported as a pass.
-///
-/// Split from the env read (`provider_required`) so the panic-vs-skip policy
-/// (`provider_absence_outcome`) is independently unit testable.
-fn handle_absent_provider(kind: TestProviderKind, reason: &str) -> Option<RealProviderTestSession> {
-    match provider_absence_outcome(provider_required(kind)) {
-        ProviderAbsence::HardFail => panic!(
-            "{}=1 but the {} real-provider test cannot run: {reason}",
-            kind.require_env(),
-            kind.label(),
-        ),
-        ProviderAbsence::SkipWithReason => {
-            eprintln!("skipping ({}): {reason}", kind.label());
-            None
-        }
-    }
-}
+// Provider kind + require-mode (fail-closed) absence gating live in the
+// sibling [`crate::test_harness_gating`] module.
+#[allow(unused_imports)]
+pub(crate) use crate::test_harness_gating::{
+    handle_absent_provider, provider_absence_outcome, provider_required, ProviderAbsence,
+    TestProviderKind,
+};
 
 // ---------------------------------------------------------------------------
 // Session builder
@@ -400,7 +321,36 @@ impl TestSessionBuilder {
             Arc::new(verter_workspace::FilesystemWorkspace::new(
                 verter_workspace::FilesystemOptions::default(),
             ));
-        let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+        // The production request deadlines are human-scaled to a single healthy
+        // provider (hover 1.5s, definition 2.5s, ...). This harness deliberately
+        // spawns real providers, and the suite runs dozens of them concurrently
+        // under nextest — a pathological CPU-starvation environment where a
+        // normally-3ms tsserver hover can be scheduled out past a second. That is
+        // the canonical "slow machine" the deadlines are configurable for: raise
+        // every kind to the long batch backstop so these tests validate provider
+        // CORRECTNESS rather than measuring latency under contention. The wedge /
+        // fail-closed repros do not use this harness — they build their config
+        // directly and set their own tight deadline.
+        let config = HostConfig {
+            lsp_method_timeouts: verter_session::LspMethodTimeoutsConfig {
+                request_deadlines: verter_session::LspMethodBudgets {
+                    hover: std::time::Duration::from_secs(15),
+                    goto_definition: std::time::Duration::from_secs(15),
+                    completion: std::time::Duration::from_secs(15),
+                    references: std::time::Duration::from_secs(15),
+                    diagnostics: std::time::Duration::from_secs(15),
+                    document_symbols: std::time::Duration::from_secs(15),
+                    semantic_tokens: std::time::Duration::from_secs(15),
+                    inlay_hints: std::time::Duration::from_secs(15),
+                    code_action: std::time::Duration::from_secs(15),
+                    rename: std::time::Duration::from_secs(15),
+                    other: std::time::Duration::from_secs(15),
+                },
+                ..HostConfig::default().lsp_method_timeouts
+            },
+            ..HostConfig::default()
+        };
+        let host = Arc::new(VerterHost::new(config, vfs_workspace));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&provider);
         // Construct the server with the per-session store-dir override installed:
@@ -419,7 +369,6 @@ impl TestSessionBuilder {
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: provider_kind,
-                        suggest_tsgo: false,
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm,
@@ -604,6 +553,46 @@ impl RealProviderTestSession {
         }
         eprintln!("skipping ({}): {reason}", self.kind.label());
         true
+    }
+
+    /// Fail-closed gate for a provider WARM-UP that never became ready.
+    ///
+    /// The sibling of [`Self::allow_empty_result_skip`] for the warm-up phase: a
+    /// test body that would `return` early because `wait_until_ready` failed is
+    /// VACUOUS — its assertions never ran. Under require-mode
+    /// (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`) that vacuity is a hard FAILURE (the
+    /// non-vacuity gate); off require-mode it records a machine-greppable
+    /// `RECEIPT … status=SKIPPED-WARMUP` marker and returns `true` so the caller
+    /// can degrade gracefully (`return`). A skipped body therefore can never
+    /// masquerade as a completed one in a receipt scan.
+    #[must_use]
+    pub(crate) fn allow_warmup_skip(&self, test: &str) -> bool {
+        if provider_required(self.kind) {
+            panic!(
+                "{}=1 but {test} never warmed up its {} provider — refusing to skip-as-pass \
+                 (non-vacuity gate)",
+                self.kind.require_env(),
+                self.kind.label(),
+            );
+        }
+        eprintln!(
+            "RECEIPT real-provider test={test} provider={} require_mode=0 status=SKIPPED-WARMUP",
+            self.kind.label()
+        );
+        true
+    }
+
+    /// Emit the end-of-body non-vacuity receipt marker. Called by
+    /// `real_provider_test!` after the test body returns; paired with
+    /// require-mode (where every skip path panics instead of returning), a
+    /// `status=body-returned require_mode=1` line is machine-checkable proof
+    /// the body's assertions executed against a live provider.
+    pub(crate) fn emit_body_receipt(&self, test: &str) {
+        eprintln!(
+            "RECEIPT real-provider test={test} provider={} require_mode={} status=body-returned",
+            self.kind.label(),
+            u8::from(provider_required(self.kind)),
+        );
     }
 
     /// Direct access to the underlying real type provider.
@@ -1273,6 +1262,7 @@ pub(crate) fn materialize_pkg_vuecomp(fixture: &str) -> std::path::PathBuf {
 const VUE_TYPE_STUB_DTS: &str = r#"// Minimal `vue` type surface for the external-TS-DX fixture carriers.
 export type PublicProps = { class?: unknown; style?: unknown };
 export type HTMLAttributes = Record<string, unknown>;
+export interface GlobalComponents {}
 export declare function defineComponent<P = {}>(options: P): {
   new (...args: any[]): { $props: P };
 };
@@ -1408,6 +1398,7 @@ macro_rules! real_provider_test {
                 async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
                     $body
                 $fn_name(&session).await;
+                session.emit_body_receipt(stringify!([<$name _tsserver>]));
                 session.shutdown().await;
             }
 
@@ -1425,6 +1416,7 @@ macro_rules! real_provider_test {
                 async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
                     $body
                 $fn_name(&session).await;
+                session.emit_body_receipt(stringify!([<$name _tsgo>]));
                 session.shutdown().await;
             }
         }

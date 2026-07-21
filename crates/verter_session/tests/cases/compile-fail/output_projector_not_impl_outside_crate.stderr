@@ -30,6 +30,7 @@ help: the trait `verter_session::project_semantic_dispatch::output_materializati
    |
 21 | struct ForeignSink;
    | ^^^^^^^^^^^^^^^^^^
+   = note: `ForeignSink` implements similarly named trait `unicode_width::private::Sealed`, but not `verter_session::project_semantic_dispatch::output_materialization::projector::sealed::Sealed`
 note: required by a bound in `verter_session::project_semantic_dispatch::output_materialization::projector::OutputProjector`
   --> src/project_semantic_dispatch/output_materialization.rs
    |

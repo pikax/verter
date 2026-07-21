@@ -68,6 +68,10 @@ path = "src/main.rs"
 
 [dev-dependencies]
 futures-util = "0.3.32"
+# Used by `tests/cases/kebab_tag_mapping_full_columns.rs` to compile a REAL SFC
+# through the production IDE codegen and assert, through the production
+# `PositionMapper`, that every letter column of a rewritten kebab component tag
+# (including the LAST column) maps into the generated TSX.
 verter_compiler = { path = "../verter_compiler" }
 verter_macro_dto = { path = "../verter_macro_dto" }
 verter_type_expr = { workspace = true }

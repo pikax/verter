@@ -36,13 +36,11 @@ pub(super) async fn handle_hover_with_audit(
         .clone();
     let position = params.text_document_position_params.position;
     let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
-    let budget = host.config().lsp_method_timeouts.hover;
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::Hover,
         canonical_id,
         Some(position),
-        budget,
         async move { handle_hover(server, params).await },
         |payload, value| {
             payload.response_size_bytes = hover_response_size(value.as_ref());
@@ -61,13 +59,11 @@ pub(super) async fn handle_completion_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
-    let budget = host.config().lsp_method_timeouts.completion;
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::Completion,
         canonical_id,
         Some(position),
-        budget,
         async move { handle_completion(server, params).await },
         |payload, value| {
             let count = match value {
@@ -97,13 +93,11 @@ pub(super) async fn handle_goto_definition_with_audit(
         .clone();
     let position = params.text_document_position_params.position;
     let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
-    let budget = host.config().lsp_method_timeouts.goto_definition;
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
         canonical_id,
         Some(position),
-        budget,
         async move { handle_goto_definition(server, params).await },
         |payload, value| {
             let count = match value {
@@ -129,13 +123,11 @@ pub(super) async fn handle_references_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
-    let budget = host.config().lsp_method_timeouts.references;
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::References,
         canonical_id,
         Some(position),
-        budget,
         async move { handle_references(server, params).await },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
@@ -157,13 +149,11 @@ pub(super) async fn handle_rename_with_audit(
     let uri = params.text_document_position.text_document.uri.clone();
     let position = params.text_document_position.position;
     let canonical_id = crate::audit_harness::canonical_id_for_uri(host.as_ref(), &uri);
-    let budget = host.config().lsp_method_timeouts.rename;
     crate::audit_harness::run_with_audit(
         &host,
         verter_audit::payloads::tags::LspMethodTag::Rename,
         canonical_id,
         Some(position),
-        budget,
         async move { handle_rename(server, params).await },
         |payload, value| {
             let edit_count = value

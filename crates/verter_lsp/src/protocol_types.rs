@@ -128,6 +128,29 @@ pub struct TypeProviderStatusParams {
     /// Stable provenance for the selected route, or the failure reason for "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Present when a different provider is recommended over the active one
+    /// (tsgo-preferred model: tsserver-family serving recommends TSGO). The
+    /// DECISION is server-owned portable facts; PRESENTATION (notification
+    /// style, dismissal persistence, settings affordances) is client-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<ProviderRecommendation>,
+}
+
+/// Structured provider recommendation riding `$/verter/typeProviderStatus`.
+///
+/// Content is editor-agnostic: no client settings keys, no editor-product
+/// names — each client renders the facts in its own idiom. Mirrors the
+/// `recommendation` field in `packages/language-shared/src/notifications.ts`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRecommendation {
+    /// The recommended provider kind (currently always "tsgo").
+    pub preferred: String,
+    /// Portable, human-readable rationale naming the active route.
+    pub reason: String,
+    /// Honest, tree-evidenced capability gaps of the recommended provider —
+    /// never marketing over evidence.
+    pub known_gaps: Vec<String>,
 }
 
 /// Server → client notification: the resolved per-workspace carrier-store

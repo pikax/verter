@@ -91,7 +91,7 @@ fn camel_to_kebab(s: &str) -> String {
 // ── Completion merge ───────────────────────────────────────────────
 
 /// Internal verter helper prefix that should be filtered from completions.
-const VERTER_INTERNAL_PREFIX: &str = "___VERTER___";
+pub(super) const VERTER_INTERNAL_PREFIX: &str = "___VERTER___";
 
 /// Internal compiler identifiers that should never appear in completions.
 fn is_internal_dunder(label: &str) -> bool {

@@ -255,6 +255,39 @@ impl ConfiguredMembership {
         // It never over-includes — the walk's effective filter IS `spec.matches`.
         self.spec.matches(file_path)
     }
+
+    /// Whether this configured project's PROGRAM directly includes `file_path`
+    /// — the tsgo `GetDefaultProject` / `findDefaultConfiguredProject` model of
+    /// membership, distinct from the general [`Self::contains`] ownership query.
+    ///
+    /// The default-configured-owner walk resolves the ONE configured project
+    /// whose loaded program actually contains the file, so a NON-EMPTY
+    /// `materialized_files` set (the walk-time program file set) is
+    /// AUTHORITATIVE: a file the walk did not materialize is not part of the
+    /// program and is not a claimant, even when the project's include glob
+    /// would match it. This is what lets `default_configured_owner_for_file`
+    /// answer `None` (⇒ `NoProject`) for a file no configured program contains,
+    /// rather than inventing an owner from a broad `**/*` include.
+    ///
+    /// An EMPTY `materialized_files` — a filesystem-less environment (WASM,
+    /// in-memory workspace) or a spec-defined match-all membership like
+    /// [`Self::match_all_under_root`] — has no program file set to be
+    /// authoritative, so it routes to `spec.matches`, where every include /
+    /// `files` hit is a direct inclusion.
+    ///
+    /// Contrast [`Self::contains`], the general ownership predicate, which
+    /// treats `materialized_files` as a positive cache and always falls through
+    /// to `spec.matches` on a miss so a file created after the walk still routes
+    /// to its owning project.
+    pub fn directly_includes(&self, file_path: &CanonicalPath) -> bool {
+        // A populated program file set is authoritative for direct inclusion.
+        if !self.materialized_files.is_empty() {
+            return self.materialized_files.contains(file_path);
+        }
+        // No program file set (filesystem-less / match-all): the compiled spec
+        // is the direct-inclusion authority.
+        self.spec.matches(file_path)
+    }
 }
 
 /// Fallback project membership: root-containment minus exclusions.

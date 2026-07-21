@@ -203,10 +203,24 @@ export declare function retrieveSetupDirectives<T>(instance: T): unknown;\n\
 export declare function strictRenderSlot(...args: unknown[]): unknown;\n\
 export declare function checkRequiredSlots(...args: unknown[]): unknown;\n";
 
-/// Write the hermetic configured-project fixture. Returns `(tsconfig_path, src_dir)`.
-/// The carrier companions are OFF-DISK overlays injected through the provider; the
-/// `include: ["src/**/*"]` glob makes them Program roots.
-fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+/// The strict `compilerOptions` every fixture project (single or dual-claimant leaf)
+/// shares, so a leaf tsconfig is a self-contained loadable Program.
+const FIXTURE_COMPILER_OPTIONS: &str = r#"  "compilerOptions": {
+    "strict": true,
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true,
+    "allowImportingTsExtensions": true
+  }"#;
+
+/// Write the fixture inputs shared by every project layout (the imported prop type,
+/// the Vue macro globals, and the `vue` + `@verter/types` package stubs) under `dir`.
+/// Returns the `src/` dir. The tsconfig(s) are written by the caller.
+fn write_fixture_common(dir: &Path) -> PathBuf {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     // The imported prop type (on disk — the carrier resolves `./props`).
@@ -250,28 +264,47 @@ fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     )
     .unwrap();
     std::fs::write(vt_dir.join("index.d.ts"), VERTER_TYPES_STUB).unwrap();
+    src
+}
 
+/// Write the hermetic configured-project fixture. Returns `(tsconfig_path, src_dir)`.
+/// The carrier companions are OFF-DISK overlays injected through the provider; the
+/// `include: ["src/**/*"]` glob makes them Program roots.
+fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    let src = write_fixture_common(dir);
     let tsconfig = dir.join("tsconfig.json");
     std::fs::write(
         &tsconfig,
-        r#"{
-  "compilerOptions": {
-    "strict": true,
-    "target": "ES2020",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "jsx": "preserve",
-    "noEmit": true,
-    "skipLibCheck": true,
-    "allowArbitraryExtensions": true,
-    "allowImportingTsExtensions": true
-  },
-  "include": ["src/**/*"]
-}
-"#,
+        format!("{{\n{FIXTURE_COMPILER_OPTIONS},\n  \"include\": [\"src/**/*\"]\n}}\n"),
     )
     .unwrap();
     (tsconfig, src)
+}
+
+/// Write the hermetic DUAL-CLAIMANT fixture: a solution `tsconfig.json`
+/// (`files: [], references: [app, components]`) referencing TWO sibling leaves that
+/// BOTH `include ["src/**/*"]`, so `src/Widget.vue` is claimed by both. The tsgo
+/// default-project selection binds it to the single default owner (`tsconfig.app.json`,
+/// the first reference-order leaf) — never a terminal `Ambiguous`. Returns
+/// `(owner_tsconfig_path, src_dir)` where the owner is that single default owner.
+fn write_dual_claimant_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    let src = write_fixture_common(dir);
+    let leaf = |name: &str| {
+        std::fs::write(
+            dir.join(name),
+            format!("{{\n{FIXTURE_COMPILER_OPTIONS},\n  \"include\": [\"src/**/*\"]\n}}\n"),
+        )
+        .unwrap();
+    };
+    leaf("tsconfig.app.json");
+    leaf("tsconfig.components.json");
+    // The solution references both leaves (app first) and includes nothing itself.
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        "{\n  \"files\": [],\n  \"references\": [\n    { \"path\": \"./tsconfig.app.json\" },\n    { \"path\": \"./tsconfig.components.json\" }\n  ]\n}\n",
+    )
+    .unwrap();
+    (dir.join("tsconfig.app.json"), src)
 }
 
 /// A fake editor over the shim stdio: writes LSP frames, records EVERY frame the
@@ -459,6 +492,33 @@ fn resolved_binding(workspace_root: &str, tsconfig: &str) -> CarrierOwnershipRes
     resolver.resolve(&format!("{workspace_root}/src/Widget.vue"), None)
 }
 
+/// Resolve the carrier SOURCE through the PRODUCTION `WorkspaceProjectResolver` over a
+/// real DUAL-CLAIMANT published snapshot (a solution referencing two sibling leaves that
+/// both `include src`). The multi-claimant carrier must bind to the SINGLE tsgo default
+/// owner (`tsconfig.app.json`) — never a terminal `Ambiguous`. Same production resolution
+/// path as `resolved_binding`, over the `dual_claimant_fixture_snapshot` topology.
+fn resolved_dual_claimant_binding(workspace_root: &str) -> CarrierOwnershipResolution {
+    let snapshot = dual_claimant_fixture_snapshot(workspace_root);
+    let vfs = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![workspace_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    let env_dims_source = |_tsconfig_uri: &str| EnvDims {
+        parse_env_hash: [11u8; 16],
+        resolve_env_hash: [22u8; 16],
+        lib_env_hash: [33u8; 16],
+        project_identity: ProjectIdentity([7u8; 16]),
+    };
+    let resolver = WorkspaceProjectResolver::new(
+        &snapshot,
+        &vfs as &dyn WorkspaceRead,
+        "7.0.2",
+        &env_dims_source,
+        true,
+    );
+    resolver.resolve(&format!("{workspace_root}/src/Widget.vue"), None)
+}
+
 /// A wired SHARED session: the shim + fake editor + the established provider.
 struct Harness {
     shim: Child,
@@ -522,6 +582,95 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
     .await
     .expect("establish_shared timed out")
     .expect("SHARED attach must be established (all-positive live evidence)");
+
+    assert_eq!(
+        provider.serve_mode(),
+        verter_session::external_ts::ServeMode::Shared,
+        "an all-positive live attach must decide SHARED"
+    );
+
+    Harness {
+        shim,
+        editor,
+        provider,
+        dir,
+        src,
+    }
+}
+
+/// Drive the full chain to an established SHARED provider over a DUAL-CLAIMANT project
+/// topology: two sibling leaves both `include src`, resolved to the single tsgo default
+/// owner (`tsconfig.app.json`) through the production resolver. Asserts the multi-claimant
+/// carrier binds `Bound` to that single owner (the release-blocking pre-fix bug was a
+/// terminal `Ambiguous(MultipleOwners)` here) before establishing the shared session under
+/// it.
+async fn setup_dual_claimant(tsgo: &Path, tag: &str) -> Harness {
+    let dir = tempdir(tag);
+    let (owner_tsconfig, src) = write_dual_claimant_fixture(&dir);
+    let owner_tsconfig_norm = norm(&owner_tsconfig);
+    let workspace_norm = norm(&dir);
+    let root_uri = format!("file:///{}", workspace_norm.trim_start_matches('/'));
+    let control_dir = dir.join("ctl");
+    let session_key = tag.to_string();
+
+    let mut shim = spawn_shim(tsgo, &control_dir, &session_key);
+    let editor_stdin = shim.stdin.take().expect("shim stdin piped");
+    let editor_stdout = shim.stdout.take().expect("shim stdout piped");
+    let editor = FakeEditor::new(editor_stdin, editor_stdout);
+
+    editor
+        .send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params(&root_uri),
+        }))
+        .await;
+    let init_resp = editor
+        .wait_for(|m| m["id"] == 1, Duration::from_secs(40))
+        .await
+        .expect("the relayed initialize response");
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["version"].as_str(),
+        Some("7.0.2"),
+        "the fake editor observes the REAL relayed tsgo version"
+    );
+    editor
+        .send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+        .await;
+
+    // The dual-claimant carrier resolves to the SINGLE tsgo default owner through the
+    // shared, provider-neutral resolver — never a terminal `Ambiguous`. This is the
+    // owner the shared `--api` session serves under.
+    let resolution = resolved_dual_claimant_binding(&workspace_norm);
+    match &resolution {
+        // Path-equality is case-insensitive on the drive letter (the resolver
+        // canonicalizes `C:` → `c:`) — compare through the portable path helper, never
+        // raw bytes.
+        CarrierOwnershipResolution::Bound(binding) => assert!(
+            verter_span::path::fs_paths_equal(binding.tsconfig_uri(), &owner_tsconfig_norm),
+            "the shared route must bind the dual-claimant carrier to the single default \
+             owner (tsconfig.app.json), never a terminal Ambiguous: got {}",
+            binding.tsconfig_uri()
+        ),
+        other => panic!(
+            "a dual-claimant carrier must resolve to a single Bound owner on the shared \
+             route (tsgo GetDefaultProject), got {other:?}"
+        ),
+    }
+
+    let provider = tokio::time::timeout(
+        Duration::from_secs(45),
+        TsgoSharedProvider::establish_shared(EstablishSharedParams {
+            control_dir: &control_dir,
+            session_key: &session_key,
+            workspace_root: &workspace_norm,
+            tsconfig_path: &owner_tsconfig_norm,
+            resolution,
+            config_generation: 1,
+            client_label: "verter_lsp",
+        }),
+    )
+    .await
+    .expect("establish_shared timed out")
+    .expect("SHARED attach must be established for the dual-claimant owner");
 
     assert_eq!(
         provider.serve_mode(),
@@ -634,6 +783,109 @@ async fn shared_provider_serves_real_vue_macro_carrier() {
     );
     // The mapped `.vue` line must be the deliberate error line (`props.label`) —
     // discriminating: a mis-mapping would land elsewhere.
+    let vue_lines: Vec<&str> = WIDGET_VUE.lines().collect();
+    let mapped_line = vue_lines
+        .get(mapped.start.line as usize)
+        .copied()
+        .unwrap_or("");
+    assert!(
+        mapped_line.contains("props.label") || mapped_line.contains("wrong"),
+        "the TS2322 must map back to the deliberate error line in the .vue script; mapped to \
+         line {} = {mapped_line:?}",
+        mapped.start.line
+    );
+
+    teardown(h).await;
+}
+
+/// DUAL-CLAIMANT-LIVE — the SHARED route's proof for the release-blocking
+/// "no inference at all" bug, mirroring the managed/tsserver `real_provider_test!`
+/// (`dual_vue_claimant_solution_resolves_to_single_default_owner_with_real_types`) on
+/// the live relay. A `.vue` carrier claimed by TWO sibling leaves (a solution
+/// referencing both) binds to the SINGLE tsgo default owner, and — served through the
+/// shared `--api` session under that owner — its REAL IDE codegen surfaces the deliberate
+/// TS2322 (imported-prop macro type), resolves every import (NO TS2307), and maps the
+/// diagnostic back to the `.vue` script span. Pre-fix the carrier was terminal
+/// `Ambiguous(MultipleOwners)`: `setup_dual_claimant`'s Bound assertion would panic and
+/// every provider feature would fail closed (null hover, 0 diagnostics).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_provider_serves_dual_claimant_carrier_with_real_types() {
+    let Some(tsgo) = engine_or_skip().await else {
+        return;
+    };
+    let h = setup_dual_claimant(&tsgo, "dualclaim").await;
+
+    // REAL IDE codegen (NOT handcrafted): the imported-prop type flows through the macro
+    // into the carrier via the shared resolver.
+    let (ide_code, source_map, companion) = compile_vue_ide(WIDGET_VUE);
+    assert!(
+        ide_code.contains("defineProps<") && ide_code.contains("Widget.vue.verter.ts"),
+        "the injected carrier is the real IDE codegen (defineProps + companion re-export)"
+    );
+
+    let carrier_tsx = norm(&h.src.join("Widget.vue.tsx"));
+    let companion_ts = norm(&h.src.join("Widget.vue.verter.ts"));
+
+    // Inject BOTH the carrier and its `.verter.ts` companion through the control protocol
+    // (the shim's gated injection channel) — the companion IDE-TSX sync.
+    h.provider
+        .open_file(&companion_ts, &companion)
+        .await
+        .expect("inject the .verter.ts companion");
+    h.provider
+        .open_file(&carrier_tsx, &ide_code)
+        .await
+        .expect("inject the real IDE carrier");
+
+    let diags = tokio::time::timeout(
+        Duration::from_secs(45),
+        h.provider.semantic_diagnostics_for_carrier(&carrier_tsx),
+    )
+    .await
+    .expect("shared semantic diagnostics timed out")
+    .expect("shared semantic diagnostics");
+
+    let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
+    eprintln!("[dualclaim] shared --api carrier diagnostics codes = {codes:?}");
+
+    // THE PROOF: the deliberate TS2322 surfaces — the dual-claimant carrier is SERVED
+    // under its single Bound owner with REAL types (never a null-hover fail-closed).
+    let ts2322 = diags
+        .iter()
+        .find(|d| d.code.as_deref() == Some("2322"))
+        .unwrap_or_else(|| {
+            panic!("the dual-claimant carrier must produce TS2322 through the shared owner; got {codes:?}")
+        });
+    // NEGATIVE: every carrier import resolved under the resolved owner — no TS2307.
+    assert!(
+        !diags.iter().any(|d| d.code.as_deref() == Some("2307")),
+        "every carrier import must resolve under the single default owner — no TS2307; \
+         got {codes:?}"
+    );
+
+    // Map the carrier-origin TS2322 back through the PRODUCTION `ProviderPositionMapper`
+    // to the `.vue` source span — the companion IDE-TSX position mapping. Real range,
+    // never a forged `(0,0)`.
+    let mapper = ProviderPositionMapper::source_map(
+        PositionMapper::from_json(&source_map).expect("parse the IDE source map"),
+    );
+    let tsx_line_index = LineIndex::new_utf16(&ide_code);
+    let vue_line_index = LineIndex::new_utf16(WIDGET_VUE);
+    let mapped = tsx_range_to_carrier_range(
+        ts2322.start,
+        ts2322.end,
+        &tsx_line_index,
+        &mapper,
+        &vue_line_index,
+    )
+    .expect("the carrier-origin TS2322 must map back to the .vue source (never forged)");
+    assert!(
+        !(mapped.start.line == 0
+            && mapped.start.character == 0
+            && mapped.end.line == 0
+            && mapped.end.character == 0),
+        "the mapped span must be a real .vue location, never a forged (0,0)"
+    );
     let vue_lines: Vec<&str> = WIDGET_VUE.lines().collect();
     let mapped_line = vue_lines
         .get(mapped.start.line as usize)
@@ -928,6 +1180,117 @@ fn fixture_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot {
         },
     };
     build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1))
+}
+
+/// A DUAL-CLAIMANT fixture: a solution `tsconfig.json` (`files: [], references:
+/// […]`) referencing TWO leaves that BOTH `include: ["src/**/*"]`, so the carrier
+/// is claimed by MULTIPLE configured projects — the release-blocking overlap.
+/// Built through the SAME production membership/reference loaders `fixture_snapshot`
+/// uses, so the SHARED route's ownership authority (`WorkspaceProjectResolver`) is
+/// exercised exactly as production does.
+fn dual_claimant_fixture_snapshot(ws_root: &str) -> WorkspaceSnapshot {
+    let solution = format!("{ws_root}/tsconfig.json");
+    let app = format!("{ws_root}/tsconfig.app.json");
+    let components = format!("{ws_root}/tsconfig.components.json");
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(
+        solution.clone(),
+        Arc::<str>::from(
+            r#"{ "files": [], "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.components.json" }] }"#,
+        ),
+    );
+    ws.inject_file(
+        app.clone(),
+        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+    );
+    ws.inject_file(
+        components.clone(),
+        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+    );
+    ws.inject_file(
+        format!("{ws_root}/src/Widget.vue"),
+        Arc::<str>::from("<template></template>"),
+    );
+
+    let root = CanonicalPath::new(ws_root);
+    let make_project = |id: u32, tsconfig: &str| {
+        let raw_membership = load_project_membership(&ws, tsconfig);
+        let compiler_options = load_compiler_options(&ws, tsconfig);
+        let supported = supported_extensions_for(&compiler_options);
+        let spec = membership_to_spec(&root, &raw_membership, &supported);
+        let references = load_project_references(&ws, tsconfig)
+            .into_iter()
+            .map(|r| CanonicalPath::new(&r))
+            .collect();
+        OwnershipProject {
+            id: ProjectId(id),
+            root: root.clone(),
+            workspace_root: CanonicalPath::new(ws_root),
+            payload: ProjectPayload::Configured {
+                tsconfig_path: CanonicalPath::new(tsconfig),
+                membership: ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options,
+                references,
+                workspace_aliases: Vec::new(),
+            },
+        }
+    };
+    build_workspace_snapshot_simple(
+        vec![
+            make_project(0, &solution),
+            make_project(1, &app),
+            make_project(2, &components),
+        ],
+        SnapshotGeneration(1),
+    )
+}
+
+/// SHARED-route ownership proof (hermetic, no relay needed): the SHARED tsgo
+/// provider decides serving from the SAME `WorkspaceProjectResolver::resolve()`
+/// the tsserver + managed-tsgo routes consume. A dual-`.vue`-claimant solution
+/// must resolve to a single `Bound` owner (the first leaf in the solution's
+/// declared references order) — never a terminal `Ambiguous`. Reverting the
+/// multi-claimant selection makes this `Ambiguous(MultipleOwners)` and the shared
+/// route fails every carrier feature closed.
+#[test]
+fn shared_route_dual_claimant_carrier_resolves_to_single_bound_owner() {
+    let ws_root = "d:/shared-dual";
+    let snapshot = dual_claimant_fixture_snapshot(ws_root);
+    let vfs = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    let env_dims_source = |_tsconfig_uri: &str| EnvDims {
+        parse_env_hash: [11u8; 16],
+        resolve_env_hash: [22u8; 16],
+        lib_env_hash: [33u8; 16],
+        project_identity: ProjectIdentity([7u8; 16]),
+    };
+    let resolver = WorkspaceProjectResolver::new(
+        &snapshot,
+        &vfs as &dyn WorkspaceRead,
+        "7.0.2",
+        &env_dims_source,
+        true,
+    );
+    match resolver.resolve(&format!("{ws_root}/src/Widget.vue"), None) {
+        CarrierOwnershipResolution::Bound(binding) => assert_eq!(
+            binding.tsconfig_uri(),
+            format!("{ws_root}/tsconfig.app.json"),
+            "the shared route must bind a dual-claimant carrier to the first \
+             reference-order leaf — never a terminal Ambiguous"
+        ),
+        other => panic!(
+            "the shared route's dual-claimant carrier must resolve to a single Bound \
+             owner (tsgo GetDefaultProject), got {other:?}"
+        ),
+    }
 }
 
 /// A TWO-project fixture: an `app` configured project that DECLARES a redirect-ON

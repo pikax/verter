@@ -115,6 +115,8 @@ fn test_css_analysis_with_vue_input() {
             start: 10,
             end: 25,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![SpecialPseudoInput {
             kind: SpecialPseudoKind::Deep,
@@ -143,6 +145,8 @@ fn test_preprocessor_no_css_parsing() {
             start: 10,
             end: 25,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: Vec::new(),
     };
@@ -170,6 +174,8 @@ fn test_flags_derived_correctly() {
             start: 0,
             end: 5,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![
             SpecialPseudoInput {
@@ -376,6 +382,8 @@ fn test_style_block_analysis_serializes_camel_case() {
             start: 10,
             end: 25,
             generated_var_name: None,
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![SpecialPseudoInput {
             kind: SpecialPseudoKind::Deep,
@@ -964,18 +972,18 @@ fn test_parse_attribute_operators() {
 
 #[test]
 fn strip_css_comments_no_comments() {
-    assert!(strip_css_comments(".a > .b").is_none());
+    assert!(strip_css_comments_dialect(".a > .b", CssScanDialect::Css).is_none());
 }
 
 #[test]
 fn strip_css_comments_inline_comment() {
-    let result = strip_css_comments(".a /* comment */ > .b").unwrap();
+    let result = strip_css_comments_dialect(".a /* comment */ > .b", CssScanDialect::Css).unwrap();
     assert_eq!(result, ".a   > .b");
 }
 
 #[test]
 fn strip_css_comments_multiple() {
-    let result = strip_css_comments("/* x */.a/* y */.b").unwrap();
+    let result = strip_css_comments_dialect("/* x */.a/* y */.b", CssScanDialect::Css).unwrap();
     assert_eq!(result, " .a .b");
 }
 
@@ -1193,6 +1201,8 @@ fn test_v_bind_generated_var_name() {
             start: 10,
             end: 25,
             generated_var_name: Some("--a4f2eed6-color".to_string()),
+            expr_roots: Vec::new(),
+            roots_complete: true,
         }],
         special_pseudos: vec![],
     };
@@ -1344,4 +1354,254 @@ fn test_debug_assert_valid_spans_panics_for_double_offset() {
 
     // This should panic because spans (500+) exceed sfc_source_len (100)
     css_analysis.debug_assert_valid_spans(sfc_source_len);
+}
+
+// ── B4: class → selector join, rule body spans, SCSS/Less dialect ──
+
+fn analyze_scss(scss: &str) -> StyleBlockAnalysis {
+    build_scanned_style_analysis(
+        StyleAnalysisLang::Scss,
+        scss,
+        VueStyleInput::default(),
+        true,
+        false,
+        None,
+        0,
+    )
+}
+
+#[test]
+fn class_selector_index_joins_each_comma_part() {
+    let analysis = analyze_css(".a, .b .a { color: red; }\n.solo { color: blue; }");
+    let css = analysis.css.as_ref().unwrap();
+    assert_eq!(css.selectors.len(), 3);
+    assert_eq!(css.selectors[0].text, ".a");
+    assert_eq!(css.selectors[1].text, ".b .a");
+    assert_eq!(css.selectors[2].text, ".solo");
+
+    // classes in scan order: a (part 0), b (part 1), a (part 1), solo (sel 2)
+    let joins: Vec<(&str, Option<u32>)> = css
+        .classes
+        .iter()
+        .map(|c| (c.name.as_str(), c.selector_index))
+        .collect();
+    assert_eq!(
+        joins,
+        vec![
+            ("a", Some(0)),
+            ("b", Some(1)),
+            ("a", Some(1)),
+            ("solo", Some(2)),
+        ]
+    );
+}
+
+#[test]
+fn selector_rule_body_span_covers_braces() {
+    let src = ".btn { color: red; }";
+    let analysis = analyze_css(src);
+    let css = analysis.css.as_ref().unwrap();
+    let body = css.selectors[0].rule_body_span.expect("body span");
+    assert_eq!(
+        &src[body.start as usize..body.end as usize],
+        "{ color: red; }"
+    );
+}
+
+#[test]
+fn nested_rule_body_spans_are_exact_inner_and_outer() {
+    let src = ".outer { color: red; .inner { color: blue; } }";
+    let analysis = analyze_scss(src);
+    let css = analysis.css.as_ref().unwrap();
+    let outer = css.selectors.iter().find(|s| s.text == ".outer").unwrap();
+    let inner = css.selectors.iter().find(|s| s.text == ".inner").unwrap();
+    let outer_body = outer.rule_body_span.unwrap();
+    let inner_body = inner.rule_body_span.unwrap();
+    assert_eq!(
+        &src[inner_body.start as usize..inner_body.end as usize],
+        "{ color: blue; }"
+    );
+    assert_eq!(
+        &src[outer_body.start as usize..outer_body.end as usize],
+        "{ color: red; .inner { color: blue; } }"
+    );
+}
+
+#[test]
+fn unclosed_rule_has_no_body_span() {
+    let analysis = analyze_css(".open { color: red;");
+    let css = analysis.css.as_ref().unwrap();
+    assert_eq!(css.selectors[0].text, ".open");
+    assert!(css.selectors[0].rule_body_span.is_none());
+}
+
+#[test]
+fn scss_nested_classes_have_exact_spans_and_css_some() {
+    let src = ".card {\n  .title { color: red; }\n  &.active { color: blue; }\n}";
+    let analysis = analyze_scss(src);
+    let css = analysis.css.as_ref().expect("scss must scan to css facts");
+    let class_at = |name: &str| {
+        css.classes
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("class {name} missing"))
+    };
+    for name in ["card", "title", "active"] {
+        let cls = class_at(name);
+        assert_eq!(
+            &src[cls.span.start as usize..cls.span.end as usize],
+            name,
+            "span of {name} must cover exactly the authored name"
+        );
+    }
+}
+
+#[test]
+fn scss_amp_selector_fails_closed_on_structure_but_extracts_literal_class() {
+    let analysis = analyze_scss(".card { &.active { color: blue; } }");
+    let css = analysis.css.as_ref().unwrap();
+    let amp_sel = css.selectors.iter().find(|s| s.text == "&.active").unwrap();
+    assert!(
+        amp_sel.structure.is_none(),
+        "an &-selector has no self-contained structure"
+    );
+    assert!(css.classes.iter().any(|c| c.name == "active"));
+}
+
+#[test]
+fn scss_line_comment_never_yields_a_class() {
+    let src = "// .ghost { color: red; }\n.real { color: blue; }";
+    let analysis = analyze_scss(src);
+    let css = analysis.css.as_ref().unwrap();
+    let names: Vec<&str> = css.classes.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["real"], "commented-out selector is not a class");
+    // The real selector keeps an exact span even with the leading comment.
+    let real = &css.selectors[0];
+    assert_eq!(
+        &src[real.span.start as usize..real.span.end as usize],
+        ".real"
+    );
+}
+
+#[test]
+fn scss_interpolated_selector_fails_closed() {
+    let src = ".icon-#{$name} { color: red; }\n.real { color: blue; }";
+    let analysis = analyze_scss(src);
+    let css = analysis.css.as_ref().unwrap();
+    assert!(
+        !css.classes.iter().any(|c| c.name.starts_with("icon")),
+        "an interpolated selector must not yield a partial class name"
+    );
+    assert!(css.classes.iter().any(|c| c.name == "real"));
+    let interp = css.selectors.iter().find(|s| s.text.contains("#{"));
+    if let Some(sel) = interp {
+        assert!(
+            sel.structure.is_none(),
+            "interpolated structure fails closed"
+        );
+    }
+}
+
+#[test]
+fn scss_variables_and_mixins_do_not_yield_classes() {
+    let src =
+        "$primary: #333;\n@mixin pad { padding: 4px; }\n.uses { @include pad; color: $primary; }";
+    let analysis = analyze_scss(src);
+    let css = analysis.css.as_ref().unwrap();
+    let names: Vec<&str> = css.classes.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["uses"]);
+}
+
+#[test]
+fn selector_comment_class_is_not_extracted() {
+    let analysis = analyze_css(".a /* .ghost */ .b { color: red; }");
+    let css = analysis.css.as_ref().unwrap();
+    let names: Vec<&str> = css.classes.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"a"));
+    assert!(names.contains(&"b"));
+    assert!(!names.contains(&"ghost"), "comment content is not a class");
+}
+
+#[test]
+fn special_pseudo_global_recorded_with_span_and_inner() {
+    let src = ".a :global(.g) { color: red; }";
+    let analysis = build_css_style_analysis(src, VueStyleInput::default(), true, false, None, 0);
+    let pseudo = analysis
+        .special_pseudos
+        .iter()
+        .find(|p| p.kind == SpecialPseudoKind::Global)
+        .expect(":global must be recorded by the scanner");
+    assert_eq!(
+        &src[pseudo.start as usize..pseudo.end as usize],
+        ":global(.g)"
+    );
+    assert_eq!(pseudo.inner.as_deref(), Some(".g"));
+    assert!(analysis
+        .analysis_flags()
+        .contains(StyleAnalysisFlags::HAS_GLOBAL));
+    // The inner class is still extracted with an exact span.
+    let css = analysis.css.as_ref().unwrap();
+    let g = css.classes.iter().find(|c| c.name == "g").unwrap();
+    assert_eq!(&src[g.span.start as usize..g.span.end as usize], "g");
+}
+
+#[test]
+fn special_pseudo_deep_and_slotted_recorded() {
+    let src = ":deep(.d) { color: red; }\n:slotted(.s) { color: blue; }";
+    let analysis = build_css_style_analysis(src, VueStyleInput::default(), true, false, None, 0);
+    let kinds: Vec<SpecialPseudoKind> = analysis.special_pseudos.iter().map(|p| p.kind).collect();
+    assert!(kinds.contains(&SpecialPseudoKind::Deep));
+    assert!(kinds.contains(&SpecialPseudoKind::Slotted));
+    let flags = analysis.analysis_flags();
+    assert!(flags.contains(StyleAnalysisFlags::HAS_DEEP));
+    assert!(flags.contains(StyleAnalysisFlags::HAS_SLOTTED));
+}
+
+#[test]
+fn plain_selector_records_no_special_pseudos() {
+    let analysis = build_css_style_analysis(
+        ".plain { color: red; }",
+        VueStyleInput::default(),
+        true,
+        false,
+        None,
+        0,
+    );
+    assert!(analysis.special_pseudos.is_empty());
+    assert!(!analysis
+        .analysis_flags()
+        .contains(StyleAnalysisFlags::HAS_GLOBAL));
+}
+
+#[test]
+fn analyzed_selector_serde_roundtrips_body_span_and_class_join() {
+    let analysis = analyze_css(".btn { color: red; }");
+    let css = analysis.css.as_ref().unwrap();
+    let json = serde_json::to_string(css).unwrap();
+    let back: CssAnalysis = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.selectors[0].rule_body_span,
+        css.selectors[0].rule_body_span
+    );
+    assert_eq!(
+        back.classes[0].selector_index,
+        css.classes[0].selector_index
+    );
+}
+
+#[test]
+fn sass_indented_stays_unscanned() {
+    let analysis = build_scanned_style_analysis(
+        StyleAnalysisLang::Sass,
+        ".a\n  color: red",
+        VueStyleInput::default(),
+        true,
+        false,
+        None,
+        0,
+    );
+    assert!(
+        analysis.css.is_none(),
+        "indented Sass is not brace-scannable"
+    );
 }

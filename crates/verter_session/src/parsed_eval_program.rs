@@ -19,7 +19,7 @@ struct ParsedEvalProgramOwner {
 }
 
 self_cell::self_cell!(
-    pub(crate) struct ParsedEvalProgram {
+    struct ParsedEvalProgramCell {
         owner: ParsedEvalProgramOwner,
 
         #[covariant]
@@ -27,10 +27,22 @@ self_cell::self_cell!(
     }
 );
 
+/// A retained eval-program parse: the `self_cell` owner/dependent pair plus
+/// the parse-outcome facts walkers need (`had_errors`).
+pub(crate) struct ParsedEvalProgram {
+    cell: ParsedEvalProgramCell,
+    /// The parse produced RECOVERABLE errors (`ParserReturn::errors` was
+    /// non-empty). An error-recovered AST can silently DROP real code, so
+    /// provers of non-usage (e.g. macro-usage liveness) must fail open when
+    /// this is set.
+    had_errors: bool,
+}
+
 impl ParsedEvalProgram {
     pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
         let mut panicked = false;
-        let parsed = Self::new(
+        let mut had_errors = false;
+        let cell = ParsedEvalProgramCell::new(
             ParsedEvalProgramOwner {
                 allocator: oxc_allocator::Allocator::new(),
                 source,
@@ -48,10 +60,22 @@ impl ParsedEvalProgram {
                 })
                 .parse();
                 panicked = result.panicked;
+                had_errors = !result.errors.is_empty();
                 result.program
             },
         );
-        (!panicked).then_some(parsed)
+        (!panicked).then_some(Self { cell, had_errors })
+    }
+
+    /// The parsed program AST, borrowed from the retained arena.
+    pub(crate) fn borrow_dependent(&self) -> &CachedEvalProgramAst<'_> {
+        self.cell.borrow_dependent()
+    }
+
+    /// Whether the parse recovered from errors (`ParserReturn::errors`
+    /// non-empty). See the field docs — non-usage provers fail open on this.
+    pub(crate) fn had_errors(&self) -> bool {
+        self.had_errors
     }
 
     /// The exact source text this program was parsed from — for a
@@ -59,12 +83,12 @@ impl ParsedEvalProgram {
     /// (script bytes at raw SFC offsets), so every span the program
     /// carries is already SFC-absolute.
     pub(crate) fn source_str(&self) -> &str {
-        self.borrow_owner().source.as_ref()
+        self.cell.borrow_owner().source.as_ref()
     }
 
     /// The `SourceType` the parse ran under — the self-consistent type
     /// for any walker consuming this program.
     pub(crate) fn source_type(&self) -> oxc_span::SourceType {
-        self.borrow_owner().source_type
+        self.cell.borrow_owner().source_type
     }
 }

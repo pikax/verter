@@ -22,6 +22,7 @@
     "test:e2e": "pnpm --filter verter-vscode test:e2e:matrix",
     "test:e2e:single": "pnpm --filter verter-vscode test:e2e",
     "test:lsp:neutral": "cargo build -p verter_lsp -p verter_relay_shim && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm --filter @verter/dx-harness test:editor-neutral-lsp",
+    "test:endurance": "pnpm --filter @verter/dx-harness run test:endurance",
     "test:scripts": "vitest run scripts/sccache-env.test.mjs",
     "fmt": "oxfmt",
     "build": "pnpm run build:native && pnpm run build:lsp && pnpm run build:wasm && pnpm run build:ts && pnpm --filter @verter/component-meta build",

@@ -29,7 +29,11 @@ pub fn references_at_position(
 ) -> Option<Vec<Location>> {
     let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
-    let word = word_at_offset(source, offset)?;
+    let Some(word) = word_at_offset(source, offset) else {
+        // No identifier word (e.g. the hyphen of a kebab class token) — the
+        // positional CSS path still owns the position.
+        return css_references_at_position(offset, source, blocks, analysis, line_index);
+    };
 
     // Check if this word is a known binding, import, or macro
     let is_binding = analysis.bindings.iter().any(|b| b.name == word);
@@ -181,20 +185,20 @@ fn css_references_at_position(
         }
     });
 
-    if !in_template && !in_style {
-        return None;
-    }
-
-    let template = analysis.template.as_deref()?;
-
     // Extract the CSS target (class or id name)
-    let target = if in_template {
+    let target = if in_style {
+        find_css_target_in_style_refs(offset, source, analysis)?
+    } else if in_template {
         if is_inside_html_comment(source, offset) {
             return None;
         }
+        let template = analysis.template.as_deref()?;
         find_css_target_in_template_refs(offset, source, template)?
     } else {
-        find_css_target_in_style_refs(offset, source, analysis)?
+        // Carrier markup outside SFC blocks (Svelte root markup): the typed
+        // markup class-token inventory owns the position.
+        let token = markup_class_token_at(offset, analysis)?;
+        CssRefTarget::Class(token.name.clone())
     };
 
     let spans = collect_css_ref_spans(&target, source, analysis);
@@ -208,6 +212,31 @@ fn css_references_at_position(
     } else {
         Some(locations)
     }
+}
+
+/// CSS-ONLY references entry (same-file): exactly the css class/id leg.
+/// Served even when the editor owns carrier-source TS features — CSS-native
+/// results have no TS correlate.
+pub(crate) fn css_only_references_at_position(
+    offset: usize,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: &FileAnalysisSnapshot,
+    line_index: &LineIndex,
+) -> Option<Vec<Location>> {
+    css_references_at_position(offset, source, blocks, analysis, line_index)
+}
+
+/// The markup class token at `offset`, for carriers WITHOUT a template
+/// element IR (Svelte `class="x"` entries and `class:x` directives).
+pub(crate) fn markup_class_token_at(
+    offset: usize,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<&verter_semantic::analysis::MarkupClassToken> {
+    analysis
+        .markup_class_tokens
+        .iter()
+        .find(|t| offset >= t.span.start as usize && offset < t.span.end as usize)
 }
 
 pub(crate) enum CssRefTarget {
@@ -227,6 +256,58 @@ pub(crate) fn collect_css_ref_spans(
 
     // Collect template attribute references
     if let Some(template) = analysis.template.as_deref() {
+        spans.extend(collect_template_css_ref_spans(target, source, template));
+    }
+
+    // Collect markup class tokens (carriers without a template element IR).
+    if let CssRefTarget::Class(name) = target {
+        for token in analysis.markup_class_tokens.iter() {
+            if token.name == *name {
+                spans.push((token.span.start, token.span.end));
+            }
+        }
+    }
+
+    // Collect style block references
+    for style in analysis.styles.iter() {
+        let css = match style.css.as_ref() {
+            Some(c) => c,
+            None => continue,
+        };
+
+        match target {
+            CssRefTarget::Class(name) => {
+                for cls in &css.classes {
+                    if cls.name == *name
+                        && cls.span.start > 0
+                        && crate::css::global_classes::class_plain_addressable(style, cls.span)
+                    {
+                        spans.push((cls.span.start, cls.span.end));
+                    }
+                }
+            }
+            CssRefTarget::Id(name) => {
+                for id in &css.ids {
+                    if id.name == *name && id.span.start > 0 {
+                        spans.push((id.span.start, id.span.end));
+                    }
+                }
+            }
+        }
+    }
+
+    spans
+}
+
+/// Collect all (start, end) byte offsets for a CSS class/id across template
+/// attributes only (static `class`/`id` plus resolvable `:class` entries).
+pub(crate) fn collect_template_css_ref_spans(
+    target: &CssRefTarget,
+    source: &str,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+) -> Vec<(u32, u32)> {
+    let mut spans = Vec::new();
+    {
         for element in &template.elements {
             for attr in &element.attributes {
                 if attr.is_dynamic {
@@ -336,31 +417,6 @@ pub(crate) fn collect_css_ref_spans(
         }
     }
 
-    // Collect style block references
-    for style in analysis.styles.iter() {
-        let css = match style.css.as_ref() {
-            Some(c) => c,
-            None => continue,
-        };
-
-        match target {
-            CssRefTarget::Class(name) => {
-                for cls in &css.classes {
-                    if cls.name == *name && cls.span.start > 0 {
-                        spans.push((cls.span.start, cls.span.end));
-                    }
-                }
-            }
-            CssRefTarget::Id(name) => {
-                for id in &css.ids {
-                    if id.name == *name && id.span.start > 0 {
-                        spans.push((id.span.start, id.span.end));
-                    }
-                }
-            }
-        }
-    }
-
     spans
 }
 
@@ -370,7 +426,17 @@ pub(crate) fn find_css_target_in_template_refs(
     source: &str,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<CssRefTarget> {
-    for element in &template.elements {
+    find_css_target_in_template_refs_with_element(offset, source, template).map(|(t, _)| t)
+}
+
+/// Like [`find_css_target_in_template_refs`], also returning the index of the
+/// template element whose attribute carries the token (for hierarchy ranking).
+pub(crate) fn find_css_target_in_template_refs_with_element(
+    offset: usize,
+    source: &str,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+) -> Option<(CssRefTarget, usize)> {
+    for (element_idx, element) in template.elements.iter().enumerate() {
         for attr in &element.attributes {
             if (offset as u32) < attr.span.start || (offset as u32) >= attr.span.end {
                 continue;
@@ -401,7 +467,10 @@ pub(crate) fn find_css_target_in_template_refs(
                                 let start = dcn.expr_offset as usize;
                                 let end = start + dcn.name.len();
                                 if cursor_in_expr >= start && cursor_in_expr < end {
-                                    return Some(CssRefTarget::Class(dcn.name.clone()));
+                                    return Some((
+                                        CssRefTarget::Class(dcn.name.clone()),
+                                        element_idx,
+                                    ));
                                 }
                             }
                         }
@@ -419,7 +488,10 @@ pub(crate) fn find_css_target_in_template_refs(
                                 let start = pos;
                                 let end = start + inner.len();
                                 if cursor_in_expr >= start && cursor_in_expr < end {
-                                    return Some(CssRefTarget::Id(inner.to_string()));
+                                    return Some((
+                                        CssRefTarget::Id(inner.to_string()),
+                                        element_idx,
+                                    ));
                                 }
                             }
                         }
@@ -441,7 +513,7 @@ pub(crate) fn find_css_target_in_template_refs(
             }
 
             if attr.name == "id" {
-                return Some(CssRefTarget::Id(value.clone()));
+                return Some((CssRefTarget::Id(value.clone()), element_idx));
             }
             if attr.name == "class" {
                 let cursor_in_value = offset - val_start;
@@ -451,7 +523,10 @@ pub(crate) fn find_css_target_in_template_refs(
                         let abs_start = pos + name_start;
                         let abs_end = abs_start + class_name.len();
                         if cursor_in_value >= abs_start && cursor_in_value < abs_end {
-                            return Some(CssRefTarget::Class(class_name.to_string()));
+                            return Some((
+                                CssRefTarget::Class(class_name.to_string()),
+                                element_idx,
+                            ));
                         }
                         pos = abs_end;
                     }
@@ -482,6 +557,12 @@ pub(crate) fn find_css_target_in_style_refs(
                 && abs_end <= source.len()
                 && source[abs_start..abs_end] == cls.name
             {
+                // `<style module>` classes are not css-native navigation
+                // origins (fail closed; `$style.*` is TS-owned) unless the
+                // declaration sits inside `:global(...)`.
+                if !crate::css::global_classes::class_plain_addressable(style, cls.span) {
+                    return None;
+                }
                 return Some(CssRefTarget::Class(cls.name.clone()));
             }
         }
@@ -888,5 +969,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// FAIL-CLOSED: `<style module>` class declarations never enter the
+    /// collected reference spans for a plain class name; the identical
+    /// non-module block is the discriminating control.
+    #[test]
+    fn module_class_declarations_excluded_from_ref_spans() {
+        let css = ".btn { color: red; }";
+        for (is_module, expect_decl) in [(true, false), (false, true)] {
+            let style = verter_semantic::analysis::build_css_style_analysis(
+                css,
+                VueStyleInput::default(),
+                false,
+                is_module,
+                None,
+                0,
+            );
+            let analysis = FileAnalysisSnapshot {
+                styles: (vec![style]).into(),
+                ..Default::default()
+            };
+            let spans =
+                collect_css_ref_spans(&CssRefTarget::Class("btn".to_string()), css, &analysis);
+            assert_eq!(
+                !spans.is_empty(),
+                expect_decl,
+                "module={is_module}: declaration span presence must be {expect_decl}: {spans:?}"
+            );
+        }
+    }
+
+    /// FAIL-CLOSED: a class token inside a `<style module>` block is not a
+    /// reference ORIGIN (`find_css_target_in_style_refs` fails closed);
+    /// `:global(...)` inside the module block opts back in.
+    #[test]
+    fn module_style_class_token_is_not_a_reference_origin() {
+        let source =
+            "<style module>\n.btn { color: red; }\n:global(.reset) { margin: 0; }\n</style>";
+        let content_start = source.find('\n').unwrap() as u32 + 1;
+        let css_end = source.find("</style>").unwrap();
+        let css = &source[content_start as usize..css_end];
+        let style = verter_semantic::analysis::build_css_style_analysis(
+            css,
+            VueStyleInput::default(),
+            false,
+            true,
+            None,
+            content_start,
+        );
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![style]).into(),
+            ..Default::default()
+        };
+
+        let btn_offset = source.find(".btn").unwrap() + 1;
+        assert!(
+            find_css_target_in_style_refs(btn_offset, source, &analysis).is_none(),
+            "a module class token must not be a css-native navigation origin"
+        );
+
+        let reset_offset = source.find(".reset").unwrap() + 1;
+        assert!(
+            matches!(
+                find_css_target_in_style_refs(reset_offset, source, &analysis),
+                Some(CssRefTarget::Class(name)) if name == "reset"
+            ),
+            ":global(...) inside a module block stays a navigation origin"
+        );
     }
 }

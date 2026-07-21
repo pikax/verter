@@ -91,4 +91,8 @@ pub struct VBindVar {
     pub expression: String,
     /// The generated CSS variable name (e.g., "--a4f2eed6-color")
     pub var_name: String,
+    /// Byte offset of the (quote-stripped) expression start within the CSS content.
+    pub expr_start: u32,
+    /// Byte offset of the (quote-stripped) expression end within the CSS content.
+    pub expr_end: u32,
 }

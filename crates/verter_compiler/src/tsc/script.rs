@@ -1650,13 +1650,24 @@ pub(super) fn quote_module_export_name(unquoted: &str) -> String {
 }
 
 fn quote_ts_string(unquoted: &str, delimiter: char) -> String {
-    let mut out = String::with_capacity(unquoted.len() + 2);
-    out.push(delimiter);
-    for ch in unquoted.chars() {
+    let body = escape_string_literal_body(unquoted, delimiter);
+    format!("{delimiter}{body}{delimiter}")
+}
+
+/// Escape `s` for embedding inside a TS/JS string literal delimited by `delim`
+/// (`'` or `"`). Backslash is escaped FIRST so it never double-processes an
+/// escape introduced for another character; the ACTIVE delimiter is escaped
+/// (the opposite quote is legal raw inside this delimiter and passes through
+/// unchanged); line terminators, U+2028/U+2029, and remaining ASCII control
+/// characters (U+0000..U+001F) use their conventional short escape or a
+/// zero-padded 4-hex `\uXXXX` fallback. The result is ALWAYS the valid,
+/// single-line body of a `delim`-quoted literal for any input.
+pub(super) fn escape_string_literal_body(s: &str, delim: char) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
         match ch {
-            // Backslash and the closing delimiter must always be escaped.
             '\\' => out.push_str("\\\\"),
-            c if c == delimiter => {
+            c if c == delim => {
                 out.push('\\');
                 out.push(c);
             }
@@ -1665,9 +1676,6 @@ fn quote_ts_string(unquoted: &str, delimiter: char) -> String {
             '\r' => out.push_str("\\r"),
             '\u{2028}' => out.push_str("\\u2028"),
             '\u{2029}' => out.push_str("\\u2029"),
-            // Remaining ASCII control characters (U+0000..U+001F) are illegal
-            // raw: use the conventional short escapes where they exist, and a
-            // zero-padded 4-hex `\uXXXX` fallback for the rest.
             '\u{0008}' => out.push_str("\\b"),
             '\t' => out.push_str("\\t"),
             '\u{000B}' => out.push_str("\\v"),
@@ -1678,7 +1686,6 @@ fn quote_ts_string(unquoted: &str, delimiter: char) -> String {
             c => out.push(c),
         }
     }
-    out.push(delimiter);
     out
 }
 
@@ -2463,6 +2470,15 @@ fn build_enum_declaration_projection(
         });
     }
     Some(render_authored_fragment(authored, &edits))
+}
+
+/// Wrap `s` as a single-quoted TS/JS string literal with a fully escaped body.
+/// Producer sites that historically emit single-quoted literals (`emits:
+/// ['update:foo']`, `name: 'X' as const`, the defaulted-prop key union) keep
+/// their quote style through this helper while an embedded `'`, `\`, or control
+/// character is escaped rather than emitted raw (which would tear the literal).
+pub(super) fn quote_single_string_literal(s: &str) -> String {
+    format!("'{}'", escape_string_literal_body(s, '\''))
 }
 
 struct TypeUsageTracker<'a> {
@@ -3904,19 +3920,26 @@ fn js_string_literal(value: &str) -> String {
     literal
 }
 
-fn js_property_key(value: &str) -> String {
-    if is_simple_ident(value) {
-        value.to_owned()
-    } else {
-        js_string_literal(value)
-    }
-}
-
-fn render_testing_binding_key(name: &str) -> String {
+/// Render a member key for a synthesized object type or object literal.
+///
+/// Member names arrive from the resolver as their COOKED string value: the
+/// source key `"onLate-signal"` is the resolved name `onLate-signal`, and the
+/// source key `'"x"'` is the three-character resolved name `"x"`. The decision
+/// is made purely on the cooked value — a valid identifier renders bare, and
+/// ANY other value is re-quoted through [`quote_module_export_name`], which
+/// escapes the cooked characters correctly. There is deliberately no
+/// "already quoted?" spelling heuristic: a cooked value whose first and last
+/// character happen to be a quote (`"x"`) is a real member name, not
+/// pre-quoted source, and guessing otherwise silently drops those characters
+/// and emits the wrong key. Rendering a non-identifier bare would be invalid
+/// TypeScript (`{ onLate-signal?: ... }`), which providers error-recover into a
+/// corrupted surface (a phantom construct-signature parameter and an `any`
+/// instance).
+pub(super) fn render_member_key(name: &str) -> String {
     if is_testing_decl_ident(name) {
         name.to_string()
     } else {
-        js_string_literal(name)
+        quote_module_export_name(name)
     }
 }
 
@@ -4414,7 +4437,7 @@ fn generate_testing_code(
         out.push_str("type __Verter_TestBindings = import(\"vue\").ShallowUnwrapRef<{\n");
         for binding in test_bindings {
             out.push_str("  ");
-            let rendered_name = render_testing_binding_key(&binding.name);
+            let rendered_name = render_member_key(&binding.name);
             if let Some(map_span) = binding.map_span {
                 out.push_mapped(&rendered_name, map_span);
             } else {
@@ -4430,25 +4453,28 @@ fn generate_testing_code(
     out.push_str("const __comp = defineComponent({\n");
 
     if let Some(ref name) = state.options_name {
-        out.push_str(&format!("  name: '{}' as const,\n", name));
+        out.push_str(&format!(
+            "  name: {} as const,\n",
+            quote_single_string_literal(name)
+        ));
     }
     for (key, val) in &state.options_extras {
-        out.push_str(&format!("  {}: {},\n", key, val));
+        out.push_str(&format!("  {}: {},\n", render_member_key(key), val));
     }
 
     let has_props = !state.props_runtime.is_empty() || !state.models.is_empty();
     if has_props {
         out.push_str("  props: {\n");
         for (name, val) in &state.props_runtime {
-            out.push_str(&format!("    {}: {},\n", name, val));
+            out.push_str(&format!("    {}: {},\n", render_member_key(name), val));
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str("    ");
-            out.push_str(&js_property_key(&model.name));
-            out.push_str(": ");
-            out.push_str(ctor);
-            out.push_str(",\n");
+            out.push_str(&format!(
+                "    {}: {},\n",
+                render_member_key(&model.name),
+                ctor
+            ));
         }
         out.push_str("  },\n");
     }
@@ -4640,25 +4666,28 @@ fn generate_code(
     out.push_str("const __comp = defineComponent({\n");
 
     if let Some(ref name) = state.options_name {
-        out.push_str(&format!("  name: '{}' as const,\n", name));
+        out.push_str(&format!(
+            "  name: {} as const,\n",
+            quote_single_string_literal(name)
+        ));
     }
     for (key, val) in &state.options_extras {
-        out.push_str(&format!("  {}: {},\n", key, val));
+        out.push_str(&format!("  {}: {},\n", render_member_key(key), val));
     }
 
     let has_props = !state.props_runtime.is_empty() || !state.models.is_empty();
     if has_props {
         out.push_str("  props: {\n");
         for (name, val) in &state.props_runtime {
-            out.push_str(&format!("    {}: {},\n", name, val));
+            out.push_str(&format!("    {}: {},\n", render_member_key(name), val));
         }
         for model in &state.models {
             let ctor = ts_to_constructor(&model.ts_type);
-            out.push_str("    ");
-            out.push_str(&js_property_key(&model.name));
-            out.push_str(": ");
-            out.push_str(ctor);
-            out.push_str(",\n");
+            out.push_str(&format!(
+                "    {}: {},\n",
+                render_member_key(&model.name),
+                ctor
+            ));
         }
         out.push_str("  },\n");
     }
@@ -4877,10 +4906,14 @@ fn render_instance_shape_body(
                 // (`typeof_target == None`) falls back to `any`.
                 match &entry.typeof_target {
                     Some(target) => {
-                        out.push_str(&format!("{}: typeof {}", entry.name, target));
+                        out.push_str(&format!(
+                            "{}: typeof {}",
+                            render_member_key(&entry.name),
+                            target
+                        ));
                     }
                     None => {
-                        out.push_str(&format!("{}: any", entry.name));
+                        out.push_str(&format!("{}: any", render_member_key(&entry.name)));
                     }
                 }
             } else {
@@ -4902,7 +4935,7 @@ fn render_instance_shape_body(
                 // wired to a consuming engine. The type-PARAMETER form
                 // (`defineExpose<{ x: T }>()`) already renders its exact type via
                 // `expose_type_text` above and is unaffected.
-                out.push_str(&format!("{}: unknown", entry.name));
+                out.push_str(&format!("{}: unknown", render_member_key(&entry.name)));
             }
         }
         out.push_str(" }>\n");
@@ -5106,7 +5139,7 @@ fn render_emits_to_props_type(emits: &[EmitEntry]) -> RenderedText {
             if !first {
                 rendered.push_str("; ");
             }
-            let key_literal = js_string_literal(&key);
+            let key_literal = quote_module_export_name(&key);
             if let Some(map_span) = emit.map_span {
                 rendered.push_mapped(&key_literal, map_span);
             } else {
@@ -5158,10 +5191,11 @@ fn render_props_shape_type(
                     rendered.push_str(comment);
                     rendered.push_str(" ");
                 }
+                let rendered_name = render_member_key(&entry.name);
                 if let Some(map_span) = entry.map_span {
-                    rendered.push_mapped(&entry.name, map_span);
+                    rendered.push_mapped(&rendered_name, map_span);
                 } else {
-                    rendered.push_str(&entry.name);
+                    rendered.push_str(&rendered_name);
                 }
                 rendered.push_str(if entry.optional { "?: " } else { ": " });
                 if generic_props.is_some_and(|set| set.contains(entry.name.as_str())) {
@@ -5287,20 +5321,20 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
         .map(|model| {
             let mut rendered = RenderedText::default();
             rendered.push_str("{ ");
-            let model_literal = js_property_key(&model.name);
+            let rendered_name = render_member_key(&model.name);
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&model_literal, map_span);
+                rendered.push_mapped(&rendered_name, map_span);
             } else {
-                rendered.push_str(&model_literal);
+                rendered.push_str(&rendered_name);
             }
             rendered.push_str(if model.optional { "?: " } else { ": " });
             rendered.push_str(&model.ts_type);
             rendered.push_str("; ");
-            let update_literal = js_string_literal(&format!("onUpdate:{}", model.name));
+            let on_update_literal = quote_module_export_name(&format!("onUpdate:{}", model.name));
             if let Some(map_span) = model.map_span {
-                rendered.push_mapped(&update_literal, map_span);
+                rendered.push_mapped(&on_update_literal, map_span);
             } else {
-                rendered.push_str(&update_literal);
+                rendered.push_str(&on_update_literal);
             }
             rendered.push_str("?: (v: ");
             rendered.push_str(&model.ts_type);

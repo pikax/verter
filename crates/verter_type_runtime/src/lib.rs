@@ -33,6 +33,7 @@
 pub mod backend;
 pub mod codec;
 pub mod contents_snapshot;
+pub mod deadline;
 pub mod discovery;
 pub mod protocol;
 pub mod provider_adapter;
@@ -52,7 +53,10 @@ pub use codec::{
     line_column_to_offset, line_column_to_offset_utf16, offset_to_line_column,
     offset_to_line_column_utf16, LineColumn, LineIndex, PositionEncoding,
 };
-pub use discovery::{detect_ts_major_version, find_node, find_tsserver};
+pub use discovery::{
+    detect_ts_major_version, find_node, find_tsserver, ts_major_is_native_family,
+    tsserver_native_family_major,
+};
 pub use protocol::*;
 pub use provider_adapter::TypeProviderAdapter;
 pub use trace::{

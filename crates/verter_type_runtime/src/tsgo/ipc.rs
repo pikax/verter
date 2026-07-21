@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -57,6 +57,96 @@ fn summarize_lsp_params(params: &serde_json::Value) -> String {
     format!("uri={} line={} character={}", uri, line, character)
 }
 
+/// In-flight requests awaiting a response, keyed by JSON-RPC id.
+///
+/// A `std::sync::Mutex`, not an async one: every critical section is a single
+/// map operation with no await inside it, and a synchronous lock is what lets
+/// [`PendingRequest::drop`] clean up. A cancelled request is dropped, not
+/// awaited to completion, so cleanup that could only run on an async path would
+/// never run at all.
+#[derive(Default)]
+struct PendingRequests {
+    map: StdMutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
+}
+
+impl PendingRequests {
+    fn insert(&self, id: i64, tx: oneshot::Sender<serde_json::Value>) {
+        self.map.lock().unwrap().insert(id, tx);
+    }
+
+    fn take(&self, id: i64) -> Option<oneshot::Sender<serde_json::Value>> {
+        self.map.lock().unwrap().remove(&id)
+    }
+
+    /// How many requests are in flight. The leak surface: a request abandoned
+    /// without releasing its slot shows up here and nowhere else.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+
+    /// Fail every in-flight request so callers return immediately instead of
+    /// waiting out their own timeouts.
+    fn drain_with_crash_error(&self) {
+        let drained: Vec<_> = self.map.lock().unwrap().drain().collect();
+        for (_id, tx) in drained {
+            let _ = tx.send(serde_json::json!({
+                "error": { "code": -32099, "message": "tsgo process crashed" }
+            }));
+        }
+    }
+}
+
+/// One in-flight request's registration, released on drop.
+///
+/// The caller's future can be dropped at any await point — a shortened request
+/// deadline elapsing upstream is the normal case, not an exotic one. Dropping it
+/// must leave nothing behind:
+///
+/// * the pending-map entry goes, or a provider that never answers leaks an entry
+///   per abandoned request for the life of the session;
+/// * `$/cancelRequest` goes out, or the engine keeps computing an answer no one
+///   will read, stealing time from the requests that replaced it.
+///
+/// Cancellation rides the unbounded control lane, never the interactive lane the
+/// request itself used: the reason a request is being cancelled is frequently
+/// that its lane is not draining, and a cancel queued behind the work it cancels
+/// is not a cancel.
+struct PendingRequest {
+    id: i64,
+    pending: Arc<PendingRequests>,
+    control_tx: mpsc::UnboundedSender<StdinMessage>,
+    /// Cleared once the response is in hand — a completed request must not emit
+    /// a cancellation for an id the engine has already answered.
+    armed: bool,
+}
+
+impl PendingRequest {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.pending.take(self.id);
+        let msg = jsonrpc_body(
+            None,
+            "$/cancelRequest",
+            &serde_json::json!({ "id": self.id }),
+        );
+        if let Ok(body) = serde_json::to_string(&msg) {
+            let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+            let _ = self
+                .control_tx
+                .send(StdinMessage::Frame(frame.into_bytes()));
+        }
+    }
+}
+
 /// Message sent to the dedicated stdin writer task.
 enum StdinMessage {
     /// Write a framed LSP message to stdin.
@@ -65,153 +155,247 @@ enum StdinMessage {
     Shutdown,
 }
 
+/// Per-lane bounded-channel capacity for the Interactive / Normal / Background
+/// stdin lanes. The Control lane is unbounded (never blocks the read loop).
+const DEFAULT_LANE_CAPACITY: usize = 1024;
+
 /// Maximum number of Normal-priority frames to flush before checking Interactive.
 const NORMAL_BATCH_CAP: usize = 5;
 /// Maximum number of Background-priority frames to flush before checking higher lanes.
 const BACKGROUND_BATCH_CAP: usize = 3;
 
-/// Dedicated task that owns the stdin writer and drains three priority lanes.
+/// Writer-stall watchdog window. It bounds time WITHOUT PROGRESS on the stdin
+/// write, not the total time to write a buffer: a child that accepts NO bytes for
+/// this long has stopped reading its stdin — the write side of a bidirectional
+/// stdio-pipe deadlock. When it trips, the writer fires `crash_notify` (unless a
+/// deliberate teardown is in flight) so the `ResilientTypeProvider` restart
+/// machinery (kill, backoff, respawn, replay) recovers the session, and the writer
+/// task ends. Generous by design: a child not draining stdin at all for this long
+/// is wedged, not merely busy.
+const WRITER_STALL_TIMEOUT_SECS: u64 = 10;
+
+/// Flush `buffer` to `stdin` under the writer-stall watchdog.
 ///
-/// Priority order: Interactive > Normal > Background.
+/// Returns `true` when the caller may continue draining lanes, `false` when the
+/// writer loop must stop (I/O error or a stall that tripped the watchdog). On a
+/// stall the child is not reading stdin, so `crash_notify` is fired (unless a
+/// deliberate teardown is in flight) to trigger the resilient restart.
+///
+/// The buffer is handed over chunk by chunk, and the window restarts on every
+/// byte the child accepts, so only a stretch with NO progress at all can trip it.
+/// A single flat window over the whole `write_all` cannot distinguish a wedged
+/// child from a healthy one cold-loading a large project: the pipe buffer is
+/// ~64KB and a restart replay pushes megabytes into a child that is mid
+/// program-build, so a flat window trips, kills, respawns, and replays the very
+/// same bulk write into the very same stall.
+async fn flush_stdin_guarded<W>(
+    stdin: &mut W,
+    buffer: &mut Vec<u8>,
+    writer_stall: std::time::Duration,
+    crash_notify: &Option<Arc<Notify>>,
+    teardown_intent: &AtomicBool,
+) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if buffer.is_empty() {
+        return true;
+    }
+    let mut written = 0usize;
+    while written < buffer.len() {
+        // Each chunk gets a fresh window; a timed-out `write` consumed nothing
+        // (it never returned `Ready`), and the watchdog trip bails out entirely
+        // rather than retrying, so no byte can be delivered twice.
+        match tokio::time::timeout(writer_stall, stdin.write(&buffer[written..])).await {
+            // A zero-length write means the child closed its stdin.
+            Ok(Ok(0)) => return false,
+            Ok(Ok(count)) => written += count,
+            Ok(Err(_)) => return false,
+            Err(_) => {
+                if teardown_intent.load(Ordering::SeqCst) {
+                    tracing::debug!(
+                        "TSGO stdin write stalled during deliberate teardown — not a crash"
+                    );
+                } else {
+                    tracing::error!(
+                        "TSGO stdin accepted no bytes for {writer_stall:?} ({written} of {} \
+                         written) — child is not reading stdin; signalling restart",
+                        buffer.len()
+                    );
+                    if let Some(notify) = crash_notify {
+                        notify.notify_waiters();
+                    }
+                }
+                return false;
+            }
+        }
+    }
+    let _ = tokio::time::timeout(writer_stall, stdin.flush()).await;
+    buffer.clear();
+    true
+}
+
+/// Dedicated task that owns the stdin writer and drains four priority lanes.
+///
+/// Priority order: Control > Interactive > Normal > Background.
+/// - Control: drained fully (unbounded) at top priority. Carries the read
+///   loop's auto-responses to the child's server→client requests (which must
+///   never wait behind feature traffic, or the child blocks) and the `Shutdown`
+///   signal. An unbounded lane so the read loop's enqueue is lossless and can
+///   NEVER block on a full lane — the structural break in the stdout-read /
+///   stdin-write deadlock cycle.
 /// - Interactive: drained fully (unbounded) before checking lower lanes.
-/// - Normal: drained up to `NORMAL_BATCH_CAP` frames, then back to check Interactive.
+/// - Normal: drained up to `NORMAL_BATCH_CAP` frames, then back to check higher.
 /// - Background: drained up to `BACKGROUND_BATCH_CAP` frames, then back to check higher.
 ///
-/// Each flush is a separate `write_all + flush`. Interactive always preempts.
+/// Every flush routes through [`flush_stdin_guarded`], so a child that stops
+/// reading stdin trips the writer-stall watchdog and fires `crash_notify`
+/// instead of parking the writer (and therefore all lanes) forever.
 ///
 /// Generic over the writer type to support both `ChildStdin` and test `DuplexStream`.
+#[allow(clippy::too_many_arguments)]
 async fn stdin_writer_loop(
     mut stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+    mut control_rx: mpsc::UnboundedReceiver<StdinMessage>,
     mut interactive_rx: mpsc::Receiver<StdinMessage>,
     mut normal_rx: mpsc::Receiver<StdinMessage>,
     mut background_rx: mpsc::Receiver<StdinMessage>,
+    crash_notify: Option<Arc<Notify>>,
+    teardown_intent: Arc<AtomicBool>,
+    writer_stall: std::time::Duration,
 ) {
     let mut buffer = Vec::new();
 
+    // Drain a lane FULLY (unbounded) into `buffer`; evaluates to `true` when a
+    // `Shutdown` was seen (caller flushes then returns).
+    macro_rules! drain_full {
+        ($rx:expr) => {{
+            let mut shutdown = false;
+            loop {
+                match $rx.try_recv() {
+                    Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Ok(StdinMessage::Shutdown) => {
+                        shutdown = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            shutdown
+        }};
+    }
+    // Drain a lane up to `$cap` frames into `buffer`; evaluates to `true` on
+    // `Shutdown`.
+    macro_rules! drain_capped {
+        ($rx:expr, $cap:expr) => {{
+            let mut shutdown = false;
+            for _ in 0..$cap {
+                match $rx.try_recv() {
+                    Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Ok(StdinMessage::Shutdown) => {
+                        shutdown = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            shutdown
+        }};
+    }
+    macro_rules! flush_or_break {
+        () => {
+            if !flush_stdin_guarded(
+                &mut stdin,
+                &mut buffer,
+                writer_stall,
+                &crash_notify,
+                &teardown_intent,
+            )
+            .await
+            {
+                break;
+            }
+        };
+    }
+    macro_rules! flush_and_return {
+        () => {{
+            let _ = flush_stdin_guarded(
+                &mut stdin,
+                &mut buffer,
+                writer_stall,
+                &crash_notify,
+                &teardown_intent,
+            )
+            .await;
+            return;
+        }};
+    }
+
     loop {
-        // Wait for any message from any lane
+        // Wait for any message from any lane. `biased` prefers Control first.
         tokio::select! {
-            biased; // Prefer higher priority
+            biased;
+            msg = control_rx.recv() => {
+                match msg {
+                    Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
+                }
+            }
             msg = interactive_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Shutdown) | None => break,
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = normal_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Shutdown) | None => break,
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
             msg = background_rx.recv() => {
                 match msg {
                     Some(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                    Some(StdinMessage::Shutdown) | None => break,
+                    Some(StdinMessage::Shutdown) | None => flush_and_return!(),
                 }
             }
         }
 
-        // Drain Interactive fully (unbounded)
-        loop {
-            match interactive_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        // Control fully, then Interactive fully, then flush.
+        if drain_full!(control_rx) {
+            flush_and_return!();
         }
+        if drain_full!(interactive_rx) {
+            flush_and_return!();
+        }
+        flush_or_break!();
 
-        // Flush Interactive batch
-        if !buffer.is_empty() {
-            if stdin.write_all(&buffer).await.is_err() {
-                break;
-            }
-            let _ = stdin.flush().await;
-            buffer.clear();
+        // Normal (capped); re-check Control + Interactive; flush.
+        if drain_capped!(normal_rx, NORMAL_BATCH_CAP) {
+            flush_and_return!();
         }
+        if drain_full!(control_rx) {
+            flush_and_return!();
+        }
+        if drain_full!(interactive_rx) {
+            flush_and_return!();
+        }
+        flush_or_break!();
 
-        // Drain Normal (capped)
-        for _ in 0..NORMAL_BATCH_CAP {
-            match normal_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        // Background (capped); re-check higher lanes; flush.
+        if drain_capped!(background_rx, BACKGROUND_BATCH_CAP) {
+            flush_and_return!();
         }
-
-        // Check Interactive again before flushing Normal
-        loop {
-            match interactive_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        if drain_full!(control_rx) {
+            flush_and_return!();
         }
-
-        if !buffer.is_empty() {
-            if stdin.write_all(&buffer).await.is_err() {
-                break;
-            }
-            let _ = stdin.flush().await;
-            buffer.clear();
+        if drain_full!(interactive_rx) {
+            flush_and_return!();
         }
-
-        // Drain Background (capped)
-        for _ in 0..BACKGROUND_BATCH_CAP {
-            match background_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
+        if drain_capped!(normal_rx, NORMAL_BATCH_CAP) {
+            flush_and_return!();
         }
-
-        // Check Interactive + Normal again before flushing Background
-        loop {
-            match interactive_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
-        }
-        loop {
-            match normal_rx.try_recv() {
-                Ok(StdinMessage::Frame(data)) => buffer.extend_from_slice(&data),
-                Ok(StdinMessage::Shutdown) => {
-                    let _ = stdin.write_all(&buffer).await;
-                    let _ = stdin.flush().await;
-                    return;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if !buffer.is_empty() {
-            if stdin.write_all(&buffer).await.is_err() {
-                break;
-            }
-            let _ = stdin.flush().await;
-            buffer.clear();
-        }
+        flush_or_break!();
     }
 }
 
@@ -221,14 +405,31 @@ async fn stdin_writer_loop_single(
     stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
     rx: mpsc::Receiver<StdinMessage>,
 ) {
-    // Create dummy channels for normal and background that never receive
+    // Create dummy channels for the other lanes that never receive.
+    let (_control_tx, control_rx) = mpsc::unbounded_channel();
     let (_normal_tx, normal_rx) = mpsc::channel(1);
     let (_bg_tx, background_rx) = mpsc::channel(1);
-    stdin_writer_loop(stdin, rx, normal_rx, background_rx).await;
+    stdin_writer_loop(
+        stdin,
+        control_rx,
+        rx,
+        normal_rx,
+        background_rx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+    )
+    .await;
 }
 
 /// LSP JSON-RPC transport over a child process's stdio.
 struct LspTransport {
+    /// Unbounded control lane, drained at top priority by the writer. Carries the
+    /// read loop's auto-responses to the child's server→client requests and the
+    /// `Shutdown` signal. Unbounded so the read loop's enqueue is lossless and
+    /// never blocks on a full lane — the structural break in the bidirectional
+    /// stdout-read / stdin-write deadlock cycle.
+    control_tx: mpsc::UnboundedSender<StdinMessage>,
     /// Interactive-priority lane: hover, completion, definition, active-file sync.
     interactive_tx: mpsc::Sender<StdinMessage>,
     /// Normal-priority lane: imported-file warmup, tsconfig config, deferred API.
@@ -236,7 +437,7 @@ struct LspTransport {
     /// Background-priority lane: workspace scanner, shadow graph, diagnostics.
     background_tx: mpsc::Sender<StdinMessage>,
     /// Pending request senders, keyed by request ID. Shared with the read loop.
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
     next_id: AtomicI64,
     /// Counts consecutive request timeouts. Reset to 0 on any successful response.
     /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
@@ -244,6 +445,13 @@ struct LspTransport {
     consecutive_failures: AtomicU32,
     /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
+    /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the `shutdown`/`exit`
+    /// pair is sent, so the child's resulting exit (stdout EOF) and any in-flight
+    /// request timeouts are recognized as the teardown they are — NEVER surfaced on
+    /// `crash_notify` as an engine crash (which would mint a spurious
+    /// "crashed. Restarting" notification and respawn an engine into a dying
+    /// session).
+    teardown_intent: Arc<AtomicBool>,
 }
 
 /// Default timeout for LSP requests (10 seconds).
@@ -281,6 +489,23 @@ const HANG_THRESHOLD: u32 = 3;
 
 use crate::traits::ProviderPriority;
 
+/// Build a JSON-RPC message body, OMITTING the `params` key entirely when the
+/// caller has none (`Value::Null`). LSP methods like `shutdown`/`exit` declare
+/// NO params; sending `"params": null` makes strict engines (tsgo) log
+/// `InvalidParams: expected no params, got null` while handling every teardown.
+fn jsonrpc_body(id: Option<i64>, method: &str, params: &serde_json::Value) -> serde_json::Value {
+    let mut msg = serde_json::Map::new();
+    msg.insert("jsonrpc".into(), serde_json::Value::from("2.0"));
+    if let Some(id) = id {
+        msg.insert("id".into(), serde_json::Value::from(id));
+    }
+    msg.insert("method".into(), serde_json::Value::from(method));
+    if !params.is_null() {
+        msg.insert("params".into(), params.clone());
+    }
+    serde_json::Value::Object(msg)
+}
+
 impl LspTransport {
     /// Get the sender for a given priority lane.
     fn tx_for_priority(&self, priority: ProviderPriority) -> &mpsc::Sender<StdinMessage> {
@@ -288,6 +513,30 @@ impl LspTransport {
             ProviderPriority::Interactive => &self.interactive_tx,
             ProviderPriority::Normal => &self.normal_tx,
             ProviderPriority::Background => &self.background_tx,
+        }
+    }
+
+    /// Record a request-level failure (response timeout OR a stdin-enqueue stall)
+    /// toward hang detection. At [`HANG_THRESHOLD`] consecutive failures fire
+    /// `crash_notify` so the [`crate::resilient::ResilientTypeProvider`] restart
+    /// machinery recovers the session — unless a deliberate teardown is in flight.
+    ///
+    /// Only the response-timeout arm used to count, so a request parked on a
+    /// full lane behind a stalled writer never reached this path, so the wedge
+    /// detector never fired for a stdin-side deadlock.
+    fn note_hang_failure(&self) {
+        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= HANG_THRESHOLD {
+            if self.teardown_intent.load(Ordering::SeqCst) {
+                tracing::debug!("TSGO request failures during deliberate teardown — not a hang");
+            } else {
+                tracing::error!(
+                    "TSGO appears hung ({count} consecutive failures) — triggering restart"
+                );
+                if let Some(notify) = &self.crash_notify {
+                    notify.notify_waiters();
+                }
+            }
         }
     }
 
@@ -325,28 +574,73 @@ impl LspTransport {
             async {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "method": method,
-                    "params": params,
-                });
+                let msg = jsonrpc_body(Some(id), method, &params);
                 let body = serde_json::to_string(&msg)
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                self.pending.lock().await.insert(id, tx);
+                self.pending.insert(id, tx);
+                // Armed from the instant the id is registered: every exit from
+                // here on — return, error, or the caller's future being dropped
+                // mid-await — releases the registration and cancels the engine's
+                // work through the same path.
+                let mut registration = PendingRequest {
+                    id,
+                    pending: Arc::clone(&self.pending),
+                    control_tx: self.control_tx.clone(),
+                    armed: true,
+                };
 
                 let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-                self.tx_for_priority(priority)
-                    .send(StdinMessage::Frame(frame.into_bytes()))
+                // The lane send and the response wait SHARE one deadline so the
+                // whole round-trip is bounded. An unbounded enqueue did an
+                // UNBOUNDED `send().await` here, so a full lane behind a writer
+                // stalled on a busy child parked the request forever — BEFORE the
+                // response timeout even started, and without counting toward hang
+                // detection. Bounding the enqueue closes that gap.
+                //
+                // The hop is bounded by whichever is tighter: this call site's
+                // configured timeout, or what the ambient request deadline has
+                // left. Firing inside the caller's deadline is what makes the
+                // failure attributable to the engine rather than to the handler.
+                let hop = crate::deadline::hop_budget(std::time::Duration::from_secs(timeout_secs));
+                let deadline = tokio::time::Instant::now() + hop;
+                let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match self
+                    .tx_for_priority(priority)
+                    .send_timeout(StdinMessage::Frame(frame.into_bytes()), send_budget)
                     .await
-                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                {
+                    Ok(()) => {}
+                    Err(mpsc::error::SendTimeoutError::Closed(_)) => {
+                        registration.disarm();
+                        self.pending.take(id);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                    Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
+                        // The frame never reached the engine, so there is nothing
+                        // to cancel — release the slot without emitting a cancel
+                        // for an id the engine has never seen.
+                        registration.disarm();
+                        self.pending.take(id);
+                        self.note_hang_failure();
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!("method={} id={} message=stdin-enqueue-timeout", method, id),
+                        );
+                        return Err(TypeProviderError::new(format!(
+                            "request '{method}' stdin enqueue timed out after {hop:?}"
+                        )));
+                    }
+                }
 
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
+                let rx_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let result = tokio::time::timeout(rx_budget, rx).await;
                 match result {
                     Ok(Ok(val)) => {
+                        // Answered: the read loop already took the entry, and an
+                        // engine that has replied must not be told to cancel.
+                        registration.disarm();
                         // Reset consecutive failures on any successful response
                         self.consecutive_failures.store(0, Ordering::Relaxed);
                         // Check for JSON-RPC error
@@ -385,6 +679,9 @@ impl LspTransport {
                             .unwrap_or(serde_json::Value::Null))
                     }
                     Ok(Err(_)) => {
+                        // The sender was dropped (drained on crash), so the id is
+                        // already gone and the engine is not running the work.
+                        registration.disarm();
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!(
@@ -395,23 +692,17 @@ impl LspTransport {
                         Err(TypeProviderError::new("response channel closed"))
                     }
                     Err(_) => {
-                        // Timeout — clean up the pending entry to prevent leak
-                        self.pending.lock().await.remove(&id);
-                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count >= HANG_THRESHOLD {
-                            tracing::error!(
-                                "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
-                            );
-                            if let Some(notify) = &self.crash_notify {
-                                notify.notify_waiters();
-                            }
-                        }
+                        // Timed out with the request live at the engine. Leave the
+                        // registration ARMED: dropping it is what removes the
+                        // pending entry and cancels the engine's work, on this
+                        // path and on the caller-dropped path alike.
+                        self.note_hang_failure();
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!("method={} id={} message=timeout", method, id),
                         );
                         Err(TypeProviderError::new(format!(
-                            "request '{method}' timed out after {timeout_secs}s"
+                            "request '{method}' timed out after {hop:?}"
                         )))
                     }
                 }
@@ -420,8 +711,55 @@ impl LspTransport {
         .await
     }
 
+    /// Enqueue an LSP notification onto `priority`'s lane WITHOUT awaiting.
+    ///
+    /// Synchronous by construction. A caller that must commit local state in the
+    /// SAME non-cancellable step as an accepted enqueue — the document-sync
+    /// ledger below — cannot express that against an async send: a dropped future
+    /// would leave the state written and the frame unsent.
+    fn try_notify_with_priority(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        priority: ProviderPriority,
+    ) -> Result<(), TypeProviderError> {
+        let msg = jsonrpc_body(None, method, params);
+        let body = serde_json::to_string(&msg)
+            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        match self
+            .tx_for_priority(priority)
+            .try_send(StdinMessage::Frame(frame.into_bytes()))
+        {
+            Ok(()) => {
+                crate::type_runtime_trace_event!(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=true", method),
+                );
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("TSGO stdin channel full — refusing notification '{method}'");
+                crate::type_runtime_trace_event!(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=false reason=full", method),
+                );
+                Err(TypeProviderError::new("channel full"))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                crate::type_runtime_trace_event!(
+                    "tsgo_transport_notify_result",
+                    format!("method={} queued=false reason=closed", method),
+                );
+                Err(TypeProviderError::new("stdin writer closed"))
+            }
+        }
+    }
+
     /// Send an LSP notification at a specific priority (no response expected).
-    /// Uses `try_send()` to prevent backpressure from blocking the caller.
+    /// Never blocks the caller: a lane with no free slot refuses the frame rather
+    /// than applying backpressure.
     async fn notify_with_priority(
         &self,
         method: &str,
@@ -436,46 +774,7 @@ impl LspTransport {
                 priority,
                 summarize_lsp_params(&params),
             ),
-            async {
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": method,
-                    "params": params,
-                });
-                let body = serde_json::to_string(&msg)
-                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
-
-                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-                match self
-                    .tx_for_priority(priority)
-                    .try_send(StdinMessage::Frame(frame.into_bytes()))
-                {
-                    Ok(()) => {
-                        crate::type_runtime_trace_event!(
-                            "tsgo_transport_notify_result",
-                            format!("method={} queued=true", method),
-                        );
-                        Ok(())
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            "TSGO stdin channel full — dropping notification '{method}'"
-                        );
-                        crate::type_runtime_trace_event!(
-                            "tsgo_transport_notify_result",
-                            format!("method={} queued=false reason=full", method),
-                        );
-                        Err(TypeProviderError::new("channel full"))
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        crate::type_runtime_trace_event!(
-                            "tsgo_transport_notify_result",
-                            format!("method={} queued=false reason=closed", method),
-                        );
-                        Err(TypeProviderError::new("stdin writer closed"))
-                    }
-                }
-            }
+            async { self.try_notify_with_priority(method, &params, priority) }
         )
         .await
     }
@@ -491,15 +790,137 @@ impl LspTransport {
     }
 }
 
+/// The LSP `languageId` for a provider path.
+fn document_language_id(path: &str) -> &'static str {
+    if path.ends_with(".tsx") {
+        "typescriptreact"
+    } else if path.ends_with(".jsx") {
+        "javascriptreact"
+    } else if path.ends_with(".js") {
+        "javascript"
+    } else {
+        "typescript"
+    }
+}
+
+/// Which notification a document sync should deliver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentSyncIntent {
+    /// Always a fresh `didOpen` at version 1 — the caller knows the child does
+    /// not hold this document.
+    Open,
+    /// `didChange` when the ledger already records the document as open, else the
+    /// `didOpen` the LSP protocol requires first (a `didChange` for a document the
+    /// child never opened makes tsgo panic with "overlay not found").
+    Update,
+}
+
+/// What a document sync actually delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentSyncMode {
+    DidOpen,
+    DidChange { version: i32 },
+}
+
+/// Deliver a `didOpen`/`didChange` for `path` and commit the local ledger ONLY
+/// once the transport has ACCEPTED the frame.
+///
+/// `versions` + `contents` are this provider's record of what the child engine was
+/// actually told: `versions` decides `didOpen` vs `didChange` on the next sync, and
+/// `contents` backs offset↔position conversion. Committing either BEFORE the
+/// transport accepts claims a sync the child never received — and a refused enqueue
+/// (a full lane behind a writer stalled on a busy child) then strands the document
+/// indefinitely, because every later sync reads the ledger, believes the document is
+/// open, and sends a `didChange` the child cannot apply.
+///
+/// Both maps are locked before the enqueue, and the commit runs in the same step as
+/// an accepted synchronous `try_send` with no `.await` between them. So there is no
+/// cancellation point at which an optimistic write could outlive a dropped future,
+/// and the read-then-write on `versions` stays mutually exclusive against a
+/// concurrent sync of the same path.
+async fn deliver_document_sync(
+    transport: &LspTransport,
+    versions: &Mutex<HashMap<String, i32>>,
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    path: &str,
+    content: &str,
+    intent: DocumentSyncIntent,
+    priority: ProviderPriority,
+) -> Result<DocumentSyncMode, TypeProviderError> {
+    let uri = TsgoTypeProvider::path_to_uri(path);
+    let mut versions_guard = versions.lock().await;
+    let mut contents_guard = contents.lock().await;
+
+    let mode = match (intent, versions_guard.get(path)) {
+        (DocumentSyncIntent::Update, Some(version)) => DocumentSyncMode::DidChange {
+            version: version + 1,
+        },
+        _ => DocumentSyncMode::DidOpen,
+    };
+    let (method, params) = match mode {
+        DocumentSyncMode::DidOpen => (
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": document_language_id(path),
+                    "version": 1,
+                    "text": content,
+                }
+            }),
+        ),
+        DocumentSyncMode::DidChange { version } => (
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": content }]
+            }),
+        ),
+    };
+
+    transport.try_notify_with_priority(method, &params, priority)?;
+
+    let version = match mode {
+        DocumentSyncMode::DidOpen => 1,
+        DocumentSyncMode::DidChange { version } => version,
+    };
+    versions_guard.insert(path.to_string(), version);
+    contents_guard.insert(contents_key(path), Arc::from(content));
+    Ok(mode)
+}
+
+/// Deliver a `didClose` for `path` and retire the ledger entry ONLY once the
+/// transport has accepted the frame.
+///
+/// A refused `didClose` leaves the entry in place, which is the accurate record:
+/// the child still holds the document open, so the next sync must keep treating it
+/// as open rather than replaying a `didOpen` over a live buffer.
+async fn deliver_document_close(
+    transport: &LspTransport,
+    versions: &Mutex<HashMap<String, i32>>,
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    path: &str,
+    priority: ProviderPriority,
+) -> Result<(), TypeProviderError> {
+    let uri = TsgoTypeProvider::path_to_uri(path);
+    let mut versions_guard = versions.lock().await;
+    let mut contents_guard = contents.lock().await;
+
+    transport.try_notify_with_priority(
+        "textDocument/didClose",
+        &serde_json::json!({ "textDocument": { "uri": uri } }),
+        priority,
+    )?;
+
+    versions_guard.remove(path);
+    contents_guard.remove(&contents_key(path));
+    Ok(())
+}
+
 /// Drain all pending requests, sending crash error responses so callers
 /// fail immediately instead of waiting for the 10s timeout.
-async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>) {
-    let mut guard = pending.lock().await;
-    for (_id, tx) in guard.drain() {
-        let _ = tx.send(serde_json::json!({
-            "error": { "code": -32099, "message": "tsgo process crashed" }
-        }));
-    }
+fn drain_pending(pending: &PendingRequests) {
+    pending.drain_with_crash_error();
 }
 
 /// Read loop that processes JSON-RPC messages from the child's stdout
@@ -509,14 +930,29 @@ async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::
 ///
 /// When `crash_notify` is provided, it is signaled on any exit (EOF, I/O error,
 /// read failure) so that the `ResilientTypeProvider` can detect the crash and restart.
+///
+/// `teardown_intent` disarms that signal: a deliberate `shutdown()` sets it BEFORE
+/// sending `shutdown`/`exit`, so the child's resulting EOF is recognized as the
+/// requested teardown — never surfaced as a crash (which would mint a spurious
+/// "crashed. Restarting" notification and respawn an engine into a dying session).
 async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<PendingRequests>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
-    interactive_tx: mpsc::Sender<StdinMessage>,
+    control_tx: mpsc::UnboundedSender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
+    teardown_intent: Arc<AtomicBool>,
 ) {
+    let signal_crash = |crash_notify: &Option<Arc<Notify>>| {
+        if teardown_intent.load(Ordering::SeqCst) {
+            tracing::debug!("TSGO stdout closed during deliberate teardown — not a crash");
+            return;
+        }
+        if let Some(notify) = crash_notify {
+            notify.notify_waiters();
+        }
+    };
     let mut reader = BufReader::new(stdout);
     let mut header_buf = String::new();
 
@@ -530,10 +966,8 @@ async fn read_loop(
             match reader.read_line(&mut header_buf).await {
                 Ok(0) => {
                     // EOF — child process exited
-                    drain_pending(&pending).await;
-                    if let Some(notify) = &crash_notify {
-                        notify.notify_waiters();
-                    }
+                    drain_pending(&pending);
+                    signal_crash(&crash_notify);
                     return;
                 }
                 Ok(_) => {
@@ -549,10 +983,8 @@ async fn read_loop(
                 }
                 Err(_) => {
                     // I/O error — child likely crashed
-                    drain_pending(&pending).await;
-                    if let Some(notify) = &crash_notify {
-                        notify.notify_waiters();
-                    }
+                    drain_pending(&pending);
+                    signal_crash(&crash_notify);
                     return;
                 }
             }
@@ -569,10 +1001,8 @@ async fn read_loop(
             .await
             .is_err()
         {
-            drain_pending(&pending).await;
-            if let Some(notify) = &crash_notify {
-                notify.notify_waiters();
-            }
+            drain_pending(&pending);
+            signal_crash(&crash_notify);
             return;
         }
 
@@ -634,9 +1064,14 @@ async fn read_loop(
             });
             let body = serde_json::to_string(&reply).unwrap_or_default();
             let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-            let _ = interactive_tx
-                .send(StdinMessage::Frame(frame.into_bytes()))
-                .await;
+            // Enqueue the auto-response on the UNBOUNDED control lane. A blocking enqueue here
+            // this was a blocking `interactive_tx.send().await` on a bounded lane:
+            // when the interactive lane was full behind a stalled writer, the read
+            // loop parked HERE and stopped draining the child's stdout — the child
+            // then blocked on its own full stdout and could never resume reading
+            // our stdin, a permanent two-pipe deadlock. An unbounded, non-blocking
+            // enqueue keeps stdout reading unconditional and breaks that cycle.
+            let _ = control_tx.send(StdinMessage::Frame(frame.into_bytes()));
             continue;
         }
 
@@ -714,7 +1149,7 @@ async fn read_loop(
         // Response to our request: route by id
         if let Some(id_val) = msg_id {
             if let Some(id) = id_val.as_i64() {
-                if let Some(tx) = pending.lock().await.remove(&id) {
+                if let Some(tx) = pending.take(id) {
                     let _ = tx.send(msg);
                 }
             }
@@ -1360,6 +1795,9 @@ pub struct TsgoTypeProvider {
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    /// Deliberate-teardown intent, shared with the transport + read loop. See
+    /// [`LspTransport::teardown_intent`].
+    teardown_intent: Arc<AtomicBool>,
 }
 
 impl Drop for TsgoTypeProvider {
@@ -1526,26 +1964,61 @@ impl TsgoTypeProvider {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(1024);
-        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(1024);
-        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(1024);
+        Self::from_transport_parts_configured(
+            read,
+            write,
+            child,
+            crash_notify,
+            DEFAULT_LANE_CAPACITY,
+            std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
+        )
+    }
+
+    /// [`Self::from_transport_parts`] with a caller-chosen lane capacity and
+    /// writer-stall watchdog window. Production uses [`DEFAULT_LANE_CAPACITY`]
+    /// and [`WRITER_STALL_TIMEOUT_SECS`]; the deadlock-repro tests inject a tiny
+    /// capacity and a short watchdog so a full lane / stalled child is reachable
+    /// deterministically.
+    fn from_transport_parts_configured<R, W>(
+        read: R,
+        write: W,
+        child: Option<Child>,
+        crash_notify: Option<Arc<Notify>>,
+        lane_capacity: usize,
+        writer_stall: std::time::Duration,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
+        let (control_tx, control_rx) = mpsc::unbounded_channel::<StdinMessage>();
+        let (interactive_tx, interactive_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
+        let (normal_tx, normal_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
+        let (background_tx, background_rx) = mpsc::channel::<StdinMessage>(lane_capacity);
+
+        let teardown_intent = Arc::new(AtomicBool::new(false));
         tokio::spawn(stdin_writer_loop(
             write,
+            control_rx,
             interactive_rx,
             normal_rx,
             background_rx,
+            crash_notify.as_ref().map(Arc::clone),
+            Arc::clone(&teardown_intent),
+            writer_stall,
         ));
 
         let transport = Arc::new(LspTransport {
-            interactive_tx: interactive_tx.clone(),
+            control_tx: control_tx.clone(),
+            interactive_tx,
             normal_tx,
             background_tx,
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
             crash_notify: crash_notify.as_ref().map(Arc::clone),
+            teardown_intent: Arc::clone(&teardown_intent),
         });
         let diagnostics_cache = Arc::new(Mutex::new(HashMap::new()));
         let contents = Arc::new(Mutex::new(HashMap::new()));
@@ -1554,8 +2027,9 @@ impl TsgoTypeProvider {
             pending,
             Arc::clone(&diagnostics_cache),
             Arc::clone(&contents),
-            interactive_tx,
+            control_tx,
             crash_notify,
+            Arc::clone(&teardown_intent),
         ));
 
         Self {
@@ -1564,6 +2038,7 @@ impl TsgoTypeProvider {
             versions: Arc::new(Mutex::new(HashMap::new())),
             contents,
             diagnostics_cache,
+            teardown_intent,
         }
     }
 
@@ -1668,15 +2143,6 @@ impl TsgoTypeProvider {
         priority: ProviderPriority,
     ) -> ProviderFuture<'_, ()> {
         let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
@@ -1692,25 +2158,17 @@ impl TsgoTypeProvider {
                     content.len()
                 ),
                 async {
-                    contents_cache
-                        .lock()
-                        .await
-                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-                    versions.lock().await.insert(path_owned, 1);
-                    transport
-                        .notify_with_priority(
-                            "textDocument/didOpen",
-                            serde_json::json!({
-                                "textDocument": {
-                                    "uri": uri,
-                                    "languageId": lang_id,
-                                    "version": 1,
-                                    "text": content,
-                                }
-                            }),
-                            priority,
-                        )
-                        .await
+                    deliver_document_sync(
+                        &transport,
+                        &versions,
+                        &contents_cache,
+                        &path_owned,
+                        &content,
+                        DocumentSyncIntent::Open,
+                        priority,
+                    )
+                    .await
+                    .map(|_| ())
                 }
             )
             .await
@@ -1724,60 +2182,23 @@ impl TsgoTypeProvider {
         content: &str,
         priority: ProviderPriority,
     ) -> ProviderFuture<'_, ()> {
-        let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache
-                .lock()
-                .await
-                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-
-            let mut vers = versions.lock().await;
-            if let Some(v) = vers.get_mut(&path_owned) {
-                *v += 1;
-                let version = *v;
-                drop(vers);
-                transport
-                    .notify_with_priority(
-                        "textDocument/didChange",
-                        serde_json::json!({
-                            "textDocument": { "uri": uri, "version": version },
-                            "contentChanges": [{ "text": content }]
-                        }),
-                        priority,
-                    )
-                    .await
-            } else {
-                vers.insert(path_owned.clone(), 1);
-                drop(vers);
-                transport
-                    .notify_with_priority(
-                        "textDocument/didOpen",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": lang_id,
-                                "version": 1,
-                                "text": content,
-                            }
-                        }),
-                        priority,
-                    )
-                    .await
-            }
+            deliver_document_sync(
+                &transport,
+                &versions,
+                &contents_cache,
+                &path_owned,
+                &content,
+                DocumentSyncIntent::Update,
+                priority,
+            )
+            .await
+            .map(|_| ())
         })
     }
 
@@ -1787,24 +2208,19 @@ impl TsgoTypeProvider {
         path: &str,
         priority: ProviderPriority,
     ) -> ProviderFuture<'_, ()> {
-        let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache
-                .lock()
-                .await
-                .remove(&contents_key(&path_owned));
-            versions.lock().await.remove(&path_owned);
-            transport
-                .notify_with_priority(
-                    "textDocument/didClose",
-                    serde_json::json!({ "textDocument": { "uri": uri } }),
-                    priority,
-                )
-                .await
+            deliver_document_close(
+                &transport,
+                &versions,
+                &contents_cache,
+                &path_owned,
+                priority,
+            )
+            .await
         })
     }
 }
@@ -2019,15 +2435,6 @@ impl TypeProvider for TsgoTypeProvider {
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
         let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
@@ -2043,25 +2450,16 @@ impl TypeProvider for TsgoTypeProvider {
                     content.len()
                 ),
                 async {
-                    contents_cache
-                        .lock()
-                        .await
-                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-                    // Mark as opened with version 1
-                    versions.lock().await.insert(path_owned, 1);
-                    transport
-                        .notify(
-                            "textDocument/didOpen",
-                            serde_json::json!({
-                                "textDocument": {
-                                    "uri": uri,
-                                    "languageId": lang_id,
-                                    "version": 1,
-                                    "text": content,
-                                }
-                            }),
-                        )
-                        .await?;
+                    deliver_document_sync(
+                        &transport,
+                        &versions,
+                        &contents_cache,
+                        &path_owned,
+                        &content,
+                        DocumentSyncIntent::Open,
+                        ProviderPriority::Interactive,
+                    )
+                    .await?;
                     crate::type_runtime_trace_event!(
                         "tsgo_open_file_result",
                         "opened=true version=1".to_string()
@@ -2106,77 +2504,37 @@ impl TypeProvider for TsgoTypeProvider {
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO update_file: {} ({} bytes)", path, content.len());
-        let uri = Self::path_to_uri(path);
-        let lang_id = if path.ends_with(".tsx") {
-            "typescriptreact"
-        } else if path.ends_with(".jsx") {
-            "javascriptreact"
-        } else if path.ends_with(".js") {
-            "javascript"
-        } else {
-            "typescript"
-        };
         let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache
-                .lock()
-                .await
-                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
-
-            let mut vers = versions.lock().await;
-            if let Some(v) = vers.get_mut(&path_owned) {
-                // File already opened — send didChange
-                *v += 1;
-                let version = *v;
-                drop(vers);
-                transport
-                    .notify(
-                        "textDocument/didChange",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "version": version,
-                            },
-                            "contentChanges": [{
-                                "text": content,
-                            }]
-                        }),
-                    )
-                    .await?;
-                crate::type_runtime_trace_event!(
-                    "tsgo_update_file_result",
-                    format!("path={} mode=didChange version={}", path_owned, version),
-                );
-                Ok(())
-            } else {
-                // File never opened — must send didOpen first (LSP protocol requirement).
-                // Sending didChange without didOpen causes tsgo to panic with
-                // "overlay not found for changed file".
-                vers.insert(path_owned.clone(), 1);
-                drop(vers);
-                transport
-                    .notify(
-                        "textDocument/didOpen",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": lang_id,
-                                "version": 1,
-                                "text": content,
-                            }
-                        }),
-                    )
-                    .await?;
-                crate::type_runtime_trace_event!(
-                    "tsgo_update_file_result",
-                    format!("path={} mode=didOpen version=1", path_owned),
-                );
-                Ok(())
+            let mode = deliver_document_sync(
+                &transport,
+                &versions,
+                &contents_cache,
+                &path_owned,
+                &content,
+                DocumentSyncIntent::Update,
+                ProviderPriority::Interactive,
+            )
+            .await?;
+            match mode {
+                DocumentSyncMode::DidChange { version } => {
+                    crate::type_runtime_trace_event!(
+                        "tsgo_update_file_result",
+                        format!("path={} mode=didChange version={}", path_owned, version),
+                    );
+                }
+                DocumentSyncMode::DidOpen => {
+                    crate::type_runtime_trace_event!(
+                        "tsgo_update_file_result",
+                        format!("path={} mode=didOpen version=1", path_owned),
+                    );
+                }
             }
+            Ok(())
         })
     }
 
@@ -2192,19 +2550,14 @@ impl TypeProvider for TsgoTypeProvider {
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
                 async {
-                    contents_cache
-                        .lock()
-                        .await
-                        .remove(&contents_key(&path_owned));
-                    versions.lock().await.remove(&path_owned);
-                    transport
-                        .notify(
-                            "textDocument/didClose",
-                            serde_json::json!({
-                                "textDocument": { "uri": uri }
-                            }),
-                        )
-                        .await?;
+                    deliver_document_close(
+                        &transport,
+                        &versions,
+                        &contents_cache,
+                        &path_owned,
+                        ProviderPriority::Interactive,
+                    )
+                    .await?;
                     crate::type_runtime_trace_event!(
                         "tsgo_close_file_result",
                         "closed=true".to_string()
@@ -2241,7 +2594,18 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
                     }
-                    None => (0, offset, None),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_completions: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(CompletionResult {
+                            items: Vec::new(),
+                            is_incomplete: false,
+                        });
+                    }
                 }
             };
 
@@ -2460,21 +2824,27 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, cache_hit) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
-                    Some(c) => {
-                        let (line, character) = offset_to_position(c, offset);
-                        (line, character, true)
+                    Some(c) => offset_to_position(c, offset),
+                    None => {
+                        // FAIL CLOSED: without the synced content there is no
+                        // valid position to convert to. A fabricated
+                        // `(0, byte-offset)` coordinate is a malformed request
+                        // the engine may not survive — never send one.
+                        tracing::warn!(
+                            "TSGO get_hover: no cached contents for {path_owned} — \n                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(None);
                     }
-                    None => (0, offset, false),
                 }
             };
             crate::type_runtime_trace_scope_async!(
                 "tsgo_get_hover",
                 format!(
-                    "path={} uri={} offset={} line={} character={} content_cache_hit={}",
-                    path_owned, uri, offset, line, character, cache_hit,
+                    "path={} uri={} offset={} line={} character={} content_cache_hit=true",
+                    path_owned, uri, offset, line, character,
                 ),
                 async {
                     let result = transport
@@ -2612,7 +2982,15 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
                     }
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_definition: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2674,7 +3052,15 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
                     }
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_type_definition: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2729,7 +3115,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_references: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2770,7 +3164,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_rename_locations: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -2823,7 +3225,15 @@ impl TypeProvider for TsgoTypeProvider {
                 let cache = contents_cache.lock().await;
                 match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
-                    None => (0, offset),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_signature_help: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(None);
+                    }
                 }
             };
             let result = transport
@@ -2990,7 +3400,15 @@ impl TypeProvider for TsgoTypeProvider {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
                     }
-                    None => (0, offset, None),
+                    None => {
+                        // FAIL CLOSED: never fabricate a `(0, byte-offset)`
+                        // position for the engine (see `get_hover`).
+                        tracing::warn!(
+                            "TSGO get_document_highlights: no cached contents for {path_owned} — \
+                             failing closed instead of fabricating a position"
+                        );
+                        return Ok(Vec::new());
+                    }
                 }
             };
             let result = transport
@@ -3139,11 +3557,17 @@ impl TypeProvider for TsgoTypeProvider {
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         let transport = Arc::clone(&self.transport);
         let child = self.child.as_ref();
+        // Declare teardown intent BEFORE any teardown traffic: the child's exit
+        // (stdout EOF) and any in-flight request timeouts are the REQUESTED
+        // teardown, never a crash to report/restart from.
+        self.teardown_intent.store(true, Ordering::SeqCst);
         Box::pin(async move {
             let Some(child) = child else {
                 // Non-owning editor attach: close only this local feature bridge.
-                // Never send shutdown/exit onto the editor-owned connection.
-                let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
+                // Never send shutdown/exit onto the editor-owned connection. The
+                // Shutdown signal rides the UNBOUNDED control lane so a crashed /
+                // wedged writer with a full interactive lane cannot block teardown.
+                let _ = transport.control_tx.send(StdinMessage::Shutdown);
                 return Ok(());
             };
             // Best-effort: try shutdown request + exit notification with overall 3s timeout.
@@ -3153,8 +3577,9 @@ impl TypeProvider for TsgoTypeProvider {
                 let _ = transport.notify("exit", serde_json::Value::Null).await;
             })
             .await;
-            // Signal the writer task to stop.
-            let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
+            // Signal the writer task to stop via the UNBOUNDED control lane — never
+            // a bounded lane send that a wedged writer could park on.
+            let _ = transport.control_tx.send(StdinMessage::Shutdown);
 
             let mut child = child
                 .lock()

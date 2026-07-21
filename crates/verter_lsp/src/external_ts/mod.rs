@@ -28,9 +28,9 @@ pub use carrier_publish_store::{
 #[cfg(test)]
 pub use carrier_publish_store::test_store_dir_override;
 pub(crate) use carrier_sync::{
-    carrier_close_target, project_ownership_diagnostic, reconcile_carrier_source, AdmitOutcome,
-    CarrierMembershipCtx, CarrierNotOwned, CarrierProviderDelivery, CarrierSyncDecision,
-    CarrierSyncRequest, CarrierTransactionCoordinator, SettleClass,
+    carrier_close_target, project_ownership_diagnostics_for, reconcile_carrier_source,
+    AdmitOutcome, CarrierMembershipCtx, CarrierNotOwned, CarrierProviderDelivery,
+    CarrierSyncDecision, CarrierSyncRequest, CarrierTransactionCoordinator, SettleClass,
 };
 pub(crate) use publish_coordinator::resolve_carrier_ownership_over_vfs;
 pub use publish_coordinator::{CarrierCompanion, CarrierPublishCoordinator, CarrierPublishError};

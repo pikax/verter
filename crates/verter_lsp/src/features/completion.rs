@@ -8,8 +8,8 @@ use verter_session::FileAnalysisSnapshot;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::{parse_opening_tag, SfcBlock};
 use crate::features::cursor_context::{
-    classify_cursor_context, CursorContext, ExpressionKind, StyleCursorContext,
-    TemplateCursorContext,
+    classify_cursor_context_for_language, CarrierTemplateLanguage, CursorContext, ExpressionKind,
+    StyleCursorContext, TemplateCursorContext,
 };
 
 /// Result from completion, including an `is_incomplete` flag for re-query behavior.
@@ -49,15 +49,26 @@ pub fn completions_at_position(
     ssr_context: bool,
 ) -> Option<CompletionResult> {
     let offset = line_index.position_to_offset(position)?;
+    let carrier_language = doc_uri.and_then(CarrierTemplateLanguage::from_uri);
 
     // Classify cursor using AST-based context detection
-    let context = classify_cursor_context(offset, source, blocks, analysis);
+    let context =
+        classify_cursor_context_for_language(offset, source, blocks, analysis, carrier_language);
 
     match context {
-        CursorContext::RootLevel => Some(CompletionResult {
-            items: sfc_root_completions(source, blocks, offset, line_index),
-            is_incomplete: false,
-        }),
+        CursorContext::RootLevel => {
+            // Vue SFC scaffold snippets are invalid at Svelte's markup root.
+            // Until there is a Svelte-native root producer, fail closed and let
+            // the provider/editor supply ordinary markup completions.
+            if carrier_language == Some(CarrierTemplateLanguage::Svelte) {
+                None
+            } else {
+                Some(CompletionResult {
+                    items: sfc_root_completions(source, blocks, offset, line_index),
+                    is_incomplete: false,
+                })
+            }
+        }
         CursorContext::BlockOpeningTag { ref tag_name } => {
             // When cursor is inside a `generic`, `attrs`, or `attributes` attribute
             // value on a <script> tag, return None to let the TypeProvider handle
@@ -96,13 +107,12 @@ pub fn completions_at_position(
             })
         }
         CursorContext::Style(StyleCursorContext::VBind) => {
-            // Style v-bind: offer reactive bindings via css completions
-            crate::css::css_completions(position, source, blocks, analysis, line_index).map(
-                |items| CompletionResult {
-                    items,
-                    is_incomplete: false,
-                },
-            )
+            // Inside `v-bind(|)`: the setup-scope bindings by bare name —
+            // never property-name or snippet junk.
+            crate::css::v_bind_scope_completions(analysis?).map(|items| CompletionResult {
+                items,
+                is_incomplete: false,
+            })
         }
         CursorContext::Style(StyleCursorContext::General) => crate::css::css_completions(
             position, source, blocks, analysis, line_index,
@@ -140,12 +150,20 @@ pub fn completions_at_position(
                             analysis,
                             resolve_component,
                             existing_attrs,
+                            carrier_language,
                         ) {
                             return Some(CompletionResult {
                                 items,
                                 is_incomplete: false,
                             });
                         }
+                    }
+                    // The generic attribute table below is Vue syntax. Until a
+                    // Svelte-native attribute producer exists, unresolved and
+                    // zero-public-prop Svelte elements fail closed instead of
+                    // leaking `v-*`, `v-model`, and `@click` suggestions.
+                    if carrier_language == Some(CarrierTemplateLanguage::Svelte) {
+                        return None;
                     }
                     Some(CompletionResult {
                         items: attribute_name_completions(),
@@ -157,6 +175,40 @@ pub fn completions_at_position(
                 }
                 TemplateCursorContext::VModelModifier { .. } => Some(vmodel_modifier_completions()),
                 TemplateCursorContext::DirectiveArgument { .. } => None,
+                TemplateCursorContext::SlotName {
+                    ref tag_name,
+                    is_component,
+                } => slot_name_completions(
+                    offset as usize,
+                    source,
+                    analysis,
+                    resolve_component,
+                    tag_name,
+                    is_component,
+                )
+                .map(|items| CompletionResult {
+                    items,
+                    is_incomplete: false,
+                }),
+                TemplateCursorContext::SvelteSnippetName { ref tag_name } => {
+                    svelte_snippet_slot_completions(
+                        offset as usize,
+                        source,
+                        analysis,
+                        resolve_component,
+                        tag_name,
+                    )
+                    .map(|items| CompletionResult {
+                        items,
+                        is_incomplete: false,
+                    })
+                }
+                TemplateCursorContext::SvelteRenderCallee => {
+                    svelte_render_callee_completions(analysis).map(|items| CompletionResult {
+                        items,
+                        is_incomplete: false,
+                    })
+                }
                 TemplateCursorContext::Expression { ref kind } => {
                     // Check if class attribute expression — offer CSS class completions
                     if matches!(
@@ -1301,23 +1353,42 @@ fn component_prop_completions(
     analysis: &FileAnalysisSnapshot,
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     existing_attrs: &[String],
+    carrier_language: Option<CarrierTemplateLanguage>,
 ) -> Option<Vec<CompletionItem>> {
     let template = analysis.template.as_deref()?;
 
     // Find which component's opening tag contains the cursor
     let component_name = find_component_at_cursor(offset, source, template)?;
 
-    // Find the component usage to get its import source
+    // Prefer the analyzed component usage. During an incomplete opening tag the
+    // template parser may not retain that usage yet, so fall back to the script
+    // import whose local binding matches the structurally scanned tag name.
     let comp_usage = template
         .components
         .iter()
-        .find(|c| c.name == component_name || to_kebab_case(&c.name) == component_name)?;
-
-    let import_source = comp_usage.import_source.as_ref()?;
+        .find(|c| c.name == component_name || to_kebab_case(&c.name) == component_name);
+    let imported_binding = analysis.imports.iter().find_map(|import| {
+        import
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.name == component_name || to_kebab_case(&binding.name) == component_name
+            })
+            .map(|binding| (import.source.as_str(), binding.name.as_str()))
+    });
+    let (import_source, resolved_component_name) = if let Some(usage) = comp_usage {
+        (usage.import_source.as_deref()?, usage.name.as_str())
+    } else {
+        imported_binding?
+    };
 
     // Resolve the component's analysis (pass component name for barrel re-export following)
     let resolve_fn = resolve_component?;
-    let child_analysis = resolve_fn(import_source, Some(&comp_usage.name))?;
+    let child_analysis = resolve_fn(import_source, Some(resolved_component_name))?;
+    // Attribute syntax is owned by the PARENT template language. Import
+    // spelling is not a framework discriminator: extensionless resolution and
+    // barrel re-exports can both terminate at a Svelte child.
+    let uses_svelte_syntax = carrier_language == Some(CarrierTemplateLanguage::Svelte);
 
     let mut items = Vec::new();
 
@@ -1335,7 +1406,11 @@ fn component_prop_completions(
 
     if let (true, Some(child_template)) = (has_prop_defs, child_template) {
         for prop_def in &child_template.prop_definitions {
-            let label = to_kebab_case(&prop_def.name);
+            let label = if uses_svelte_syntax {
+                prop_def.name.clone()
+            } else {
+                to_kebab_case(&prop_def.name)
+            };
             if used_props.contains(prop_def.name.as_str()) || used_props.contains(label.as_str()) {
                 continue;
             }
@@ -1352,6 +1427,8 @@ fn component_prop_completions(
 
             let insert_text = if prop_def.is_boolean {
                 Some(label.clone())
+            } else if uses_svelte_syntax {
+                Some(format!("{}={{$1}}", label))
             } else {
                 Some(format!(":{}=\"$1\"", label))
             };
@@ -1375,7 +1452,11 @@ fn component_prop_completions(
         for m in child_analysis.macros.iter() {
             if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps {
                 for field in &m.prop_fields {
-                    let label = to_kebab_case(&field.name);
+                    let label = if uses_svelte_syntax {
+                        field.name.clone()
+                    } else {
+                        to_kebab_case(&field.name)
+                    };
                     if used_props.contains(field.name.as_str())
                         || used_props.contains(label.as_str())
                     {
@@ -1385,7 +1466,11 @@ fn component_prop_completions(
                         label: label.clone(),
                         kind: Some(CompletionItemKind::PROPERTY),
                         detail: Some("prop".to_string()),
-                        insert_text: Some(format!(":{}=\"$1\"", label)),
+                        insert_text: Some(if uses_svelte_syntax {
+                            format!("{}={{$1}}", label)
+                        } else {
+                            format!(":{}=\"$1\"", label)
+                        }),
                         insert_text_format: Some(InsertTextFormat::SNIPPET),
                         sort_text: Some(format!("0{}", label)),
                         ..Default::default()
@@ -1441,6 +1526,451 @@ fn component_prop_completions(
         return None;
     }
 
+    Some(items)
+}
+
+// =============================================================================
+// D5 — slot-name completion (Vue `v-slot`/`#`, Svelte `{#snippet}`/`{@render}`)
+// =============================================================================
+
+/// Resolve the component usage that owns the slot attribute at `offset`:
+/// the component element itself for `<MyComp #|>`, or the parent component
+/// element for `<template #|>`. Returns the usage plus the used slot names
+/// recorded on it.
+fn slot_owner_component<'a>(
+    offset: usize,
+    source: &str,
+    template: &'a verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    tag_name: &str,
+    is_component: bool,
+) -> Option<&'a verter_semantic::analysis::template::TemplateComponentUsage> {
+    if is_component && tag_name != "template" {
+        return template.components.iter().find(|component| {
+            component.name == tag_name
+                || to_kebab_case(&component.name) == tag_name
+                || component.name == to_pascal_case(tag_name)
+        });
+    }
+    // `<template #…>`: typed parent walk — the template element whose open-tag
+    // region contains the offset, then its parent component element.
+    let offset32 = offset as u32;
+    let owner_element = template.elements.iter().find(|el| {
+        el.tag == "template"
+            && offset32 >= el.span.start
+            && offset32 < el.tag_span_end.max(el.span.start + 1)
+    });
+    if let Some(el) = owner_element {
+        let parent = el
+            .parent_index
+            .and_then(|idx| template.elements.get(idx as usize));
+        if let Some(parent) = parent {
+            if parent.is_component {
+                if let Some(component) = template.components.iter().find(|component| {
+                    component.name == parent.tag || component.name == to_pascal_case(&parent.tag)
+                }) {
+                    return Some(component);
+                }
+            }
+        }
+    }
+    // Incomplete-parse fallback: scan backwards from the slot tag for the
+    // nearest enclosing component open tag (skipping closing tags and the
+    // slot's own `<template` tag).
+    let bytes = source.as_bytes();
+    let mut i = offset.min(source.len());
+    let mut saw_slot_tag = false;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] != b'<' {
+            continue;
+        }
+        let tag_start = i + 1;
+        if tag_start < source.len() && bytes[tag_start] == b'/' {
+            continue; // closing tag
+        }
+        let mut tag_end = tag_start;
+        while tag_end < source.len()
+            && (bytes[tag_end].is_ascii_alphanumeric()
+                || bytes[tag_end] == b'-'
+                || bytes[tag_end] == b'_')
+        {
+            tag_end += 1;
+        }
+        let name = &source[tag_start..tag_end];
+        if !saw_slot_tag {
+            // The first open tag before the cursor is the slot's own
+            // `<template`/`<MyComp` tag — step over it to find the owner.
+            saw_slot_tag = true;
+            if name != "template" {
+                return template.components.iter().find(|component| {
+                    component.name == name
+                        || to_kebab_case(&component.name) == name
+                        || component.name == to_pascal_case(name)
+                });
+            }
+            continue;
+        }
+        return template.components.iter().find(|component| {
+            component.name == name
+                || to_kebab_case(&component.name) == name
+                || component.name == to_pascal_case(name)
+        });
+    }
+    None
+}
+
+/// The tag OWNING the slot attribute being typed, recovered from source while
+/// the parse has not retained the usage: the component tag itself for
+/// `<MyComp #|>`, or the nearest enclosing component open tag for
+/// `<template #|>`. Non-component tags (lowercase elements like `<span>`) are
+/// never slot owners and are skipped; closing tags are stepped over.
+fn slot_owner_tag_name(
+    offset: usize,
+    source: &str,
+    is_component: bool,
+    analysis: &FileAnalysisSnapshot,
+) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut i = offset.min(source.len());
+    let mut skip_slot_tag = !is_component;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] != b'<' {
+            continue;
+        }
+        let tag_start = i + 1;
+        if tag_start < source.len() && bytes[tag_start] == b'/' {
+            continue; // closing tag
+        }
+        let mut tag_end = tag_start;
+        while tag_end < source.len()
+            && (bytes[tag_end].is_ascii_alphanumeric()
+                || bytes[tag_end] == b'-'
+                || bytes[tag_end] == b'_')
+        {
+            tag_end += 1;
+        }
+        let name = source.get(tag_start..tag_end)?;
+        if name.is_empty() {
+            return None;
+        }
+        if skip_slot_tag && name == "template" {
+            // The first open tag before the cursor is the slot's own
+            // `<template` tag — step over it to find the owner.
+            skip_slot_tag = false;
+            continue;
+        }
+        let is_component_tag = name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase())
+            || analysis.imports.iter().any(|import| {
+                import
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.name == name || to_kebab_case(&binding.name) == name)
+            });
+        if is_component_tag {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// D5: slot-name completion for `<template #|>` / `<template v-slot:|>` /
+/// `<MyComp #|>` — server-owned items from the CHILD's declared slots surface
+/// (defineSlots fields, template defined-slots fallback), never a document
+/// word fallback. Already-used slot names are filtered with Vue's kebab↔camel
+/// equivalence; `default` is offered while unused and undeclared.
+#[allow(clippy::type_complexity)]
+fn slot_name_completions(
+    offset: usize,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
+    tag_name: &str,
+    is_component: bool,
+) -> Option<Vec<CompletionItem>> {
+    let template = analysis.template.as_deref();
+    let component = template.and_then(|template| {
+        slot_owner_component(offset, source, template, tag_name, is_component)
+    });
+    // While the slot tag is still being typed the error-tolerant parse may
+    // drop the component usage entirely; recover the owner through the script
+    // import whose local binding matches the scanned tag (the same recovery
+    // component prop completion uses for incomplete tags).
+    let owner_tag = component
+        .map(|usage| usage.name.clone())
+        .or_else(|| slot_owner_tag_name(offset, source, is_component, analysis))?;
+    let (import_source, resolved_name) = if let Some(usage) = component {
+        (usage.import_source.as_deref()?, usage.name.as_str())
+    } else {
+        analysis.imports.iter().find_map(|import| {
+            import
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.name == owner_tag || to_kebab_case(&binding.name) == owner_tag
+                })
+                .map(|binding| (import.source.as_str(), binding.name.as_str()))
+        })?
+    };
+    let resolve_fn = resolve_component?;
+    let child_analysis = resolve_fn(import_source, Some(resolved_name))?;
+
+    // Already-used slot names: the usage's recorded slots plus sibling
+    // `<template #x>` slot directives under the same parent element. Both are
+    // typed facts that exist only while the parse retains the usage; in a
+    // mid-typing broken-parse window the filter degrades to "all declared
+    // slots offered" rather than guessing from source text.
+    let mut used: Vec<String> = component
+        .map(|usage| usage.slots_used.clone())
+        .unwrap_or_default();
+    if let Some(template) = template {
+        let offset32 = offset as u32;
+        let owner_parent_idx = template
+            .elements
+            .iter()
+            .position(|el| {
+                el.tag == "template"
+                    && offset32 >= el.span.start
+                    && offset32 < el.tag_span_end.max(el.span.start + 1)
+            })
+            .and_then(|idx| template.elements[idx].parent_index)
+            .map(|idx| idx as usize);
+        if let Some(parent_idx) = owner_parent_idx {
+            for el in &template.elements {
+                if el.parent_index.map(|idx| idx as usize) != Some(parent_idx) {
+                    continue;
+                }
+                for dir in &el.directives {
+                    if dir.name == "slot" {
+                        used.push(
+                            dir.argument
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let is_used = |name: &str| {
+        used.iter()
+            .any(|used_name| crate::server::attr_name_match_rank(name, used_name).is_some())
+    };
+
+    let mut items = Vec::new();
+    let mut declared_default = false;
+    for mac in child_analysis.macros.iter() {
+        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
+            continue;
+        }
+        for field in &mac.slot_fields {
+            if field.name == "default" {
+                declared_default = true;
+            }
+            if is_used(&field.name) {
+                continue;
+            }
+            let props = if field.bindings.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "(props: {{ {} }})",
+                    field
+                        .bindings
+                        .iter()
+                        .map(|binding| {
+                            format!(
+                                "{}: {}",
+                                binding.name,
+                                binding.type_annotation.as_deref().unwrap_or("unknown")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            };
+            let return_type = field.return_type.as_deref().unwrap_or("any");
+            let name = field.name.clone();
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(format!("(slot) {name}{props}: {return_type}")),
+                documentation: field
+                    .description
+                    .clone()
+                    .map(tower_lsp_server::ls_types::Documentation::String),
+                insert_text: Some(name.clone()),
+                sort_text: Some(format!("0{name}")),
+                ..Default::default()
+            });
+        }
+    }
+    if items.is_empty() {
+        // Fallback: the child's template-defined slots (untyped names).
+        if let Some(child_template) = child_analysis.template.as_deref() {
+            for slot in &child_template.defined_slots {
+                if slot.name == "default" {
+                    declared_default = true;
+                }
+                if is_used(&slot.name) {
+                    continue;
+                }
+                items.push(CompletionItem {
+                    label: slot.name.clone(),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: Some("slot".to_string()),
+                    insert_text: Some(slot.name.clone()),
+                    sort_text: Some(format!("0{}", slot.name)),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    if !declared_default && !is_used("default") {
+        items.push(CompletionItem {
+            label: "default".to_string(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some("default slot".to_string()),
+            insert_text: Some("default".to_string()),
+            sort_text: Some("0default".to_string()),
+            ..Default::default()
+        });
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(items)
+}
+
+/// Classify a captured type annotation as Svelte's `Snippet` prop type by its
+/// ROOT type-reference name — the typed-IR classification of the annotation,
+/// not a substring sniff. `Snippet`, `Snippet<…>`, `svelte.Snippet`, and
+/// `import("svelte").Snippet<…>` classify; `NotSnippet`, `SnippetExtra`, or a
+/// payload that merely mentions `Snippet` inside generic arguments do not.
+fn is_snippet_type_annotation(type_annotation: &str) -> bool {
+    let mut root = type_annotation.trim();
+    // An `import("…")` qualifier prefixes the type-reference path.
+    if let Some(rest) = root.strip_prefix("import(") {
+        if let Some(close) = rest.find(')') {
+            root = rest[close + 1..].trim_start_matches('.').trim();
+        }
+    }
+    // The root type-reference name ends where generic arguments, unions,
+    // intersections, arrays, or function parameters begin.
+    let cut = root.find(['<', '|', '&', '[', '(']).unwrap_or(root.len());
+    let root = root[..cut].trim();
+    // Qualified roots (`svelte.Snippet`) classify on their trailing segment.
+    root.rsplit('.').next().unwrap_or(root).trim() == "Snippet"
+}
+
+/// D5 Svelte: `{#snippet |` inside a component completes the snippet-slot
+/// names the CHILD accepts — its snippet-typed props (e.g.
+/// `header?: import("svelte").Snippet<…>`) — with used slots filtered.
+#[allow(clippy::type_complexity)]
+fn svelte_snippet_slot_completions(
+    offset: usize,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
+    tag_name: &str,
+) -> Option<Vec<CompletionItem>> {
+    let template = analysis.template.as_deref()?;
+    let component = template.components.iter().find(|component| {
+        component.name == tag_name
+            || to_kebab_case(&component.name) == tag_name
+            || component.name == to_pascal_case(tag_name)
+    });
+    let component = match component {
+        Some(component) => component,
+        None => slot_owner_component(offset, source, template, tag_name, true)?,
+    };
+    let import_source = component.import_source.as_deref()?;
+    let resolve_fn = resolve_component?;
+    let child_analysis = resolve_fn(import_source, Some(&component.name))?;
+
+    let is_used = |name: &str| component.slots_used.iter().any(|used| used == name);
+    let mut items = Vec::new();
+    if let Some(child_template) = child_analysis.template.as_deref() {
+        for prop_def in &child_template.prop_definitions {
+            let is_snippet = prop_def
+                .type_annotation
+                .as_deref()
+                .is_some_and(is_snippet_type_annotation);
+            if !is_snippet || is_used(&prop_def.name) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: prop_def.name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: prop_def
+                    .type_annotation
+                    .clone()
+                    .or_else(|| Some("snippet".to_string())),
+                insert_text: Some(prop_def.name.clone()),
+                sort_text: Some(format!("0{}", prop_def.name)),
+                ..Default::default()
+            });
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(items)
+}
+
+/// D5 Svelte: `{@render |}` completes the in-scope snippet names — local
+/// `{#snippet}` declarations (typed template IR) plus the component's own
+/// snippet-typed props.
+fn svelte_render_callee_completions(
+    analysis: &FileAnalysisSnapshot,
+) -> Option<Vec<CompletionItem>> {
+    let template = analysis.template.as_deref()?;
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for snippet in &template.snippet_definitions {
+        if !seen.insert(snippet.name.clone()) {
+            continue;
+        }
+        let detail = snippet
+            .params_text
+            .as_deref()
+            .map(|params| format!("({params})"))
+            .unwrap_or_else(|| "()".to_string());
+        items.push(CompletionItem {
+            label: snippet.name.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(format!("snippet {}{detail}", snippet.name)),
+            insert_text: Some(snippet.name.clone()),
+            sort_text: Some(format!("0{}", snippet.name)),
+            ..Default::default()
+        });
+    }
+    for prop_def in &template.prop_definitions {
+        let is_snippet = prop_def
+            .type_annotation
+            .as_deref()
+            .is_some_and(is_snippet_type_annotation);
+        if !is_snippet || !seen.insert(prop_def.name.clone()) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: prop_def.name.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: prop_def
+                .type_annotation
+                .clone()
+                .or_else(|| Some("snippet prop".to_string())),
+            insert_text: Some(prop_def.name.clone()),
+            sort_text: Some(format!("1{}", prop_def.name)),
+            ..Default::default()
+        });
+    }
+    if items.is_empty() {
+        return None;
+    }
     Some(items)
 }
 
@@ -1526,7 +2056,10 @@ fn find_component_at_cursor(
         return Some(tag_name.to_string());
     }
 
-    None
+    // An incomplete opening tag can be absent from the semantic component
+    // inventory. Preserve the structurally recognized name so the caller can
+    // resolve it through the matching script import.
+    Some(tag_name.to_string())
 }
 
 /// Convert PascalCase to kebab-case.

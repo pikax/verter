@@ -1419,6 +1419,7 @@ const color = ref('red')
             style_usage_complete: true,
             css_modules: vec![],
             template_used_vars: None,
+            custom_elements: None,
         },
     );
     // color is referenced in style v-bind, should get void()

@@ -124,6 +124,7 @@ pub fn gen_tsx_script_unwrap(source: &str) -> (String, FxHashMap<String, Binding
         style_usage_complete: style_usage.complete,
         css_modules: vec![],
         template_used_vars,
+        custom_elements: None,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {
@@ -231,6 +232,7 @@ fn gen_tsx_script_full_with_opts_and_runtime(
         style_usage_complete: true,
         css_modules,
         template_used_vars: None,
+        custom_elements: None,
     };
 
     // Use unified CT mode: pass template_end so comp functions are emitted in code
@@ -341,6 +343,7 @@ pub fn gen_tsx_script_with_sourcemap(source: &str) -> (String, String) {
         style_usage_complete: true,
         css_modules: vec![],
         template_used_vars: None,
+        custom_elements: None,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {
@@ -450,6 +453,7 @@ fn gen_tsx_script_narrowing_with_optional_runtime(
         style_usage_complete: true,
         css_modules: vec![],
         template_used_vars: None,
+        custom_elements: None,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {
@@ -611,6 +615,7 @@ pub fn gen_jsx_script(source: &str) -> (String, String) {
         style_usage_complete: true,
         css_modules: vec![],
         template_used_vars: None,
+        custom_elements: None,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {
