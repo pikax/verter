@@ -504,7 +504,7 @@ fn classify_template_context(
     let deepest = find_deepest_element(offset, &template.elements);
 
     match deepest {
-        Some(el) => classify_within_element(offset, source, el, &template.elements),
+        Some(el) => classify_within_element(offset, source, el),
         None => {
             // Cursor is in template content but not inside any element's span.
             // This can happen between top-level elements or when analysis is incomplete.
@@ -538,7 +538,6 @@ fn classify_within_element(
     offset: u32,
     source: &str,
     el: &verter_semantic::analysis::template::TemplateElement,
-    all_elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> CursorContext {
     // Case A: cursor is in the opening tag (before tag_span_end)
     if offset < el.tag_span_end {
@@ -552,7 +551,7 @@ fn classify_within_element(
     }
 
     // Case C: cursor is in element content (between opening and closing tag)
-    classify_in_content(offset, el, all_elements)
+    classify_in_content(offset, el)
 }
 
 /// Classify cursor within an element's opening tag.
@@ -750,7 +749,6 @@ fn classify_in_opening_tag(
 fn classify_in_content(
     offset: u32,
     el: &verter_semantic::analysis::template::TemplateElement,
-    all_elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> CursorContext {
     // Check text children for interpolations and text
     for segment in &el.text_children {
@@ -775,20 +773,19 @@ fn classify_in_content(
         }
     }
 
-    // Check if cursor might be inside a child element (not directly tracked in text_children)
-    // This shouldn't normally happen since find_deepest_element picks the innermost,
-    // but handle it gracefully.
-    for child in all_elements {
-        if let Some(_pi) = child.parent_index {
-            // Not a direct comparison — we'd need the element index, but we can check spans
-            if offset >= child.span.start && offset < child.span.end {
-                // Cursor is inside a child element — shouldn't reach here if find_deepest_element works
-                return classify_within_element(offset, "", child, all_elements);
-            }
-        }
-    }
-
-    // Default: text content between children
+    // No descent into a "child" element happens here. The caller reached this
+    // element through `find_deepest_element`, which already returns the SMALLEST
+    // element whose span contains the offset, so by construction there is no
+    // smaller element left to descend into.
+    //
+    // The former fallback scanned `all_elements` — the FLAT element list — and
+    // recursed into the first entry whose span contained the offset. Span
+    // containment is not a parent-child relation: the element already being
+    // classified is itself in that list, so any offset not covered by one of its
+    // `text_children` segments (an HTML comment, for instance) re-entered
+    // `classify_within_element` on the SAME element, forever.
+    //
+    // Text content between children is the correct answer for such an offset.
     CursorContext::Template(TemplateCursorContext::TextContent)
 }
 
