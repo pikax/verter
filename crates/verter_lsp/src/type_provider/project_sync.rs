@@ -1087,15 +1087,38 @@ mod tests {
         sync.open_tsx_background("A.vue.tsx", "tsx").await.unwrap();
         sync.open_dts_normal("A.vue.verter.ts", "ts").await.unwrap();
 
-        let opens = mock
-            .file_sync_calls()
-            .into_iter()
-            .filter(|c| matches!(c, MockCall::OpenFile { .. }))
+        let calls = mock.file_sync_calls();
+        let opens = calls
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    MockCall::OpenFile { .. } | MockCall::OpenFileBackground { .. }
+                )
+            })
             .count();
         assert_eq!(
             opens, 2,
             "tsgo must still open carrier companions in the background/normal lanes \
-             (m8 suppression is tsserver-only)"
+             (m8 suppression is tsserver-only), calls={calls:?}"
+        );
+        // …and each verb must land on ITS OWN lane: the background verb on the
+        // background lane, the normal verb on the interactive one. The mock records
+        // the lanes distinctly, so a verb that silently collapsed onto the wrong
+        // priority is caught here rather than hidden by a lane-agnostic count.
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                MockCall::OpenFileBackground { path, .. } if path == "A.vue.tsx"
+            )),
+            "the background TSX verb must open on the background lane, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                MockCall::OpenFile { path, .. } if path == "A.vue.verter.ts"
+            )),
+            "the normal DTS verb must open on the interactive lane, calls={calls:?}"
         );
     }
 

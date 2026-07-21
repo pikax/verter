@@ -468,6 +468,7 @@ mod inner {
                     matches!(
                         c,
                         MockCall::OpenFile { .. }
+                            | MockCall::OpenFileBackground { .. }
                             | MockCall::LoadFile { .. }
                             | MockCall::UpdateFile { .. }
                             | MockCall::CloseFile { .. }
