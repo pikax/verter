@@ -105,6 +105,28 @@ export function evaluateRoute(
     );
   }
 
+  // OUTCOME non-vacuity. The checks above prove the run DID something; these prove
+  // it ACHIEVED something. A route that answered nothing satisfies every identity
+  // above exactly — sent === errored, no empties (an empty requires an answer), no
+  // latency samples to breach a p95 bar — which is how a run with 0/15 answered and
+  // 15 errored previously reported `pass: true`. A gate that certifies a total
+  // failure certifies nothing.
+  if (accounting.requestsAnswered === 0) {
+    failures.push(
+      `${tag} vacuous outcome: zero requests were answered ` +
+        `(sent=${accounting.requestsSent}, errored=${accounting.requestsErrored}, ` +
+        `timedOut=${accounting.requestsTimedOut}, abandoned=${accounting.requestsAbandoned})`,
+    );
+  }
+  // Errored requests are failures of the thing under test, and were previously
+  // invisible to the bar entirely: they settle the accounting identity without
+  // ever being counted against the route.
+  if (accounting.requestsErrored > 0) {
+    failures.push(
+      `${tag} ${accounting.requestsErrored} of ${accounting.requestsSent} request(s) errored`,
+    );
+  }
+
   const p95Bars: Readonly<Record<(typeof CORPUS_REQUEST_KINDS)[number], number>> = {
     hover: thresholds.hoverP95Ms,
     definition: thresholds.definitionP95Ms,
