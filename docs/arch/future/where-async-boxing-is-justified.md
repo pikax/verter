@@ -56,6 +56,25 @@ Judgement criteria: (large) AND (held many times) AND (hot path) AND
 sync vs query phases, drop locals after await) so both stack *and* heap
 capacity × size fall without a permanent per-request alloc.
 
+## Project-wide extension (non-LSP)
+
+| surface | already boxed? | size | held many times? | box justified? |
+|---|---|---|---|---|
+| `TypeProvider::*` | **yes** | 16 B outer; ~168 B heap body | every hop | **keep** (dyn trait) |
+| MCP `#[tool]` methods | **yes** (rmcp macro) | 16 B outer; ~40–64 B body | spawn-per-request | **keep** (already paid) |
+| NAPI VFS async | NAPI runtime | 40–112 B | per JS call | **no further box** |
+| tsgo_api `JsonRpcConnection::request` | no | ~32–280 B | per RPC | **no** (tiny) |
+| Completion-detail tasks | spawn (heap) | ~192 B | ≤8 | **already task-isolated** |
+| Scheduler jobs | n/a (sync) | — | — | n/a |
+| Live session / semantic | n/a (sync) | — | — | n/a |
+| Recursive async | none found | — | — | **yes if introduced** |
+
+**Judgement:** outside LSP, boxing is already applied where the type
+system requires it (`dyn TypeProvider`, `dyn` tool handlers). Further
+`Box::pin` on 32–280 B request futures would not move the needle. The
+only place boxing-or-shrink still earns a product discussion is the
+**LSP trait methods at 21–38 KiB**, already analyzed above.
+
 ## Why deferred
 
 Policy judgement for a later performance cut. No code change in this pass.

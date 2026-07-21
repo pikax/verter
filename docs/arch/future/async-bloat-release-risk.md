@@ -60,6 +60,30 @@ this class is **memory under concurrent load** (capacity × size), not
 stack overflow. Debug remains unusable without a raised stack or a
 future-size / boxing cut.
 
+## Project-wide extension (non-LSP crates)
+
+A second inventory pass measured every other workspace crate with an
+async surface (`verter_type_runtime`, `verter_mcp`, `verter_tsgo_api`,
+`verter_napi`, `verter_relay_shim`, `verter_dx_baseline`) and confirmed
+negatives for `verter_scheduler`, live `verter_session` host,
+`verter_semantic` / dispatch, `verter_wasm`, `verter_compiler`.
+
+| claim | evidence |
+|---|---|
+| Largest **unboxed** future outside `verter_lsp` | **280 B** (`select`+cancel request shape in `verter_tsgo_api`) |
+| Largest production hop body shape (provider) | **168–192 B** (definition / detail-resolve; lives inside already-boxed `ProviderFuture`) |
+| MCP / NAPI outer or method futures | **16–112 B** |
+| Scheduler / live session / semantic async futures | **none** |
+| Release stack risk outside LSP serve thread | **None measured** — futures are 100× smaller than LSP handlers; background/IPC tasks use normal tokio stacks |
+| Release heap risk outside LSP | **Mild or negligible** — worst non-LSP product is MCP unbounded × ~64 B, or 8 × ~192 B detail tasks; pending maps are 8 B/entry |
+| Still the only multi-MiB concurrent-handler set | **LSP 64 × ~38 KiB ≈ 2.32 MiB** |
+
+**Plain statement (workspace):** release risk remains **debug stack on
+the LSP serve path** plus **mild LSP concurrent-handler heap**. No
+non-LSP path is close to a release stack limit from async state-machine
+bloat. See `workspace-async-capacity-multiplication.md` and the
+per-surface docs in this directory.
+
 ## Why deferred
 
 Scope is documentation. Raising debug stack, changing concurrency, or

@@ -17,8 +17,15 @@ problem.
 | 3 | `workspace_scanner::scanner_loop` | dedicated spawn | no |
 | 4 | `background_init` / drain helpers | spawn / `spawn_blocking` | no |
 | 5 | resilient provider actor (`run_actor`) | spawn | no |
-| 6 | tsgo/tsserver IPC request futures | boxed `ProviderFuture`, awaited by caller | only inside caller’s future |
+| 6 | tsgo/tsserver IPC request futures | boxed `ProviderFuture`, awaited by caller | only inside caller's future |
+| 7 | MCP `rmcp` serve loop | **spawn per inbound request** | unbounded N (not ×64 serve slots) |
+| 8 | `verter_relay_shim` / `LspRelay` pumps | dedicated tasks for process life | no |
+| 9 | `verter_tsgo_api` actor + jsonrpc reader/writer | dedicated tasks; request futures on callers | no future collection |
+| 10 | `verter_dx_baseline` `dispatch_loop` | sequential one-request-at-a-time | no |
+| 11 | NAPI VFS async methods | libuv / NAPI async | JS-driven, tiny futures |
 | — | `verter_scheduler` | **no async fn** | n/a |
+| — | live `verter_session` host / semantic dispatch | **sync** | n/a |
+| — | `verter_wasm` | **no async fn** | n/a |
 
 Background loops nest several `async fn`s (`sync_file` → provider open/sync
 → diagnostics publish, etc.) but each runs on **its own task** with a
@@ -48,11 +55,19 @@ pass):
 - Production `join_all` / `FuturesUnordered` holding Verter handlers:
   **none** (tests only).
 - Scheduler async surface: **none**.
+- Project-wide sizes (second pass): MCP tools 16 B outer / ~40–64 B body;
+  NAPI VFS 40–112 B; tsgo_api request shapes 32–280 B; provider hop bodies
+  ~168–192 B inside existing boxes. Full tables in
+  `type-runtime-async-future-sizes.md`, `mcp-tool-async-state-machine-sizes.md`,
+  `relay-ipc-pending-request-maps.md`, `napi-wasm-async-boundary.md`,
+  `workspace-async-capacity-multiplication.md`.
 
-Background task future sizes were **not** `size_of_val`-measured in this
-pass (would require constructing full coordinator deps). Stack peaks on
-those tasks were **not** measured. Treat as: same nesting *pattern*
-possible, but **not** the same concurrency multiplier as the serve loop.
+Background LSP task future sizes were **not** `size_of_val`-measured in
+the first pass (would require constructing full coordinator deps). Stack
+peaks on those tasks were **not** measured. Treat as: same nesting
+*pattern* possible, but **not** the same concurrency multiplier as the
+serve loop. Relay `run_relay` similarly not fully constructed (needs a
+child process); pumps are I/O loops on dedicated tasks.
 
 ## Why deferred
 

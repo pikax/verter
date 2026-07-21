@@ -51,6 +51,25 @@ class without new code.
 walks — and is out of scope here; peer docs on connected-depth budgets cover
 that space.)
 
+## Project-wide extension
+
+The same search was extended to every non-test production module under
+`crates/` with an async surface:
+
+| area | result |
+|---|---|
+| `verter_mcp` tools | no self-await; await-free sync bodies behind `Box::pin` |
+| `verter_tsgo_api` (actor, jsonrpc, relay pumps, attach) | loops / select, not recursive async |
+| `verter_relay_shim` | select/setup loops; no recursive async fn |
+| `verter_napi` VFS async | no await of self |
+| `verter_dx_baseline` dispatch | sequential `handle` → one request; no recursion |
+| `verter_scheduler` / live `verter_session` host / `verter_wasm` / `verter_compiler` | no `async fn` |
+| Semantic `reduce_awaited` | **sync** Promise unwrap — not Rust async recursion |
+
+**Conclusion (workspace):** no unboxed recursive `async fn` class found
+anywhere in production. Recorded so the next pass does not re-scan without
+new code.
+
 ## Why deferred
 
 Nothing to fix. Keep the negative on file.

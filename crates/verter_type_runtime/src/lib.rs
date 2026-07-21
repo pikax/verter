@@ -44,6 +44,9 @@ pub mod tsgo;
 pub mod tsserver;
 pub mod uri;
 
+#[cfg(test)]
+mod future_size_measure_tests;
+
 // Re-exports for convenience
 pub use backend::{
     ArtifactProfile, BackendError, BackendFuture, BackendTypeCompleteness, BackendTypeData,
