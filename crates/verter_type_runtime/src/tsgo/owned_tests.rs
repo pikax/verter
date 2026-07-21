@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::protocol::TypeDiagnosticSeverity;
+use tokio::io::AsyncReadExt;
 
 #[test]
 fn fs_paths_equal_normalizes_slashes_and_distinguishes_distinct_files() {
@@ -298,4 +299,120 @@ fn carrier_membership_in_configured_project_root_files_is_required_not_inferred(
         "membership is checked against the project SELECTED BY the requested tsconfig, \
          not any project that happens to contain the carrier"
     );
+}
+
+/// Build the owned dual-surface provider over two in-process duplexes: the `--lsp`
+/// surface under test, and an inert `--api` attach the file-lifecycle methods never
+/// touch. Returns the provider plus the `--lsp` peer end, so a test can observe
+/// EXACTLY which bytes a file-lifecycle call puts on the wire.
+fn owned_over_duplex() -> (
+    TsgoOwnedProvider,
+    tokio::io::DuplexStream,
+    tokio::io::DuplexStream,
+) {
+    let (lsp_side, lsp_peer) = tokio::io::duplex(64 * 1024);
+    let (lsp_read, lsp_write) = tokio::io::split(lsp_side);
+    let lsp = Arc::new(TsgoTypeProvider::from_initialized_transport(
+        lsp_read, lsp_write,
+    ));
+
+    let (api_side, api_peer) = tokio::io::duplex(64 * 1024);
+    let (api_read, api_write) = tokio::io::split(api_side);
+    let api = Arc::new(ApiSurface {
+        client: ApiAttachClient::new(JsonRpcConnection::connect(api_read, api_write)),
+        engine_version: "test-engine".to_string(),
+        snapshot: SyncMutex::new(None),
+    });
+
+    (TsgoOwnedProvider { lsp, api }, lsp_peer, api_peer)
+}
+
+/// The BACKGROUND load is local-only: `load_file` caches content for import
+/// resolution and MUST NOT open an editor buffer or take the `--lsp` diagnostic
+/// barrier.
+///
+/// The owned provider overrides `open_file` with a synchronous `get_diagnostics`
+/// barrier. With no `load_file` override the trait default routes every background
+/// load through `open_file` — so the workspace scanner's per-file "load" silently
+/// became a `didOpen` + a blocking `textDocument/diagnostic` round trip. This test
+/// is discriminating on exactly that: with the default inherited, the provider puts
+/// a `textDocument/didOpen` on the wire and then blocks for the full request
+/// timeout awaiting a diagnostic response no peer will send.
+#[tokio::test]
+async fn load_file_is_local_only_and_never_opens_or_barriers_on_the_lsp_surface() {
+    let (provider, mut lsp_peer, _api_peer) = owned_over_duplex();
+    let path = if cfg!(windows) {
+        "D:/w/Widget.vue.tsx"
+    } else {
+        "/w/Widget.vue.tsx"
+    };
+    let source = "export const label: string = 'ok';\n";
+
+    // (1) It returns promptly — no barrier. The inherited default awaits
+    // `get_diagnostics`, which cannot settle here and burns the request timeout.
+    let load = tokio::time::timeout(
+        Duration::from_secs(2),
+        TypeProvider::load_file(&provider, path, source),
+    )
+    .await
+    .expect("load_file must be local-only — it must not block on an --lsp round trip");
+    load.expect("load_file caches content locally and succeeds");
+
+    // (2) It puts NOTHING on the `--lsp` wire. `didOpen` makes the file
+    // editor-open, which is what triggers the engine's diagnostic computation.
+    let mut buf = [0u8; 4096];
+    let observed = tokio::time::timeout(Duration::from_millis(400), lsp_peer.read(&mut buf)).await;
+    if let Ok(Ok(n)) = observed {
+        panic!(
+            "load_file must emit NOTHING on the --lsp transport; it wrote {n} bytes: {}",
+            String::from_utf8_lossy(&buf[..n])
+        );
+    }
+}
+
+/// The complement of the rule above: the INTERACTIVE open still opens the editor
+/// buffer on the `--lsp` surface. Without this, "emits nothing" would also be
+/// satisfied by a provider that had stopped delivering opens entirely.
+#[tokio::test]
+async fn open_file_still_delivers_the_editor_open_on_the_lsp_surface() {
+    let (provider, mut lsp_peer, _api_peer) = owned_over_duplex();
+    let path = if cfg!(windows) {
+        "D:/w/Widget.vue.tsx"
+    } else {
+        "/w/Widget.vue.tsx"
+    };
+    let source = "export const label: string = 'ok';\n";
+
+    // `open_file` takes the diagnostic barrier, which no peer answers here — drive
+    // it in the background and observe the wire.
+    let open = tokio::spawn(async move {
+        let _ = TypeProvider::open_file(&provider, path, source).await;
+    });
+
+    let mut framer = verter_tsgo_api::jsonrpc::framing::MessageFramer::new();
+    let mut chunk = [0u8; 8192];
+    let mut methods: Vec<String> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while methods.is_empty() {
+        let n = tokio::time::timeout_at(deadline, lsp_peer.read(&mut chunk))
+            .await
+            .expect("open_file must deliver a didOpen on the --lsp transport")
+            .expect("read from the --lsp peer");
+        assert_ne!(
+            n, 0,
+            "the --lsp transport closed before any open was issued"
+        );
+        framer.push(&chunk[..n]);
+        while let Some(message) = framer.next_message().expect("decode message") {
+            if let Some(method) = message["method"].as_str() {
+                methods.push(method.to_string());
+            }
+        }
+    }
+    assert_eq!(
+        methods.first().map(String::as_str),
+        Some("textDocument/didOpen"),
+        "the interactive open must still deliver the editor open: {methods:?}"
+    );
+    open.abort();
 }
