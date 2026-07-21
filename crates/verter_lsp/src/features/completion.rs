@@ -48,6 +48,7 @@ pub fn completions_at_position(
     doc_uri: Option<&str>,
     ssr_context: bool,
 ) -> Option<CompletionResult> {
+    verter_session::stack_probe_public::mark("fn:completions_at_position");
     let offset = line_index.position_to_offset(position)?;
     let carrier_language = doc_uri.and_then(CarrierTemplateLanguage::from_uri);
 
@@ -269,6 +270,7 @@ fn sfc_root_completions(
     offset: u32,
     line_index: &LineIndex,
 ) -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:sfc_root_completions");
     let mut items = Vec::new();
     let has_template = blocks.iter().any(|b| b.tag_name == "template");
     let has_script = blocks.iter().any(|b| b.tag_name == "script");
@@ -375,6 +377,7 @@ fn sfc_root_completions(
 
 /// Completions inside an SFC opening tag: context-sensitive attributes.
 fn sfc_attribute_completions(source: &str, block: &SfcBlock) -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:sfc_attribute_completions");
     let ctx = parse_opening_tag(source, block);
     let existing: Vec<&str> = ctx.attrs.iter().map(|a| a.name.as_str()).collect();
     let mut items = Vec::new();
@@ -457,6 +460,7 @@ fn snippet_item(
     offset: u32,
     line_index: &LineIndex,
 ) -> CompletionItem {
+    verter_session::stack_probe_public::mark("fn:snippet_item");
     let text_edit = sfc_snippet_text_edit(insert_text, source, offset, line_index);
     CompletionItem {
         label: label.to_string(),
@@ -486,6 +490,7 @@ fn sfc_snippet_text_edit(
     offset: u32,
     line_index: &LineIndex,
 ) -> Option<CompletionTextEdit> {
+    verter_session::stack_probe_public::mark("fn:sfc_snippet_text_edit");
     if !insert_text.starts_with('<') {
         return None;
     }
@@ -524,6 +529,7 @@ fn sfc_snippet_text_edit(
 }
 
 fn attr_item(name: &str, value_snippet: Option<&str>, detail: &str) -> CompletionItem {
+    verter_session::stack_probe_public::mark("fn:attr_item");
     let (insert_text, format) = if let Some(val) = value_snippet {
         (format!("{}={}", name, val), InsertTextFormat::SNIPPET)
     } else {
@@ -619,6 +625,7 @@ pub(crate) fn tag_name_completions(
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
 ) -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:tag_name_completions");
     let mut items = Vec::new();
 
     // HTML elements
@@ -758,6 +765,7 @@ pub(crate) fn tag_name_completions(
 
 /// Build attribute name completions: Vue directives + common HTML attributes + event shorthands.
 fn attribute_name_completions() -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:attribute_name_completions");
     let mut items = Vec::new();
 
     // Vue directives
@@ -846,6 +854,7 @@ const VMODEL_MODIFIERS: &[(&str, &str)] = &[
 
 /// Provide v-model modifier completions.
 fn vmodel_modifier_completions() -> CompletionResult {
+    verter_session::stack_probe_public::mark("fn:vmodel_modifier_completions");
     let items = VMODEL_MODIFIERS
         .iter()
         .map(|(name, desc)| CompletionItem {
@@ -874,6 +883,7 @@ fn class_attribute_completions(
     source: &str,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<CompletionResult> {
+    verter_session::stack_probe_public::mark("fn:class_attribute_completions");
     let template = analysis.template.as_deref()?;
 
     // Check if cursor is inside a class attribute value
@@ -927,6 +937,7 @@ fn class_attribute_completions(
 
 /// Check if the cursor is inside a quoted string within a `:class` expression.
 fn is_cursor_in_inner_string(expr: &str, cursor_pos: usize, outer_quote: u8) -> bool {
+    verter_session::stack_probe_public::mark("fn:is_cursor_in_inner_string");
     let bytes = expr.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -962,6 +973,7 @@ fn build_class_completions(
     _source: &str,
     _offset: usize,
 ) -> CompletionResult {
+    verter_session::stack_probe_public::mark("fn:build_class_completions");
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
@@ -989,6 +1001,7 @@ fn build_class_completions(
 
 /// Completions available in `<script setup>` context.
 fn script_completions(analysis: &FileAnalysisSnapshot) -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:script_completions");
     let mut items = Vec::new();
 
     // Offer existing bindings (sort prefix "0" = highest priority)
@@ -1030,6 +1043,7 @@ fn script_completions(analysis: &FileAnalysisSnapshot) -> Vec<CompletionItem> {
 ///
 /// Boosts `onServerPrefetch` and `import.meta.server/client` patterns.
 fn ssr_script_completions() -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:ssr_script_completions");
     vec![
         CompletionItem {
             label: "onServerPrefetch".to_string(),
@@ -1059,6 +1073,7 @@ fn ssr_script_completions() -> Vec<CompletionItem> {
 
 /// Extra tag name completions for template context in SSR projects.
 fn ssr_tag_name_completions() -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:ssr_tag_name_completions");
     vec![CompletionItem {
         label: "ClientOnly".to_string(),
         kind: Some(CompletionItemKind::CLASS),
@@ -1079,6 +1094,7 @@ fn template_completions(
     doc_uri: Option<&str>,
     offset: Option<u32>,
 ) -> Vec<CompletionItem> {
+    verter_session::stack_probe_public::mark("fn:template_completions");
     let mut items = Vec::new();
 
     // All bindings from script setup are available in template
@@ -1220,6 +1236,7 @@ fn template_completions(
 /// Handles simple names (`item`), destructured objects (`{ name, email }`),
 /// and destructured arrays (`[first, second]`).
 fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
+    verter_session::stack_probe_public::mark("fn:extract_vfor_variable_names");
     let trimmed = pattern.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         trimmed
@@ -1241,6 +1258,7 @@ fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
 fn binding_completion_kind(
     kind: &verter_semantic::analysis::AnalyzedBindingKind,
 ) -> CompletionItemKind {
+    verter_session::stack_probe_public::mark("fn:binding_completion_kind");
     match kind {
         verter_semantic::analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
         verter_semantic::analysis::AnalyzedBindingKind::Let
@@ -1254,6 +1272,7 @@ fn binding_completion_kind(
 }
 
 fn binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> String {
+    verter_session::stack_probe_public::mark("fn:binding_detail");
     let kind = match binding.kind {
         verter_semantic::analysis::AnalyzedBindingKind::Const => "const",
         verter_semantic::analysis::AnalyzedBindingKind::Let => "let",
@@ -1277,6 +1296,7 @@ use crate::features::event_modifiers::{
 /// Provide event modifier completions for a given event name.
 /// The event name is determined by the cursor context module.
 fn event_modifier_completions_for(event_name: &str) -> CompletionResult {
+    verter_session::stack_probe_public::mark("fn:event_modifier_completions_for");
     // Event-family classification is shared with hover (see `event_modifiers`) so the
     // two surfaces never disagree on which modifiers apply to which events.
     let is_keyboard = is_keyboard_event(event_name);
@@ -1355,6 +1375,7 @@ fn component_prop_completions(
     existing_attrs: &[String],
     carrier_language: Option<CarrierTemplateLanguage>,
 ) -> Option<Vec<CompletionItem>> {
+    verter_session::stack_probe_public::mark("fn:component_prop_completions");
     let template = analysis.template.as_deref()?;
 
     // Find which component's opening tag contains the cursor
@@ -1544,6 +1565,7 @@ fn slot_owner_component<'a>(
     tag_name: &str,
     is_component: bool,
 ) -> Option<&'a verter_semantic::analysis::template::TemplateComponentUsage> {
+    verter_session::stack_probe_public::mark("fn:slot_owner_component");
     if is_component && tag_name != "template" {
         return template.components.iter().find(|component| {
             component.name == tag_name
@@ -1630,6 +1652,7 @@ fn slot_owner_tag_name(
     is_component: bool,
     analysis: &FileAnalysisSnapshot,
 ) -> Option<String> {
+    verter_session::stack_probe_public::mark("fn:slot_owner_tag_name");
     let bytes = source.as_bytes();
     let mut i = offset.min(source.len());
     let mut skip_slot_tag = !is_component;
@@ -1691,6 +1714,7 @@ fn slot_name_completions(
     tag_name: &str,
     is_component: bool,
 ) -> Option<Vec<CompletionItem>> {
+    verter_session::stack_probe_public::mark("fn:slot_name_completions");
     let template = analysis.template.as_deref();
     let component = template.and_then(|template| {
         slot_owner_component(offset, source, template, tag_name, is_component)
@@ -1851,6 +1875,7 @@ fn slot_name_completions(
 /// `import("svelte").Snippet<…>` classify; `NotSnippet`, `SnippetExtra`, or a
 /// payload that merely mentions `Snippet` inside generic arguments do not.
 fn is_snippet_type_annotation(type_annotation: &str) -> bool {
+    verter_session::stack_probe_public::mark("fn:is_snippet_type_annotation");
     let mut root = type_annotation.trim();
     // An `import("…")` qualifier prefixes the type-reference path.
     if let Some(rest) = root.strip_prefix("import(") {
@@ -1877,6 +1902,7 @@ fn svelte_snippet_slot_completions(
     resolve_component: Option<&dyn Fn(&str, Option<&str>) -> Option<FileAnalysisSnapshot>>,
     tag_name: &str,
 ) -> Option<Vec<CompletionItem>> {
+    verter_session::stack_probe_public::mark("fn:svelte_snippet_slot_completions");
     let template = analysis.template.as_deref()?;
     let component = template.components.iter().find(|component| {
         component.name == tag_name
@@ -1927,6 +1953,7 @@ fn svelte_snippet_slot_completions(
 fn svelte_render_callee_completions(
     analysis: &FileAnalysisSnapshot,
 ) -> Option<Vec<CompletionItem>> {
+    verter_session::stack_probe_public::mark("fn:svelte_render_callee_completions");
     let template = analysis.template.as_deref()?;
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1983,6 +2010,7 @@ fn find_component_at_cursor(
     source: &str,
     template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<String> {
+    verter_session::stack_probe_public::mark("fn:find_component_at_cursor");
     let bytes = source.as_bytes();
 
     // Scan backward from cursor to find the nearest `<` that opens a tag
@@ -2064,6 +2092,7 @@ fn find_component_at_cursor(
 
 /// Convert PascalCase to kebab-case.
 fn to_kebab_case(s: &str) -> String {
+    verter_session::stack_probe_public::mark("fn:to_kebab_case");
     let mut result = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
         if ch.is_ascii_uppercase() {
@@ -2095,6 +2124,7 @@ fn to_kebab_case(s: &str) -> String {
 // until a shared helper can express both modes (e.g. a `sanitize: bool` axis)
 // without entangling matching with import synthesis.
 fn to_pascal_case(s: &str) -> String {
+    verter_session::stack_probe_public::mark("fn:to_pascal_case");
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for ch in s.chars() {
@@ -2112,6 +2142,7 @@ fn to_pascal_case(s: &str) -> String {
 
 /// Internal compiler identifiers that should never appear in completions.
 fn is_internal_dunder(label: &str) -> bool {
+    verter_session::stack_probe_public::mark("fn:is_internal_dunder");
     matches!(
         label,
         "__props" | "__emit" | "__slots" | "__expose" | "__returned"
@@ -2119,6 +2150,7 @@ fn is_internal_dunder(label: &str) -> bool {
 }
 
 fn macro_kind_label(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
+    verter_session::stack_probe_public::mark("fn:macro_kind_label");
     match kind {
         verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
         verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
@@ -2138,6 +2170,7 @@ fn macro_kind_label(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'st
 /// `tsx_offset` is the byte offset in `tsx_content` where the cursor maps to.
 #[cfg(test)]
 pub(crate) fn is_member_access_in_tsx(tsx_content: &str, tsx_offset: u32) -> bool {
+    verter_session::stack_probe_public::mark("fn:is_member_access_in_tsx");
     if tsx_offset == 0 {
         return false;
     }

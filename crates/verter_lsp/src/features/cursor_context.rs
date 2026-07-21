@@ -149,6 +149,7 @@ pub enum CarrierTemplateLanguage {
 
 impl CarrierTemplateLanguage {
     pub fn from_uri(uri: &str) -> Option<Self> {
+        verter_session::stack_probe_public::mark("cc:from_uri");
         let language = verter_session::LanguageRegistry::global()
             .classify_static(uri)
             .static_resolution();
@@ -176,6 +177,7 @@ pub fn classify_cursor_context(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_cursor_context");
     classify_cursor_context_for_language(offset, source, blocks, analysis, None)
 }
 
@@ -186,6 +188,7 @@ pub fn classify_cursor_context_for_language(
     analysis: Option<&FileAnalysisSnapshot>,
     language: Option<CarrierTemplateLanguage>,
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_cursor_context_for_language");
     // Svelte has no Vue-style `<template>` or custom SFC blocks: all paired
     // root elements/components are ordinary template markup. Only script/style
     // participate in SFC block classification.
@@ -283,6 +286,7 @@ fn classify_root_or_template_context(
     analysis: Option<&FileAnalysisSnapshot>,
     language: Option<CarrierTemplateLanguage>,
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_root_or_template_context");
     let has_explicit_template_block = blocks.iter().any(|block| block.tag_name == "template");
     let inside_explicit_template = blocks.iter().any(|block| {
         let (start, end) = block.content_range();
@@ -386,6 +390,7 @@ fn classify_root_or_template_context(
 /// `offset` (skipping closing tags) — the incomplete-parse recovery for the
 /// `{#snippet |` owner when analysis has not retained the component usage.
 fn nearest_open_component_tag(source: &str, offset: u32) -> Option<String> {
+    verter_session::stack_probe_public::mark("cc:nearest_open_component_tag");
     let bytes = source.as_bytes();
     let mut i = (offset as usize).min(source.len());
     while i > 0 {
@@ -426,6 +431,7 @@ fn slot_name_context_from_source(
     source: &str,
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> Option<TemplateCursorContext> {
+    verter_session::stack_probe_public::mark("cc:slot_name_context_from_source");
     let bytes = source.as_bytes();
     let mut i = (offset as usize).min(source.len());
     while i > 0 {
@@ -485,6 +491,7 @@ fn classify_template_context(
     source: &str,
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_template_context");
     // D5 slot-name token scan — a trailing `#partial` / `v-slot:partial`
     // immediately before the cursor in an open tag. Runs before the AST
     // classification: error-tolerant parsing may not retain the element or
@@ -518,6 +525,7 @@ fn find_deepest_element(
     offset: u32,
     elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> Option<&verter_semantic::analysis::template::TemplateElement> {
+    verter_session::stack_probe_public::mark("cc:find_deepest_element");
     let mut best: Option<&verter_semantic::analysis::template::TemplateElement> = None;
     let mut best_size = u32::MAX;
 
@@ -540,6 +548,10 @@ fn classify_within_element(
     el: &verter_semantic::analysis::template::TemplateElement,
     all_elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark(&format!(
+        "cc:classify_within_element el={}..{} tag={}",
+        el.span.start, el.span.end, el.tag
+    ));
     // Case A: cursor is in the opening tag (before tag_span_end)
     if offset < el.tag_span_end {
         return classify_in_opening_tag(offset, source, el);
@@ -561,6 +573,7 @@ fn classify_in_opening_tag(
     source: &str,
     el: &verter_semantic::analysis::template::TemplateElement,
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_in_opening_tag");
     // Check if cursor is on the tag name itself
     // Tag name starts right after '<' (el.span.start + 1)
     let tag_name_start = el.span.start + 1;
@@ -752,6 +765,13 @@ fn classify_in_content(
     el: &verter_semantic::analysis::template::TemplateElement,
     all_elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark(&format!(
+        "cc:classify_in_content el={}..{} tag={} children={}",
+        el.span.start,
+        el.span.end,
+        el.tag,
+        el.text_children.len()
+    ));
     // Check text children for interpolations and text
     for segment in &el.text_children {
         match segment {
@@ -783,6 +803,15 @@ fn classify_in_content(
             // Not a direct comparison — we'd need the element index, but we can check spans
             if offset >= child.span.start && offset < child.span.end {
                 // Cursor is inside a child element — shouldn't reach here if find_deepest_element works
+                // THROWAWAY A/B (perf/inv-opus, VERTER_FIX_CC_CYCLE=1): descend ONLY into a
+                // STRICTLY SMALLER span. `all_elements` is the FLAT element list, so without
+                // this `child` can be `el` itself (or a same-span sibling) and the descent
+                // never makes progress: classify_within_element -> classify_in_content -> ...
+                if std::env::var_os("VERTER_FIX_CC_CYCLE").is_some()
+                    && (child.span.end - child.span.start) >= (el.span.end - el.span.start)
+                {
+                    continue;
+                }
                 return classify_within_element(offset, "", child, all_elements);
             }
         }
@@ -796,6 +825,7 @@ fn classify_in_content(
 fn directive_to_expression_kind(
     dir: &verter_semantic::analysis::template::TemplateDirective,
 ) -> ExpressionKind {
+    verter_session::stack_probe_public::mark("cc:directive_to_expression_kind");
     match dir.name.as_str() {
         "if" | "else-if" => ExpressionKind::VIf,
         "for" => ExpressionKind::VFor,
@@ -825,6 +855,7 @@ fn directive_to_expression_kind(
 fn collect_existing_attrs(
     el: &verter_semantic::analysis::template::TemplateElement,
 ) -> Vec<String> {
+    verter_session::stack_probe_public::mark("cc:collect_existing_attrs");
     let mut names = Vec::new();
     for attr in &el.attributes {
         names.push(attr.name.clone());
@@ -837,6 +868,7 @@ fn collect_existing_attrs(
 
 /// Extract a partial identifier typed after a specific byte marker.
 fn extract_partial_after(offset: u32, source: &str, _marker: u8) -> String {
+    verter_session::stack_probe_public::mark("cc:extract_partial_after");
     // Scan backward from cursor to find start of identifier
     let bytes = source.as_bytes();
     let mut start = offset as usize;
@@ -856,6 +888,7 @@ fn classify_style_context(
     blocks: &[SfcBlock],
     analysis: Option<&FileAnalysisSnapshot>,
 ) -> CursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_style_context");
     if let Some(analysis) = analysis {
         // Check all style blocks for v-bind() expressions
         for (i, style_block) in blocks
@@ -891,6 +924,7 @@ fn classify_style_context(
 
 /// Text-based fallback for template classification when no analysis is available.
 fn classify_template_text_fallback(offset: u32, source: &str) -> TemplateCursorContext {
+    verter_session::stack_probe_public::mark("cc:classify_template_text_fallback");
     let offset = offset as usize;
     let bytes = source.as_bytes();
     if offset > bytes.len() {
@@ -958,6 +992,7 @@ pub fn classify_expression_context_with_trigger(
     cursor_offset: usize,
     trigger_character: Option<&str>,
 ) -> ExpressionContext {
+    verter_session::stack_probe_public::mark("cc:classify_expression_context_with_trigger");
     // Shortcut: trigger character `.` means member access without needing to parse
     if trigger_character == Some(".") {
         return ExpressionContext::MemberAccess;
@@ -971,6 +1006,7 @@ pub fn classify_expression_context_with_trigger(
 /// Parses the expression as TSX and walks the AST to determine what kind of
 /// expression position the cursor is in.
 pub fn classify_expression_context(tsx_content: &str, tsx_offset: usize) -> ExpressionContext {
+    verter_session::stack_probe_public::mark("cc:classify_expression_context");
     if tsx_content.is_empty() || tsx_offset == 0 {
         return ExpressionContext::IdentifierExpected;
     }
@@ -999,6 +1035,7 @@ pub fn classify_expression_context(tsx_content: &str, tsx_offset: usize) -> Expr
 
 /// Check if cursor is in a member access position using byte scanning.
 fn is_member_access_position(content: &str, offset: usize) -> bool {
+    verter_session::stack_probe_public::mark("cc:is_member_access_position");
     if offset == 0 {
         return false;
     }
@@ -1057,6 +1094,7 @@ fn is_member_access_position(content: &str, offset: usize) -> bool {
 
 /// Walk the OXC AST to classify the expression context at a given offset.
 fn classify_from_ast(program: &oxc_ast::ast::Program<'_>, offset: usize) -> ExpressionContext {
+    verter_session::stack_probe_public::mark("cc:classify_from_ast");
     use oxc_ast::ast::*;
 
     // Walk statements to find the expression
@@ -1075,6 +1113,7 @@ fn classify_from_ast(program: &oxc_ast::ast::Program<'_>, offset: usize) -> Expr
 }
 
 fn classify_expression(expr: &oxc_ast::ast::Expression<'_>, offset: usize) -> ExpressionContext {
+    verter_session::stack_probe_public::mark("cc:classify_expression");
     use oxc_ast::ast::Expression;
 
     match expr {
@@ -1284,6 +1323,7 @@ fn classify_expression(expr: &oxc_ast::ast::Expression<'_>, offset: usize) -> Ex
 }
 
 fn get_stmt_span(stmt: &oxc_ast::ast::Statement<'_>) -> oxc_span::Span {
+    verter_session::stack_probe_public::mark("cc:get_stmt_span");
     use oxc_ast::ast::Statement;
     match stmt {
         Statement::ExpressionStatement(s) => s.span,

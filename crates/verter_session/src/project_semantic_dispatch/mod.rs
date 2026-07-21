@@ -1922,7 +1922,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // stack growth per 512 KiB and captures ONE backtrace past the
         // threshold, so an unbounded native recursion is observable without a
         // debugger. Zero cost unless `VERTER_STACK_PROBE` is set.
-        crate::stack_probe::probe(&key.tag(), self.connected_demand.query_depth.get());
+        crate::stack_probe::probe(&key, self.connected_demand.query_depth.get());
 
         let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
         let mut query_depth_guard = None;

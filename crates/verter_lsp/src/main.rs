@@ -1,5 +1,34 @@
 use std::sync::Arc;
 
+/// THROWAWAY DIAGNOSTIC (perf/inv-opus): sampling allocator that probes native
+/// stack depth. Every allocation is a chance to observe an unbounded recursion
+/// no matter which module it lives in. Fully inert unless
+/// `VERTER_STACK_PROBE_ALLOC_EVERY` is set (a single relaxed TLS increment).
+struct StackProbeAlloc;
+
+unsafe impl std::alloc::GlobalAlloc for StackProbeAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        verter_session::stack_probe_public::probe_alloc();
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // Probed as well as `alloc`: a recursive `Drop` descends without ever
+        // allocating, so an alloc-only hook is blind to exactly that class.
+        verter_session::stack_probe_public::probe_alloc();
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        verter_session::stack_probe_public::probe_alloc();
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: StackProbeAlloc = StackProbeAlloc;
+
 use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
@@ -28,6 +57,7 @@ fn main() {
                 .name("verter-main".to_string())
                 .stack_size(mb * 1024 * 1024)
                 .spawn(|| {
+                    verter_session::stack_probe_public::set_thread_base();
                     tokio::runtime::Builder::new_multi_thread()
                         .enable_all()
                         .build()
@@ -38,6 +68,7 @@ fn main() {
             let _ = handle.join();
         }
         _ => {
+            verter_session::stack_probe_public::set_thread_base();
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
