@@ -421,6 +421,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         .collect();
 
     let (scanner_done_tx, scanner_done_rx) = tokio::sync::oneshot::channel::<()>();
+    // The readiness ladder's level-1 latch: fired immediately after this init sends
+    // `$/verter/ready`, so the scan-complete waiter can hold level 2 behind it.
+    let (ready_announced_tx, ready_announced_rx) = tokio::sync::oneshot::channel::<()>();
 
     let scanner = crate::workspace_scanner::spawn_workspace_scanner(
         crate::workspace_scanner::WorkspaceScannerConfig {
@@ -461,8 +464,13 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let vfs_workspace = Arc::clone(&vfs_workspace);
         let provider_sync_states = Arc::clone(&provider_sync_states);
         tokio::spawn(async move {
-            if scanner_done_rx.await.is_err() {
-                return; // Scanner was dropped/cancelled
+            // Level 2 of the readiness ladder is emitted only after level 1: a fast
+            // scan on a small workspace finishes before this init reaches its ready
+            // point, and announcing "the project is fully synced" to a client that
+            // has not yet been told the server is up reads as a stale-then-ready
+            // flap. Holding here costs nothing — level 1 is already unblocked.
+            if !await_scan_complete_after_ready(scanner_done_rx, ready_announced_rx).await {
+                return; // Scanner or this init generation was dropped/cancelled.
             }
 
             // Check generation — bail if superseded
@@ -573,6 +581,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     client
         .send_notification::<VerterReady>(VerterReadyParams { gen: my_gen })
         .await;
+    // Level 1 is on the wire — release the scan-complete waiter's gate.
+    let _ = ready_announced_tx.send(());
 
     // Notify client about Vite configs that need trust approval
     for info in &trust_required {
@@ -592,6 +602,28 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     tracing::info!("background init complete (gen={my_gen})");
     Ok(())
+}
+
+/// The readiness-ladder gate: level 2 (`$/verter/typeProviderSyncComplete`) may be
+/// released only once BOTH the workspace scan has completed AND level 1
+/// (`$/verter/ready`) has been put on the wire for the same generation.
+///
+/// Awaiting the scan alone is not enough. The scan and the remainder of background
+/// init run concurrently, so on a small (or empty) workspace the scan finishes
+/// first and level 2 races ahead of level 1 — the client then sees "fully synced"
+/// for a server it has not yet been told is ready.
+///
+/// Returns `false` when either signal is dropped (a superseded or cancelled init),
+/// in which case level 2 is NOT emitted: a generation that never announced level 1
+/// must not announce a completeness the client never saw begin.
+async fn await_scan_complete_after_ready(
+    scan_complete: tokio::sync::oneshot::Receiver<()>,
+    ready_announced: tokio::sync::oneshot::Receiver<()>,
+) -> bool {
+    if scan_complete.await.is_err() {
+        return false;
+    }
+    ready_announced.await.is_ok()
 }
 
 /// Returns `true` if `types_dir` contains files written by Verter's stub
@@ -702,6 +734,62 @@ pub(super) fn materialize_verter_types(roots: &[String]) -> MaterializeVerterTyp
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// The readiness ladder is MONOTONE: a scan that completes before background
+    /// init reaches its ready point must not release level 2 early.
+    ///
+    /// Discriminating: awaiting the scan signal alone (the pre-fix shape) releases
+    /// the moment the scan reports done, so the pending assertion below fails.
+    #[tokio::test]
+    async fn scan_complete_is_held_until_ready_is_announced() {
+        let (scan_tx, scan_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let gate = tokio::spawn(await_scan_complete_after_ready(scan_rx, ready_rx));
+        tokio::pin!(gate);
+
+        // The scan finishes FIRST — the level-2 race the ladder must lose.
+        scan_tx.send(()).expect("scan signal delivered");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), &mut gate)
+                .await
+                .is_err(),
+            "level 2 must stay held while level 1 has not been announced"
+        );
+
+        ready_tx.send(()).expect("ready signal delivered");
+        assert!(
+            gate.await.expect("gate task joins"),
+            "level 2 releases once both the scan and level 1 have happened"
+        );
+    }
+
+    /// A superseded / cancelled init drops its level-1 latch. Level 2 must then be
+    /// suppressed entirely rather than announcing a completeness for a generation
+    /// the client was never told about.
+    #[tokio::test]
+    async fn dropped_ready_latch_suppresses_scan_complete() {
+        let (scan_tx, scan_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        scan_tx.send(()).expect("scan signal delivered");
+        drop(ready_tx);
+        assert!(
+            !await_scan_complete_after_ready(scan_rx, ready_rx).await,
+            "a dropped level-1 latch must suppress level 2"
+        );
+    }
+
+    /// A cancelled scanner drops its done channel; level 2 is suppressed and the
+    /// gate never blocks forever waiting for a level 1 that is irrelevant.
+    #[tokio::test]
+    async fn dropped_scan_signal_suppresses_scan_complete() {
+        let (scan_tx, scan_rx) = tokio::sync::oneshot::channel::<()>();
+        let (_ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        drop(scan_tx);
+        assert!(
+            !await_scan_complete_after_ready(scan_rx, ready_rx).await,
+            "a cancelled scanner must suppress level 2"
+        );
+    }
 
     #[test]
     fn superseded_type_materialization_cannot_mutate_the_live_compile_profile() {

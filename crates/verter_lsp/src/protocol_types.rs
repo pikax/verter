@@ -48,9 +48,19 @@ pub struct HeartbeatParams {
     pub timestamp: u64,
 }
 
-/// Server → client notification: background initialization complete.
-/// Sent after project registry, workspace scanner, and type provider are ready.
+/// Server → client notification: LEVEL 1 of the two-level readiness ladder —
+/// background initialization is complete and the server answers requests.
+///
+/// Guaranteed at this point: the project registry is built, the type provider is
+/// spawned and configured, and every open document has had diagnostics published.
 /// The extension uses this to re-request diagnostics for open docs.
+///
+/// NOT guaranteed at this point: the workspace scan. It is still running, so
+/// cross-file results (barrel re-exports, imported carrier surfaces, project-wide
+/// references) may be incomplete for files the scan has not reached. A client that
+/// needs project-wide completeness waits for LEVEL 2,
+/// [`TypeProviderSyncComplete`], which is never emitted before this notification
+/// for the same generation.
 pub enum VerterReady {}
 
 impl tower_lsp_server::ls_types::notification::Notification for VerterReady {
@@ -63,9 +73,14 @@ pub struct VerterReadyParams {
     pub gen: u64,
 }
 
-/// Server → client notification: workspace scanner has finished syncing all files
-/// to the type provider.
+/// Server → client notification: LEVEL 2 of the two-level readiness ladder — the
+/// workspace scanner has finished syncing all files to the type provider.
 /// Cross-file type resolution (barrel re-exports, imported types) is now reliable.
+///
+/// Ordered strictly after [`VerterReady`] for the same generation, so the ladder a
+/// client observes is monotone: a fast scan on a small workspace can finish before
+/// background init reaches its ready point, and emitting level 2 first would let a
+/// client conclude the project had gone stale again.
 pub enum TypeProviderSyncComplete {}
 
 impl tower_lsp_server::ls_types::notification::Notification for TypeProviderSyncComplete {
