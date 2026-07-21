@@ -3,9 +3,9 @@
  *
  * Receipts are machine-readable JSON written OUTSIDE the repo (an env-directed
  * path or a temp file) and identify the corpus only by its anonymous label.
- * The compare mode diffs two receipts route-by-route and kind-by-kind so a
- * Phase-2 block can state precisely what a change did to real-corpus latency,
- * wedge behaviour, and memory.
+ * The compare mode diffs two receipts route-by-route and kind-by-kind so the
+ * effect of a change on real-corpus latency, wedge behaviour, and memory can
+ * be stated precisely.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
