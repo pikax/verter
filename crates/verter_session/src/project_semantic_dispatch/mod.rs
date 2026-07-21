@@ -1918,6 +1918,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // suppresses caching (the value still flows, the memo refuses).
         let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): native-stack depth probe. Logs
+        // stack growth per 512 KiB and captures ONE backtrace past the
+        // threshold, so an unbounded native recursion is observable without a
+        // debugger. Zero cost unless `VERTER_STACK_PROBE` is set.
+        crate::stack_probe::probe(&key.tag(), self.connected_demand.query_depth.get());
+
         let exact_same_path = self.graph().is_same_path_inflight_on_current_thread(&key);
         let mut query_depth_guard = None;
         if preexisting_trip.is_some_and(|reasons| {

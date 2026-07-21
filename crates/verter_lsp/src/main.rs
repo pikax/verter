@@ -14,8 +14,40 @@ use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
 use verter_session::{HostConfig, VerterHost};
 
-#[tokio::main]
-async fn main() {
+/// THROWAWAY DIAGNOSTIC (perf/inv-opus): run the whole tokio runtime on a
+/// thread with an explicitly-sized stack when `VERTER_MAIN_STACK_MB` is set.
+/// Unset ⇒ byte-identical behaviour to the shipped `#[tokio::main]` entry
+/// (the process main thread's link-time stack).
+fn main() {
+    match std::env::var("VERTER_MAIN_STACK_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(mb) if mb > 0 => {
+            let handle = std::thread::Builder::new()
+                .name("verter-main".to_string())
+                .stack_size(mb * 1024 * 1024)
+                .spawn(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio runtime")
+                        .block_on(async_main());
+                })
+                .expect("spawn verter-main");
+            let _ = handle.join();
+        }
+        _ => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(async_main());
+        }
+    }
+}
+
+async fn async_main() {
     // Initialize tracing (controlled via VERTER_LOG or RUST_LOG env var).
     // ANSI colors are disabled because the output goes to VS Code's debug
     // console which renders escape codes as literal text (e.g. `[2m`, `[0m`).
@@ -26,6 +58,9 @@ async fn main() {
                 .unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_ansi(false)
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): thread identity on every line.
+        .with_thread_ids(true)
+        .with_thread_names(true)
         .with_writer(std::io::stderr)
         .init();
 

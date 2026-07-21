@@ -17,6 +17,10 @@ impl HandlerGuard {
     pub(crate) fn new(name: &'static str) -> Self {
         let prev = ACTIVE_HANDLERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let thread_id = std::thread::current().id();
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): anchor the stack-probe base for
+        // this thread at the SHALLOWEST point a request reaches, so any later
+        // native growth inside the handler is measured from the true entry.
+        verter_session::stack_probe_public::probe(&name, 0);
         tracing::info!(
             "HANDLER_ENTER {name} active={} thread={thread_id:?}",
             prev + 1

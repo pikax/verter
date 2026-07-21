@@ -175,6 +175,14 @@ fn type_runtime_trace_output_path() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// THROWAWAY DIAGNOSTIC (perf/inv-opus): process-start monotonic epoch so every
+/// emitted trace line carries an absolute `t_us` and a cross-thread timeline can
+/// be reconstructed. Remove with the rest of the investigation instrumentation.
+fn type_runtime_trace_epoch_us() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn format_type_runtime_trace_line(
     event: TypeRuntimeTraceEvent,
@@ -190,7 +198,8 @@ pub fn format_type_runtime_trace_line(
         .map(|id| id.to_string())
         .unwrap_or_else(|| "-".to_string());
     let mut line = format!(
-        "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
+        "[verter-meta-trace] t_us={} event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
+        type_runtime_trace_epoch_us(),
         event.as_str(),
         trace_id,
         span_id,

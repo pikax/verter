@@ -169,6 +169,27 @@ where
     let deadline = timeouts.request_deadlines.for_method(&method);
     let budget = timeouts.audit_supersede.for_method(&method);
 
+    // THROWAWAY DIAGNOSTIC (perf/inv-opus): one trace span per audited LSP
+    // request so every inner stage event parents under it and the span close
+    // carries the end-to-end `dur_ms`. Zero-cost when the trace is disabled.
+    let body = verter_type_runtime::type_runtime_trace_scope_async(
+        "lsp_request",
+        if verter_type_runtime::type_runtime_trace_enabled() {
+            Some(format!(
+                "method={:?} deadline_ms={} pos={}",
+                method,
+                deadline.as_millis(),
+                position
+                    .as_ref()
+                    .map(|p| format!("{}:{}", p.line, p.character))
+                    .unwrap_or_else(|| "-".to_string()),
+            ))
+        } else {
+            None
+        },
+        body,
+    );
+
     if !host.config().audit_enabled {
         // Always-on production request deadline. The audit-supersede `budget` is
         // only applied when audit is enabled; with audit off (the production

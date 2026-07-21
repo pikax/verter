@@ -950,7 +950,15 @@ impl VerterLanguageServer {
         let repair_lease = self.ide_sync_repair_lease(&canonical_id, open_generation);
         #[cfg(test)]
         self.maybe_pause_ide_sync_after_lease(&canonical_id).await;
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): repair-lease acquisition wait.
+        let _perf_lease_t0 = std::time::Instant::now();
         let _repair_guard = repair_lease.lock().await;
+        crate::perf_event("lsp_repair_lease_acquired", || {
+            format!(
+                "wait_ms={:.3}",
+                _perf_lease_t0.elapsed().as_secs_f64() * 1000.0
+            )
+        });
         if !self.ide_sync_generation_is_open(uri, &canonical_id, open_generation) {
             // Retire only a lane that still belongs to the generation this repair
             // serialized for: a close→reopen can REVIVE this same lane object in
@@ -1029,8 +1037,15 @@ impl VerterLanguageServer {
             && !needs_owner_reconcile
             && provider_surface_matches_live_source
         {
+            crate::perf_event("lsp_current_file_fresh", || "fresh=1".to_string());
             return; // IDE is fresh
         }
+        crate::perf_event("lsp_current_file_repair", || {
+            format!(
+                "needs_sync={needs_sync} has_state={has_committed_state} ide_synced={ide_already_synced} \
+                 owner_reconcile={needs_owner_reconcile} surface_match={provider_surface_matches_live_source}"
+            )
+        });
 
         // Consume the dirty flag only once this call is the single repair that
         // will run. Holding the per-document lock means no concurrent repair can
@@ -1050,12 +1065,25 @@ impl VerterLanguageServer {
 
         // Ensure file and its deps are loaded. The scheduler's extract_deps
         // + auto-ingress handles recursive dependency walking.
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): this is a SYNCHRONOUS scheduler
+        // wait on a tokio worker thread — the peer's proposed starvation site.
+        let _perf_load_t0 = std::time::Instant::now();
         self.documents.host().ensure_loaded(&canonical_id);
+        crate::perf_event("lsp_ensure_loaded", || {
+            format!("ms={:.3}", _perf_load_t0.elapsed().as_secs_f64() * 1000.0)
+        });
 
         // Recompile + refresh mapper (in case blocker hydration changed TSX) BEFORE
         // the carrier-sync gateway runs, so a tsserver membership publish advertises
         // the freshly-compiled companions.
+        let _perf_recompile_t0 = std::time::Instant::now();
         self.documents.recompile_and_refresh_mapper(uri);
+        crate::perf_event("lsp_recompile_mapper", || {
+            format!(
+                "ms={:.3}",
+                _perf_recompile_t0.elapsed().as_secs_f64() * 1000.0
+            )
+        });
 
         let ide = self.documents.get_ide(uri);
         // The dialect comes from the compile, falling back to the parse-level
@@ -1444,8 +1472,20 @@ impl VerterLanguageServer {
 
     /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
     pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
-        self.ensure_current_file_synced(uri).await;
-        self.ensure_imported_carriers_synced_memoized(uri).await;
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): per-leg spans so the sync gate's
+        // share of a request's wall clock is attributable.
+        verter_type_runtime::type_runtime_trace_scope_async(
+            "lsp_sync_current_file",
+            crate::perf_detail(String::new),
+            self.ensure_current_file_synced(uri),
+        )
+        .await;
+        verter_type_runtime::type_runtime_trace_scope_async(
+            "lsp_sync_imports_memoized",
+            crate::perf_detail(String::new),
+            self.ensure_imported_carriers_synced_memoized(uri),
+        )
+        .await;
     }
 
     /// The current-file leg's imported-carrier + barrel preamble, wrapped in a
@@ -1476,19 +1516,35 @@ impl VerterLanguageServer {
         // ONE import-set pass. A follower that acquires the lock after the leader
         // finished sees a fresh memo and returns without re-walking.
         let lock = self.import_sync.lock_for(&canonical_id);
+        // THROWAWAY DIAGNOSTIC (perf/inv-opus): import-set singleflight wait.
+        let _perf_imp_t0 = std::time::Instant::now();
         let _guard = lock.lock().await;
+        crate::perf_event("lsp_import_lock_acquired", || {
+            format!(
+                "wait_ms={:.3}",
+                _perf_imp_t0.elapsed().as_secs_f64() * 1000.0
+            )
+        });
 
         let key = self.import_sync_freshness_key();
         if let Some(key) = key {
             if self.import_sync.is_fresh_at(&canonical_id, key) {
+                crate::perf_event("lsp_import_memo_fresh", || "fresh=1".to_string());
                 return; // The import set was already delivered at this generation.
             }
         }
 
-        let outcome = self
-            .ensure_imported_carrier_apis_synced(uri)
-            .await
-            .and(self.ensure_barrel_imports_synced(uri).await);
+        let _perf_api_t0 = std::time::Instant::now();
+        let api_outcome = self.ensure_imported_carrier_apis_synced(uri).await;
+        crate::perf_event("lsp_import_apis_synced", || {
+            format!("ms={:.3}", _perf_api_t0.elapsed().as_secs_f64() * 1000.0)
+        });
+        let _perf_barrel_t0 = std::time::Instant::now();
+        let barrel_outcome = self.ensure_barrel_imports_synced(uri).await;
+        crate::perf_event("lsp_import_barrels_synced", || {
+            format!("ms={:.3}", _perf_barrel_t0.elapsed().as_secs_f64() * 1000.0)
+        });
+        let outcome = api_outcome.and(barrel_outcome);
 
         // Publish the memo only when the whole preamble DELIVERED under a stable
         // key — never warm a torn generation, and never warm over a leg that has
