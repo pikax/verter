@@ -81,9 +81,11 @@ fn client_framework_manifest_ts_is_byte_equal_to_the_rendered_registry() {
 /// per-framework client fork. This scans the VS Code extension source and pins
 /// (a) the wiring module reads the manifest, (b) the retired `verter.frameworks`
 /// opt-in gate is gone (Svelte is no longer opt-in), (c) the extension consumes
-/// the manifest-driven wiring helpers, and (d) the manifest itself is wired into
+/// the manifest-driven wiring helpers, (d) the manifest itself is wired into
 /// the extension's package.json (the `svelte` language is registered, both
-/// `onLanguage:vue` and `onLanguage:svelte` activate). Discriminating: it FAILS
+/// `onLanguage:vue` and `onLanguage:svelte` activate), and (e) Verter ships its
+/// own TextMate grammar for BOTH carriers (`source.vue` + `source.svelte`) — it
+/// replaces the official Vue and Svelte extensions. Discriminating: it FAILS
 /// against the pre-S2a tree (opt-in gate present, no manifest helpers, no svelte
 /// language row).
 #[test]
@@ -133,10 +135,17 @@ fn client_framework_manifest_drives_extension_wiring() {
         package_json.contains("\"id\": \"svelte\""),
         "package.json must register the svelte language minimally"
     );
-    // No grammar shipped for svelte (relies on the user's Svelte extension).
+    // Verter REPLACES the official Vue AND Svelte extensions: it ships its own
+    // TextMate grammar for BOTH carriers, so `.vue` and `.svelte` colorize without
+    // any third-party extension. Assert both grammars are contributed — Svelte is
+    // treated exactly like Vue. The grammar files, embedded-language wiring, and
+    // language configuration are asserted in the extension's TS specs
+    // (`packageManifestFramework.spec.ts`, `svelteGrammar.spec.ts`) and the
+    // `svelte-grammar.test` E2E suite.
     assert!(
-        !package_json.contains("source.svelte"),
-        "Verter must not ship a Svelte TextMate grammar"
+        package_json.contains("source.vue") && package_json.contains("source.svelte"),
+        "Verter must ship its own TextMate grammar for both vue and svelte \
+         (it replaces the official Vue and Svelte extensions)"
     );
     // The retired opt-in config is gone.
     assert!(
