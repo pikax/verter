@@ -44,6 +44,10 @@ impl TypeProvider for MeasureMock {
         Box::pin(async move { Ok(()) })
     }
 
+    fn load_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async move { Ok(()) })
+    }
+
     fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async move { Ok(()) })
     }
