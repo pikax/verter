@@ -3,6 +3,10 @@
 **Status:** BLOCKED — the premise of "add a packaging step" does not hold. Needs a product
 decision about what ships `verter-lsp`, and whether a guarded invariant is relaxed.
 
+**Audit verdict (2026-07-22): BLOCKED.**
+
+**Exact owner decision needed:** identify the artifact that owns `verter-lsp` distribution and explicitly approve or reject shipping a bundled tsgo sidecar by relaxing the guarded “tsgo is never packaged” invariant.
+
 ## Symptom
 
 Tier 4, Verter's offline floor, is fully specified and never staged. On any machine that

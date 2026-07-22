@@ -1,5 +1,7 @@
 # Serve-loop `buffer_unordered` capacity × future-size multiplication
 
+**Audit verdict (2026-07-22): NEGATIVE.** The bounded worst-case request-future residency is about 2.32 MiB, no RSS or user-visible regression was measured, and boxing would not reduce the retained heap mass.
+
 ## Symptom
 
 `tower-lsp-server` admits up to **`LSP_MAX_CONCURRENCY = 64`** in-flight

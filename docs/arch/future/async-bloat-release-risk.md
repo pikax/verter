@@ -1,5 +1,7 @@
 # Async state-machine bloat: release risk vs debug-only
 
+**Audit verdict (2026-07-22): NEGATIVE.** Release stack use is safe, the debug-only stack failure is already contained by the explicit serve-thread stack, and no user-visible release regression was measured.
+
 ## Symptom
 
 The headline stack finding is **debug-dominant**:

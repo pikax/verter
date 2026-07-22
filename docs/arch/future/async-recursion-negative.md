@@ -1,5 +1,7 @@
 # Recursive / mutually-recursive `async fn` — negative finding
 
+**Audit verdict (2026-07-22): NEGATIVE.** No production recursive or mutually recursive async chain was found on the audited LSP, session, or type-runtime surfaces.
+
 ## Symptom
 
 Unboxed recursive `async fn` (direct or mutual) grows the future frame

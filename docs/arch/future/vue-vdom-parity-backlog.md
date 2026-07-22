@@ -4,6 +4,8 @@
 >
 > Scope note: the maintainer chose "fix common-pattern bugs, track the rest" then revised to "log all, fix post-merge." So NONE of the below were fixed pre-merge; this is the actionable post-merge list. Each item names the official 3.6.0-rc.1 behavior, Verter's wrong behavior, location, and fix approach.
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** Vue compiler/VDOM parity is explicitly outside the VS Code TypeScript-engine mandate.
+
 ## Legend
 - **REGRESSION** = introduced/exposed by the defineComponent-gate + inline-template work (93fc14423 / 97033f2b8 / 72714af27 / 36be9089a / e877e448d). Fix first post-merge — these are newly-broken cases.
 - **PRE-EXISTING** = a parity gap Verter always had; the conformance surfaced it.

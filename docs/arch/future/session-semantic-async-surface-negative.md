@@ -1,5 +1,7 @@
 # Session host + semantic engine async surface — negative finding
 
+**Audit verdict (2026-07-22): NEGATIVE.** Session and semantic concurrency is scheduler/thread/singleflight based, not retained Rust async state machines.
+
 ## Symptom
 
 The semantic type engine and host operations are a large concurrent surface.

@@ -1,5 +1,7 @@
 # Scheduler async surface — negative finding
 
+**Audit verdict (2026-07-22): NEGATIVE.** The scheduler has no production async-future surface that can reproduce this bloat or capacity-multiplication class.
+
 ## Symptom
 
 Q1–Q3 of the async state-machine bloat class ask whether the **scheduler**

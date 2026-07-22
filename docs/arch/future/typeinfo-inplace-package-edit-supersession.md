@@ -2,6 +2,8 @@
 
 > **Status:** DEFERRED — tracked follow-up. Pre-existing gap, surfaced (not introduced) during the type-macro migration's typeinfo cache-invalidation hardening (2026-07-20). The five *in-scope* typeinfo invalidation holes were closed in that work (`OwnerImportSurfaceDb`/`RouteDb` warm-hit fact re-observation, commit `6234bbac9`); this one has a **distinct root** and is recorded here for a focused follow-up.
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** This is an internal typeinfo/cache supersession defect in the semantic type engine.
+
 ## Symptom
 
 An **in-place content edit** to a **scheduler-tracked (package-backed) leaf file** does not invalidate the warm published `Surface`. After the leaf's content hash is bumped V1 → V2, the owner still resolves the **stale V1** shape (e.g. `Selected.v == 1` instead of `2`).

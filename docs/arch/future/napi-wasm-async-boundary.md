@@ -1,5 +1,7 @@
 # NAPI / WASM async boundary future sizes
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** NAPI and WASM boundaries are explicitly outside this audit mandate.
+
 ## Symptom
 
 FFI boundaries can pin large futures across the JS runtime. Inventory of

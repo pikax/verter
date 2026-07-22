@@ -1,5 +1,7 @@
 # Async poll sites outside the LSP serve loop
 
+**Audit verdict (2026-07-22): NEGATIVE.** The surveyed poll sites do not reproduce the serve-loop's single-poller or capacity-multiplied large-future failure class.
+
 ## Symptom
 
 Q1 asks where else a deep async chain is polled **inline** on a thread that

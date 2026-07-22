@@ -1,5 +1,7 @@
 # LSP handler async state-machine sizes (inventory)
 
+**Audit verdict (2026-07-22): NEGATIVE.** This is a size inventory, not a release defect: the measured release stack is safe and the debug-only risk is already handled by the serve-thread stack.
+
 ## Symptom
 
 A peer agent established that a single `textDocument/definition` path has a

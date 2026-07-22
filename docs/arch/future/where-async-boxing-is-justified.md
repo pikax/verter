@@ -1,5 +1,7 @@
 # Where async `Box::pin` is justified (and where it is not)
 
+**Audit verdict (2026-07-22): NEGATIVE.** The measured data rejects blanket boxing as a fix; it would add allocations without reducing total retained handler state.
+
 ## Symptom
 
 Async state-machine bloat invites a reflexive “box everything” fix. The

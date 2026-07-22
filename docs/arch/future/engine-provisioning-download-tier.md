@@ -3,6 +3,10 @@
 **Status:** BLOCKED — needs a dependency/supply-chain decision from the product owner.
 **Owner decision required before any implementation.**
 
+**Audit verdict (2026-07-22): BLOCKED.**
+
+**Exact owner decision needed:** approve or reject a network/TLS dependency and, if approved, define the trusted download origin, integrity verification, cache/update policy, and offline failure behavior.
+
 ## Symptom
 
 Verter cannot obtain a TypeScript engine on a machine that does not already have one.
