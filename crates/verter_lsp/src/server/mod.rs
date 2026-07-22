@@ -75,6 +75,10 @@ mod child_prop_rename;
 // target_ide_path helpers, and the background-init bootstrap.
 mod sync_orchestration;
 
+// Background import-dependency publication + the DependencyReady receipt and
+// the handler readiness protocol (capture / join / enqueue — never start).
+mod import_publication;
+
 // Custom LSP protocol handlers. The 13 `pub async fn`
 // methods invoked via `main.rs` `.custom_method("$/...",
 // VerterLanguageServer::<method>)` registrations. Public visibility on
@@ -324,18 +328,27 @@ struct CompletionSnapshotPause {
     release: Arc<tokio::sync::Notify>,
 }
 
-/// Per-document import-set freshness memo plus the singleflight locks that guard
-/// the pass which populates it.
+/// The per-document DependencyReady store: the import-set freshness memo (the
+/// receipt), the in-flight publication registry (the join handle), and the
+/// singleflight locks that guard the background pass which populates them.
 ///
 /// The memo records the workspace `(content_generation,
 /// resolver_snapshot_generation)` after a DELIVERED imported-carrier + barrel
-/// preamble, so a request storm on an unchanged document skips the per-request
-/// import-graph BFS re-walk and carrier gateway reconcile entirely. Both
-/// generations are safe superset signals: ANY content edit (this document OR a
-/// dependency) bumps `content_generation`, and any resolver re-publish bumps the
-/// snapshot generation.
+/// publication, so an interactive request on an unchanged document captures the
+/// receipt and skips the import-graph BFS re-walk and carrier gateway reconcile
+/// entirely. Both generations are safe superset signals: ANY content edit (this
+/// document OR a dependency) bumps `content_generation`, and any resolver
+/// re-publish bumps the snapshot generation — so a stale receipt can never be
+/// captured for a changed revision (invalidation is the key comparison itself).
 ///
-/// Both maps are owned together because both must be evicted together when the
+/// The receipt is minted ONLY from BACKGROUND publication completion
+/// ([`VerterLanguageServer::publish_import_dependencies`]); interactive
+/// handlers may capture it, join an in-flight publication through
+/// [`Self::in_flight_watch`], or enqueue a background publication — they never
+/// run the pass inline, so a request cancelled at its deadline cannot prevent
+/// the receipt from being minted (the cancel-loop root this design deletes).
+///
+/// All maps are owned together because all must be evicted together when the
 /// workspace is REPLACED. `content_generation` is per-workspace and a fresh
 /// workspace restarts it low, so an entry minted against the previous workspace
 /// can collide with a low generation of the new one and serve a warm skip for a
@@ -345,6 +358,16 @@ struct CompletionSnapshotPause {
 pub(crate) struct ImportSyncMemo {
     fresh_at: DashMap<String, (u64, u64)>,
     locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// In-flight background publication per document: a watch receiver that
+    /// resolves (value change or sender drop) when the publication settles.
+    /// Registered by the publisher AFTER it holds the singleflight lock, so at
+    /// most one live entry exists per document.
+    in_flight: DashMap<String, tokio::sync::watch::Receiver<bool>>,
+    /// Edit-debounce epochs: a debounced enqueue bumps its document's epoch and
+    /// only the LATEST enqueue survives its debounce sleep, so a typing burst
+    /// coalesces onto one publication after the silence window.
+    enqueue_epochs: DashMap<String, u64>,
+    epoch_counter: std::sync::atomic::AtomicU64,
 }
 
 impl ImportSyncMemo {
@@ -366,11 +389,67 @@ impl ImportSyncMemo {
         self.fresh_at.insert(canonical_id, key);
     }
 
+    /// Register this document's publication as in flight and return the guard
+    /// that (a) resolves every joiner and (b) removes the registration when the
+    /// publication settles — including on panic, so a dead entry can never
+    /// strand joiners. Call ONLY while holding [`Self::lock_for`]'s lock.
+    pub(crate) fn begin_in_flight(self: &Arc<Self>, canonical_id: &str) -> InFlightPublication {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        self.in_flight.insert(canonical_id.to_string(), receiver);
+        InFlightPublication {
+            memo: Arc::clone(self),
+            canonical_id: canonical_id.to_string(),
+            sender,
+        }
+    }
+
+    /// The in-flight publication watch for `canonical_id`, if one is running.
+    /// A joiner awaits `changed()` on the clone (value change or sender drop
+    /// both resolve it) and then re-reads the receipt — it never starts work.
+    pub(crate) fn in_flight_watch(
+        &self,
+        canonical_id: &str,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.in_flight.get(canonical_id).map(|entry| entry.clone())
+    }
+
+    /// Drop a DEAD in-flight registration (its sender is gone but the entry is
+    /// still present — a publisher that panicked between registration and its
+    /// guard's drop). Removes only the exact channel the caller observed dead,
+    /// never a newer live registration.
+    pub(crate) fn clear_dead_in_flight(
+        &self,
+        canonical_id: &str,
+        dead: &tokio::sync::watch::Receiver<bool>,
+    ) {
+        self.in_flight
+            .remove_if(canonical_id, |_, current| current.same_channel(dead));
+    }
+
+    /// Bump and return the edit-debounce epoch for `canonical_id`. A debounced
+    /// enqueue captures the returned value and abandons itself after its sleep
+    /// when a newer enqueue has bumped past it.
+    pub(crate) fn bump_enqueue_epoch(&self, canonical_id: &str) -> u64 {
+        let epoch = self
+            .epoch_counter
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        self.enqueue_epochs.insert(canonical_id.to_string(), epoch);
+        epoch
+    }
+
+    /// Whether `epoch` is still the newest enqueue for `canonical_id`.
+    pub(crate) fn enqueue_epoch_is_current(&self, canonical_id: &str, epoch: u64) -> bool {
+        self.enqueue_epochs.get(canonical_id).map(|entry| *entry) == Some(epoch)
+    }
+
     /// Drop every entry. Called whenever the workspace is replaced, because the
     /// generations the keys are built from belong to the OLD workspace.
     pub(crate) fn evict_all(&self) {
         self.fresh_at.clear();
         self.locks.clear();
+        self.in_flight.clear();
+        self.enqueue_epochs.clear();
     }
 
     /// Number of documents currently recorded as delivered (test observation).
@@ -380,11 +459,64 @@ impl ImportSyncMemo {
     }
 }
 
+/// RAII registration of an in-flight background publication. Dropping it —
+/// normal completion or panic — removes the in-flight entry and resolves every
+/// joiner's watch. The receipt (if any) must be recorded BEFORE this drops so a
+/// woken joiner re-reads a settled memo.
+pub(crate) struct InFlightPublication {
+    memo: Arc<ImportSyncMemo>,
+    canonical_id: String,
+    sender: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for InFlightPublication {
+    fn drop(&mut self) {
+        self.memo
+            .in_flight
+            .remove_if(&self.canonical_id, |_, current| {
+                current.same_channel(&self.sender.subscribe())
+            });
+        // Wake joiners AFTER the registry removal so a woken joiner that
+        // re-checks sees either the fresh receipt or a clean Missing state.
+        let _ = self.sender.send(true);
+    }
+}
+
 /// The Verter language server implementation.
 ///
 /// Wraps `verter_session` for SFC analysis and optionally a `TypeProvider`
 /// (e.g., TSGO) for richer type information.
+///
+/// A cheap-`Clone` handle over the shared [`ServerCore`]: tower-lsp owns its
+/// own `Arc` of this wrapper and never exposes it, so background work that
+/// must OUTLIVE a request (detached `tokio::spawn`, e.g. import-dependency
+/// publication) clones this handle instead. All state lives on `ServerCore`;
+/// field and method access flow through `Deref`, so `&self` call sites are
+/// unaffected by the wrapping.
 pub struct VerterLanguageServer {
+    core: Arc<ServerCore>,
+}
+
+impl Clone for VerterLanguageServer {
+    fn clone(&self) -> Self {
+        Self {
+            core: Arc::clone(&self.core),
+        }
+    }
+}
+
+impl std::ops::Deref for VerterLanguageServer {
+    type Target = ServerCore;
+
+    fn deref(&self) -> &ServerCore {
+        &self.core
+    }
+}
+
+/// The shared server state behind [`VerterLanguageServer`]. One instance per
+/// session, `Arc`-shared between tower-lsp's request dispatch and any detached
+/// background task the server spawns.
+pub struct ServerCore {
     client: Client,
     documents: Arc<DocumentRegistry>,
     type_provider: Option<Arc<dyn TypeProvider>>,
@@ -1034,7 +1166,7 @@ impl VerterLanguageServer {
             },
         );
 
-        Self {
+        let core = ServerCore {
             client,
             documents,
             type_provider: config.type_provider,
@@ -1093,6 +1225,9 @@ impl VerterLanguageServer {
             ),
             carrier_publish_coordinator,
             carrier_transaction_coordinator,
+        };
+        Self {
+            core: Arc::new(core),
         }
     }
 

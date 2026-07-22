@@ -645,12 +645,14 @@ async fn handle_completion_attempt(
     // new edit can land between releasing the mutex and reading source/analysis.
     // The fence is released before any provider await.
     let mut edit_fence = server.did_change_mutex.lock().await;
-    // NOTE: We do NOT call ensure_provider_synced here.  The debounced sync in
-    // did_change sends the update to TSGO within 50ms of the last keystroke.
-    // Flushing inline would serialize: sync → TSGO re-analysis → get_completions,
-    // which takes 2-3s on large files and blocks the entire completion pipeline.
-    // Instead we let TSGO answer with whatever version it has; if it's stale the
-    // response arrives fast and VS Code re-requests after the debounce fires.
+    // NOTE: completion starts NO sync work here. The eager did_change carrier
+    // refresh keeps the current-file surface fresh per keystroke, and the
+    // import-dependency closure is background-published (capture-only readiness
+    // below). Flushing inline would serialize: sync → TSGO re-analysis →
+    // get_completions, which takes 2-3s on large files and blocks the entire
+    // completion pipeline. Instead we let TSGO answer with whatever version it
+    // has; if it's stale the response arrives fast and VS Code re-requests
+    // after the debounce fires.
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
@@ -1073,7 +1075,10 @@ async fn handle_completion_attempt(
             );
             server.ensure_current_file_synced(uri).await;
         }
-        let _ = server.ensure_imported_carrier_apis_synced(uri).await;
+        // Capture-only dependency readiness: completion NEVER awaits the
+        // imported-carrier delivery (a partial member list beats a stalled
+        // one mid-typing); a receipt miss enqueues background publication.
+        let _ = server.dependency_readiness_capture(uri);
         let ctx = server.type_provider_context(uri);
         if ctx.is_none() {
             tracing::debug!("completion: no ide_context for {}", uri.as_str());
@@ -1248,7 +1253,9 @@ async fn handle_completion_attempt(
                             server.force_reopen_current_file_in_type_provider(uri).await;
                             server.sync_api_to_provider(uri).await;
                         }
-                        let _ = server.ensure_imported_carrier_apis_synced(uri).await;
+                        // Capture-only: a no-content recovery may re-enqueue the
+                        // background dependency publication, never await it.
+                        let _ = server.dependency_readiness_capture(uri);
                         tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                         type_completion_result = tp
                             .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)

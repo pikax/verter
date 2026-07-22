@@ -78,8 +78,6 @@ pub(super) async fn handle_goto_definition(
         position.character
     );
 
-    server.ensure_provider_synced(uri).await;
-
     if server.editor_owns_carrier_source_features() {
         // CSS-native results have no TS correlate — the editor's TS plugin can
         // never own them, so the server still serves EXACTLY the css leg.
@@ -88,8 +86,19 @@ pub(super) async fn handle_goto_definition(
         ));
     }
 
+    // Readiness protocol (never a starter): capture the DependencyReady
+    // receipt for the live revision, JOIN an in-flight background publication,
+    // or enqueue one and answer without the provider. The handler must never
+    // run the import-set/barrel walk inline — a request cancelled at its
+    // deadline would kill the walk and un-mint the receipt (the cancel loop).
+    let dependency_readiness = server.dependency_readiness_join(uri).await;
+
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
-    if let Some(tp) = &server.type_provider {
+    if let Some(tp) = server
+        .type_provider
+        .as_ref()
+        .filter(|_| dependency_readiness.is_ready())
+    {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
@@ -271,9 +280,17 @@ pub(super) async fn handle_goto_definition(
     // try_component_contract_definition. The old separate resolve_component_event_definition
     // and resolve_component_prop_definition calls are subsumed by it.
 
-    // Enhance with TypeProvider for cross-file definitions.
+    // Enhance with TypeProvider for cross-file definitions — only under a
+    // committed (or joined) DependencyReady receipt: querying over a missing
+    // import closure returns wrong/empty cross-file answers, and the honest
+    // disposition for a not-ready revision is the native result (VS Code
+    // re-queries once background publication mints the receipt).
     // Extract all context synchronously — no DashMap guard held across await.
-    if let Some(tp) = &server.type_provider {
+    if let Some(tp) = server
+        .type_provider
+        .as_ref()
+        .filter(|_| dependency_readiness.is_ready())
+    {
         if let Some(ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
@@ -505,10 +522,17 @@ pub(super) async fn handle_goto_type_definition(
         position.character
     );
 
-    server.ensure_provider_synced(uri).await;
+    // Readiness protocol (never a starter): capture / join / enqueue — the
+    // handler must never run the import-set walk inline (see
+    // `handle_goto_definition`).
+    let dependency_readiness = server.dependency_readiness_join(uri).await;
 
     // Virtual file: route directly through type provider (position is already in TSX coordinates)
-    if let Some(tp) = &server.type_provider {
+    if let Some(tp) = server
+        .type_provider
+        .as_ref()
+        .filter(|_| dependency_readiness.is_ready())
+    {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
@@ -574,8 +598,14 @@ pub(super) async fn handle_goto_type_definition(
         }
     }
 
-    // Type definition is purely a type provider operation — no verter analysis phase.
-    if let Some(tp) = &server.type_provider {
+    // Type definition is purely a type provider operation — no verter analysis
+    // phase. Query only under a committed (or joined) DependencyReady receipt;
+    // a not-ready revision answers empty and background publication heals.
+    if let Some(tp) = server
+        .type_provider
+        .as_ref()
+        .filter(|_| dependency_readiness.is_ready())
+    {
         if let Some(ctx) = server.type_provider_context(uri) {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
@@ -1006,16 +1036,16 @@ pub(super) async fn handle_rename(
         return Err(multi_claimant_rename_unavailable_error());
     }
 
-    // PRODUCTION sync-before-query: the cross-file rename declaration surfaces via
-    // the imported component's `{carrier}.ts` PUBLIC-API surface, which the
-    // provider must already hold before the query. Peer navigation handlers
-    // (`handle_goto_definition`) sync first; rename MUST too, or a closed child
-    // carrier's API surface is never live and the rename drops the child edit.
-    // Run BEFORE the fence so the sync's own provider commands are written, then
-    // pin the resulting generations under the fence.
-    if !server.is_self_file_projection(uri) {
-        server.ensure_provider_synced(uri).await;
-    }
+    // Readiness protocol (never a starter): the cross-file rename declaration
+    // surfaces via the imported component's `{carrier}.ts` PUBLIC-API surface,
+    // which background publication delivers and receipts as DependencyReady.
+    // The handler may capture the receipt or JOIN an in-flight publication
+    // (bounded by the rename deadline); on a miss it enqueues background
+    // publication and proceeds WITHOUT the provider leg — the same fail-closed
+    // shape as a provider error, with the child-prop completeness gate below
+    // still refusing partial cross-file edits. Runs BEFORE the fence so a
+    // joined publication's provider commands are written first.
+    let dependency_readiness = server.dependency_readiness_join(uri).await;
 
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
@@ -1067,7 +1097,7 @@ pub(super) async fn handle_rename(
     // ONCE at the end over `rename_class`, so a confirmed child-prop rename cannot
     // escape the gate on any branch.
     let mut result = verter_result.clone();
-    if !server.is_self_file_projection(uri) {
+    if !server.is_self_file_projection(uri) && dependency_readiness.is_ready() {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
                 if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
