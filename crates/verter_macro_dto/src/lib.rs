@@ -109,6 +109,12 @@ pub enum RuntimePropType {
         constructors: OrderedRuntimeConstructors,
         skip_check: bool,
     },
+    /// The demand never asked for broad-runtime classification, so none was
+    /// computed. Only a target that emits the Vue runtime `props` option
+    /// object needs member constructors; a TSX-only (IDE) compile consumes
+    /// public binding names and nothing else. Distinct from both a resolved
+    /// semantic Unknown and a degradation: no claim is made about the member.
+    Unclassified,
     /// Member-position resolution failed. Vue renders `null` while the
     /// compiler surfaces a warning at the row's honest anchor.
     Degraded(MacroFailure<MacroMemberReason>),
@@ -119,7 +125,7 @@ impl RuntimePropType {
     pub fn constructors(&self) -> Option<&OrderedRuntimeConstructors> {
         match self {
             Self::Resolved { constructors, .. } => Some(constructors),
-            Self::Degraded(_) => None,
+            Self::Unclassified | Self::Degraded(_) => None,
         }
     }
 
