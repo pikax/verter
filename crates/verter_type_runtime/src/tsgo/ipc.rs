@@ -1017,6 +1017,7 @@ fn drain_pending(pending: &PendingRequests) {
 /// sending `shutdown`/`exit`, so the child's resulting EOF is recognized as the
 /// requested teardown — never surfaced as a crash (which would mint a spurious
 /// "crashed. Restarting" notification and respawn an engine into a dying session).
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     pending: Arc<PendingRequests>,
