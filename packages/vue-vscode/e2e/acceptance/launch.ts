@@ -2,15 +2,23 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { runTests } from "@vscode/test-electron";
+import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-electron";
 
 import {
   copyLspBinaryToTemp,
   findWorkspaceRcTsgoBinary,
+  provisionVsCodeExtension,
   readE2eEnv,
   resolveVscodeExecutablePath,
   writeVsCodeUserSettings,
 } from "../sharedLaunch";
+
+/**
+ * The Native Preview build the shared-tsgo tier attaches to. Pinned so a lane
+ * run reproduces the user's editor rather than whatever the marketplace serves
+ * that day; override with `VERTER_E2E_NATIVE_PREVIEW_EXTENSION`.
+ */
+const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
 
 /**
  * Launcher for the VS Code acceptance lane.
@@ -98,6 +106,23 @@ async function main(): Promise<void> {
       : {}),
   });
 
+  // Reproduce the editor a user actually runs when the Native Preview extension
+  // is installed: the shared-tsgo tier can only engage if that extension is
+  // present, and `--disable-extensions` would keep it unloaded. The profile's
+  // extensions directory is fresh per run, so dropping the flag admits exactly
+  // this one extension plus the built-ins.
+  const withNativePreview = process.env.VERTER_ACCEPTANCE_NATIVE_PREVIEW === "1";
+  if (withNativePreview) {
+    const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
+    console.log(`acceptance lane: provisioning ${extension} into the isolated profile`);
+    provisionVsCodeExtension({
+      cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
+      extension,
+      extensionsDir,
+      userDataDir,
+    });
+  }
+
   const logFile = path.join(os.tmpdir(), `verter-acceptance-${label}-${provider}.log`);
   for (const stale of [logFile, `${logFile}.runsummary`, receipt]) {
     fs.rmSync(stale, { force: true });
@@ -128,7 +153,7 @@ async function main(): Promise<void> {
         // registering providers for the `vue` language from the plugin
         // contribution. `VERTER_ACCEPTANCE_KEEP_EXTENSIONS=1` reproduces the
         // real editor so that hand-off can be measured rather than assumed.
-        ...(keepExtensions ? [] : ["--disable-extensions"]),
+        ...(keepExtensions || withNativePreview ? [] : ["--disable-extensions"]),
         `--extensions-dir=${extensionsDir}`,
         `--user-data-dir=${userDataDir}`,
       ],
