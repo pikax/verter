@@ -75,11 +75,9 @@ async fn measure_tsgo_api_future_sizes() {
         drop(fut);
     }
     {
-        let timed = tokio::time::timeout(Duration::from_secs(10), synthetic_jsonrpc_request_shape());
-        report(
-            "timeout(jsonrpc request shape)",
-            size_of_val(&timed),
-        );
+        let timed =
+            tokio::time::timeout(Duration::from_secs(10), synthetic_jsonrpc_request_shape());
+        report("timeout(jsonrpc request shape)", size_of_val(&timed));
         drop(timed);
     }
     {
@@ -97,10 +95,7 @@ async fn measure_tsgo_api_future_sizes() {
                 () = cancel => Err("cancelled".to_string()),
             }
         };
-        report(
-            "select(reply_rx, cancel) request shape",
-            size_of_val(&fut),
-        );
+        report("select(reply_rx, cancel) request shape", size_of_val(&fut));
         drop(fut);
     }
 
