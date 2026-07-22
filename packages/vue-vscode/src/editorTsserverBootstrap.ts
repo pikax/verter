@@ -34,8 +34,20 @@ export interface EditorTsserverBootstrapRuntime {
   ) => PromiseLike<EditorTsserverAttestationReceipt>;
 }
 
+/**
+ * Whether the configured policy selects the editor-owned tsserver tier.
+ *
+ * EXPLICIT selection only. On this tier the LSP owns no TypeScript engine and
+ * hands carrier rename to the plugin running inside VS Code's own tsserver, so
+ * the tier serves only when tsserver keeps the carrier in a configured project
+ * the plugin has a live runtime for. That is a property of the user's project
+ * topology, it cannot be verified before the LSP has published its carriers,
+ * and a workspace where it does not hold gets no rename at all. The automatic
+ * policy therefore never selects it; `tsserver` means the workspace tsserver
+ * the setting advertises.
+ */
 export function typeProviderRoutesEditorTsserver(typeProvider: string | undefined): boolean {
-  return typeProvider === "auto" || typeProvider === "shared-tsgo" || typeProvider === "tsserver";
+  return typeProvider === "editor-tsserver";
 }
 
 /** The editor plugin owns carrier source features only after this tier attests. */

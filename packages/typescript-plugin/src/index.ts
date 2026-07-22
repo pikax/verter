@@ -73,8 +73,43 @@ interface ProcessEditorProjectRuntime {
   readonly readSource: (fileName: string) => string | undefined;
   readonly editorOwnsMembership: () => boolean;
   readonly ensureResponseSourceScriptInfo: (fileName: string) => boolean;
+  /**
+   * Whether the owning tsserver project has been closed.
+   *
+   * `Project.close()` clears `rootFilesMap`, so every later host read through
+   * that project (`getScriptSnapshot` → `getOrCreateScriptInfoAndAttachToProject`)
+   * throws. A closed project can therefore never answer, and must never be
+   * chosen as a carrier's owner.
+   */
+  readonly isClosed: () => boolean;
 }
 const processEditorProjectRuntimes = new Map<string, ProcessEditorProjectRuntime>();
+
+/**
+ * The registered runtimes whose tsserver project is still alive, dropping any
+ * that have been closed.
+ *
+ * tsserver closes and re-creates configured projects freely — a solution-style
+ * workspace does it for every open file that resolves through project
+ * references. A runtime whose project has closed keeps a `LanguageServiceHost`
+ * that throws on every read, so routing a carrier source feature at it turns an
+ * answerable request into a FAILED tsserver command and the editor shows
+ * nothing at all. Dead entries are dropped as soon as they are observed, so the
+ * project tsserver re-creates under the same name is the one that answers.
+ */
+function liveEditorProjectRuntimes(): ProcessEditorProjectRuntime[] {
+  const live: ProcessEditorProjectRuntime[] = [];
+  for (const [projectKey, runtime] of processEditorProjectRuntimes) {
+    if (runtime.isClosed()) {
+      if (processEditorProjectRuntimes.get(projectKey) === runtime) {
+        processEditorProjectRuntimes.delete(projectKey);
+      }
+      continue;
+    }
+    live.push(runtime);
+  }
+  return live;
+}
 let processCurrentConfig: Record<string, unknown> | undefined;
 
 const SVELTE_JSX_RUNTIME_SUBPATHS = new Map<string, string>([
@@ -1076,6 +1111,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       readCompanion: carrierContent,
       readSource: readOriginalSource,
       editorOwnsMembership: () => editorOwnsMembership,
+      isClosed: () => info.project.isClosed(),
       ensureResponseSourceScriptInfo: (fileName) => {
         const companion = store.companionForSource(fileName);
         if (companion === undefined) return true;
@@ -1113,14 +1149,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       // Prefer that exact runtime before consulting process-wide candidates;
       // stale inferred-project factories can coexist for the lifetime of
       // tsserver and must never make an otherwise exact local owner ambiguous.
-      if (editorRuntime.editorOwnsMembership()) {
+      if (!editorRuntime.isClosed() && editorRuntime.editorOwnsMembership()) {
         const localStore = editorRuntime.getStore();
         const localCompanion = localStore.companionForSource(fileName);
         if (localCompanion !== undefined && localStore.readyFile(localCompanion) !== undefined) {
           return editorRuntime;
         }
       }
-      const runtimes = [...processEditorProjectRuntimes.values()];
+      const runtimes = liveEditorProjectRuntimes();
       const candidates = runtimes.filter((runtime) => {
         if (!runtime.editorOwnsMembership()) return false;
         const runtimeStore = runtime.getStore();
@@ -1185,10 +1221,14 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     /** Resolve a generated companion revisit to the configured project that published it. */
     function editorOwnerForCompanion(fileName: string): ProcessEditorProjectRuntime | undefined {
-      if (editorRuntime.editorOwnsMembership() && editorRuntime.getStore().readyFile(fileName)) {
+      if (
+        !editorRuntime.isClosed() &&
+        editorRuntime.editorOwnsMembership() &&
+        editorRuntime.getStore().readyFile(fileName)
+      ) {
         return editorRuntime;
       }
-      const candidates = [...processEditorProjectRuntimes.values()].filter(
+      const candidates = liveEditorProjectRuntimes().filter(
         (runtime) =>
           runtime.editorOwnsMembership() && runtime.getStore().readyFile(fileName) !== undefined,
       );

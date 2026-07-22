@@ -22,9 +22,12 @@ describe("VS Code E2E route inventory", () => {
     const matrix = buildGitHubActionsMatrix();
 
     expect(routes).toHaveLength(48);
-    expect(routes.filter((route) => route.typeProvider === "tsserver")).toHaveLength(17);
+    expect(routes.filter((route) => route.typeProvider === "tsserver")).toHaveLength(16);
     expect(routes.filter((route) => route.typeProvider === "tsgo")).toHaveLength(16);
     expect(routes.filter((route) => route.typeProvider === "shared-tsgo")).toHaveLength(15);
+    // The editor-owned tier is never selected automatically, so it appears
+    // exactly once — on the fixture that exists to exercise it.
+    expect(routes.filter((route) => route.typeProvider === "editor-tsserver")).toHaveLength(1);
     expect(new Set(labels).size).toBe(labels.length);
     expect(matrix.include).toEqual(
       routes.map(({ fixture, typeProvider }) => ({

@@ -210,6 +210,7 @@ function createInfo(
     getRootFiles: () => [],
     getFileNames: () => [],
     containsFile: () => false,
+    isClosed: () => false,
     markAsDirty: () => {},
     refreshDiagnostics: () => {},
   };
@@ -2999,6 +3000,112 @@ describe("editor-owned source diagnostic routing", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("editor-owned routing never uses a CLOSED tsserver project", () => {
+  const sourcePath = "d:/ws/src/A.vue";
+  const companionPath = "d:/ws/src/A.vue.tsx";
+  const sourceText = "const foo = 1;\n";
+
+  /**
+   * A configured owner whose tsserver project has been CLOSED.
+   *
+   * `Project.close()` clears `rootFilesMap`, and every subsequent host read
+   * (`getScriptSnapshot` → `getOrCreateScriptInfoAndAttachToProject`) then
+   * throws `TypeError: Cannot read properties of undefined (reading 'get')`.
+   * `Project.isClosed()` is exactly `rootFilesMap === undefined`, so the two
+   * are modelled together here.
+   */
+  function closedConfiguredOwner(dir: string) {
+    const info = createInfo(
+      dir,
+      { diskFiles: { [sourcePath]: sourceText } },
+      "d:/ws/tsconfig.json",
+    );
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    info.languageServiceHost.getScriptSnapshot = () => {
+      throw new TypeError("Cannot read properties of undefined (reading 'get')");
+    };
+    init({ typescript: ts } as any).create(info);
+    // Closed AFTER `create`: tsserver loads the plugin for a live project and
+    // closes it later, which is the sequence that leaves a dead runtime behind.
+    info.project.isClosed = () => true;
+    return info;
+  }
+
+  function liveInferredRequester(dir: string) {
+    const info = createInfo(
+      dir,
+      { diskFiles: { [sourcePath]: sourceText } },
+      "/dev/null/inferredProject1*",
+    );
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    init({ typescript: ts } as any).create(info);
+    return info;
+  }
+
+  it("fails closed instead of throwing when the only owner runtime is closed", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    closedConfiguredOwner(dir);
+    const inferredInfo = liveInferredRequester(dir);
+
+    // Every carrier source feature routed at a closed owner must MISS, never
+    // throw: a thrown tsserver request is reported to the editor as a failed
+    // command, and the user sees nothing at all.
+    expect(() => inferredInfo.languageService.getQuickInfoAtPosition(sourcePath, 6)).not.toThrow();
+    expect(inferredInfo.languageService.getQuickInfoAtPosition(sourcePath, 6)).toBeUndefined();
+    expect(() =>
+      inferredInfo.languageService.getDefinitionAndBoundSpan(sourcePath, 6),
+    ).not.toThrow();
+    expect(inferredInfo.languageService.getDefinitionAndBoundSpan(sourcePath, 6)).toBeUndefined();
+    expect(() => inferredInfo.languageService.getReferencesAtPosition(sourcePath, 6)).not.toThrow();
+  });
+
+  it("serves again from the owner tsserver re-creates after closing the previous one", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    closedConfiguredOwner(dir);
+    const inferredInfo = liveInferredRequester(dir);
+    // The dead owner is observed and dropped by the miss above.
+    expect(inferredInfo.languageService.getQuickInfoAtPosition(sourcePath, 6)).toBeUndefined();
+
+    // tsserver re-creates the configured project under the SAME name; the
+    // replacement runtime must be the one that answers.
+    const revivedInfo = createInfo(
+      dir,
+      { diskFiles: { [sourcePath]: sourceText } },
+      "d:/ws/tsconfig.json",
+    );
+    revivedInfo.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    const asked: string[] = [];
+    revivedInfo.languageService.__lsImpl = {
+      getQuickInfoAtPosition: (fileName: string) => {
+        asked.push(fileName);
+        return {
+          kind: ts.ScriptElementKind.constElement,
+          kindModifiers: "",
+          textSpan: { start: 6, length: 3 },
+          displayParts: [{ text: "const foo: number", kind: "text" }],
+        };
+      },
+    };
+    init({ typescript: ts } as any).create(revivedInfo);
+
+    const quickInfo = inferredInfo.languageService.getQuickInfoAtPosition(sourcePath, 6);
+    expect(asked).toEqual([companionPath]);
+    expect(quickInfo?.textSpan).toEqual({ start: 6, length: 3 });
   });
 });
 

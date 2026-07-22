@@ -78,14 +78,6 @@ pub(super) async fn handle_goto_definition(
         position.character
     );
 
-    if server.editor_owns_carrier_source_features() {
-        // CSS-native results have no TS correlate — the editor's TS plugin can
-        // never own them, so the server still serves EXACTLY the css leg.
-        return Ok(super::nav_features_css::editor_owned_css_definition(
-            server, uri, position,
-        ));
-    }
-
     // Readiness protocol (never a starter): capture the DependencyReady
     // receipt for the live revision, JOIN an in-flight background publication,
     // or enqueue one and answer without the provider. The handler must never
@@ -701,15 +693,6 @@ pub(super) async fn handle_references(
         include_declaration
     );
 
-    if server.editor_owns_carrier_source_features() {
-        // CSS-native references have no TS correlate — the server still
-        // serves EXACTLY the css leg (same-file occurrences + the
-        // workspace-wide global-class extension).
-        return Ok(super::nav_features_css::editor_owned_css_references(
-            server, uri, position,
-        ));
-    }
-
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
@@ -970,7 +953,7 @@ pub(super) async fn handle_prepare_rename(
     let uri = &params.text_document.uri;
     let position = &params.position;
 
-    if server.editor_owns_carrier_source_features() {
+    if server.editor_owns_carrier_rename() {
         return Ok(None);
     }
 
@@ -1017,7 +1000,7 @@ pub(super) async fn handle_rename(
         return Ok(None);
     }
 
-    if server.editor_owns_carrier_source_features() {
+    if server.editor_owns_carrier_rename() {
         return Ok(None);
     }
 

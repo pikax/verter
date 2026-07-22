@@ -28,7 +28,7 @@ import {
 } from "../../src/sharedTsgoLaunch";
 
 const FIXTURE = "editor-owned-project";
-const REQUIRED_PROVIDERS = new Set(["tsserver", "shared-tsgo"]);
+const REQUIRED_PROVIDERS = new Set(["editor-tsserver", "shared-tsgo"]);
 
 interface EditorTsserverReceiptObservation {
   pid: number;
@@ -60,7 +60,7 @@ if (FIXTURE_NAME === FIXTURE) {
     suiteSetup(async function () {
       assert.ok(
         TYPE_PROVIDER && REQUIRED_PROVIDERS.has(TYPE_PROVIDER),
-        `The ${FIXTURE} acceptance must run with tsserver or shared-tsgo, got ${TYPE_PROVIDER ?? "none"}`,
+        `The ${FIXTURE} acceptance must run with editor-tsserver or shared-tsgo, got ${TYPE_PROVIDER ?? "none"}`,
       );
 
       compDocument = await openVueFile("src/Comp.vue");
@@ -82,7 +82,7 @@ if (FIXTURE_NAME === FIXTURE) {
     test("reports the attested editor route and exact configured project", function () {
       const timing = parseStartupTiming();
       const log = readTestLog();
-      const expectedKind = TYPE_PROVIDER === "tsserver" ? "editor-tsserver" : "tsgo";
+      const expectedKind = TYPE_PROVIDER === "editor-tsserver" ? "editor-tsserver" : "tsgo";
 
       assert.strictEqual(
         timing.providerKind,
@@ -97,7 +97,7 @@ if (FIXTURE_NAME === FIXTURE) {
       );
 
       const expectedTsconfig = path.join(workspaceRoot(), "tsconfig.json");
-      if (TYPE_PROVIDER === "tsserver") {
+      if (TYPE_PROVIDER === "editor-tsserver") {
         const observation = parseEditorTsserverObservation(log);
         assert.ok(
           observation.projects.some(
@@ -235,7 +235,7 @@ if (FIXTURE_NAME === FIXTURE) {
         descendantsOf(editorTree, lspProcesses[0].pid).map((row) => row.pid),
       );
       const log = readTestLog();
-      if (TYPE_PROVIDER === "tsserver") {
+      if (TYPE_PROVIDER === "editor-tsserver") {
         const observation = parseEditorTsserverObservation(log);
         const process = inventory.find((row) => row.pid === observation.pid);
         assert.ok(process, `Attested editor tsserver ${observation.pid} is not running`);

@@ -44,17 +44,29 @@ describe("E2E type-provider attestation", () => {
     ).toMatchObject({ publicKind: "tsgo", route: "shared-tsgo" });
   });
 
-  it("accepts either attested editor tsserver or managed tsserver for the tsserver rail", () => {
-    expect(
-      attestE2eTypeProviderLog(
-        "Type provider status: editor-tsserver (attested pid 10)",
-        "tsserver",
-      ),
-    ).toMatchObject({ publicKind: "editor-tsserver", route: "tsserver" });
+  it("holds each tsserver-family rail to the exact engine it asked for", () => {
     expect(attestE2eTypeProviderLog("Type provider status: tsserver", "tsserver")).toMatchObject({
       publicKind: "tsserver",
       route: "tsserver",
     });
+    expect(
+      attestE2eTypeProviderLog(
+        "Type provider status: editor-tsserver (attested pid 10)",
+        "editor-tsserver",
+      ),
+    ).toMatchObject({ publicKind: "editor-tsserver", route: "editor-tsserver" });
+    // The two rails are distinct engines with distinct topologies. Accepting the
+    // editor plugin for a `tsserver` run is what let a route that served nothing
+    // pass as the workspace tsserver.
+    expect(() =>
+      attestE2eTypeProviderLog(
+        "Type provider status: editor-tsserver (attested pid 10)",
+        "tsserver",
+      ),
+    ).toThrow(/reported editor-tsserver/);
+    expect(() =>
+      attestE2eTypeProviderLog("Type provider status: tsserver", "editor-tsserver"),
+    ).toThrow(/reported tsserver/);
   });
 
   it("requires an actual shared feature result and rejects every managed fallback signal", () => {
