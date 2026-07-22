@@ -8,6 +8,8 @@
 
 ---
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** Vapor compiler/codegen parity is explicitly outside this audit mandate.
+
 ## Root cause
 
 Verter's Vapor lowering makes template **depth** part of the static-vs-reactive decision: it builds **one HTML string** and special-cases only structural **roots**. Nested (depth>0) `v-for`/`v-if`/components get baked into the static HTML template instead of recursing into child reactive blocks. Root-depth works; nesting silently produces static HTML that never updates — a **runtime reactivity bug**, not a cosmetic diff.

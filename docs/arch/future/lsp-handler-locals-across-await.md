@@ -1,5 +1,7 @@
 # Large locals held across `.await` on LSP hot paths
 
+**Audit verdict (2026-07-22): NEGATIVE.** No large inline payload or measured user-visible cost was found; the retained values are small headers and heap-backed handles, while the remaining size is control-flow layout.
+
 ## Symptom
 
 Anything alive across an `.await` is stored in the async state machine and

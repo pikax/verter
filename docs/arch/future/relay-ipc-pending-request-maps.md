@@ -1,5 +1,7 @@
 # Relay / tsgo_api IPC: pending maps and per-request futures
 
+**Audit verdict (2026-07-22): NEGATIVE.** Pending maps retain small oneshot senders and boxed caller futures, not multi-KiB request state machines.
+
 ## Symptom
 
 The relay shim and `verter_tsgo_api` keep long-lived processes and

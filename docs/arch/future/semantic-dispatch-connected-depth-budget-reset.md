@@ -6,6 +6,8 @@ current effort (see the ratified scope directive: native type resolution is bein
 the LSP path entirely, so resolver defects are not on the critical path). Nothing here may
 be changed without the owner's direction — this record exists so the finding is not lost.
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** This is an internal semantic type-engine defect, which the binding scope explicitly excludes.
+
 **Confidence:** the mechanism is read from the source and is unambiguous; the *live*
 consequence is evidence-consistent but **not proven**. See "What was NOT proven" below.
 

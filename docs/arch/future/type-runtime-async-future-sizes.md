@@ -1,5 +1,7 @@
 # Type-runtime provider / IPC async future sizes
 
+**Audit verdict (2026-07-22): NEGATIVE.** Provider hops are boxed 16-byte futures and the bounded transport structures do not reproduce the LSP handler-size failure class.
+
 ## Symptom
 
 Every LSP handler that talks to TypeScript ends in `verter_type_runtime`

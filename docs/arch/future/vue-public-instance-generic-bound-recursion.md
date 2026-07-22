@@ -7,6 +7,8 @@ the LSP path entirely, so resolver defects are not on the critical path).
 
 ---
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** This is an internal semantic/typeinfo recursion defect, explicitly outside the binding scope.
+
 ## READ THIS FIRST — what this is NOT
 
 This is **not** the cause of the language-server crash that was under investigation, and it

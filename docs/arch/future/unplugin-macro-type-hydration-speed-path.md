@@ -2,6 +2,8 @@
 
 > **Status:** DEFERRED — future plan (recorded 2026-07-20). Intent reference: commit `82ea84ce` (`perf(unplugin): drop-in fixture speed path and Vue runtime parity`, on `codex/release-clean-tsc-performance`) plus the newer uncommitted working-tree WIP on that same branch. Deferred (not landed on release/clean-review) because it carries a **perf-regression risk**, a **VueMacros plugin-shape conflict**, and is **WIP-dependent** — it must land as ONE coherent TDD package, not piecemeal.
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** Bundler/unplugin transform-time optimization is explicitly outside the VS Code TypeScript-engine mandate.
+
 ## Goal
 
 Cut unplugin transform-time cost by (1) narrowing macro-type hydration to **type-relevant edges** and (2) **stopping speculative value-import bulk upserts** on every transform.

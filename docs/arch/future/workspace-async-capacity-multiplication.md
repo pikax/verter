@@ -1,5 +1,7 @@
 # Workspace-wide capacity × future-size multiplication (Q3)
 
+**Audit verdict (2026-07-22): NEGATIVE.** No second workspace-wide capacity-times-large-future multiplier exists outside the already bounded LSP request inventory.
+
 ## Symptom
 
 The LSP pass found the only serious multiplier in `verter_lsp`:

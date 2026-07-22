@@ -1,5 +1,7 @@
 # MCP tool async state-machine sizes
 
+**Audit verdict (2026-07-22): OUT-OF-SCOPE.** MCP is outside the VS Code LSP and TypeScript-engine mandate; the record also finds no LSP-class retained-future issue.
+
 ## Symptom
 
 `verter_mcp` exposes dozens of `async fn` tools on `VerterMcpServer`. That
