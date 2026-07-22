@@ -835,3 +835,23 @@ describe("provider-restart evidence reaches the receipt", () => {
     expect(stamped?.isolation?.latencyGating).toBe(true);
   });
 });
+
+describe("restart advisory", () => {
+  it("names the restart count in the advisory text, and stays silent without one", () => {
+    const restarted = evaluateRouteAdvisories(
+      report("tsserver", SAMPLE, {
+        providerLifecycle: {
+          providerPids: [1, 2, 3],
+          restarts: 2,
+          measurementInvalidated: true,
+        },
+      }),
+      testConfig().thresholds,
+    );
+    expect(restarted.some((line) => line.includes("RESTARTED 2 time(s)"))).toBe(true);
+    expect(restarted.some((line) => line.includes("COLD latency"))).toBe(true);
+
+    const clean = evaluateRouteAdvisories(report("tsserver", SAMPLE), testConfig().thresholds);
+    expect(clean.some((line) => line.includes("RESTARTED"))).toBe(false);
+  });
+});

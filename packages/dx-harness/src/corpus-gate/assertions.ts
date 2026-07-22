@@ -251,6 +251,14 @@ export function evaluateRouteAdvisories(
       }
     }
   }
+  if (report.providerLifecycle !== undefined && report.providerLifecycle.restarts > 0) {
+    advisories.push(
+      `ADVISORY ${tag} the type provider RESTARTED ${report.providerLifecycle.restarts} time(s) ` +
+        `during this route (${report.providerLifecycle.providerPids.length} provider children) — ` +
+        `every latency recorded after a restart is a COLD latency, so these numbers do not ` +
+        `describe a settled server`,
+    );
+  }
   if (report.providerAttribution?.status === "unobservable") {
     advisories.push(
       `ADVISORY ${tag} provider attribution unobservable: ${report.providerAttribution.detail}`,
