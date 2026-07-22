@@ -112,6 +112,13 @@ interface Sample {
 
 interface ProviderFacts {
   readonly kind: string;
+  /**
+   * WHICH engine is serving and who owns it. The engine FAMILY alone cannot
+   * say it: a shared attach to the editor tsgo and a Verter-spawned tsgo both
+   * report `tsgo`, so a run that cannot name the topology cannot prove the
+   * SAME topology was selected on a repeat launch.
+   */
+  readonly topology: string;
   readonly reason: string;
 }
 
@@ -140,8 +147,10 @@ function readProviderFacts(): ProviderFacts {
     ),
   );
   const last = matches[matches.length - 1];
-  if (!last) return { kind: "unreported", reason: "" };
-  return { kind: last[1], reason: last[2] ?? "" };
+  const topologies = Array.from(readLog().matchAll(/Type provider topology:\s+(\S+)/g));
+  const topology = topologies[topologies.length - 1]?.[1] ?? "unreported";
+  if (!last) return { kind: "unreported", topology, reason: "" };
+  return { kind: last[1], topology, reason: last[2] ?? "" };
 }
 
 function percentile(values: readonly number[], p: number): number {
@@ -507,7 +516,7 @@ function typescriptAnswers(fileKind: FileKind, operation?: OperationName): numbe
 // ── The suite ──────────────────────────────────────────────────────────────
 
 suite("VS Code acceptance — TypeScript results in the editor", () => {
-  let provider: ProviderFacts = { kind: "unreported", reason: "" };
+  let provider: ProviderFacts = { kind: "unreported", topology: "unreported", reason: "" };
   let firstHover: { elapsedMs?: number; lastVerdict: AnswerVerdict; lastReason: string } = {
     lastVerdict: "empty",
     lastReason: "not run",
@@ -675,6 +684,19 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
         provider.reason.trim().length > 0,
         "provider status `none` was published with NO reason — a workspace that cannot get " +
           "an engine must say why, not fail silently",
+      );
+    }
+    // A connected engine must NAME ITSELF. Two topologies share the `tsgo`
+    // family, so a status that reports only the family cannot tell a user
+    // whether Verter attached to the engine their editor was already running or
+    // spawned a second one — which is exactly how a working tier was reported
+    // as broken.
+    if (provider.kind !== "none" && provider.kind !== "unreported") {
+      assert.notStrictEqual(
+        provider.topology,
+        "unreported",
+        `provider kind is \`${provider.kind}\` but no topology was published — the user cannot ` +
+          "tell which engine is serving",
       );
     }
   });

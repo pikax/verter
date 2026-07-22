@@ -112,3 +112,51 @@ describe("computeProviderRecommendationNotice", () => {
     expect(notice?.message).not.toContain("Note:");
   });
 });
+
+describe("computeStatusBarState — the status names the TOPOLOGY, not the family", () => {
+  /**
+   * Two topologies share the "tsgo" family: an attach to the tsgo the editor is
+   * ALREADY running, and a second engine Verter spawned. Reporting both as
+   * "Verter: tsgo" made a serving shared attach indistinguishable from a broken
+   * one, which is how a working tier was diagnosed as a routing bug.
+   */
+  it("distinguishes the editor-owned tsgo from a Verter-spawned one", () => {
+    const shared = computeStatusBarState({
+      kind: "tsgo",
+      topology: "shared-tsgo",
+      reason: "attested editor-owned Native Preview Program",
+    });
+    const managed = computeStatusBarState({
+      kind: "tsgo",
+      topology: "managed-tsgo",
+      reason: "managed TSGO resolved to /x/tsgo",
+    });
+
+    expect(shared.text).not.toBe(managed.text);
+    expect(shared.text).toMatch(/shared|editor/i);
+    expect(shared.warning).toBe(false);
+    expect(managed.warning).toBe(false);
+    expect(shared.tooltip).toContain("Native Preview");
+    expect(managed.tooltip).toContain("/x/tsgo");
+  });
+
+  it("names the workspace tsserver and the editor plugin distinctly", () => {
+    const workspace = computeStatusBarState({
+      kind: "tsserver",
+      topology: "workspace-tsserver",
+    });
+    const editor = computeStatusBarState({
+      kind: "editor-tsserver",
+      topology: "editor-tsserver",
+      reason: "attested editor tsserver process 4242",
+    });
+    expect(workspace.text).not.toBe(editor.text);
+    expect(editor.tooltip).toContain("4242");
+  });
+
+  it("falls back to the engine family when a server sends no topology", () => {
+    const state = computeStatusBarState({ kind: "tsgo" });
+    expect(state.text).toContain("tsgo");
+    expect(state.warning).toBe(false);
+  });
+});

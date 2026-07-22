@@ -84,8 +84,11 @@ fn editor_tsserver_topology_owns_no_semantic_child() {
 
     assert!(topology.0.is_none());
     assert_eq!(topology.1, TypeProviderKind::EditorTsserver);
+    // The status surface must NAME this topology, not just its engine family.
+    assert_eq!(topology.2, TypeProviderTopology::EditorTsserver);
+    assert_eq!(topology.2.wire(), "editor-tsserver");
     assert!(topology
-        .2
+        .3
         .as_deref()
         .is_some_and(|reason| reason.contains("4242")));
 }
@@ -376,5 +379,36 @@ fn genuine_tsgo_shapes_stay_plausible_candidates() {
             ),
             "{provenance:?} is operator- or policy-controlled and stays plausible"
         );
+    }
+}
+
+// ── DISCRIMINATING: the two tsgo TOPOLOGIES must be distinguishable from the
+//    status surface alone. Both report the `tsgo` FAMILY, so a status that
+//    carries only the family cannot tell a user whether Verter attached to the
+//    engine their editor was already running or spawned a second one — which is
+//    exactly how a serving shared tier was reported as a routing failure.
+#[test]
+fn the_two_tsgo_topologies_are_distinguishable_on_the_wire() {
+    assert_eq!(TypeProviderTopology::SharedTsgo.wire(), "shared-tsgo");
+    assert_eq!(TypeProviderTopology::ManagedTsgo.wire(), "managed-tsgo");
+    assert_ne!(
+        TypeProviderTopology::SharedTsgo.wire(),
+        TypeProviderTopology::ManagedTsgo.wire()
+    );
+    // Both are the same engine family, which is why the family cannot report it.
+    assert_eq!(
+        TypeProviderTopology::implied_by(TypeProviderKind::Tsgo),
+        TypeProviderTopology::ManagedTsgo,
+        "an editor-owned attach is never IMPLIED — it is chosen explicitly"
+    );
+    for topology in [
+        TypeProviderTopology::SharedTsgo,
+        TypeProviderTopology::ManagedTsgo,
+        TypeProviderTopology::WorkspaceTsserver,
+        TypeProviderTopology::EditorTsserver,
+        TypeProviderTopology::ExtensionHosted,
+        TypeProviderTopology::None,
+    ] {
+        assert!(!topology.wire().is_empty());
     }
 }

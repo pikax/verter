@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/**
+ /**
  * Native HTML/SVG intrinsic elements for element-interface hover / type tests.
  * Each open tag carries a unique data-intrinsic marker so anchors are unambiguous.
  */

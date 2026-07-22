@@ -985,6 +985,11 @@ export async function activateVueLanguageServer(
         log.info(
           `Type provider status: ${params.kind}${params.reason ? ` (${params.reason})` : ""}`,
         );
+        // A SEPARATE line: the existing one is parsed by the E2E attestation and
+        // the acceptance lane, and its shape is `kind (reason)`. The topology is
+        // the answer to "which engine is actually serving", so it is recorded
+        // where a log reader — or a bug report — cannot miss it.
+        log.info(`Type provider topology: ${params.topology ?? "unreported"}`);
         if (params.kind !== "none") {
           startupProbe?.markTypeProviderStarted(params.kind);
         }

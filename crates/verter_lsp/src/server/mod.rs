@@ -562,6 +562,8 @@ pub struct ServerCore {
     rename_provider_fence: Arc<tokio::sync::Mutex<()>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
     type_provider_kind: crate::TypeProviderKind,
+    /// WHICH engine is serving and who owns it — reporting only, never behaviour.
+    pub(crate) type_provider_topology: crate::TypeProviderTopology,
     /// TEST SEAM: when `true`, suppress the `did_open` imported-carrier-API
     /// prewarm so a cross-file-rename lane can exercise the path where only
     /// `handle_rename`'s own sync-before-query would sync a closed child's API
@@ -1185,6 +1187,7 @@ impl VerterLanguageServer {
             decl_overlay_owner,
             rename_provider_fence: Arc::new(tokio::sync::Mutex::new(())),
             type_provider_kind: config.type_provider_kind,
+            type_provider_topology: config.type_provider_topology,
             suppress_imported_carrier_prewarm: config.suppress_imported_carrier_prewarm,
             provider_only_completions: std::sync::atomic::AtomicBool::new(
                 e2e_provider_only_completions_enabled(),

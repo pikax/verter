@@ -372,6 +372,61 @@ impl std::fmt::Display for TypeProviderKind {
     }
 }
 
+/// WHICH engine is serving, and who owns it.
+///
+/// [`TypeProviderKind`] is the engine FAMILY and drives behaviour (sync policy,
+/// provider delivery, recommendations); two different topologies share one
+/// family. The status surface needs the finer answer, because "tsgo" alone
+/// cannot tell a user whether Verter attached to the engine their editor was
+/// already running or spawned a second one — and a working shared attach that
+/// presents as the generic label is indistinguishable from a broken one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TypeProviderTopology {
+    /// Attached to the tsgo the editor's own TypeScript integration is running.
+    SharedTsgo,
+    /// A tsgo process Verter spawned and owns.
+    ManagedTsgo,
+    /// A Node tsserver Verter spawned and owns, from the workspace TypeScript.
+    WorkspaceTsserver,
+    /// The editor's own tsserver, extended by Verter's contributed plugin.
+    EditorTsserver,
+    /// A TypeScript language service hosted inside the extension process.
+    ExtensionHosted,
+    /// No engine is serving.
+    #[default]
+    None,
+}
+
+impl TypeProviderTopology {
+    /// The topology IMPLIED by an engine family when no finer selection was made.
+    ///
+    /// The  family maps to the MANAGED topology: attaching to an
+    /// editor-owned engine is never implied, it is only ever chosen explicitly at
+    /// selection time. Used by harnesses that build a server from a family alone.
+    #[must_use]
+    pub fn implied_by(kind: TypeProviderKind) -> Self {
+        match kind {
+            TypeProviderKind::Tsgo => TypeProviderTopology::ManagedTsgo,
+            TypeProviderKind::Tsserver => TypeProviderTopology::WorkspaceTsserver,
+            TypeProviderKind::EditorTsserver => TypeProviderTopology::EditorTsserver,
+            TypeProviderKind::None => TypeProviderTopology::None,
+        }
+    }
+
+    /// The stable machine-readable token published on `$/verter/typeProviderStatus`.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            TypeProviderTopology::SharedTsgo => "shared-tsgo",
+            TypeProviderTopology::ManagedTsgo => "managed-tsgo",
+            TypeProviderTopology::WorkspaceTsserver => "workspace-tsserver",
+            TypeProviderTopology::EditorTsserver => "editor-tsserver",
+            TypeProviderTopology::ExtensionHosted => "extension-hosted",
+            TypeProviderTopology::None => "none",
+        }
+    }
+}
+
 /// Configuration for creating a verter LSP server instance.
 pub struct LspConfig {
     /// The verter host instance (always required, shared via Arc for MCP embedding).
@@ -383,6 +438,9 @@ pub struct LspConfig {
     pub project_sync_mode: ProjectSyncMode,
     /// Which type provider backend is active.
     pub type_provider_kind: TypeProviderKind,
+    /// WHICH engine is serving and who owns it — the status surface's answer.
+    /// Behaviour keys on `type_provider_kind`; only reporting keys on this.
+    pub type_provider_topology: TypeProviderTopology,
     /// Actual MCP HTTP port (already bound). `None` when MCP is disabled.
     /// The LSP sends a `$/verter/mcpReady` notification during `initialized()`.
     pub mcp_port: Option<u16>,
