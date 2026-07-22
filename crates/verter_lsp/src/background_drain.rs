@@ -169,7 +169,6 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
             &snapshot,
             provider_sync_states,
             &canonical_id,
-            is_tsgo,
             Some(&carrier_publish),
             carrier_coordinator,
         )
@@ -364,10 +363,6 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             continue;
         }
 
-        if is_tsgo {
-            configure_provider_paths_for_source(sync, &snapshot, import_id, true).await;
-        }
-
         let ide = if is_tsgo {
             host.get_ide(import_id, &profile)
         } else {
@@ -532,8 +527,6 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 continue;
             }
 
-            configure_provider_paths_for_source(sync, &snapshot, carrier_id, true).await;
-
             let ide = host.get_ide(carrier_id, &profile);
 
             // Route the owner-resolved carrier (or an owner lost mid-flight) through
@@ -565,7 +558,6 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 &snapshot,
                 provider_sync_states,
                 barrel_id,
-                true,
             )
             .await
             {
@@ -603,40 +595,6 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     synced_any
 }
 
-pub(super) fn owner_path_config_for_source(
-    snapshot: &super::PublishedResolverSnapshot,
-    canonical_id: &str,
-) -> Option<(String, serde_json::Value)> {
-    let owner = snapshot.resolver.nearest_config_for_path(canonical_id)?;
-    let tsconfig_path = owner.tsconfig_path.as_deref()?;
-    let ws =
-        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
-    crate::svelte_assets::owner_provider_path_config(&ws, tsconfig_path, &owner.root)
-}
-
-pub(crate) async fn configure_provider_paths_for_source(
-    sync: &ProjectSync,
-    snapshot: &super::PublishedResolverSnapshot,
-    canonical_id: &str,
-    background: bool,
-) {
-    let Some((base_url, paths)) = owner_path_config_for_source(snapshot, canonical_id) else {
-        return;
-    };
-
-    let result = if background {
-        sync.configure_paths_background(&base_url, paths).await
-    } else {
-        sync.configure_paths(&base_url, paths).await
-    };
-
-    if let Err(error) = result {
-        tracing::warn!(
-            "failed to configure provider paths for {canonical_id} (baseUrl={base_url}): {error}"
-        );
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_snapshot_provider_file(
     sync: Option<&ProjectSync>,
@@ -644,7 +602,6 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
-    is_tsgo: bool,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> SyncOutcome {
@@ -655,7 +612,6 @@ pub(super) async fn sync_pending_snapshot_provider_file(
             snapshot,
             provider_sync_states,
             canonical_id,
-            is_tsgo,
             carrier_publish,
             carrier_coordinator,
         )
@@ -671,7 +627,6 @@ pub(super) async fn sync_pending_snapshot_provider_file(
             snapshot,
             provider_sync_states,
             canonical_id,
-            is_tsgo,
         )
         .await
         {
@@ -689,7 +644,6 @@ pub(super) async fn sync_pending_carrier_provider_file(
     snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
-    is_tsgo: bool,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> SyncOutcome {
@@ -708,12 +662,6 @@ pub(super) async fn sync_pending_carrier_provider_file(
     let _ =
         block_in_place_if_available(|| documents.host.ensure_ide_compiled(canonical_id, &profile));
     let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
-    if is_tsgo {
-        if let Some(sync) = sync {
-            configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
-        }
-    }
-
     // Route through the SINGLE carrier-sync gateway: tsserver PUBLISHES the carrier
     // companions into the on-disk store the plugin reads (the configured-project
     // membership), tsgo opens the companions directly, and an owner loss RETRACTS the
@@ -1233,13 +1181,9 @@ pub(super) async fn sync_api_to_provider_background_task(
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
     canonical_id: String,
     is_jsx: bool,
-    is_tsgo: bool,
     carrier_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
     pending_snapshot_provider_sync: Arc<dashmap::DashSet<String>>,
 ) {
-    if is_tsgo {
-        configure_provider_paths_for_source(&sync, &snapshot, &canonical_id, true).await;
-    }
     // Route through the SINGLE carrier-sync gateway. This API-only background task
     // is the tsgo path (the tsserver coordinator route returns before spawning it),
     // so the gateway returns `DirectOpen` carrying the transition + a POST-open
@@ -1378,7 +1322,6 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
     snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
-    is_tsgo: bool,
 ) -> bool {
     let Some(source) = documents.host.get_source(canonical_id) else {
         return false;
@@ -1418,9 +1361,6 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
         return false;
     };
 
-    if is_tsgo {
-        configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
-    }
     let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
     close_stale_provider_paths(
         sync,

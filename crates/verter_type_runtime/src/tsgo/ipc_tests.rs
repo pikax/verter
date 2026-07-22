@@ -796,27 +796,6 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
     );
 }
 
-#[test]
-fn test_build_paths_config_payload_includes_paths_only() {
-    let payload = build_paths_config_payload(serde_json::json!({
-        "@/*": ["src/*"],
-        "@pkg/*": ["packages/*"],
-    }));
-
-    // baseUrl must NOT be present — TSGO 7.0 rejects it with TS5102
-    assert!(
-        payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["baseUrl"].is_null(),
-        "baseUrl must not be in the payload"
-    );
-    assert_eq!(
-        payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["paths"],
-        serde_json::json!({
-            "@/*": ["src/*"],
-            "@pkg/*": ["packages/*"],
-        })
-    );
-}
-
 async fn tsgo_bin_or_skip() -> Option<String> {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
@@ -4402,4 +4381,231 @@ async fn a_slow_but_progressing_child_does_not_trip_the_writer_stall_watchdog() 
         seen >= payload_len,
         "the child must actually have received the payload, got {seen} of {payload_len} bytes"
     );
+}
+
+// ===========================================================================
+// The document ledger: didOpen once, didChange on change, NOTHING on no-change,
+// didClose on retract.
+//
+// The provider's `versions` + `contents` maps are its record of what the child
+// engine was actually told. They are the ONLY authority for which notification a
+// publication owes the engine — a caller cannot select one. Re-sending bytes the
+// child already holds is not a no-op on the far side: every `didChange` carries a
+// higher version, and TypeScript answers a version bump by invalidating and
+// rebuilding program state for that document.
+// ===========================================================================
+
+/// A provider whose transport frames land in a channel the test drains, so an
+/// assertion can name EXACTLY which document notifications reached the wire.
+/// `child: None` — nothing to spawn, nothing for `Drop` to kill.
+fn ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<StdinMessage>) {
+    let (stdin_tx, stdin_rx) = mpsc::channel(capacity);
+    let provider = TsgoTypeProvider {
+        transport: Arc::new(test_transport(stdin_tx)),
+        child: None,
+        versions: Arc::new(Mutex::new(HashMap::new())),
+        contents: Arc::new(Mutex::new(HashMap::new())),
+        diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+        teardown_intent: Arc::new(AtomicBool::new(false)),
+    };
+    (provider, stdin_rx)
+}
+
+/// Every frame queued since the last drain, as `(method, params)`.
+fn drained_notifications(
+    stdin_rx: &mut mpsc::Receiver<StdinMessage>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut frames = Vec::new();
+    while let Ok(message) = stdin_rx.try_recv() {
+        let body = frame_body(&message);
+        frames.push((
+            body["method"].as_str().unwrap_or_default().to_string(),
+            body["params"].clone(),
+        ));
+    }
+    frames
+}
+
+/// Republishing bytes the child already holds must send NOTHING, and a genuine
+/// edit must still arrive as a `didChange` the engine can apply.
+///
+/// Both halves are load-bearing. Suppressing the redundant frame is the point;
+/// suppressing a real edit would silently serve stale types forever, which is why
+/// the edit assertions check the delivered TEXT and VERSION, not merely a count.
+#[tokio::test]
+async fn republishing_identical_bytes_sends_nothing_while_a_real_edit_still_syncs() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/App.vue.tsx";
+    let first = "const a: number = 1;\n";
+    let edited = "const a: number = 2;\n";
+
+    provider.update_file(path, first).await.unwrap();
+    let opened = drained_notifications(&mut stdin_rx);
+    assert_eq!(opened.len(), 1, "the first publication owes a didOpen");
+    assert_eq!(opened[0].0, "textDocument/didOpen");
+    assert_eq!(opened[0].1["textDocument"]["text"], first);
+
+    // The subject: the child already holds these exact bytes.
+    provider.update_file(path, first).await.unwrap();
+    provider.update_file(path, first).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "a byte-identical republication must not reach the engine: every didChange \
+         carries a higher version, and TypeScript rebuilds program state for it"
+    );
+
+    // The correctness half — a real edit MUST still arrive, with its bytes.
+    provider.update_file(path, edited).await.unwrap();
+    let changed = drained_notifications(&mut stdin_rx);
+    assert_eq!(
+        changed.len(),
+        1,
+        "a genuine edit owes exactly one didChange"
+    );
+    assert_eq!(changed[0].0, "textDocument/didChange");
+    assert_eq!(changed[0].1["contentChanges"][0]["text"], edited);
+    assert_eq!(
+        changed[0].1["textDocument"]["version"], 2,
+        "the suppressed republications must not have consumed versions"
+    );
+
+    // Reverting is a change from what the engine holds, not a repeat.
+    provider.update_file(path, first).await.unwrap();
+    let reverted = drained_notifications(&mut stdin_rx);
+    assert_eq!(
+        reverted.len(),
+        1,
+        "a revert is an edit the engine has not seen"
+    );
+    assert_eq!(reverted[0].0, "textDocument/didChange");
+    assert_eq!(reverted[0].1["contentChanges"][0]["text"], first);
+    assert_eq!(reverted[0].1["textDocument"]["version"], 3);
+}
+
+/// The ledger — not the caller — owns which notification a publication owes.
+///
+/// `didOpen` once, `didChange` on a real change, NOTHING on no-change, `didClose`
+/// on retract, and a fresh `didOpen` after that retract. A caller that could
+/// *select* `didOpen` re-announces a live document on every publication; the
+/// investigated session issued 1,333 of them for a single edited file.
+#[tokio::test]
+async fn the_ledger_opens_once_changes_on_edit_and_reopens_only_after_a_close() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/Widget.vue.tsx";
+
+    provider.open_file(path, "const a = 1;\n").await.unwrap();
+    let opened = drained_notifications(&mut stdin_rx);
+    assert_eq!(opened.len(), 1, "the first open owes exactly one didOpen");
+    assert_eq!(opened[0].0, "textDocument/didOpen");
+    assert_eq!(opened[0].1["textDocument"]["version"], 1);
+
+    // The child already holds this document with these exact bytes.
+    provider.open_file(path, "const a = 1;\n").await.unwrap();
+    provider.open_file(path, "const a = 1;\n").await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "re-announcing a live document with unchanged bytes must send nothing"
+    );
+
+    // An open verb carrying NEW bytes is still an edit the engine must see —
+    // as a didChange, because the document is already open on the far side.
+    provider.open_file(path, "const a = 2;\n").await.unwrap();
+    let changed = drained_notifications(&mut stdin_rx);
+    assert_eq!(changed.len(), 1, "changed bytes owe exactly one frame");
+    assert_eq!(
+        changed[0].0, "textDocument/didChange",
+        "a second didOpen for a live document is what floods the engine"
+    );
+    assert_eq!(changed[0].1["contentChanges"][0]["text"], "const a = 2;\n");
+    assert_eq!(changed[0].1["textDocument"]["version"], 2);
+
+    // Retract: the child is told, and the ledger stops claiming it holds the doc.
+    provider.close_file(path).await.unwrap();
+    let closed = drained_notifications(&mut stdin_rx);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, "textDocument/didClose");
+    assert!(!provider.versions.lock().await.contains_key(path));
+    assert!(!provider
+        .contents
+        .lock()
+        .await
+        .contains_key(&contents_key(path)));
+
+    // After a retract the SAME bytes are new to the child again: a suppression
+    // that outlived the close would strand the document with no content at all.
+    provider.open_file(path, "const a = 2;\n").await.unwrap();
+    let reopened = drained_notifications(&mut stdin_rx);
+    assert_eq!(reopened.len(), 1, "a closed document must reopen");
+    assert_eq!(reopened[0].0, "textDocument/didOpen");
+    assert_eq!(reopened[0].1["textDocument"]["version"], 1);
+    assert_eq!(reopened[0].1["textDocument"]["text"], "const a = 2;\n");
+}
+
+/// `load_file` caches content for local position conversion and deliberately
+/// tells the child NOTHING. A ledger that read `contents` as proof of delivery
+/// would then skip the `didOpen` for those exact bytes — and tsgo panics with
+/// "overlay not found" on a `didChange` for a document it never opened. The open
+/// set is `versions`; `contents` is only what the child was told, if anything.
+#[tokio::test]
+async fn content_cached_by_load_file_never_counts_as_delivered_to_the_child() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let path = "/w/Cached.vue.tsx";
+    let source = "export const cached = 1;\n";
+
+    provider.load_file(path, source).await.unwrap();
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "load_file must not notify the child"
+    );
+    assert!(
+        provider
+            .contents
+            .lock()
+            .await
+            .contains_key(&contents_key(path)),
+        "load_file must cache the content locally (else this test proves nothing)"
+    );
+
+    // The SAME bytes now get published. The child has never seen this document.
+    provider.update_file(path, source).await.unwrap();
+    let frames = drained_notifications(&mut stdin_rx);
+    assert_eq!(frames.len(), 1, "a never-opened document owes a didOpen");
+    assert_eq!(frames[0].0, "textDocument/didOpen");
+    assert_eq!(frames[0].1["textDocument"]["text"], source);
+}
+
+/// tsgo must send NO `workspace/didChangeConfiguration`.
+///
+/// Native tsgo treats that payload as user preferences: it cannot add compiler
+/// options to a configured project through it, and it advertises no such
+/// capability. Verter already works around that by adapting the provider buffer to
+/// owner-bound classic JSX namespaces (`ProjectSync::prepare_tsx_content`), so the
+/// notification bought nothing — while the LSP emitted one PER SYNCED FILE,
+/// 427-490 per session, each one a frame the engine parses and discards.
+#[tokio::test]
+async fn tsgo_sends_no_workspace_configuration_notification() {
+    let (provider, mut stdin_rx) = ledger_provider(64);
+    let paths = serde_json::json!({ "@/*": ["src/*"] });
+
+    provider.configure_paths("/w", paths.clone()).await.unwrap();
+    provider
+        .configure_paths_background("/w", paths)
+        .await
+        .unwrap();
+
+    assert!(
+        drained_notifications(&mut stdin_rx).is_empty(),
+        "tsgo cannot consume workspace/didChangeConfiguration; emitting it is pure \
+         per-file transport spam"
+    );
+
+    // Positive control: the transport IS observable, so the emptiness above is a
+    // real absence rather than a test that watches nothing.
+    provider
+        .open_file("/w/a.tsx", "const x = 1;\n")
+        .await
+        .unwrap();
+    let frames = drained_notifications(&mut stdin_rx);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, "textDocument/didOpen");
 }
