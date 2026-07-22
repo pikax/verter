@@ -33,6 +33,7 @@ fn build_test_server(host: Arc<VerterHost>) -> LspService<VerterLanguageServer> 
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
+                type_provider_topology: verter_lsp::TypeProviderTopology::None,
                 project_sync_mode: ProjectSyncMode::FullProject,
                 type_provider_kind: TypeProviderKind::Tsserver,
                 mcp_port: None,
