@@ -1636,6 +1636,30 @@ async fn make_definition_test_server_with_kind(
     Arc<MockTypeProvider>,
     String,
 ) {
+    make_definition_test_server_with_kind_and_deadlines(
+        files,
+        kind,
+        verter_session::LspMethodBudgets::interactive_defaults(),
+    )
+    .await
+}
+
+/// [`make_definition_test_server_with_kind`] with custom production request
+/// deadlines, so a readiness/cancellation test can use a SHORT definition
+/// deadline instead of waiting out the shipped 2500 ms budget. Production
+/// deadline values themselves are pinned by the deadline tests below — this
+/// harness only exercises behaviour AT a deadline, never re-tunes one.
+async fn make_definition_test_server_with_kind_and_deadlines(
+    files: &[(&str, &str, &str)],
+    kind: crate::TypeProviderKind,
+    request_deadlines: verter_session::LspMethodBudgets,
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1656,7 +1680,9 @@ async fn make_definition_test_server_with_kind(
     let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
-    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let mut host_config = HostConfig::default();
+    host_config.lsp_method_timeouts.request_deadlines = request_deadlines;
+    let host = Arc::new(VerterHost::new(host_config, vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
     let (service, socket) = tower_lsp_server::LspService::new(move |client| {
@@ -3159,7 +3185,11 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
     );
 
     let position = find_document_position(server, &app_uri, "{{ vueTsTitle }}", 3);
-    server.ensure_provider_synced(&app_uri).await;
+    // Lifecycle surface sync + settled background dependency publication: the
+    // rename handler only CAPTURES readiness (it never starts the pass), so the
+    // test provides both receipts the way production does.
+    server.ensure_current_file_synced(&app_uri).await;
+    server.publish_import_dependencies_settled(&app_uri).await;
     let ctx = synced_type_provider_context(server, &app_uri);
     let usage_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
@@ -7251,11 +7281,15 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
     let server = service.inner();
     let position = find_document_position(server, &app_uri, ":my-prop=", 1);
 
-    // Production sync: the child's `{carrier}.verter.ts` API surface must be
-    // live for the synthesis snapshot capture. Then seed the provider's OWN
-    // rename answer for the parent usage leg in the parent IDE surface (what
-    // tsserver returns; tsgo omits even this and the gate fails closed).
-    server.ensure_provider_synced(&app_uri).await;
+    // Production-shaped setup: the child's `{carrier}.verter.ts` API surface
+    // must be live for the synthesis snapshot capture — delivered by the
+    // BACKGROUND dependency publication (settled here), which also mints the
+    // DependencyReady receipt the rename handler captures. Then seed the
+    // provider's OWN rename answer for the parent usage leg in the parent IDE
+    // surface (what tsserver returns; tsgo omits even this and the gate fails
+    // closed).
+    server.ensure_current_file_synced(&app_uri).await;
+    server.publish_import_dependencies_settled(&app_uri).await;
     let ctx = synced_type_provider_context(server, &app_uri);
     let usage_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
@@ -7347,7 +7381,10 @@ async fn contract_rename_provider_case_folded_carrier_path_reanchors_to_authored
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "{{ vueTsTitle }}", 3);
 
-    server.ensure_provider_synced(&app_uri).await;
+    // Lifecycle surface sync + settled background dependency publication (the
+    // rename handler only captures readiness — see the unique-carrier test).
+    server.ensure_current_file_synced(&app_uri).await;
+    server.publish_import_dependencies_settled(&app_uri).await;
     let ctx = synced_type_provider_context(server, &app_uri);
     let usage_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
@@ -14068,7 +14105,9 @@ async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
     let server = service.inner();
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
 
-    server.ensure_barrel_imports_synced(&usage_uri).await;
+    server
+        .ensure_barrel_imports_synced_for_test(&usage_uri)
+        .await;
 
     let calls = provider.file_sync_calls();
     let opened: Vec<String> = calls
@@ -14118,7 +14157,9 @@ async fn barrel_eager_sync_terminates_on_reexport_cycle_and_still_syncs_terminal
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
 
     // If the BFS did not bound the cycle this call would not return.
-    server.ensure_barrel_imports_synced(&usage_uri).await;
+    server
+        .ensure_barrel_imports_synced_for_test(&usage_uri)
+        .await;
 
     let calls = provider.file_sync_calls();
     let opened: Vec<String> = calls
@@ -14166,7 +14207,9 @@ async fn barrel_eager_sync_follows_aliased_reexport_hops() {
     let server = service.inner();
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
 
-    server.ensure_barrel_imports_synced(&usage_uri).await;
+    server
+        .ensure_barrel_imports_synced_for_test(&usage_uri)
+        .await;
 
     let opened: Vec<String> = provider
         .file_sync_calls()
@@ -26508,24 +26551,25 @@ async fn get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
 }
 
 // ===========================================================================
-// Definition-latency freshness gate.
+// Definition-latency freshness gate (DependencyReady receipt).
 //
 // Every go-to-definition re-ran the imported-carrier + barrel preamble and
 // re-pushed byte-identical carrier companions (`.vue.tsx` + `.vue.ts`) as
 // full-text didChange, bumping the LSP version and invalidating the engine's
-// whole program → a project-scale re-check on the next query. The per-document
-// import-set freshness memo skips the whole preamble while nothing that could
-// change the resolved import set has advanced, so the steady-state definition
+// whole program → a project-scale re-check on the next query. Delivery is now
+// BACKGROUND-owned: a request's readiness miss enqueues one publication, the
+// publication mints the DependencyReady receipt, and every later request on an
+// unchanged document CAPTURES the receipt — so the steady-state definition
 // path emits ZERO redundant sync. `ProjectSync::synced_tsx_contents` is a
 // record-only evidence ledger of the bytes the engine last received — it does no
-// compare-and-skip of its own, so the memo is what makes the steady state quiet.
+// compare-and-skip of its own, so the receipt is what makes the steady state quiet.
 // ===========================================================================
 
-/// The SECOND identical go-to-definition on an unchanged document must perform
-/// ZERO carrier-companion `update_file` / `open_file` / `load_file` — the
-/// freshness memo skips the preamble that would re-push them. Fails pre-fix (it
-/// re-synced every imported carrier on every request). Uses Tsgo so the DirectOpen
-/// arm actually delivers companion content (tsserver suppresses it entirely).
+/// After the background publication settles (DependencyReady minted), every
+/// identical go-to-definition performs ZERO carrier-companion `update_file` /
+/// `open_file` / `load_file` — the receipt capture skips the delivery pass that
+/// would re-push them. Uses Tsgo so the DirectOpen arm actually delivers
+/// companion content (tsserver suppresses it entirely).
 #[tokio::test]
 async fn definition_second_identical_request_performs_zero_carrier_resync() {
     let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
@@ -26544,7 +26588,8 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
 
-    // Warm request: opens + syncs the carrier companions into the provider.
+    // Cold request: answers natively and ENQUEUES the background publication
+    // that opens + syncs the carrier companions into the provider.
     let first = server
         .goto_definition(goto_definition_params(&app_uri, position))
         .await
@@ -26552,10 +26597,18 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
         .expect("component event resolves on the first request");
     assert!(
         !definition_locations(first).is_empty(),
-        "the warm request must resolve to the child defineEmits"
+        "the cold request must resolve to the child defineEmits"
+    );
+    assert!(
+        wait_until(std::time::Duration::from_secs(5), || {
+            server.import_sync.recorded_len() > 0
+        })
+        .await,
+        "the readiness miss must enqueue a background publication that mints \
+         DependencyReady"
     );
 
-    // Count carrier-sync verbs performed by the SECOND identical request only.
+    // Count carrier-sync verbs performed AFTER the receipt is committed.
     let is_sync_verb = |c: &MockCall| {
         matches!(
             c,
@@ -26563,13 +26616,13 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
         )
     };
     let before = provider.calls().iter().filter(|c| is_sync_verb(c)).count();
-    // Positive control: the warm request DID push companions. Without this, a
-    // fixture that never syncs companions at all would satisfy the zero-delta
-    // assertion below and the memo would be untested.
+    // Positive control: the settled publication DID push companions. Without
+    // this, a fixture that never syncs companions at all would satisfy the
+    // zero-delta assertion below and the receipt would be untested.
     assert!(
         before > 0,
-        "the warm request must actually have pushed carrier companions, else the \
-         zero-resync assertion below is vacuous"
+        "the background publication must actually have pushed carrier companions, \
+         else the zero-resync assertion below is vacuous"
     );
 
     let second = server
@@ -26592,7 +26645,7 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
     assert_eq!(
         after - before,
         0,
-        "the second identical definition must re-push ZERO carrier companions \
+        "a definition after DependencyReady must re-push ZERO carrier companions \
          (byte-identical didChange invalidates the engine program); got: {new_syncs:?}"
     );
 
@@ -26600,14 +26653,15 @@ async fn definition_second_identical_request_performs_zero_carrier_resync() {
     drop(service);
 }
 
-/// The memo's INVALIDATION direction: editing an IMPORTED file's CONTENTS, with
-/// its import set unchanged, must make the next definition re-push that carrier
-/// WITH THE NEW BYTES.
+/// The receipt's INVALIDATION direction: editing an IMPORTED file's CONTENTS,
+/// with its import set unchanged, must make the publication enqueued by the
+/// next definition re-push that carrier WITH THE NEW BYTES.
 ///
-/// This is the half a zero-resync assertion cannot cover. The memo key rides the
-/// workspace `content_generation`, which any content edit bumps — including an
-/// edit to a dependency the requesting document merely imports. Without that, a
-/// warm skip would serve the engine stale companion bytes indefinitely.
+/// This is the half a zero-resync assertion cannot cover. The receipt key rides
+/// the workspace `content_generation`, which any content edit bumps — including
+/// an edit to a dependency the requesting document merely imports. Without
+/// that, a warm capture would serve the engine stale companion bytes
+/// indefinitely.
 #[tokio::test]
 async fn editing_an_imported_carrier_re_pushes_it_with_the_new_bytes() {
     let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
@@ -26627,10 +26681,18 @@ async fn editing_an_imported_carrier_re_pushes_it_with_the_new_bytes() {
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
     let child_id = format!("{workspace_id}/src/MyComp.vue");
 
-    // Warm the memo: after this the steady state pushes nothing.
+    // Mint the receipt: the cold definition enqueues the background
+    // publication; after it settles the steady state pushes nothing.
     let _ = server
         .goto_definition(goto_definition_params(&app_uri, position))
         .await;
+    assert!(
+        wait_until(std::time::Duration::from_secs(5), || {
+            server.import_sync.recorded_len() > 0
+        })
+        .await,
+        "the cold definition must enqueue a publication that mints DependencyReady"
+    );
 
     let child_pushes = |calls: Vec<MockCall>| -> Vec<String> {
         calls
@@ -26648,8 +26710,8 @@ async fn editing_an_imported_carrier_re_pushes_it_with_the_new_bytes() {
     let warm_pushes = child_pushes(provider.calls());
     assert!(
         !warm_pushes.is_empty(),
-        "the warm request must actually have pushed the imported child's companions, \
-         else this test proves nothing"
+        "the settled publication must actually have pushed the imported child's \
+         companions, else this test proves nothing"
     );
     let already_pushed = warm_pushes.len();
 
@@ -26668,22 +26730,29 @@ async fn editing_an_imported_carrier_re_pushes_it_with_the_new_bytes() {
         })
         .expect("upsert the edited imported child");
 
+    // The content-generation bump invalidated the receipt by key: the next
+    // definition misses, enqueues a fresh publication, and THAT re-pushes the
+    // child with the new bytes.
     let _ = server
         .goto_definition(goto_definition_params(&app_uri, position))
         .await;
 
+    assert!(
+        wait_until(std::time::Duration::from_secs(5), || {
+            child_pushes(provider.calls()).len() > already_pushed
+        })
+        .await,
+        "an edited imported carrier must be re-pushed by the publication the next \
+         definition enqueues — the receipt must not warm-skip a content change \
+         behind the import"
+    );
     let after_edit: Vec<String> = child_pushes(provider.calls())
         .into_iter()
         .skip(already_pushed)
         .collect();
     assert!(
-        !after_edit.is_empty(),
-        "an edited imported carrier must be re-pushed on the next definition — the memo \
-         must not warm-skip a content change behind the import"
-    );
-    assert!(
         after_edit.iter().any(|content| content.contains("number")),
-        "the re-push must carry the NEW bytes, not the memoized ones; got: {after_edit:?}"
+        "the re-push must carry the NEW bytes, not the receipted ones; got: {after_edit:?}"
     );
 
     drain_handle.abort();
@@ -26715,13 +26784,17 @@ async fn swapping_the_vfs_workspace_evicts_the_import_set_memo() {
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
 
-    // Warm the memo through a real request.
+    // Mint a receipt through a real request's enqueued background publication.
     let _ = server
         .goto_definition(goto_definition_params(&app_uri, position))
         .await;
     assert!(
-        server.import_sync.recorded_len() > 0,
-        "the request must actually have recorded a memo entry, else this test proves nothing"
+        wait_until(std::time::Duration::from_secs(5), || {
+            server.import_sync.recorded_len() > 0
+        })
+        .await,
+        "the enqueued publication must actually have recorded a receipt, else this \
+         test proves nothing"
     );
 
     // Replace the workspace exactly as `initialize` does.
@@ -26745,15 +26818,17 @@ async fn swapping_the_vfs_workspace_evicts_the_import_set_memo() {
     drop(service);
 }
 
-/// A carrier sync that FAILED inside the import-set preamble must leave the memo
-/// COLD, so the next request RETRIES that carrier.
+/// A carrier sync that FAILED inside the background publication must leave
+/// DependencyReady COLD (not Ready), so the next request's readiness miss
+/// enqueues a fresh publication that RETRIES that carrier.
 ///
-/// Publishing the memo over a failed leg warm-skips the entire preamble until an
-/// unrelated edit bumps the generation: the failure arms only queue
+/// Minting the receipt over a failed leg would warm-capture past the failure
+/// until an unrelated edit bumps the generation: the failure arms only queue
 /// `pending_snapshot_provider_sync`, whose sole drain is background init, so a
-/// transient provider error strands the carrier for the rest of the session.
+/// transient provider error would strand the carrier for the rest of the
+/// session.
 #[tokio::test]
-async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
+async fn a_failed_carrier_sync_leaves_dependency_readiness_cold_and_retries() {
     let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
     let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
     let (_temp, service, drain_handle, provider, workspace_id) =
@@ -26767,7 +26842,7 @@ async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
         .await;
 
     // Fail ONLY the imported child's IDE companion; every other sync succeeds, so
-    // the preamble reaches its publish point with exactly one failed leg.
+    // the publication reaches its mint point with exactly one failed leg.
     let child_id = format!("{workspace_id}/src/MyComp.vue");
     let child_ide_path = verter_workspace::carrier_ide_provider_path(&child_id, false);
     provider.set_fail_sync_path(&child_ide_path);
@@ -26775,10 +26850,6 @@ async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
-
-    let _ = server
-        .goto_definition(goto_definition_params(&app_uri, position))
-        .await;
 
     let child_sync_attempts = |calls: Vec<MockCall>| {
         calls
@@ -26792,24 +26863,400 @@ async fn a_failed_carrier_sync_in_the_preamble_leaves_the_import_memo_cold() {
             .count()
     };
 
-    // Reach assertion: the first pass must ACTUALLY attempt the failing sync,
-    // otherwise the retry assertion below would be vacuous.
-    let before = child_sync_attempts(provider.calls());
-    assert!(
-        before > 0,
-        "the first request must actually attempt the child's IDE companion sync \
-         ({child_ide_path}), else this test proves nothing"
-    );
-
     let _ = server
         .goto_definition(goto_definition_params(&app_uri, position))
         .await;
 
-    let after = child_sync_attempts(provider.calls());
+    // Reach assertion: the enqueued publication must ACTUALLY attempt the
+    // failing sync, otherwise the retry assertion below would be vacuous.
     assert!(
-        after > before,
-        "a FAILED carrier sync must leave the import memo cold so the next request \
-         retries it; attempts stayed at {before} (after: {after})"
+        wait_until(std::time::Duration::from_secs(5), || {
+            child_sync_attempts(provider.calls()) > 0
+        })
+        .await,
+        "the first request's enqueued publication must actually attempt the child's \
+         IDE companion sync ({child_ide_path}), else this test proves nothing"
+    );
+    let before = child_sync_attempts(provider.calls());
+    assert_eq!(
+        server.import_sync.recorded_len(),
+        0,
+        "a publication with a FAILED leg must not mint DependencyReady"
+    );
+
+    // The next request misses (no receipt), enqueues a fresh publication, and
+    // that publication RETRIES the failed carrier.
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    assert!(
+        wait_until(std::time::Duration::from_secs(5), || {
+            child_sync_attempts(provider.calls()) > before
+        })
+        .await,
+        "a FAILED carrier sync must leave DependencyReady cold so the next request's \
+         publication retries it; attempts stayed at {before}"
+    );
+    assert_eq!(
+        server.import_sync.recorded_len(),
+        0,
+        "the retrying publication (still failing) must still not mint DependencyReady"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// ===========================================================================
+// Dependency readiness (SurfaceReady / DependencyReady) handler protocol.
+//
+// Interactive handlers never START an import-set or barrel sync: publication is
+// background-owned (open / edit / readiness-miss enqueue), mints the
+// DependencyReady receipt (the import-set freshness memo) only from background
+// completion, and handlers may only CAPTURE a committed receipt, JOIN an
+// in-flight publication for the current revision, or answer without the
+// provider. The cancel loop this kills: a request-started preamble whose p90
+// sat on the definition deadline was cancelled, a cancelled pass never
+// published its freshness memo, so the next identical request repeated the
+// identical storm.
+// ===========================================================================
+
+const READINESS_CHILD_SOURCE: &str = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+const READINESS_PARENT_SOURCE: &str = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+
+/// Poll `condition` every 25 ms until it holds or `timeout` elapses. Returns
+/// whether the condition held. Real-time polling (never `tokio::time::pause`)
+/// because the condition is advanced by detached background tasks.
+async fn wait_until(timeout: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if condition() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn import_sync_verb_count(provider: &MockTypeProvider) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                MockCall::OpenFile { .. } | MockCall::UpdateFile { .. } | MockCall::LoadFile { .. }
+            )
+        })
+        .count()
+}
+
+/// A definition CANCELLED by its request deadline must not prevent
+/// DependencyReady from being minted once the import-set work completes.
+///
+/// This is the cancel-loop root: the request-started preamble ran INSIDE the
+/// deadline-cancelled handler body, so the deadline dropped the pass mid-flight
+/// and the freshness memo (whose publication requires a COMPLETE pass) was
+/// never recorded — the next identical request repeated the identical storm.
+/// Background-owned publication survives the request: the receipt must appear
+/// after the blocked child sync is released, with NO further request.
+#[tokio::test]
+async fn cancelled_definition_does_not_prevent_dependency_ready_publication() {
+    let mut deadlines = verter_session::LspMethodBudgets::interactive_defaults();
+    deadlines.goto_definition = std::time::Duration::from_millis(200);
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind_and_deadlines(
+            &[
+                ("src/MyComp.vue", "vue", READINESS_CHILD_SOURCE),
+                ("src/App.vue", "vue", READINESS_PARENT_SOURCE),
+            ],
+            crate::TypeProviderKind::Tsgo,
+            deadlines,
+        )
+        .await;
+
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+    let child_ide_path = verter_workspace::carrier_ide_provider_path(&child_id, false);
+
+    // Park the import-set pass INSIDE the child companion open, past the
+    // definition deadline.
+    let (arrived, release) = provider.block_open_file(&child_ide_path);
+
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+    let _ = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+
+    // The import-set pass must actually have REACHED the blocked child open
+    // (otherwise the release below proves nothing).
+    tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
+        .await
+        .expect("the import-set pass must reach the blocked child companion open");
+    assert_eq!(
+        server.import_sync.recorded_len(),
+        0,
+        "no DependencyReady receipt may exist while the child companion sync is blocked"
+    );
+
+    // Release the blocked child open. The definition request is long gone
+    // (cancelled or answered); ONLY background-owned publication can finish the
+    // pass and mint the receipt now.
+    release.notify_one();
+
+    let minted = wait_until(std::time::Duration::from_secs(5), || {
+        server.import_sync.recorded_len() > 0
+    })
+    .await;
+    assert!(
+        minted,
+        "DependencyReady must be minted by background completion after the blocked \
+         child sync is released — a cancelled definition must not kill the pass \
+         (the cancel-loop root: no receipt, so the next request repeats the storm)"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// With the dependency receipt MISSING and the publication lane busy, the
+/// definition handler must NOT start (or inline-join) the import-set pass: it
+/// answers within its deadline from what it has, pushes ZERO import companions
+/// from its own turn, and the miss heals through a BACKGROUND enqueue.
+#[tokio::test]
+async fn definition_returns_fast_without_starting_import_set_when_missing() {
+    let mut deadlines = verter_session::LspMethodBudgets::interactive_defaults();
+    deadlines.goto_definition = std::time::Duration::from_millis(500);
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind_and_deadlines(
+            &[
+                ("src/MyComp.vue", "vue", READINESS_CHILD_SOURCE),
+                ("src/App.vue", "vue", READINESS_PARENT_SOURCE),
+            ],
+            crate::TypeProviderKind::Tsgo,
+            deadlines,
+        )
+        .await;
+
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let app_id = format!("{workspace_id}/src/App.vue");
+
+    // SurfaceReady: commit the current file's IDE surface through the lifecycle
+    // path (did_open's sync), so only the DEPENDENCY receipt is missing.
+    server.ensure_current_file_synced(&app_uri).await;
+
+    // Hold the per-document publication lane so any (background) publication
+    // attempt parks instead of completing — the handler must not wait for it.
+    let lane = server.import_sync.lock_for(&app_id);
+    let lane_guard = lane.lock().await;
+
+    let verbs_before = import_sync_verb_count(&provider);
+    let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+    let started = std::time::Instant::now();
+    let result = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+    let wall = started.elapsed();
+
+    assert!(
+        result.is_ok(),
+        "a MISSING dependency receipt must yield an answer (native or empty), never \
+         a deadline cancellation from waiting on import-set work; got {result:?} \
+         after {wall:?}"
+    );
+    assert!(
+        wall < std::time::Duration::from_millis(350),
+        "the handler must answer well inside its deadline instead of blocking on \
+         the import-set lane; took {wall:?}"
+    );
+    assert_eq!(
+        import_sync_verb_count(&provider) - verbs_before,
+        0,
+        "the handler turn must push ZERO import companions when the receipt is missing"
+    );
+
+    // The miss must have ENQUEUED background publication: releasing the lane
+    // lets it run to completion and mint the receipt with no further request.
+    drop(lane_guard);
+    let minted = wait_until(std::time::Duration::from_secs(5), || {
+        server.import_sync.recorded_len() > 0
+    })
+    .await;
+    assert!(
+        minted,
+        "a readiness miss must enqueue BACKGROUND publication that mints \
+         DependencyReady once the lane frees"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// A definition with the import closure missing must not inline the walk (its
+/// wall stays far below the blocked-sync hold), and a definition issued while
+/// publication is IN FLIGHT joins that one publication instead of starting a
+/// second walk: exactly ONE child companion open in total.
+#[tokio::test]
+async fn definition_joins_in_flight_dependency_publication_instead_of_walking() {
+    // Parent -> barrel (`./components` re-export hop) -> child carrier: the walk
+    // being joined includes the barrel BFS leg, not only direct imports.
+    let child = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
+    let barrel = "export { default as MyComp } from './MyComp.vue'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { MyComp } from './components'\n</script>\n<template><MyComp></MyComp></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/components/MyComp.vue", "vue", child),
+                ("src/components/index.ts", "typescript", barrel),
+                ("src/Usage.vue", "vue", usage),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let server = service.inner();
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+    let child_id = format!("{workspace_id}/src/components/MyComp.vue");
+    let child_ide_path = verter_workspace::carrier_ide_provider_path(&child_id, false);
+    let (arrived, release) = provider.block_open_file(&child_ide_path);
+
+    let position = find_document_position(server, &usage_uri, "<MyComp>", 1);
+
+    // First definition: receipt missing, no publication in flight. It must NOT
+    // inline the import walk — the blocked child open holds until released
+    // below, so an inlined walk would park the handler on it.
+    let started = std::time::Instant::now();
+    let first = server
+        .goto_definition(goto_definition_params(&usage_uri, position))
+        .await;
+    let first_wall = started.elapsed();
+    assert!(
+        first.is_ok(),
+        "definition with a blocked import closure must still answer; got {first:?}"
+    );
+    assert!(
+        first_wall < std::time::Duration::from_millis(400),
+        "definition must not inline the import walk (blocked child sync would park \
+         it); took {first_wall:?}"
+    );
+
+    // The BACKGROUND publication must reach the blocked child open.
+    tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
+        .await
+        .expect("background publication must reach the blocked child companion open");
+
+    // Second definition while publication is IN FLIGHT: it joins that
+    // publication (released mid-join) instead of starting a second walk.
+    let release_task = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release.notify_one();
+    };
+    let (second, ()) = tokio::join!(
+        server.goto_definition(goto_definition_params(&usage_uri, position)),
+        release_task
+    );
+    assert!(
+        second.is_ok(),
+        "a definition joining in-flight publication must answer once it settles; \
+         got {second:?}"
+    );
+
+    let minted = wait_until(std::time::Duration::from_secs(5), || {
+        server.import_sync.recorded_len() > 0
+    })
+    .await;
+    assert!(
+        minted,
+        "publication must mint DependencyReady after release"
+    );
+
+    // Exactly ONE walk delivered the child companion: joiners never start a
+    // second BFS (`OpenFile` is the first-open verb; a second walk would
+    // re-open or re-push the same companion).
+    let child_opens = provider
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::OpenFile { path, .. } if path == &child_ide_path))
+        .count();
+    assert_eq!(
+        child_opens, 1,
+        "exactly one import-set walk may deliver the child companion; a joiner \
+         must never start a second walk"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// Completion never awaits imported-carrier sync: with the child companion sync
+/// blocked, completion answers immediately (capture-only readiness) and the
+/// import set is delivered by BACKGROUND publication after release.
+#[tokio::test]
+async fn completion_returns_fast_without_awaiting_import_carrier_sync() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", READINESS_CHILD_SOURCE),
+                ("src/App.vue", "vue", READINESS_PARENT_SOURCE),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+    let child_ide_path = verter_workspace::carrier_ide_provider_path(&child_id, false);
+
+    // SurfaceReady for the current file (lifecycle path), so completion's
+    // provider context capture succeeds and only the dependency leg differs.
+    server.ensure_current_file_synced(&app_uri).await;
+
+    let (_arrived, release) = provider.block_open_file(&child_ide_path);
+
+    let position = find_document_position(server, &app_uri, "handleCustom(payload", 1);
+    let started = std::time::Instant::now();
+    // Bound the FAIL direction: a DETACHED task releases the blocked child open
+    // 1200 ms in, so a completion that (wrongly) awaits the import-carrier sync
+    // resumes then and its wall shows the wait; a capture-only completion
+    // returns immediately, long before the release.
+    let release_handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        release.notify_one();
+    });
+    let completion = server
+        .completion(completion_params(&app_uri, position, None))
+        .await;
+    let wall = started.elapsed();
+    let _ = release_handle.await;
+
+    assert!(
+        completion.is_ok(),
+        "completion must answer with the child companion sync blocked; got {completion:?}"
+    );
+    assert!(
+        wall < std::time::Duration::from_millis(600),
+        "completion must not await imported-carrier sync (blocked child open held \
+         1200 ms); took {wall:?}"
+    );
+
+    // The dependency delivery still happens — in the background: the child
+    // companion must eventually be pushed without any further request.
+    let delivered = wait_until(std::time::Duration::from_secs(5), || {
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::OpenFile { path, .. } if path == &child_ide_path))
+    })
+    .await;
+    assert!(
+        delivered,
+        "the imported child companion must be delivered by BACKGROUND publication"
     );
 
     drain_handle.abort();

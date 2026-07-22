@@ -633,6 +633,16 @@ pub(super) async fn handle_did_open(
         server
             .sync_coordinator
             .signal(canonical_id.clone(), uri.as_str().to_string());
+        // Background import-dependency publication (imported carrier APIs +
+        // the barrel re-export walk) for the freshly opened document. This —
+        // not any interactive request — is what mints the DependencyReady
+        // receipt navigation handlers capture; the per-import prewarm above
+        // stays as the latency head start, while this pass adds the barrel
+        // closure and the receipt.
+        server.spawn_import_dependency_publication(
+            uri,
+            super::import_publication::PublicationUrgency::Immediate,
+        );
     }
 
     if startup_policy.publish_diagnostics {
@@ -747,6 +757,15 @@ pub(super) async fn handle_did_change(
             server
                 .sync_coordinator
                 .signal(canonical_id.clone(), uri.as_str().to_string());
+            // Re-publish the import-dependency closure after edit silence: the
+            // content-generation bump already invalidated the DependencyReady
+            // receipt (its key embeds the generation), and this debounced
+            // background pass re-delivers and re-mints so the post-edit
+            // navigation request finds a committed receipt instead of a miss.
+            server.spawn_import_dependency_publication(
+                &uri,
+                super::import_publication::PublicationUrgency::EditDebounced,
+            );
 
             // Eager carrier refresh — make the freshly-edited carrier content
             // visible to the type provider immediately, so the next interactive

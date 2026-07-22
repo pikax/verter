@@ -70,6 +70,12 @@ pub(super) struct BackgroundInitArgs {
     /// Per-document import-set freshness memo, shared with the server so a
     /// workspace installed here evicts entries keyed on the previous one.
     pub(super) import_sync: Arc<super::ImportSyncMemo>,
+    /// Cheap-`Clone` server handle: once the snapshot publishes and the
+    /// pending-sync drain settles, init enqueues a background
+    /// import-dependency publication for every OPEN document so
+    /// DependencyReady receipts mint under the fresh snapshot generation (the
+    /// snapshot bump invalidated any earlier ones by key).
+    pub(super) server: super::VerterLanguageServer,
 }
 
 struct PublishedWorkspaceBuild {
@@ -182,6 +188,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         decl_overlay_owner,
         resync_coordinator,
         import_sync,
+        server,
     } = args;
 
     let host = documents.host_arc();
@@ -403,6 +410,22 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
     if init_generation.load(std::sync::atomic::Ordering::Acquire) != my_gen {
         tracing::info!("init gen={my_gen} superseded before scanner, discarding");
         return Ok(());
+    }
+
+    // 6a. The fresh snapshot generation invalidated every DependencyReady
+    // receipt by key (and the workspace install above may have evicted the
+    // store outright): enqueue a background import-dependency publication for
+    // every OPEN document so receipts re-mint under the new generation without
+    // waiting for an interactive readiness miss. Detached + singleflighted per
+    // document; a superseded init's enqueue is harmless (the pass re-reads the
+    // live key).
+    for uri_str in &documents.open_uris() {
+        if let Ok(uri) = uri_str.parse::<Uri>() {
+            server.spawn_import_dependency_publication(
+                &uri,
+                super::import_publication::PublicationUrgency::Immediate,
+            );
+        }
     }
 
     // Get the published snapshot for snapshot-driven scanner classification.
