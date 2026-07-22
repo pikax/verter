@@ -50,6 +50,9 @@ pub mod snapshot;
 pub mod toolchain;
 pub mod transport;
 
+#[cfg(test)]
+mod future_size_measure_tests;
+
 pub use actor::{ClientHandle, RequestOptions};
 pub use api_attach::{ApiAttachClient, AttachSnapshot};
 pub use attach::{
