@@ -14,8 +14,24 @@ use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
 use verter_session::{HostConfig, VerterHost};
 
-#[tokio::main]
-async fn main() {
+/// Start the server on a thread with an explicitly sized stack.
+///
+/// `#[tokio::main]` would run the runtime — and therefore `Server::serve`, and
+/// therefore every request handler `buffer_unordered` polls inline — on the
+/// process main thread, whose stack is whatever the platform's linker chose
+/// (1 MiB on Windows/MSVC). `verter_lsp::SERVE_THREAD_STACK_BYTES` documents
+/// the measured requirement this replaces that default with.
+fn main() {
+    verter_lsp::run_on_serve_thread(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("multi-thread tokio runtime must build")
+            .block_on(serve());
+    });
+}
+
+async fn serve() {
     // Initialize tracing (controlled via VERTER_LOG or RUST_LOG env var).
     // ANSI colors are disabled because the output goes to VS Code's debug
     // console which renders escape codes as literal text (e.g. `[2m`, `[0m`).

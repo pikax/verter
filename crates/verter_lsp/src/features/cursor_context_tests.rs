@@ -1274,3 +1274,152 @@ fn test_svelte_render_callee_context() {
         other => panic!("expected SvelteRenderCallee, got: {:?}", other),
     }
 }
+
+// =============================================================================
+// Nested-element content classification must terminate
+// =============================================================================
+//
+// `classify_in_content` used to fall back to a scan of `all_elements` — the FLAT
+// element list — and descend into the first element whose span contains the
+// cursor. `find_deepest_element` has already chosen the smallest such element,
+// and that element is itself in `all_elements` with a parent, so the fallback
+// re-entered `classify_within_element` on the SAME element forever: a
+// non-terminating, allocation-free recursion that exhausts any stack.
+//
+// It fires whenever the cursor sits inside an element that HAS A PARENT at an
+// offset covered by none of that element's `text_children` segments. An HTML
+// comment is the easiest such region to author.
+
+const NESTED_COMMENT_SFC: &str = r#"<script setup lang="ts">
+const args = { key: 1 }
+</script>
+
+<template>
+  <div class="outer">
+    <section class="inner">
+      <!-- {{ args.key }} -->
+    </section>
+  </div>
+</template>
+"#;
+
+const NESTED_COMMENT_CHILD_MARKER: &str = "VERTER_CURSOR_CONTEXT_NESTED_COMMENT_CHILD";
+
+/// Byte offset just past the `.` of `args.` inside the HTML comment.
+fn nested_comment_cursor_offset() -> u32 {
+    let dot = NESTED_COMMENT_SFC
+        .find("args.")
+        .expect("fixture contains the member expression")
+        + "args.".len();
+    u32::try_from(dot).expect("fixture offset fits in u32")
+}
+
+/// Outer `div` (no parent) + inner `section` (parent_index = Some(0)), spans
+/// taken from the fixture text so the classifier sees a consistent document.
+fn nested_comment_template() -> TemplateAnalysisSnapshot {
+    let src = NESTED_COMMENT_SFC;
+    let at = |needle: &str| u32::try_from(src.find(needle).expect("fixture anchor")).unwrap();
+
+    let div_start = at("<div");
+    let div_open_end = at(r#"<div class="outer">"#) + r#"<div class="outer">"#.len() as u32;
+    let div_content_end = at("</div>");
+    let div_end = div_content_end + "</div>".len() as u32;
+
+    let section_start = at("<section");
+    let section_open_end =
+        at(r#"<section class="inner">"#) + r#"<section class="inner">"#.len() as u32;
+    let section_content_end = at("</section>");
+    let section_end = section_content_end + "</section>".len() as u32;
+
+    let mut outer = make_element("div", (div_start, div_end), div_open_end, div_content_end);
+    outer.has_element_children = true;
+
+    let mut inner = make_element(
+        "section",
+        (section_start, section_end),
+        section_open_end,
+        section_content_end,
+    );
+    // The element the cursor is inside HAS A PARENT — the precondition the old
+    // fallback ignored — and its comment content is in no `text_children` segment.
+    inner.parent_index = Some(0);
+    inner.parent_tag = Some("div".to_string());
+    inner.nesting_depth = 1;
+
+    TemplateAnalysisSnapshot {
+        elements: vec![outer, inner],
+        ..Default::default()
+    }
+}
+
+fn classify_nested_comment_cursor() -> CursorContext {
+    let analysis = analysis_with_template(nested_comment_template());
+    let blocks = scan_sfc_blocks(NESTED_COMMENT_SFC);
+    classify_cursor_context(
+        nested_comment_cursor_offset(),
+        NESTED_COMMENT_SFC,
+        &blocks,
+        Some(&analysis),
+    )
+}
+
+/// The regression: run the classification in an isolated child process so a
+/// recursion that exhausts the stack is reported as a failing status instead of
+/// aborting the whole test binary.
+#[test]
+fn cursor_in_uncovered_region_of_nested_element_terminates() {
+    if std::env::var(NESTED_COMMENT_CHILD_MARKER).as_deref() == Ok("1") {
+        let context = classify_nested_comment_cursor();
+        // Terminating is the point, but the answer must also be the documented
+        // fallthrough rather than an arbitrary context.
+        assert!(
+            matches!(
+                context,
+                CursorContext::Template(TemplateCursorContext::TextContent)
+            ),
+            "an uncovered content region of a nested element is template text content, got {context:?}"
+        );
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("current unit-test executable");
+    let status = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("features::cursor_context::cursor_context_tests::cursor_in_uncovered_region_of_nested_element_terminates")
+        .arg("--nocapture")
+        .env(NESTED_COMMENT_CHILD_MARKER, "1")
+        .env_remove("RUST_MIN_STACK")
+        .status()
+        .expect("spawn isolated cursor-context child");
+
+    assert!(
+        status.success(),
+        "classifying an uncovered region of a NESTED element must terminate; \
+         a non-zero status here is the self-recursion exhausting the child's stack; status={status}"
+    );
+}
+
+/// Control: the same uncovered comment region in a ROOT-level element (no
+/// parent) never entered the fallback, so it must keep classifying in-process.
+/// This is what makes the test above discriminating rather than a smoke test.
+#[test]
+fn cursor_in_uncovered_region_of_root_element_terminates_in_process() {
+    let mut template = nested_comment_template();
+    template.elements[1].parent_index = None;
+    template.elements[1].parent_tag = None;
+    let analysis = analysis_with_template(template);
+    let blocks = scan_sfc_blocks(NESTED_COMMENT_SFC);
+    let context = classify_cursor_context(
+        nested_comment_cursor_offset(),
+        NESTED_COMMENT_SFC,
+        &blocks,
+        Some(&analysis),
+    );
+    assert!(
+        matches!(
+            context,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "a parentless element never reached the fallback and must classify as text content, got {context:?}"
+    );
+}
