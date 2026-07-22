@@ -369,6 +369,9 @@ impl TestSessionBuilder {
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
                         project_sync_mode: crate::ProjectSyncMode::FullProject,
                         type_provider_kind: provider_kind,
+                        type_provider_topology: crate::TypeProviderTopology::implied_by(
+                            provider_kind,
+                        ),
                         mcp_port: None,
                         type_provider_reason: None,
                         suppress_imported_carrier_prewarm,

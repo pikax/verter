@@ -156,6 +156,17 @@ impl LazyManagedTypeProvider {
         self.provider.get().cloned()
     }
 
+    /// Whether the managed fallback has actually been activated in this session.
+    ///
+    /// Activation is recorded in a session-long cell, so this is the ONLY
+    /// truthful answer to "did the managed engine ever start". Callers that
+    /// merely observed the editor-owned route serving a request cannot infer it:
+    /// managed may have activated earlier and the editor route recovered after.
+    #[must_use]
+    pub fn is_activated(&self) -> bool {
+        self.provider.get().is_some()
+    }
+
     async fn activate(&self) -> Result<Arc<dyn TypeProvider>, TypeProviderError> {
         let _activation = self.activation.lock().await;
         if let Some(provider) = self.provider.get() {
@@ -200,6 +211,14 @@ impl LazyManagedTypeProvider {
             Ok(provider) => {
                 attempt.settle_success();
                 let _ = self.provider.set(provider.clone());
+                // The component that OWNS the activation state is the only one
+                // that can report it truthfully. Without this record, the sole
+                // signal about the managed engine came from the editor-owned
+                // serving path, which cannot see this cell at all.
+                tracing::info!(
+                    provider = provider.provider_id(),
+                    "managed fallback ACTIVATED — the editor-owned route could not serve a bound demand"
+                );
                 Ok(provider)
             }
             Err(error) => {

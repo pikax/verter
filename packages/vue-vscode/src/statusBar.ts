@@ -35,6 +35,11 @@ export function computeProviderRecommendationNotice(
   return { message: `Verter: ${recommendation.reason}${gaps}` };
 }
 
+/** Append the server's provenance so the tooltip says WHY this engine was chosen. */
+function withReason(base: string, reason: string | undefined): string {
+  return reason ? `${base} — ${reason}` : base;
+}
+
 /**
  * Compute the status bar display state from TypeProviderStatus params.
  * Pure function — easy to unit test without VS Code API dependency.
@@ -42,6 +47,51 @@ export function computeProviderRecommendationNotice(
 export function computeStatusBarState(
   params: NotificationParams[typeof NotificationType.TypeProviderStatus],
 ): StatusBarState {
+  // The TOPOLOGY is the honest answer — WHICH engine is serving and who owns
+  // it. The engine FAMILY (`kind`) is what behaviour keys on, and two
+  // topologies share the "tsgo" family: an attach to the tsgo the editor is
+  // already running, and a second engine Verter spawned. Labelling both
+  // "Verter: tsgo" made a serving tier look identical to a broken one. A server
+  // that sends no topology falls back to the family.
+  switch (params.topology ?? "") {
+    case "shared-tsgo":
+      return {
+        text: "$(check) Verter: tsgo (shared)",
+        tooltip: withReason(
+          "Verter type provider: the tsgo your editor is already running (no second engine)",
+          params.reason,
+        ),
+        warning: false,
+      };
+    case "managed-tsgo":
+      return {
+        text: "$(check) Verter: tsgo (managed)",
+        tooltip: withReason(
+          "Verter type provider: a tsgo process Verter started and owns",
+          params.reason,
+        ),
+        warning: false,
+      };
+    case "workspace-tsserver":
+      return {
+        text: "$(check) Verter: tsserver",
+        tooltip: withReason(
+          "Verter type provider: a Node tsserver Verter started from the workspace TypeScript",
+          params.reason,
+        ),
+        warning: false,
+      };
+    case "extension-hosted":
+      return {
+        text: "$(check) Verter: in-extension TS",
+        tooltip: withReason(
+          "Verter type provider: a TypeScript language service hosted in the extension process",
+          params.reason,
+        ),
+        warning: false,
+      };
+  }
+
   switch (params.kind) {
     case "tsgo":
       return {

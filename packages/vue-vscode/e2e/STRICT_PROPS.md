@@ -4,11 +4,11 @@ Verter is **strict-first**. This is intentional product design, not a bug vs Vol
 
 ## Vue
 
-| Surface | Meaning |
-| --- | --- |
-| **Declared props** | `defineProps` / Options `props` only |
-| **Accepted call-site attrs** | Declared **plus** computed **fallthrough** (root inheritance) |
-| **Unknown prop** | Attr not in the accepted surface → **diagnostic / type error** |
+| Surface                      | Meaning                                                        |
+| ---------------------------- | -------------------------------------------------------------- |
+| **Declared props**           | `defineProps` / Options `props` only                           |
+| **Accepted call-site attrs** | Declared **plus** computed **fallthrough** (root inheritance)  |
+| **Unknown prop**             | Attr not in the accepted surface → **diagnostic / type error** |
 
 ### Why not Volar-loose?
 
@@ -37,11 +37,11 @@ Public meta fields: `props` (declared) vs `acceptedProps` / `fallthroughSurface`
 
 Svelte is **not** Vue fallthrough. There is no multi-hop “attrs fall through component roots” model like Vue’s `$attrs` + `inheritAttrs`.
 
-| Surface | Meaning |
-| --- | --- |
-| **Declared props** | `$props()` / export let — **only** these type-check by default |
-| **Unknown prop** | Not in `$props` → **type error** (strict, same spirit as Verter Vue) |
-| **Rest / spread** | Author **opts in** with `...rest` (and a typed index signature when needed). That is deliberate, not automatic fallthrough. |
+| Surface            | Meaning                                                                                                                     |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| **Declared props** | `$props()` / export let — **only** these type-check by default                                                              |
+| **Unknown prop**   | Not in `$props` → **type error** (strict, same spirit as Verter Vue)                                                        |
+| **Rest / spread**  | Author **opts in** with `...rest` (and a typed index signature when needed). That is deliberate, not automatic fallthrough. |
 
 So:
 

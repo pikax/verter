@@ -24,6 +24,16 @@ export interface NativePreviewRelayControllerOptions {
   readGlobalTsdk(): string | undefined;
   writeGlobalTsdk(value: string | undefined): Promise<void>;
   hasAdvertisement(): boolean;
+  /**
+   * Give Native Preview a reason to start a language-server session.
+   *
+   * Forcing activation does not create one: the extension activates on
+   * `onLanguage:{java,type}script[react]` and starts its server for those
+   * documents, so a workspace whose open editor is a `.vue`/`.svelte` carrier
+   * leaves it activated with no session. Invoked at most once, only after the
+   * first attestation reports no running server.
+   */
+  startSession?(): PromiseLike<unknown> | unknown;
   timeoutMs?: number;
   pollMs?: number;
   onBackgroundError?(error: unknown): void;
@@ -127,16 +137,7 @@ export class NativePreviewRelayController implements DisposableLike {
         );
       }
 
-      // This public API delegates to the CURRENT Native Preview language client.
-      // A successful non-empty pipe therefore attests its exact editor-owned Program.
-      const apiPipe = await withTimeout(
-        this.api.initializeAPIConnection(),
-        this.timeoutMs,
-        "attesting Native Preview's current Program",
-      );
-      if (!apiPipe.trim()) {
-        throw new Error("Native Preview attestation returned an empty API pipe");
-      }
+      const apiPipe = await this.attestCurrentProgram(this.api);
 
       await this.waitForAdvertisement();
       this.installRestartListener();
@@ -160,6 +161,45 @@ export class NativePreviewRelayController implements DisposableLike {
             ),
           );
         }
+      }
+    }
+  }
+
+  /**
+   * Attest Native Preview's CURRENT Program, waiting for it to have one.
+   *
+   * This public API delegates to the current Native Preview language client, so
+   * a non-empty pipe attests its exact editor-owned Program. It reports
+   * "Language server is not running." until a session exists, and a single
+   * attempt the instant after activation loses to that startup — which is how a
+   * carrier-only editor declined the whole shared tier in under a second. Nudge
+   * a session into existence once, keep asking until the budget runs out, and
+   * surface the engine's own reason rather than a generic timeout.
+   */
+  private async attestCurrentProgram(api: NativePreviewApi): Promise<string> {
+    const deadline = Date.now() + this.timeoutMs;
+    let nudged = false;
+    for (;;) {
+      try {
+        const apiPipe = await withTimeout(
+          api.initializeAPIConnection(),
+          this.timeoutMs,
+          "attesting Native Preview's current Program",
+        );
+        if (apiPipe.trim()) return apiPipe;
+        throw new Error("Native Preview attestation returned an empty API pipe");
+      } catch (error) {
+        if (!nudged && this.opts.startSession) {
+          nudged = true;
+          try {
+            await this.opts.startSession();
+          } catch (startError) {
+            // A nudge that fails must not replace the engine's own reason.
+            this.opts.onBackgroundError?.(startError);
+          }
+        }
+        if (Date.now() >= deadline) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, this.pollMs));
       }
     }
   }

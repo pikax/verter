@@ -109,7 +109,23 @@ export type NotificationParams = {
     reason: string;
   };
   [NotificationType.TypeProviderStatus]: {
+    /**
+     * The engine FAMILY. Behaviour keys on this; two topologies share "tsgo",
+     * so it cannot identify the serving engine on its own.
+     */
     kind: "tsgo" | "tsserver" | "editor-tsserver" | "none";
+    /**
+     * WHICH engine is serving and who owns it. Mirrors `TypeProviderTopology`
+     * in `crates/verter_lsp/src/lib.rs`. Optional so a client keeps working
+     * against a server that predates it.
+     */
+    topology?:
+      | "shared-tsgo"
+      | "managed-tsgo"
+      | "workspace-tsserver"
+      | "editor-tsserver"
+      | "extension-hosted"
+      | "none";
     reason?: string;
     /**
      * Present when a different provider is recommended over the active one

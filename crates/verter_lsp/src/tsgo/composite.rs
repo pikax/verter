@@ -706,10 +706,15 @@ impl TsgoCompositeProvider {
             .await
             {
                 Ok(Some(provider)) => {
+                    // Reports ONLY what this site observed. It cannot see the
+                    // managed provider's session-long activation cell, so it must
+                    // not claim the fallback stayed cold: managed may have
+                    // activated earlier and the editor route recovered after.
+                    // `LazyManagedTypeProvider` records its own activation.
                     tracing::info!(
                         feature = feature.name(),
                         source = %source,
-                        "editor-owned tsgo served carrier feature; managed fallback remained cold"
+                        "editor-owned tsgo served carrier feature"
                     );
                     return Some(provider);
                 }
