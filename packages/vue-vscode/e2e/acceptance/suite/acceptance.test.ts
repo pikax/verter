@@ -122,6 +122,18 @@ interface ProviderFacts {
   readonly reason: string;
 }
 
+/**
+ * Wall-clock ceiling for the probe sweep, checked before EVERY probe.
+ *
+ * Checking it only between files let one slow file run far past the budget and
+ * blow the suite hook timeout, which DISCARDS the whole run — the measurement is
+ * lost exactly on the slow sessions that matter most.
+ */
+let sweepDeadlineAt = Number.POSITIVE_INFINITY;
+function sweepBudgetExhausted(): boolean {
+  return Date.now() > sweepDeadlineAt;
+}
+
 const samples: Sample[] = [];
 const notes: string[] = [];
 
@@ -321,6 +333,7 @@ async function runHoverProbes(
 ): Promise<void> {
   for (const probe of file.probes) {
     const position = doc.positionAt(probe.offset);
+    if (sweepBudgetExhausted()) return;
     for (let i = 0; i < REPEATS; i++) {
       const { text, latencyMs } = await timedHover(doc.uri, position);
       const verdict = classifyHoverText(text, toContract(probe));
@@ -346,6 +359,7 @@ async function runDefinitionProbes(
   const targets = file.probes.filter((p) => p.probeClass === "alias" || p.probeClass === "member");
   for (const probe of targets) {
     const position = doc.positionAt(probe.offset);
+    if (sweepBudgetExhausted()) return;
     for (let i = 0; i < REPEATS; i++) {
       const start = Date.now();
       const raw =
@@ -384,6 +398,7 @@ async function runCompletionProbes(
     // completions AT the identifier start is exactly the member-completion the
     // editor issues while the user types past the dot.
     const position = doc.positionAt(probe.offset);
+    if (sweepBudgetExhausted()) return;
     for (let i = 0; i < REPEATS; i++) {
       const start = Date.now();
       const list = await vscode.commands.executeCommand<vscode.CompletionList>(
@@ -423,6 +438,7 @@ async function runReferenceProbes(
   );
   for (const probe of targets) {
     const position = doc.positionAt(probe.offset);
+    if (sweepBudgetExhausted()) return;
     for (let i = 0; i < REPEATS; i++) {
       const start = Date.now();
       const locations =
@@ -599,6 +615,7 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
     // can outlive the suite timeout, and the run is then reported as a harness
     // failure instead of as the very-slow-editor result it actually is.
     const sweepDeadline = Date.now() + SWEEP_BUDGET_MS;
+    sweepDeadlineAt = sweepDeadline;
     const rounds = Math.max(carrierFiles.length, typescriptFiles.length);
     let truncated = false;
     for (let round = 0; round < rounds && !truncated; round++) {
