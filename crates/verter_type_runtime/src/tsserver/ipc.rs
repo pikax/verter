@@ -297,6 +297,10 @@ struct TsserverTransport {
     /// then are not counted as independent evidence. See
     /// [`TsserverTransport::note_hang_failure`]. Cleared with the counter.
     last_strike_at: StdMutex<Option<std::time::Instant>>,
+    /// When the read loop last got ANY output from the child — a response OR an
+    /// event. Shared with the read loop. A child that is emitting is working,
+    /// however slowly; a WEDGED child emits nothing at all.
+    last_message_at: Arc<StdMutex<std::time::Instant>>,
     /// Shared with `ResilientProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Singleflight + cooldown stamp for `reloadProjects` membership recovery.
@@ -349,7 +353,28 @@ impl TsserverTransport {
     /// bound started; only a hop issued at or after the last strike advances the
     /// count, so reaching [`HANG_THRESHOLD`] takes that many successive windows in
     /// which the engine answered nothing at all.
+    /// A hop is evidence of a WEDGE only if the child produced nothing at all
+    /// while it ran.
+    ///
+    /// A response resets the counter outright, but a busy tsserver also emits
+    /// EVENTS while it works — `projectLoadingStart`/`Finish`, diagnostics,
+    /// telemetry, `requestCompleted`. Those prove the child's loop is turning.
+    /// Without this gate, a request whose answer the caller does not even use —
+    /// `notify_carrier_changed` awaits `projectInfo` purely as an ORDERING FENCE
+    /// and discards the body — becomes proof that the engine is hung, and three
+    /// carrier changes against a cold project destroy it.
+    fn child_was_silent_during(&self, issued_at: std::time::Instant) -> bool {
+        let last = *self
+            .last_message_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        last <= issued_at
+    }
+
     fn note_hang_failure(&self, command: &str, issued_at: std::time::Instant) {
+        if !self.child_was_silent_during(issued_at) {
+            return;
+        }
         let count = {
             let mut last = self
                 .last_strike_at
@@ -642,6 +667,7 @@ async fn read_loop(
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     crash_notify: Option<Arc<Notify>>,
+    last_message_at: Arc<StdMutex<std::time::Instant>>,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line_buf = String::new();
@@ -662,6 +688,13 @@ async fn read_loop(
                 if trimmed.is_empty() {
                     continue;
                 }
+                // ANY output from the child proves its loop is turning. Hang
+                // detection reads this to tell a busy engine from a wedged one:
+                // a busy tsserver keeps emitting events while it builds; a
+                // wedged one goes silent.
+                *last_message_at
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
 
                 // Check if this is a Content-Length header (modern tsserver)
                 if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
@@ -1399,12 +1432,15 @@ impl TsserverTypeProvider {
         let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
         tokio::spawn(tsserver_stdin_writer_loop(stdin, stdin_rx));
 
+        let last_message_at = Arc::new(StdMutex::new(std::time::Instant::now()));
+
         let transport = Arc::new(TsserverTransport {
             stdin_tx: stdin_tx.clone(),
             pending: Arc::clone(&pending),
             next_seq: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
             last_strike_at: StdMutex::new(None),
+            last_message_at: Arc::clone(&last_message_at),
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
             cancellation,
@@ -1422,6 +1458,7 @@ impl TsserverTypeProvider {
             Arc::clone(&diagnostics_cache),
             Arc::clone(&contents_cache),
             crash_notify,
+            last_message_at,
         ));
 
         // Log stderr

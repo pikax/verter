@@ -586,6 +586,7 @@ async fn tsserver_shutdown_completes_within_timeout() {
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -995,6 +996,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1073,6 +1075,7 @@ async fn run_update_file_capture(
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1237,6 +1240,7 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1437,6 +1441,7 @@ async fn run_resync_capture(
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1589,6 +1594,7 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2447,6 +2453,7 @@ fn resync_harness() -> ResyncHarness {
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2657,6 +2664,7 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2792,6 +2800,7 @@ fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: Some(Arc::clone(&crash_notify)),
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -3253,6 +3262,7 @@ fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTrans
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -3270,6 +3280,7 @@ fn test_transport_with_notify(
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: Some(crash_notify),
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -3461,6 +3472,49 @@ async fn concurrent_full_bound_timeouts_are_one_strike_not_three() {
         "one window of silence must not restart a merely-busy engine"
     );
     waiter.abort();
+}
+
+/// A child that is EMITTING is working, not wedged — even when a full-bound hop
+/// goes unanswered.
+///
+/// A busy tsserver keeps producing output while it builds a cold program
+/// (`projectLoadingStart`/`Finish`, diagnostics events, telemetry). A WEDGED one
+/// produces nothing. Without this discrimination, a request whose answer the
+/// caller does not even use — `notify_carrier_changed` awaits `projectInfo`
+/// purely as an ordering fence and DISCARDS the body — is charged as proof the
+/// engine is hung, and three carrier changes against a cold project destroy it.
+#[tokio::test]
+async fn a_hop_is_not_charged_while_the_child_is_still_emitting() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    let notify = Arc::new(Notify::new());
+    let transport = Arc::new(test_transport_with_notify(stdin_tx, Arc::clone(&notify)));
+
+    for _ in 0..(HANG_THRESHOLD + 2) {
+        // The read loop stamps this on every line the child produces; simulate
+        // an event arriving DURING the hop.
+        let transport_for_traffic = Arc::clone(&transport);
+        let traffic = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            *transport_for_traffic
+                .last_message_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+        });
+        let _ = transport
+            .request_with_timeout(
+                "projectInfo",
+                serde_json::json!({}),
+                std::time::Duration::from_millis(120),
+            )
+            .await;
+        traffic.await.expect("traffic task must not panic");
+    }
+
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        0,
+        "an unanswered hop against a child that kept emitting is not evidence of a wedge"
+    );
 }
 
 /// A caller with no ambient deadline — batch and background work — keeps its
