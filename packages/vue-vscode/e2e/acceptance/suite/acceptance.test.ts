@@ -78,6 +78,12 @@ const FIRST_HOVER_TIMEOUT_MS = Number(readE2eEnv("ACCEPTANCE_FIRST_HOVER_TIMEOUT
  * would satisfy the control vacuously.
  */
 const EXPECT_NATIVE = readE2eEnv("ACCEPTANCE_EXPECT_NATIVE") === "1";
+/** Wall-clock ceiling on the probe sweep so a slow workspace still yields a receipt. */
+const SWEEP_BUDGET_MS = Number(readE2eEnv("ACCEPTANCE_SWEEP_BUDGET_MS") ?? "240000");
+/** How long to wait for the server to publish a provider status. */
+const PROVIDER_STATUS_TIMEOUT_MS = Number(
+  readE2eEnv("ACCEPTANCE_PROVIDER_STATUS_TIMEOUT_MS") ?? "60000",
+);
 
 type OperationName = "hover" | "definition" | "completion" | "references";
 type FileKind = "carrier" | "typescript";
@@ -171,17 +177,19 @@ interface ProbedFile {
  * a manual walk so VS Code's own exclusion rules apply and huge dependency
  * trees are never traversed.
  */
+const DISCOVERY_EXCLUDE = "**/{node_modules,dist,.output,.nuxt,.git,coverage}/**";
+
+async function findCandidates(glob: string): Promise<vscode.Uri[]> {
+  const found = await vscode.workspace.findFiles(glob, DISCOVERY_EXCLUDE, 400);
+  return [...found].sort((a, b) => a.fsPath.localeCompare(b.fsPath));
+}
+
 async function discoverProbedFiles(
   glob: string,
   wantCarrier: boolean,
   budget: number,
 ): Promise<ProbedFile[]> {
-  const found = await vscode.workspace.findFiles(
-    glob,
-    "**/{node_modules,dist,.output,.nuxt,.git,coverage}/**",
-    400,
-  );
-  const sorted = [...found].sort((a, b) => a.fsPath.localeCompare(b.fsPath));
+  const sorted = await findCandidates(glob);
   const picked: ProbedFile[] = [];
   for (const uri of sorted) {
     if (picked.length >= budget) break;
@@ -200,6 +208,41 @@ async function discoverProbedFiles(
     picked.push({ uri, text, probes });
   }
   return picked;
+}
+
+/**
+ * Open SOME carrier even when none of them yields probes.
+ *
+ * Verter starts its language server on the first carrier the editor opens, so a
+ * workspace whose SFCs are all plain JavaScript — no `lang="ts"` — would
+ * otherwise never start the server, never publish a provider status, and be
+ * recorded as "nothing happened". That is precisely the silent outcome this
+ * lane exists to convert into an explicit, reasoned `none`.
+ */
+async function openAnyCarrierForStatus(): Promise<boolean> {
+  const candidates = await findCandidates("**/*.{vue,svelte}");
+  const target = candidates[0];
+  if (!target) return false;
+  const doc = await vscode.workspace.openTextDocument(target);
+  await vscode.window.showTextDocument(doc);
+  return true;
+}
+
+/**
+ * Wait for the server to publish a provider status.
+ *
+ * Reading the status once at the END of the sweep loses it entirely on a
+ * workspace slow enough that the status arrives late — which is exactly the
+ * workspace whose status matters most.
+ */
+async function waitForProviderStatus(timeoutMs: number): Promise<ProviderFacts> {
+  const deadline = Date.now() + timeoutMs;
+  let facts = readProviderFacts();
+  while (facts.kind === "unreported" && Date.now() < deadline) {
+    await sleep(500);
+    facts = readProviderFacts();
+  }
+  return facts;
 }
 
 // ── Operation drivers ──────────────────────────────────────────────────────
@@ -475,7 +518,10 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
   let tsCapableExtensions: string[] = [];
 
   suiteSetup(async function (this: Mocha.Context) {
-    this.timeout(FIRST_HOVER_TIMEOUT_MS + 240_000);
+    // Derived from the phases it actually runs, not a fixed number: a fixed
+    // timeout smaller than first-hover polling plus the sweep budget aborts the
+    // hook and discards everything measured so far.
+    this.timeout(FIRST_HOVER_TIMEOUT_MS + PROVIDER_STATUS_TIMEOUT_MS + SWEEP_BUDGET_MS + 180_000);
 
     const ext = vscode.extensions.getExtension("pikax.verter-vscode");
     assert.ok(ext, "Verter extension must be installed in the acceptance host");
@@ -500,7 +546,13 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
     );
 
     if (carrierFiles.length === 0) {
-      notes.push("no probeable carrier found — the lane cannot measure this workspace");
+      notes.push(
+        "no probeable TypeScript carrier found — this workspace cannot be MEASURED, but its " +
+          "provider status is still an acceptance outcome and is collected below",
+      );
+      const opened = await openAnyCarrierForStatus();
+      notes.push(opened ? "opened a carrier to start the server" : "workspace contains no carrier");
+      provider = await waitForProviderStatus(PROVIDER_STATUS_TIMEOUT_MS);
       return;
     }
 
@@ -522,18 +574,34 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
       openedAt,
     );
 
+    // Capture the provider status BEFORE the probe sweep. Reading it only at the
+    // end loses it on any workspace slow enough for the sweep to be cut short —
+    // and a workspace that slow is exactly the one whose status matters. Losing
+    // it there produced a false "status never published" failure that blamed the
+    // product for a defect in this lane.
+    provider = await waitForProviderStatus(PROVIDER_STATUS_TIMEOUT_MS);
+
     // ── Per-operation sampling ────────────────────────────────────────────
     // Carrier and plain-TypeScript files are INTERLEAVED rather than run in two
     // blocks. Running all carriers first and all `.ts` files afterwards would
     // hand the `.ts` side a warmer server and quietly inflate the overhead
     // ratio the lane exists to report.
+    // A slow workspace must still produce a receipt. Without a budget the sweep
+    // can outlive the suite timeout, and the run is then reported as a harness
+    // failure instead of as the very-slow-editor result it actually is.
+    const sweepDeadline = Date.now() + SWEEP_BUDGET_MS;
     const rounds = Math.max(carrierFiles.length, typescriptFiles.length);
-    for (let round = 0; round < rounds; round++) {
+    let truncated = false;
+    for (let round = 0; round < rounds && !truncated; round++) {
       for (const [file, kind] of [
         [carrierFiles[round], "carrier"] as const,
         [typescriptFiles[round], "typescript"] as const,
       ]) {
         if (!file) continue;
+        if (Date.now() > sweepDeadline) {
+          truncated = true;
+          break;
+        }
         const opened = await vscode.workspace.openTextDocument(file.uri);
         await vscode.window.showTextDocument(opened);
         await runHoverProbes(file, kind, opened);
@@ -542,8 +610,16 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
         await runReferenceProbes(file, kind, opened);
       }
     }
-
-    provider = readProviderFacts();
+    if (truncated) {
+      notes.push(
+        `sweep truncated after ${SWEEP_BUDGET_MS}ms — this workspace is slow enough that the ` +
+          "full probe matrix does not complete; the samples below are a prefix, not the whole set",
+      );
+    }
+    // Re-read: a late status change (a fallback, a restart) must be the one
+    // reported, but an early capture is already banked if the sweep was cut short.
+    const finalProvider = readProviderFacts();
+    if (finalProvider.kind !== "unreported") provider = finalProvider;
   });
 
   suiteTeardown(() => {
@@ -629,7 +705,11 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
       this.skip();
       return;
     }
-    assert.ok(carrierFiles.length > 0, "no probeable carrier was discovered in this workspace");
+    assert.ok(
+      carrierFiles.length > 0,
+      `provider status is \`${provider.kind}\` but no probeable TypeScript carrier was found, ` +
+        "so the editor experience on this workspace cannot be verified",
+    );
     assert.ok(
       typescriptAnswers("carrier", "hover") > 0,
       `provider status is \`${provider.kind}\` but ZERO carrier hovers carried real TypeScript ` +

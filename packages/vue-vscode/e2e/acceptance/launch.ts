@@ -59,6 +59,7 @@ async function main(): Promise<void> {
 
   const label = process.env.VERTER_ACCEPTANCE_LABEL ?? "unlabelled";
   const provider = process.env.VERTER_ACCEPTANCE_PROVIDER ?? "auto";
+  const keepExtensions = process.env.VERTER_ACCEPTANCE_KEEP_EXTENSIONS === "1";
   const receipt =
     process.env.VERTER_ACCEPTANCE_RECEIPT ??
     path.join(os.tmpdir(), `verter-acceptance-${label}-${provider}.json`);
@@ -95,7 +96,9 @@ async function main(): Promise<void> {
     fs.rmSync(stale, { force: true });
   }
 
-  console.log(`acceptance lane: corpus=${label} provider=${provider}`);
+  console.log(
+    `acceptance lane: corpus=${label} provider=${provider} keepExtensions=${keepExtensions}`,
+  );
   console.log(`  receipt: ${receipt}`);
   console.log(`  log:     ${logFile}`);
 
@@ -111,7 +114,14 @@ async function main(): Promise<void> {
         "--disable-workspace-trust",
         "--skip-welcome",
         "--skip-release-notes",
-        "--disable-extensions",
+        // `--disable-extensions` keeps the host clean, but it is not what a user
+        // runs. On the editor-owned tsserver route Verter defers carrier source
+        // features to its TypeScript plugin inside the editor's own tsserver,
+        // and that hand-off depends on the built-in TypeScript extension
+        // registering providers for the `vue` language from the plugin
+        // contribution. `VERTER_ACCEPTANCE_KEEP_EXTENSIONS=1` reproduces the
+        // real editor so that hand-off can be measured rather than assumed.
+        ...(keepExtensions ? [] : ["--disable-extensions"]),
         `--extensions-dir=${extensionsDir}`,
         `--user-data-dir=${userDataDir}`,
       ],
