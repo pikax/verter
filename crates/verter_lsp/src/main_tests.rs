@@ -50,6 +50,30 @@ fn cli_attestation_is_fail_closed_for_partial_or_stale_facts() {
     assert!(args.editor_tsserver_attestation().is_err());
 }
 
+// ── DISCRIMINATING: only the EXPLICIT `editor-tsserver` policy may adopt an
+//    editor plugin attestation. The editor-owned tier leaves the LSP with no
+//    engine of its own, so a policy that adopts it without the user asking can
+//    silently hand a whole workspace to a plugin that cannot serve it.
+#[test]
+fn only_the_explicit_editor_tsserver_route_adopts_the_plugin_attestation() {
+    assert!(route_consumes_editor_tsserver_attestation(
+        "editor-tsserver"
+    ));
+    for route in [
+        "auto",
+        "tsserver",
+        "shared-tsgo",
+        "tsgo",
+        "extension",
+        "off",
+    ] {
+        assert!(
+            !route_consumes_editor_tsserver_attestation(route),
+            "route {route} must not adopt an editor tsserver attestation"
+        );
+    }
+}
+
 #[test]
 fn editor_tsserver_topology_owns_no_semantic_child() {
     let topology =

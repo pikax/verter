@@ -12,8 +12,10 @@
     "./e2e/fixtures",
     "./e2e/dx/vitest.config.ts",
     "./e2e/lib/vitest.config.mts",
+    "./e2e/acceptance/vitest.config.ts",
     "./e2e/dx/**/*.unit.test.ts",
-    "./e2e/lib/**/*.unit.test.ts"
+    "./e2e/lib/**/*.unit.test.ts",
+    "./e2e/acceptance/**/*.unit.test.ts"
   ],
   "compilerOptions": {
     "outDir": "./out-test",

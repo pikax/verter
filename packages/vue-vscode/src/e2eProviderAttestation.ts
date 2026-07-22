@@ -1,9 +1,9 @@
-export type E2eTypeProviderRoute = "tsserver" | "tsgo" | "shared-tsgo";
+export type E2eTypeProviderRoute = "tsserver" | "tsgo" | "shared-tsgo" | "editor-tsserver";
 
 export interface E2eTypeProviderAttestation {
   publicKind: "tsgo" | "tsserver" | "editor-tsserver";
   reason?: string;
-  route: "tsserver" | "managed-tsgo" | "shared-tsgo";
+  route: "tsserver" | "managed-tsgo" | "shared-tsgo" | "editor-tsserver";
 }
 
 const STATUS_PATTERN =
@@ -55,11 +55,17 @@ export function attestE2eTypeProviderLog(
     );
   }
 
-  if (requested === "tsserver") {
-    if (publicKind !== "tsserver" && publicKind !== "editor-tsserver") {
-      throw new Error(`Requested tsserver, but the public provider status reported ${publicKind}`);
+  // The workspace tsserver and the editor-owned plugin tier are DISTINCT engines
+  // with distinct topologies, so each rail is held to the one it asked for.
+  // Accepting the editor plugin for a `tsserver` run is what let a tier that
+  // served nothing pass as "the workspace tsserver".
+  if (requested === "tsserver" || requested === "editor-tsserver") {
+    if (publicKind !== requested) {
+      throw new Error(
+        `Requested ${requested}, but the public provider status reported ${publicKind}`,
+      );
     }
-    return { publicKind, reason, route: "tsserver" };
+    return { publicKind, reason, route: requested };
   }
 
   if (publicKind !== "tsgo") {

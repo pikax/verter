@@ -209,10 +209,17 @@ describe("editor tsserver bootstrap", () => {
     ).rejects.toThrow(/unbound|timed out/i);
   });
 
-  it("routes only automatic/shared and explicit editor-tsserver policy to this tier", () => {
-    expect(typeProviderRoutesEditorTsserver("auto")).toBe(true);
-    expect(typeProviderRoutesEditorTsserver("shared-tsgo")).toBe(true);
-    expect(typeProviderRoutesEditorTsserver("tsserver")).toBe(true);
+  it("routes ONLY the explicit editor-tsserver policy to this tier", () => {
+    expect(typeProviderRoutesEditorTsserver("editor-tsserver")).toBe(true);
+    // This tier hands carrier rename to a plugin inside the editor's own
+    // tsserver, and whether that plugin can serve a workspace depends on
+    // tsserver's project topology, which Verter neither controls nor can
+    // verify before the LSP has published. The automatic policy therefore
+    // never selects it, and `tsserver` means the workspace tsserver the
+    // setting advertises.
+    expect(typeProviderRoutesEditorTsserver("auto")).toBe(false);
+    expect(typeProviderRoutesEditorTsserver("shared-tsgo")).toBe(false);
+    expect(typeProviderRoutesEditorTsserver("tsserver")).toBe(false);
     expect(typeProviderRoutesEditorTsserver("tsgo")).toBe(false);
     expect(typeProviderRoutesEditorTsserver("extension")).toBe(false);
     expect(typeProviderRoutesEditorTsserver("off")).toBe(false);

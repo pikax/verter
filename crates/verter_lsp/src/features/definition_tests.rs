@@ -3431,12 +3431,14 @@ fn module_class_rule_is_not_a_same_file_definition_target() {
 
         let cursor = source.find("class=\"btn\"").unwrap() + 7;
         let position = line_index.offset_to_position(cursor as u32).unwrap();
-        let result = css_only_definition_at_position(
+        let result = definition_at_position(
             &position,
             source,
             &blocks,
             Some(&analysis),
             &line_index,
+            None,
+            None,
         );
         if module_expected_none {
             assert!(
@@ -3497,8 +3499,15 @@ fn module_style_class_token_is_not_a_navigation_origin() {
     // Cursor on "btn" in the module block's `.btn` selector.
     let cursor = source.find(".btn { color").unwrap() + 1;
     let position = line_index.offset_to_position(cursor as u32).unwrap();
-    let result =
-        css_only_definition_at_position(&position, source, &blocks, Some(&analysis), &line_index);
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        None,
+        None,
+    );
     assert!(
         result.is_none(),
         "a module class token must not navigate to plain-class usages: {result:?}"

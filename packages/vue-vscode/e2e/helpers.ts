@@ -771,7 +771,12 @@ export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void>
 }
 
 function isE2eTypeProviderRoute(value: string): value is E2eTypeProviderRoute {
-  return value === "tsserver" || value === "tsgo" || value === "shared-tsgo";
+  return (
+    value === "tsserver" ||
+    value === "tsgo" ||
+    value === "shared-tsgo" ||
+    value === "editor-tsserver"
+  );
 }
 
 function assertSharedTsgoHandshake(log: string): void {
