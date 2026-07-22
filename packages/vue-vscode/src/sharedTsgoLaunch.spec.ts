@@ -13,6 +13,8 @@ import {
   isShimAdvertisement,
   lspArgsPropagated,
   mintSessionKey,
+  nativePreviewTsdkCandidates,
+  orphanedControlDirs,
   parseArmedControlDir,
   planSharedTsgo,
   prepareEditorTsdk,
@@ -84,7 +86,7 @@ describe("discoverNativePreviewTsgo", () => {
         platform: "win32",
         exists: (p) => p === bin,
       }),
-    ).toBe(bin);
+    ).toEqual({ path: bin, source: "VERTER_TSGO_BIN" });
   });
   it("falls back to the native-preview.tsdk dir", () => {
     const tsdk = "/tsdk";
@@ -92,11 +94,11 @@ describe("discoverNativePreviewTsgo", () => {
     expect(
       discoverNativePreviewTsgo({
         env: {},
-        nativePreviewTsdk: tsdk,
+        tsdkCandidates: [{ source: "typescript.native-preview.tsdk", dir: tsdk }],
         platform: "linux",
         exists: (p) => p === bin,
       }),
-    ).toBe(bin);
+    ).toEqual({ path: bin, source: "typescript.native-preview.tsdk" });
   });
   it("falls back to the workspace @typescript native-preview package", () => {
     const bin = join(
@@ -115,10 +117,141 @@ describe("discoverNativePreviewTsgo", () => {
         arch: "x64",
         exists: (p) => p === bin,
       }),
-    ).toBe(bin);
+    ).toEqual({ path: bin, source: "workspace node_modules" });
   });
   it("returns undefined (fail-closed) when nothing resolves", () => {
     expect(discoverNativePreviewTsgo({ env: {}, exists: () => false })).toBeUndefined();
+  });
+
+  // ── DISCRIMINATING (W5/FIX-1): discovery must try EVERY tsdk source, not stop
+  //    at the first one. The observed real session: a workspace `typescript.tsdk`
+  //    pointing at `node_modules/typescript/lib` (a TS 5.x dir with NO native
+  //    engine) MASKED the installed Native Preview bundle, and tier 1 reported
+  //    "native-preview tsgo (tsdk) not found". RED before the fix: only the first
+  //    candidate is probed. ───────────────────────────────────────────────────────
+  it("keeps searching later tsdk sources when an earlier one holds no engine", () => {
+    const masking = join("/ws", "node_modules", "typescript", "lib");
+    const bundle = join("/ext/native-preview", "lib");
+    const bin = join(bundle, "tsc.exe");
+    expect(
+      discoverNativePreviewTsgo({
+        env: {},
+        tsdkCandidates: [
+          { source: "typescript.tsdk", dir: masking },
+          { source: "native-preview bundle", dir: bundle },
+        ],
+        platform: "win32",
+        arch: "x64",
+        exists: (p) => p === bin,
+      }),
+    ).toEqual({ path: bin, source: "native-preview bundle" });
+  });
+
+  // ── DISCRIMINATING (W5/FIX-2): a tsdk dir holding the LEGACY `tsgo[.exe]`
+  //    engine name still resolves — discovery looked for `tsc.exe` ONLY, so a
+  //    directory containing `tsgo.exe` was invisible. ─────────────────────────────
+  it("accepts the legacy tsgo engine name inside a tsdk dir", () => {
+    const tsdk = "/legacy-tsdk";
+    const bin = join(tsdk, "tsgo.exe");
+    expect(
+      discoverNativePreviewTsgo({
+        env: {},
+        tsdkCandidates: [{ source: "typescript.native-preview.tsdk", dir: tsdk }],
+        platform: "win32",
+        arch: "x64",
+        exists: (p) => p === bin,
+      }),
+    ).toEqual({ path: bin, source: "typescript.native-preview.tsdk" });
+  });
+
+  // ── DISCRIMINATING (W5/FIX-2): a tsdk setting left pointing at a Verter-STAGED
+  //    control dir must NEVER be adopted as the "real" engine — the bytes there
+  //    are the relay shim, so relaying to them is a shim→shim loop. Discovery
+  //    skips it and keeps going. RED before the fix: the staged `tsgo.exe` is
+  //    accepted as the real engine. ──────────────────────────────────────────────
+  it("refuses a Verter-staged control dir and continues to the next source", () => {
+    const staged = join("/tmp", "verter-shared-deadbeef", "editor-tsdk");
+    const bundle = join("/ext/native-preview", "lib");
+    const real = join(bundle, "tsc.exe");
+    expect(
+      discoverNativePreviewTsgo({
+        env: {},
+        tsdkCandidates: [
+          { source: "typescript.native-preview.tsdk", dir: staged },
+          { source: "native-preview bundle", dir: bundle },
+        ],
+        platform: "win32",
+        arch: "x64",
+        // BOTH exist: the staged shim would win without the refusal.
+        exists: (p) => p === join(staged, "tsgo.exe") || p === real,
+      }),
+    ).toEqual({ path: real, source: "native-preview bundle" });
+  });
+});
+
+describe("nativePreviewTsdkCandidates (W5/FIX-1: every source, never collapsed)", () => {
+  // ── DISCRIMINATING: all four configured sources survive as SEPARATE ordered
+  //    candidates. The extension used `a || b || c || bundle`, which discarded
+  //    every source after the first non-empty one. ────────────────────────────────
+  it("keeps every non-empty source as its own ordered candidate", () => {
+    const got = nativePreviewTsdkCandidates({
+      jsTsTsdkPath: "/a",
+      typescriptTsdk: "/b",
+      nativePreviewTsdk: "/c",
+      nativePreviewExtensionPath: "/ext/np",
+    });
+    expect(got).toEqual([
+      { source: "js/ts.tsdk.path", dir: "/a" },
+      { source: "typescript.tsdk", dir: "/b" },
+      { source: "typescript.native-preview.tsdk", dir: "/c" },
+      { source: "native-preview bundle", dir: join("/ext/np", "lib") },
+    ]);
+  });
+  it("drops empty/whitespace values and dedupes repeated dirs", () => {
+    const got = nativePreviewTsdkCandidates({
+      jsTsTsdkPath: "   ",
+      typescriptTsdk: "/same",
+      nativePreviewTsdk: "/same",
+      nativePreviewExtensionPath: undefined,
+    });
+    expect(got).toEqual([{ source: "typescript.tsdk", dir: "/same" }]);
+  });
+});
+
+describe("orphanedControlDirs (W5/FIX-2: staging must not leak)", () => {
+  const now = 1_000_000_000_000;
+  const hour = 3_600_000;
+
+  // ── DISCRIMINATING: only `verter-shared-<hex>` entries are ever selected, the
+  //    LIVE session is never selected, and a fresh dir from a concurrent session
+  //    is never selected. 96 orphans / 256 MB accumulated because nothing swept. ──
+  it("selects only stale verter-shared dirs, never the live session or foreign entries", () => {
+    const got = orphanedControlDirs({
+      entries: [
+        "verter-shared-aaaa",
+        "verter-shared-bbbb",
+        "verter-shared-cccc",
+        "verter-editor-tsserver-dddd",
+        "some-other-temp-dir",
+        "verter-shared-NOTHEX",
+      ],
+      currentSessionKey: "aaaa",
+      now,
+      maxAgeMs: hour,
+      modifiedAt: (name) => (name === "verter-shared-cccc" ? now - 60_000 : now - 5 * hour),
+    });
+    expect(got).toEqual(["verter-shared-bbbb"]);
+  });
+  it("selects nothing when there is nothing stale", () => {
+    expect(
+      orphanedControlDirs({
+        entries: ["verter-shared-aaaa"],
+        currentSessionKey: "aaaa",
+        now,
+        maxAgeMs: hour,
+        modifiedAt: () => now - 5 * hour,
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -172,23 +305,59 @@ describe("buildShimSpawnArgs", () => {
 });
 
 describe("prepareEditorTsdk", () => {
-  it("stages the relay bytes under Native Preview's tsgo executable name", () => {
+  // ── DISCRIMINATING (W5/FIX-2): Native Preview does NOT spawn `<tsdk>/tsgo`.
+  //    Its tsdk validator reads `<tsdk>/package.json`, requires `name` + a
+  //    `bin` entry, and then stats
+  //    `<node_modules>/@typescript/<name>-<platform>-<arch>/lib/<bin>[.exe]`.
+  //    A bare directory holding one `tsgo.exe` can never be selected, which is
+  //    why tier 1 never armed. The staged tree must satisfy that contract.
+  //    (Evidence: TypeScriptTeam.native-preview 0.20260708.2 dist bundle.) ───────
+  it("stages an npm-shaped tsdk Native Preview can actually resolve", () => {
     const made: string[] = [];
     const copied: Array<[string, string]> = [];
+    const written: Array<[string, string]> = [];
     const staged = prepareEditorTsdk({
       shimPath: "/ext/bin/verter-relay-shim",
       controlDir: "/tmp/session",
       platform: "linux",
+      arch: "x64",
       mkdir: (path) => made.push(path),
       copy: (source, destination) => copied.push([source, destination]),
+      writeFile: (path, content) => written.push([path, content]),
       chmod: () => {},
     });
-    expect(staged).toEqual({
-      dir: join("/tmp/session", "editor-tsdk"),
-      executable: join("/tmp/session", "editor-tsdk", "tsgo"),
-    });
-    expect(made).toEqual([staged.dir]);
+
+    const modules = join("/tmp/session", "editor-tsdk", "node_modules");
+    expect(staged.dir).toBe(join(modules, "@typescript", "native-preview"));
+    expect(staged.executable).toBe(
+      join(modules, "@typescript", "native-preview-linux-x64", "lib", "tsgo"),
+    );
+    // The shim bytes land at the exact path Native Preview stats.
     expect(copied).toEqual([["/ext/bin/verter-relay-shim", staged.executable]]);
+    // The manifest the validator parses: scoped name + a `tsgo` bin entry.
+    expect(written).toHaveLength(1);
+    expect(written[0][0]).toBe(join(staged.dir, "package.json"));
+    const manifest = JSON.parse(written[0][1]);
+    expect(manifest.name).toBe("@typescript/native-preview");
+    expect(typeof manifest.version).toBe("string");
+    expect(manifest.bin).toHaveProperty("tsgo");
+    // Both directories are created before anything is written into them.
+    expect(made).toContain(staged.dir);
+    expect(made).toContain(join(modules, "@typescript", "native-preview-linux-x64", "lib"));
+  });
+
+  it("suffixes the staged engine with .exe on win32", () => {
+    const staged = prepareEditorTsdk({
+      shimPath: "C:\\ext\\bin\\verter-relay-shim.exe",
+      controlDir: "C:\\tmp\\session",
+      platform: "win32",
+      arch: "x64",
+      mkdir: () => {},
+      copy: () => {},
+      writeFile: () => {},
+      chmod: () => {},
+    });
+    expect(staged.executable.endsWith("tsgo.exe")).toBe(true);
   });
 });
 
@@ -268,6 +437,38 @@ describe("planSharedTsgo (fail-closed)", () => {
     expect(plan.engaged).toBe(false);
     if (plan.engaged) throw new Error("unreachable");
     expect(plan.reason).toMatch(/tsgo|tsdk/i);
+  });
+
+  // ── DISCRIMINATING (W5/FIX-1): the EXACT observed real session — the Native
+  //    Preview extension IS installed and its bundled engine EXISTS, but a
+  //    workspace `typescript.tsdk` points at `node_modules/typescript/lib`
+  //    (TS 5.x, no native engine). Collapsing the settings to the first
+  //    non-empty value made tier 1 report "native-preview tsgo (tsdk) not
+  //    found". Trying every source engages on the bundle instead. ───────────────
+  it("engages on the Native Preview bundle when a workspace typescript.tsdk masks it", () => {
+    const winShim = join("/ext", "target", "debug", "verter-relay-shim.exe");
+    const bundleDir = join("/np", "lib");
+    const bundleEngine = join(bundleDir, "tsc.exe");
+    const maskingTsdk = join("/ws", "node_modules", "typescript", "lib");
+    const plan = planSharedTsgo({
+      extensionPath: "/ext",
+      controlDirRoot: "/tmp",
+      env: {},
+      tsdkCandidates: nativePreviewTsdkCandidates({
+        typescriptTsdk: maskingTsdk,
+        nativePreviewExtensionPath: "/np",
+      }),
+      workspaceRoot: "/ws",
+      platform: "win32",
+      arch: "x64",
+      exists: (p) => p === winShim || p === bundleEngine,
+      mkdir: () => {},
+      rng: (n) => Buffer.alloc(n, 0x01),
+    });
+    expect(plan.engaged).toBe(true);
+    if (!plan.engaged) throw new Error("unreachable");
+    expect(plan.realTsgo).toBe(bundleEngine);
+    expect(plan.realTsgoSource).toBe("native-preview bundle");
   });
 });
 
