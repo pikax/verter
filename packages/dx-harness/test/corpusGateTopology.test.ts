@@ -29,6 +29,7 @@ import {
 import { CORPUS_GATE_DIR_ENV, resolveCorpusGateEnv } from "../src/corpus-gate/config.js";
 import { runCorpusGate } from "../src/corpus-gate/index.js";
 import { sampleManifestHash } from "../src/corpus-gate/sample.js";
+import { summarizeProviderLifecycle } from "../src/corpus-gate/processTree.js";
 import {
   MIN_CORES_PER_PARALLEL_ROUTE,
   RouteConcurrencyTracker,
@@ -178,6 +179,7 @@ function report(
       unattributedPids: [],
       sampledProcessCount: 2,
     },
+    providerLifecycle: { providerPids: [4243], restarts: 0, measurementInvalidated: false },
     earlyStop: { enabled: false, stopped: false, reason: null },
     isolation: {
       topology: "serial",
@@ -260,10 +262,34 @@ describe("isolation classification", () => {
       topology: "serial",
       executor: "unattested",
       observedConcurrentRoutes: 1,
+      providerRestarts: 0,
     });
     expect(isolation.mode).toBe("isolated");
     expect(isolation.latencyGating).toBe(true);
     expect(isolation.evidence).toContain("sole route session");
+  });
+
+  it("summarises the announced provider pids into restart evidence", () => {
+    const clean = summarizeProviderLifecycle([4243]);
+    expect(clean.restarts).toBe(0);
+    expect(clean.measurementInvalidated).toBe(false);
+
+    const restarted = summarizeProviderLifecycle([4243, 4301, 4399]);
+    expect(restarted.restarts).toBe(2);
+    expect(restarted.measurementInvalidated).toBe(true);
+    expect(restarted.providerPids).toEqual([4243, 4301, 4399]);
+  });
+
+  it("refuses to gate latency when the provider restarted mid-session", () => {
+    const isolation = classifyIsolation({
+      topology: "serial",
+      executor: "dedicated",
+      observedConcurrentRoutes: 1,
+      providerRestarts: 1,
+    });
+    expect(isolation.mode).toBe("contended");
+    expect(isolation.latencyGating).toBe(false);
+    expect(isolation.evidence).toContain("restart");
   });
 
   it("refuses to gate latency when sessions overlapped", () => {
@@ -271,6 +297,7 @@ describe("isolation classification", () => {
       topology: "parallel",
       executor: "unattested",
       observedConcurrentRoutes: 3,
+      providerRestarts: 0,
     });
     expect(isolation.mode).toBe("contended");
     expect(isolation.latencyGating).toBe(false);
@@ -282,6 +309,7 @@ describe("isolation classification", () => {
       topology: "parallel",
       executor: "dedicated",
       observedConcurrentRoutes: 2,
+      providerRestarts: 0,
     });
     expect(isolation.attestationContradicted).toBe(true);
     expect(isolation.latencyGating).toBe(false);
@@ -293,6 +321,7 @@ describe("isolation classification", () => {
       topology: "serial",
       executor: "shared",
       observedConcurrentRoutes: 1,
+      providerRestarts: 0,
     });
     expect(isolation.mode).toBe("contended");
     expect(isolation.latencyGating).toBe(false);
@@ -303,6 +332,7 @@ describe("isolation classification", () => {
       topology: "parallel",
       executor: "unattested",
       observedConcurrentRoutes: 1,
+      providerRestarts: 0,
     });
     expect(isolation.latencyGating).toBe(false);
     expect(isolation.evidence).toContain("isolation is unproven");
@@ -313,6 +343,7 @@ describe("isolation classification", () => {
       topology: "parallel",
       executor: "dedicated",
       observedConcurrentRoutes: 1,
+      providerRestarts: 0,
     });
     expect(isolation.mode).toBe("isolated");
     expect(isolation.latencyGating).toBe(true);
@@ -772,5 +803,35 @@ describe("config resolution for the new knobs", () => {
         VERTER_CORPUS_GATE_EXECUTOR: "probably-fine",
       }),
     ).toThrow(/VERTER_CORPUS_GATE_EXECUTOR/);
+  });
+});
+
+describe("provider-restart evidence reaches the receipt", () => {
+  it("marks a route whose engine restarted mid-run as a non-gating measurement", async () => {
+    const result = await runCorpusGate(testConfig({ routes: ["tsserver"] }), {
+      log: () => {},
+      runRoute: async (route, _config, sample) =>
+        report(route, sample, {
+          providerLifecycle: {
+            providerPids: [4243, 4301],
+            restarts: 1,
+            measurementInvalidated: true,
+          },
+        }),
+    });
+    const stamped = result.receipt.routes.tsserver;
+    expect(stamped?.providerLifecycle?.restarts).toBe(1);
+    expect(stamped?.isolation?.latencyGating).toBe(false);
+    expect(stamped?.isolation?.evidence).toContain("restarted");
+  });
+
+  it("still gates a route whose engine never restarted (the discriminator)", async () => {
+    const result = await runCorpusGate(testConfig({ routes: ["tsserver"] }), {
+      log: () => {},
+      runRoute: async (route, _config, sample) => report(route, sample),
+    });
+    const stamped = result.receipt.routes.tsserver;
+    expect(stamped?.providerLifecycle?.restarts).toBe(0);
+    expect(stamped?.isolation?.latencyGating).toBe(true);
   });
 });

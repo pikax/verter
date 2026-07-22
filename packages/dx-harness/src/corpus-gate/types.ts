@@ -125,6 +125,29 @@ export interface CorpusProviderAttribution {
   readonly sampledProcessCount: number;
 }
 
+/**
+ * Type-provider lifecycle evidence for one route.
+ *
+ * The server announces every provider child it starts on
+ * `$/verter/typeProviderStarted`. The FIRST announcement is the session's own
+ * engine; every later one is a RESPAWN of an engine that died or was restarted
+ * mid-session.
+ *
+ * A run containing a respawn is NOT a clean latency measurement: the work after
+ * it was redone against a cold engine, so the percentiles blend a warm engine
+ * with a rebuild. Recording zero restarts is just as load-bearing as recording
+ * one — without this field a restarted run and a clean run are indistinguishable
+ * in the receipt.
+ */
+export interface CorpusProviderLifecycle {
+  /** Provider children announced over the session, in announcement order. */
+  readonly providerPids: readonly number[];
+  /** Respawns: announcements after the first. */
+  readonly restarts: number;
+  /** `restarts > 0` — this route's latency is not a clean measurement. */
+  readonly measurementInvalidated: boolean;
+}
+
 /** Exact request/response accounting for one route (non-vacuity evidence). */
 export interface CorpusRouteAccounting {
   readonly requestsSent: number;
@@ -236,6 +259,11 @@ export interface CorpusRouteReport {
   readonly isolation?: CorpusRouteIsolation;
   /** Provider-sample attribution evidence (gate integrity). */
   readonly providerAttribution?: CorpusProviderAttribution;
+  /**
+   * Engine-restart evidence. Optional in the TYPE only so receipts written
+   * before it existed still load; a missing value is unknown, never "zero".
+   */
+  readonly providerLifecycle?: CorpusProviderLifecycle;
   /** Opt-in early stop; `enabled: false` on the default path. */
   readonly earlyStop?: CorpusRouteEarlyStop;
   /**

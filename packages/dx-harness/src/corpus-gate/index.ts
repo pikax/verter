@@ -314,6 +314,10 @@ export async function runCorpusGate(
       topology: topology.effective,
       executor: config.executor,
       observedConcurrentRoutes: tracker.peakFor(route),
+      // A pre-lifecycle receipt records no restarts at all; treating "unknown"
+      // as zero would let a restarted run gate, so an absent record is read as
+      // a restart (fail-closed).
+      providerRestarts: report.providerLifecycle?.restarts ?? 1,
     });
     routes[route] = { ...report, isolation };
     log(
