@@ -346,7 +346,8 @@ async fn inject_all_dirty_injects_the_whole_open_carrier_set() {
 
     // A single diagnostics query injects the WHOLE open set — so the carrier's import
     // of its companion resolves, not just the queried carrier.
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     let mut ops = established.transport.ops();
     ops.sort();
     assert_eq!(
@@ -359,11 +360,134 @@ async fn inject_all_dirty_injects_the_whole_open_carrier_set() {
     );
 
     // A second query re-injects nothing (all clean — no Program spam).
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert_eq!(
         established.transport.ops().len(),
         2,
         "unchanged carriers are not re-injected on the next query"
+    );
+}
+
+/// An interactive request must NOT be charged with the workspace scan's bulk publish.
+///
+/// The scan records every carrier in the project on the BACKGROUND lifecycle lane. A
+/// deadline-bounded request injects only what the editor demanded: its own companion
+/// family plus whatever an editor lane recorded (the open documents and the import
+/// closure, both INTERACTIVE).
+///
+/// RED before the scope filter: the request-path sweep injected all 41 recorded carriers,
+/// sequentially, in arbitrary map order. On a real project that is a ~30 s whole-project
+/// publish inside a 1.5 s hover — the request expired in the sweep and returned a
+/// cancellation, having often not even reached its own file. The RED output shows exactly
+/// that: `Open.vue.tsx` lands 22nd of 41.
+#[tokio::test]
+async fn an_editor_demand_sweep_is_not_charged_with_the_background_bulk() {
+    let core = LazyOverlayCore::<FakeTransport>::new();
+    // The open document's carrier, recorded by the editor lifecycle.
+    core.record_content_at_priority("/ws/Open.vue.tsx", "open", OverlayPriority::Interactive);
+    // The workspace scan's bulk: 40 carriers nobody has asked for.
+    for i in 0..40 {
+        core.record_content_at_priority(
+            &format!("/ws/Bulk{i}.vue.tsx"),
+            "bulk",
+            OverlayPriority::Background,
+        );
+    }
+    let established = core
+        .ensure(
+            Some(((), 1u64)),
+            |_g| Some("nonce-1".to_string()),
+            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("establishes");
+
+    core.inject_all_dirty(
+        &established,
+        1,
+        |_, priority| priority >= OverlayPriority::Normal,
+        |_| true,
+    )
+    .await;
+
+    assert_eq!(
+        established.transport.ops(),
+        vec!["/ws/Open.vue.tsx=open".to_string()],
+        "a deadline-bounded request injects only the editor-demand set — the workspace \
+         scan's speculative bulk is not the request's work"
+    );
+    assert!(
+        core.is_synced("/ws/Open.vue.tsx"),
+        "the request's own carrier must be synced, so the query is SERVED rather than \
+         failing closed to the managed fallback"
+    );
+}
+
+/// The queried carrier's own companion family is in the editor-demand scope even when
+/// only a BACKGROUND lane recorded it.
+///
+/// `is_synced(provider_path)` is an unconditional gate: a queried carrier the sweep
+/// scoped out is never synced, so the composite would admit the managed fallback and
+/// spawn a duplicate engine. Scoping by lane ALONE is therefore unsound — the composite's
+/// predicate ORs in the queried source, and this pins that clause.
+///
+/// RED with a lane-only predicate: nothing is injected and `is_synced` is false.
+#[tokio::test]
+async fn the_queried_carrier_family_is_in_scope_even_on_the_background_lane() {
+    let core = LazyOverlayCore::<FakeTransport>::new();
+    // Only the scan has seen this carrier — no editor lane has recorded it.
+    core.record_content_at_priority(
+        "/ws/Queried.vue.tsx",
+        "carrier",
+        OverlayPriority::Background,
+    );
+    core.record_content_at_priority(
+        "/ws/Queried.vue.verter.ts",
+        "companion",
+        OverlayPriority::Background,
+    );
+    core.record_content_at_priority("/ws/Other.vue.tsx", "other", OverlayPriority::Background);
+    let established = core
+        .ensure(
+            Some(((), 1u64)),
+            |_g| Some("nonce-1".to_string()),
+            |(), _g| async { Some(Arc::new(FakeTransport::alive())) },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("establishes");
+
+    // The composite's predicate shape: editor lanes OR the queried carrier's own source.
+    core.inject_all_dirty(
+        &established,
+        1,
+        |companion, priority| {
+            priority >= OverlayPriority::Normal || companion.starts_with("/ws/Queried.vue")
+        },
+        |_| true,
+    )
+    .await;
+
+    let mut ops = established.transport.ops();
+    ops.sort();
+    assert_eq!(
+        ops,
+        vec![
+            "/ws/Queried.vue.tsx=carrier".to_string(),
+            "/ws/Queried.vue.verter.ts=companion".to_string(),
+        ],
+        "the queried carrier's whole companion family is injected regardless of the lane \
+         that recorded it, and nothing else is"
+    );
+    assert!(
+        core.is_synced("/ws/Queried.vue.tsx"),
+        "the queried carrier must be synced so the SHARED route serves it"
+    );
+    assert!(
+        !core.is_synced("/ws/Other.vue.tsx"),
+        "an unrelated speculatively-published carrier is not made a Program member"
     );
 }
 
@@ -487,9 +611,12 @@ async fn inject_all_dirty_skips_shadow_unsafe_carriers() {
         .expect("establishes");
 
     // The shadow-safety predicate ADMITS the genuine companion, REJECTS the shadow.
-    core.inject_all_dirty(&established, 1, |companion| {
-        companion != "/ws/Shadow.vue.tsx"
-    })
+    core.inject_all_dirty(
+        &established,
+        1,
+        |_, _| true,
+        |companion| companion != "/ws/Shadow.vue.tsx",
+    )
     .await;
     assert_eq!(
         established.transport.ops(),
@@ -557,7 +684,8 @@ async fn reestablished_transport_replays_open_carrier_set() {
     // Establish transport A (epoch 1) and inject the whole open set.
     let est_a = establish_alive(&core, 1, "nonce-1").await;
     let transport_a = Arc::clone(&est_a.transport);
-    core.inject_all_dirty(&est_a, 1, |_| true).await;
+    core.inject_all_dirty(&est_a, 1, |_, _| true, |_| true)
+        .await;
     let mut ops_a = transport_a.ops();
     ops_a.sort();
     assert_eq!(
@@ -566,7 +694,8 @@ async fn reestablished_transport_replays_open_carrier_set() {
         "transport A receives the whole open set"
     );
     // A second warm call into the SAME transport injects nothing (all clean for epoch 1).
-    core.inject_all_dirty(&est_a, 1, |_| true).await;
+    core.inject_all_dirty(&est_a, 1, |_, _| true, |_| true)
+        .await;
     assert_eq!(
         transport_a.ops().len(),
         2,
@@ -584,7 +713,8 @@ async fn reestablished_transport_replays_open_carrier_set() {
     );
 
     // Replay: the new epoch marks every carrier dirty, so B receives the FULL open set.
-    core.inject_all_dirty(&est_b, 1, |_| true).await;
+    core.inject_all_dirty(&est_b, 1, |_, _| true, |_| true)
+        .await;
     let mut ops_b = transport_b.ops();
     ops_b.sort();
     assert_eq!(
@@ -677,10 +807,15 @@ async fn inject_all_dirty_skips_shadow_predicate_for_clean_cached_generation() {
 
     // First query at shadow generation 1 evaluates + injects (predicate → true).
     let c = Arc::clone(&calls);
-    core.inject_all_dirty(&established, 1, move |_| {
-        c.fetch_add(1, Ordering::SeqCst);
-        true
-    })
+    core.inject_all_dirty(
+        &established,
+        1,
+        |_, _| true,
+        move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
     .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -692,10 +827,15 @@ async fn inject_all_dirty_skips_shadow_predicate_for_clean_cached_generation() {
     // A second query at the SAME shadow generation with no content edits SKIPS the
     // predicate entirely (content-clean AND shadow-generation-clean).
     let c = Arc::clone(&calls);
-    core.inject_all_dirty(&established, 1, move |_| {
-        c.fetch_add(1, Ordering::SeqCst);
-        true
-    })
+    core.inject_all_dirty(
+        &established,
+        1,
+        |_, _| true,
+        move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
     .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -722,20 +862,30 @@ async fn shadow_generation_advance_rechecks_clean_carriers() {
 
     // Inject at shadow generation 1.
     let c = Arc::clone(&calls);
-    core.inject_all_dirty(&established, 1, move |_| {
-        c.fetch_add(1, Ordering::SeqCst);
-        true
-    })
+    core.inject_all_dirty(
+        &established,
+        1,
+        |_, _| true,
+        move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // NO content edit; a query at shadow generation 2 MUST re-check the clean carrier
     // (the file-set may have changed such that shadow-safety flipped).
     let c = Arc::clone(&calls);
-    core.inject_all_dirty(&established, 2, move |_| {
-        c.fetch_add(1, Ordering::SeqCst);
-        true
-    })
+    core.inject_all_dirty(
+        &established,
+        2,
+        |_, _| true,
+        move |_| {
+            c.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
     .await;
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -755,7 +905,8 @@ async fn shadow_generation_flip_to_unsafe_clears_synced_marker() {
     let established = establish_alive(&core, 1, "nonce-1").await;
 
     // Inject SAFE at shadow generation 1.
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert!(
         core.is_synced("/ws/Foo.vue.tsx"),
         "the safe carrier is synced at gen 1"
@@ -763,7 +914,8 @@ async fn shadow_generation_flip_to_unsafe_clears_synced_marker() {
 
     // At shadow generation 2 the predicate flips to UNSAFE (a real file now occupies the
     // companion path). The stale overlay is not treated synced.
-    core.inject_all_dirty(&established, 2, |_| false).await;
+    core.inject_all_dirty(&established, 2, |_, _| true, |_| false)
+        .await;
     assert!(
         !core.is_synced("/ws/Foo.vue.tsx"),
         "a carrier whose shadow-safety flipped to unsafe is no longer synced"
@@ -786,12 +938,14 @@ async fn shadow_flip_to_unsafe_retracts_previously_injected_carrier() {
     let transport = Arc::clone(&established.transport);
 
     // Inject SAFE at shadow generation 1 (the transport records the inject).
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert_eq!(transport.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
 
     // At shadow generation 2 the carrier flips to UNSAFE (a real user file appeared at
     // the companion path). The previously-injected overlay must be RETRACTED.
-    core.inject_all_dirty(&established, 2, |_| false).await;
+    core.inject_all_dirty(&established, 2, |_, _| true, |_| false)
+        .await;
     assert!(
         transport
             .ops()
@@ -805,7 +959,8 @@ async fn shadow_flip_to_unsafe_retracts_previously_injected_carrier() {
 
     // The ContentRecord is retained: at shadow generation 3 the carrier flips BACK to
     // safe (the real file was removed) and RE-INJECTS.
-    core.inject_all_dirty(&established, 3, |_| true).await;
+    core.inject_all_dirty(&established, 3, |_, _| true, |_| true)
+        .await;
     assert!(
         core.is_synced("/ws/Foo.vue.tsx"),
         "a carrier that flipped back to safe re-injects (the ContentRecord was retained)"
@@ -848,7 +1003,8 @@ async fn inflight_inject_does_not_resync_after_concurrent_flip_to_unsafe() {
     // SAFE and PREVIOUSLY INJECTED (a later flip-to-unsafe must retract it).
     let established = establish_alive(&core, 1, "nonce-1").await;
     let transport = Arc::clone(&established.transport);
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert!(core.is_synced("/ws/Foo.vue.tsx"));
     assert_eq!(transport.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
 
@@ -867,7 +1023,7 @@ async fn inflight_inject_does_not_resync_after_concurrent_flip_to_unsafe() {
             identity: established.identity.clone(),
         };
         tokio::spawn(async move {
-            core.inject_all_dirty(&est, 1, |_| true).await;
+            core.inject_all_dirty(&est, 1, |_, _| true, |_| true).await;
         })
     };
     transport.inject_reached.notified().await;
@@ -882,7 +1038,7 @@ async fn inflight_inject_does_not_resync_after_concurrent_flip_to_unsafe() {
             identity: established.identity.clone(),
         };
         tokio::spawn(async move {
-            core.inject_all_dirty(&est, 2, |_| false).await;
+            core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
         })
     };
 
@@ -935,7 +1091,8 @@ async fn cached_unsafe_carrier_is_not_synced_even_with_a_set_injected_marker() {
     let established = establish_alive(&core, 1, "nonce-1").await;
     let transport = Arc::clone(&established.transport);
     let run_epoch = established.identity.epoch;
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert!(
         core.is_synced("/ws/Foo.vue.tsx"),
         "the safe, previously-injected carrier is synced at gen 1 (marker set)"
@@ -1070,7 +1227,7 @@ async fn first_injection_physical_overlay_is_retracted_when_flipped_unsafe() {
             identity: established.identity.clone(),
         };
         tokio::spawn(async move {
-            core.inject_all_dirty(&est, 2, |_| false).await;
+            core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
         })
     };
 
@@ -1162,13 +1319,15 @@ async fn superseded_unsafe_sweep_after_newer_safe_commit_is_inert() {
     let transport = Arc::clone(&established.transport);
 
     // Inject SAFE at generation 1 → marker committed, shadow {1, safe:true}, synced.
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert!(core.is_synced("/ws/Foo.vue.tsx"));
     assert_eq!(transport.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
 
     // A NEWER SAFE decision commits at generation 2 (content clean → no physical re-inject,
     // but the shadow cache advances to {2, safe:true}; the marker stays set).
-    core.inject_all_dirty(&established, 2, |_| true).await;
+    core.inject_all_dirty(&established, 2, |_, _| true, |_| true)
+        .await;
     assert!(core.is_synced("/ws/Foo.vue.tsx"));
     assert_eq!(
         transport.ops().len(),
@@ -1178,7 +1337,8 @@ async fn superseded_unsafe_sweep_after_newer_safe_commit_is_inert() {
 
     // A STALE older-generation (generation 1) UNSAFE sweep arrives late — superseded by the
     // newer {2, safe:true} decision. It must be FULLY INERT: no close, no marker mutation.
-    core.inject_all_dirty(&established, 1, |_| false).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| false)
+        .await;
 
     assert!(
         !transport.ops().iter().any(|o| o == "close:/ws/Foo.vue.tsx"),
@@ -1208,7 +1368,8 @@ async fn newer_safe_cache_during_blocked_retract_leaves_carrier_unsynced() {
     let run_epoch = established.identity.epoch;
 
     // Inject SAFE at gen 1 → marker set, synced.
-    core.inject_all_dirty(&established, 1, |_| true).await;
+    core.inject_all_dirty(&established, 1, |_, _| true, |_| true)
+        .await;
     assert!(core.is_synced("/ws/Foo.vue.tsx"));
 
     // Arm the retract gate: the flip-to-unsafe sweep's bounded retract blocks mid-await.
@@ -1223,7 +1384,7 @@ async fn newer_safe_cache_during_blocked_retract_leaves_carrier_unsynced() {
             identity: established.identity.clone(),
         };
         tokio::spawn(async move {
-            core.inject_all_dirty(&est, 2, |_| false).await;
+            core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
         })
     };
     transport.retract_reached.notified().await;
@@ -1247,7 +1408,8 @@ async fn newer_safe_cache_during_blocked_retract_leaves_carrier_unsynced() {
     );
 
     // A genuine reinjection at gen 3 (content-dirty via the cleared marker) re-syncs (self-heal).
-    core.inject_all_dirty(&established, 3, |_| true).await;
+    core.inject_all_dirty(&established, 3, |_, _| true, |_| true)
+        .await;
     assert!(
         core.is_synced("/ws/Foo.vue.tsx"),
         "a genuine reinjection re-syncs the carrier"
@@ -1443,7 +1605,7 @@ async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reo
             identity: established.identity.clone(),
         };
         tokio::spawn(async move {
-            core.inject_all_dirty(&est, 2, |_| false).await;
+            core.inject_all_dirty(&est, 2, |_, _| true, |_| false).await;
         })
     };
 

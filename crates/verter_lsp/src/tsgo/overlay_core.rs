@@ -593,13 +593,27 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         }
     }
 
-    /// Inject EVERY recorded carrier whose content is dirty for the bound transport epoch
-    /// AND that `should_inject` admits — the query-time COMPLETENESS step. The queried
-    /// carrier's diagnostics need its companion family (`.vue.tsx` + its `.vue.verter.ts`
-    /// script) and any other already-open carrier it imports to be members of the SHARED
-    /// Program, not just the single queried carrier; injecting the whole recorded open set
-    /// at query time keeps the normal open→diagnostics flow correct (an unrelated carrier
-    /// is a harmless extra open document).
+    /// Inject every recorded carrier that `in_scope` admits, whose content is dirty for
+    /// the bound transport epoch, and that `should_inject` admits — the query-time
+    /// COMPLETENESS step.
+    ///
+    /// The queried carrier's diagnostics need its companion family (`.vue.tsx` + its
+    /// `.vue.verter.ts` script) and the carriers it imports to be members of the SHARED
+    /// Program, not just the single queried carrier. `in_scope` is what bounds that to
+    /// the set the editor actually demanded: every carrier an editor lifecycle lane
+    /// recorded — the open documents and the import closure the background import
+    /// publication delivers — plus the queried carrier's own family.
+    ///
+    /// It is NOT the whole recorded set. A workspace scan records every carrier in the
+    /// project on the BACKGROUND lane, and injecting those was a whole-project publish
+    /// charged to whichever interactive request happened to arrive first: sequential, one
+    /// relay round-trip per carrier, in arbitrary map order, with no priority for the
+    /// request's own file. On a real project that took ~30 s, so every hover / definition
+    /// / code-action in that window expired inside this call and returned a cancellation
+    /// without ever reaching the engine — while the same work cost 5-8 ms once the sweep
+    /// had drained. Speculatively-published carriers become members when the editor
+    /// demands them (an open, or an import the publication pass delivers), which is what
+    /// upgrades their recorded lane.
     ///
     /// Work is attributed to the BOUND transport's epoch (`established.identity.epoch`),
     /// and every per-carrier physical operation runs under that carrier's gate (so a safe
@@ -639,12 +653,14 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// dirty — its shadow-safety decision is keyed on the workspace content generation,
     /// orthogonal to the transport epoch, so while the real user file still occupies its
     /// companion path it must not be injected into the fresh transport.
-    pub(crate) async fn inject_all_dirty<F>(
+    pub(crate) async fn inject_all_dirty<S, F>(
         &self,
         established: &EstablishedTransport<T>,
         generation: u64,
+        in_scope: S,
         should_inject: F,
     ) where
+        S: Fn(&str, OverlayPriority) -> bool,
         F: Fn(&str) -> bool,
     {
         let run_epoch = established.identity.epoch;
@@ -665,6 +681,12 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
                 .content
                 .iter()
                 .filter_map(|(path, rec)| {
+                    if !in_scope(path, rec.priority) {
+                        // Out of the editor-demand scope: a speculatively published
+                        // carrier nobody has asked for. Not deferred work — work no
+                        // request may be charged for.
+                        return None;
+                    }
                     let content_dirty = !record_is_synced(rec, Some(run_epoch));
                     let (shadow_fresh, cached_safe) = match rec.shadow_safety.as_ref() {
                         Some(cache) if cache.generation == generation => (true, cache.safe),
