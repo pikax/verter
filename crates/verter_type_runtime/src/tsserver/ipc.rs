@@ -293,6 +293,10 @@ struct TsserverTransport {
     /// tsserver (accepts requests, never responds) must be detected and restarted,
     /// not silently time out every request for the rest of the session.
     consecutive_failures: AtomicU32,
+    /// When the last hang strike was charged, so hops that were already in flight
+    /// then are not counted as independent evidence. See
+    /// [`TsserverTransport::note_hang_failure`]. Cleared with the counter.
+    last_strike_at: StdMutex<Option<std::time::Instant>>,
     /// Shared with `ResilientProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Singleflight + cooldown stamp for `reloadProjects` membership recovery.
@@ -334,16 +338,47 @@ impl TsserverTransport {
     /// the program, which makes the next requests cold too, which charges three
     /// more — a loop in which the engine never gets far enough to answer, and
     /// requests come back fast and EMPTY instead of slow and correct.
-    fn note_hang_failure(&self) {
-        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+    ///
+    /// CONSECUTIVE MEANS SEQUENTIAL IN TIME. A hop that was already in flight when
+    /// the previous strike was charged observed the SAME window of silence, so it
+    /// is not independent evidence. The LSP fans out — hover, definition,
+    /// completion, references and a background diagnostics pull are routinely in
+    /// flight at the same instant on the same bound — so charging each of them
+    /// separately reaches the threshold after a SINGLE bound's worth of silence
+    /// and restarts an engine that is merely busy. `issued_at` is when this hop's
+    /// bound started; only a hop issued at or after the last strike advances the
+    /// count, so reaching [`HANG_THRESHOLD`] takes that many successive windows in
+    /// which the engine answered nothing at all.
+    fn note_hang_failure(&self, command: &str, issued_at: std::time::Instant) {
+        let count = {
+            let mut last = self
+                .last_strike_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.is_some_and(|at| issued_at < at) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+            self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1
+        };
         if count >= HANG_THRESHOLD {
             tracing::error!(
-                "tsserver appears hung ({count} consecutive timeouts) — triggering restart"
+                "tsserver appears hung ({count} successive unanswered full-bound hops, \
+                 latest '{command}') — triggering restart"
             );
             if let Some(notify) = &self.crash_notify {
                 notify.notify_waiters();
             }
         }
+    }
+
+    /// Clear hang-detection state after proof the engine is alive and answering.
+    fn clear_hang_evidence(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        *self
+            .last_strike_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// Send a tsserver request and wait for the response.
@@ -415,6 +450,7 @@ impl TsserverTransport {
                 // shortened hop expiring is the CALLER running out of patience,
                 // not the engine failing to answer.
                 let full_bound = hop >= configured;
+                let issued_at = std::time::Instant::now();
                 let deadline = tokio::time::Instant::now() + hop;
 
                 // tsserver uses newline-delimited JSON (no Content-Length framing)
@@ -438,7 +474,7 @@ impl TsserverTransport {
                         registration.disarm();
                         self.pending.take(seq);
                         if full_bound {
-                            self.note_hang_failure();
+                            self.note_hang_failure(command, issued_at);
                         }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
@@ -462,7 +498,7 @@ impl TsserverTransport {
                         registration.disarm();
                         // Any response (even a tsserver-level error) proves the process
                         // is alive and answering — reset the hang detector.
-                        self.consecutive_failures.store(0, Ordering::Relaxed);
+                        self.clear_hang_evidence();
                         // Check for tsserver error
                         if let Some(false) = val.get("success").and_then(|v| v.as_bool()) {
                             let msg = val
@@ -535,7 +571,7 @@ impl TsserverTransport {
                         // pending entry and cancels the engine's work, on this
                         // path and on the caller-dropped path alike.
                         if full_bound {
-                            self.note_hang_failure();
+                            self.note_hang_failure(command, issued_at);
                         }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
@@ -1368,6 +1404,7 @@ impl TsserverTypeProvider {
             pending: Arc::clone(&pending),
             next_seq: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
+            last_strike_at: StdMutex::new(None),
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
             cancellation,
