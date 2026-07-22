@@ -1168,7 +1168,6 @@ pub(super) async fn handle_did_change_watched_files(
             let vfs_workspace = Arc::clone(&server.vfs_workspace);
             let provider_sync_states = Arc::clone(&server.provider_sync_states);
             let provider_surfaces = server.documents.provider_surfaces().clone();
-            let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
             tokio::spawn(async move {
                 for canonical_id in non_carrier_resync_ids {
@@ -1178,7 +1177,6 @@ pub(super) async fn handle_did_change_watched_files(
                         &sync,
                         &provider_surfaces,
                         &vfs_workspace,
-                        is_tsgo,
                         &provider_sync_states,
                     )
                     .await;
