@@ -114,6 +114,7 @@ function healthy(overrides: Partial<CorpusRouteReport> = {}): CorpusRouteReport 
       unattributedPids: [],
       sampledProcessCount: 2,
     },
+    providerLifecycle: { providerPids: [4243], restarts: 0, measurementInvalidated: false },
     earlyStop: { enabled: false, stopped: false, reason: null },
     isolation: {
       topology: "serial",

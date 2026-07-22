@@ -32,6 +32,7 @@ import type {
   CorpusProcessRole,
   CorpusProviderAttribution,
   CorpusProviderAttributionStatus,
+  CorpusProviderLifecycle,
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -265,6 +266,22 @@ export function unsampledTreeMembers(
   return members
     .filter((member) => member.maxRssBytes === null && nowMs - member.discoveredAtMs >= graceMs)
     .map((member) => member.pid);
+}
+
+/**
+ * Provider-lifecycle evidence from the ordered provider pids the server
+ * announced (pure).
+ *
+ * The first announcement is the session's engine; every later one is a respawn.
+ * Counting them is the ONLY way a receipt can tell a clean run from one whose
+ * numbers average a mid-run engine rebuild — a restarted provider re-does its
+ * work against a cold program, so every latency after it is a cold latency.
+ */
+export function summarizeProviderLifecycle(
+  providerPids: readonly number[],
+): CorpusProviderLifecycle {
+  const restarts = Math.max(0, providerPids.length - 1);
+  return { providerPids: [...providerPids], restarts, measurementInvalidated: restarts > 0 };
 }
 
 export interface ProcessTreeRoots {

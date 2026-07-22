@@ -375,22 +375,77 @@ fn make_resilient(
     (provider, crash_notify, spawn_gate)
 }
 
+/// A respawned provider is a NEW child process, and must be announced through
+/// the same structural channel as the first one.
+///
+/// The editor tracks the provider child by pid; so does every benchmark
+/// harness. Announcing only the initial start leaves both pointing at a dead
+/// process after the first respawn, and — worse for measurement — makes a run
+/// that tore its engine down and rebuilt it mid-flight indistinguishable from
+/// one that did not. Every latency number in such a run silently averages over
+/// a cold restart. A prose `show_message` is not that channel: it is
+/// user-facing text, not data a receipt can count.
+#[tokio::test]
+async fn a_respawned_provider_is_announced_structurally() {
+    let harness = make_harness(MockProvider::new("tsgo"), MockProvider::new("tsgo"));
+
+    harness
+        .provider
+        .open_file("/p/App.vue.tsx", "const a = 1;")
+        .await
+        .unwrap();
+    assert!(
+        harness.notifier.started().is_empty(),
+        "the wrapper does not announce the child it was handed — the caller \
+         that spawned it already did"
+    );
+
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    await_down(&harness.provider).await;
+
+    // The respawn is gated on a backoff sleep; wait for the fresh generation.
+    for _ in 0..600 {
+        if !harness.notifier.started().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        harness.notifier.started().len(),
+        1,
+        "a post-crash respawn must announce its fresh child structurally, got \
+         messages={:?}",
+        harness.notifier.messages()
+    );
+}
+
 /// A [`ProviderNotifier`] that records every user-facing notification so tests
 /// can assert what the user was (and was NOT) told.
 #[derive(Default)]
 struct RecordingNotifier {
     messages: parking_lot::Mutex<Vec<(NotifySeverity, String)>>,
+    started: parking_lot::Mutex<Vec<Option<u32>>>,
 }
 
 impl RecordingNotifier {
     fn messages(&self) -> Vec<(NotifySeverity, String)> {
         self.messages.lock().clone()
     }
+
+    fn started(&self) -> Vec<Option<u32>> {
+        self.started.lock().clone()
+    }
 }
 
 impl ProviderNotifier for RecordingNotifier {
     fn notify(&self, severity: NotifySeverity, message: String) {
         self.messages.lock().push((severity, message));
+    }
+
+    fn provider_started(&self, pid: Option<u32>) {
+        self.started.lock().push(pid);
     }
 }
 

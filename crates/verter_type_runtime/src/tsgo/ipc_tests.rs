@@ -127,6 +127,8 @@ fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
         pending: Arc::new(PendingRequests::default()),
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
     }
@@ -145,6 +147,8 @@ fn test_transport_with_pending(
         pending,
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
     }
@@ -166,6 +170,8 @@ fn test_transport_with_control(
             pending,
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
+            last_strike_at: StdMutex::new(None),
+            last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
             crash_notify: None,
             teardown_intent: Arc::new(AtomicBool::new(false)),
         },
@@ -2667,6 +2673,7 @@ async fn test_read_loop_exits_on_eof() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -2735,6 +2742,7 @@ async fn test_provider_operations_fail_after_process_death() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     let provider = TsgoTypeProvider {
@@ -2822,6 +2830,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
     let provider = TsgoTypeProvider {
         transport,
@@ -3108,6 +3117,7 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
         control_tx,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     // Spawn a mock "TSGO" task that reads requests from mock_stdout_writer
@@ -3424,6 +3434,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
@@ -4177,13 +4188,43 @@ async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_f
             "a stalled child answers nothing — each request must fail closed, got {r:?}"
         );
     }
-    // A stdin-enqueue stall must count toward hang detection just like a response
-    // timeout: with 8 failures over HANG_THRESHOLD, the restart signal fires.
+    // Those 8 hops were all in flight during ONE window of engine silence, so
+    // they are ONE piece of evidence — not 8. Charging each separately would
+    // restart a merely-busy engine after a single bound.
+    assert_eq!(
+        provider
+            .transport
+            .consecutive_failures
+            .load(Ordering::Relaxed),
+        1,
+        "hops that shared one silence window are ONE strike"
+    );
+
+    // A stdin-enqueue stall must nevertheless count toward hang detection just
+    // like a response timeout: SUCCESSIVE stalled rounds accumulate, and at
+    // HANG_THRESHOLD the restart signal fires. (Before the enqueue arm charged
+    // at all, a request parked on a full lane behind a stalled writer never
+    // reached hang detection, so a stdin-side deadlock never restarted.)
+    for _ in 0..HANG_THRESHOLD {
+        let _ = provider
+            .transport
+            .request_with_priority(
+                "textDocument/hover",
+                serde_json::json!({
+                    "textDocument": { "uri": "file:///w/a.tsx" },
+                    "position": { "line": 1, "character": 1 }
+                }),
+                1,
+                ProviderPriority::Interactive,
+            )
+            .await;
+    }
+
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(2), crash)
             .await
             .is_ok(),
-        "consecutive send/response failures past HANG_THRESHOLD must fire crash_notify"
+        "successive send/response failures past HANG_THRESHOLD must fire crash_notify"
     );
     assert!(
         provider
