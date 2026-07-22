@@ -1279,11 +1279,32 @@ fn hover_text(hover: Option<Hover>) -> String {
 }
 
 /// Build a [`TypeProviderContext`] for tests through the SAME captured-surface
-/// path production uses. Tests drive provider sync through many entry points;
-/// when a test set up its document WITHOUT completing a recorded sync, seed the
-/// committed sync state + recorded surface from the live artifacts (the exact
-/// data a successful sync would have recorded) and capture again.
-fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> TypeProviderContext {
+/// path production uses, with the document's DependencyReady receipt settled
+/// the way production settles it (background publication on open — these
+/// harnesses bypass `did_open`, so the settle runs inline here). Tests drive
+/// provider sync through many entry points; when a test set up its document
+/// WITHOUT completing a recorded sync, seed the committed sync state + recorded
+/// surface from the live artifacts (the exact data a successful sync would have
+/// recorded) and capture again.
+async fn synced_type_provider_context(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+) -> TypeProviderContext {
+    // Settle the background dependency publication first: navigation handlers
+    // only CAPTURE the receipt (they never start the pass), so a test that
+    // expects a provider-backed answer must provide the receipt like
+    // production's open path does.
+    server.publish_import_dependencies_settled(uri).await;
+    synced_type_provider_context_surface_only(server, uri)
+}
+
+/// The surface half of [`synced_type_provider_context`], WITHOUT the
+/// DependencyReady settle — for seeding helpers whose handlers are not
+/// receipt-gated (hover / completion).
+fn synced_type_provider_context_surface_only(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+) -> TypeProviderContext {
     if let Some(ctx) = server.type_provider_context(uri) {
         return ctx;
     }
@@ -1323,7 +1344,7 @@ fn set_type_hover_at_vue_position(
     position: Position,
     contents: &str,
 ) {
-    let ctx = synced_type_provider_context(server, uri);
+    let ctx = synced_type_provider_context_surface_only(server, uri);
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -1349,7 +1370,7 @@ fn set_type_completions_at_vue_position(
     position: Position,
     items: Vec<crate::type_provider::protocol::Completion>,
 ) {
-    let ctx = synced_type_provider_context(server, uri);
+    let ctx = synced_type_provider_context_surface_only(server, uri);
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -3190,7 +3211,7 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
     // test provides both receipts the way production does.
     server.ensure_current_file_synced(&app_uri).await;
     server.publish_import_dependencies_settled(&app_uri).await;
-    let ctx = synced_type_provider_context(server, &app_uri);
+    let ctx = synced_type_provider_context(server, &app_uri).await;
     let usage_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -5768,7 +5789,7 @@ async fn goto_definition_component_event_name_skips_type_provider_virtual_fallba
     let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
-    let ctx = synced_type_provider_context(server, &app_uri);
+    let ctx = synced_type_provider_context(server, &app_uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -7290,7 +7311,7 @@ async fn contract_kebab_prop_rename_executes_merged_edit_spanning_script_and_tem
     // closed).
     server.ensure_current_file_synced(&app_uri).await;
     server.publish_import_dependencies_settled(&app_uri).await;
-    let ctx = synced_type_provider_context(server, &app_uri);
+    let ctx = synced_type_provider_context(server, &app_uri).await;
     let usage_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -7385,7 +7406,7 @@ async fn contract_rename_provider_case_folded_carrier_path_reanchors_to_authored
     // rename handler only captures readiness — see the unique-carrier test).
     server.ensure_current_file_synced(&app_uri).await;
     server.publish_import_dependencies_settled(&app_uri).await;
-    let ctx = synced_type_provider_context(server, &app_uri);
+    let ctx = synced_type_provider_context(server, &app_uri).await;
     let usage_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -7522,7 +7543,7 @@ async fn assert_svelte_same_file_definition(
     target: &str,
 ) {
     let position = find_document_position(server, uri, query.0, query.1);
-    let ctx = synced_type_provider_context(server, uri);
+    let ctx = synced_type_provider_context(server, uri).await;
     let query_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -7594,7 +7615,7 @@ async fn assert_svelte_child_prop_definition(
     // foreign-surface target token.
     server.sync_ide_to_provider(app_uri).await;
     server.sync_ide_to_provider(&child_uri).await;
-    let ctx = synced_type_provider_context(server, app_uri);
+    let ctx = synced_type_provider_context(server, app_uri).await;
     let query_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -7611,7 +7632,7 @@ async fn assert_svelte_child_prop_definition(
         .current_snapshot(&child_ide_path)
         .expect("child CarrierIde surface recorded");
     let child_target_range = range_for_authored_snippet(server, &child_uri, child_target);
-    let child_ctx = synced_type_provider_context(server, &child_uri);
+    let child_ctx = synced_type_provider_context(server, &child_uri).await;
     let child_target_start = merge::carrier_position_to_tsx_offset_validated(
         &child_target_range.start,
         &child_ctx.carrier_line_index,
@@ -7662,7 +7683,7 @@ async fn assert_svelte_token_fails_closed(
     let position = find_document_position(server, uri, query.0, query.1);
     // Force the provider context to exist (the request path builds it anyway);
     // nothing is seeded, so any answer is a native fabrication.
-    let _ctx = synced_type_provider_context(server, uri);
+    let _ctx = synced_type_provider_context(server, uri).await;
     let response = server
         .goto_definition(goto_definition_params(uri, position))
         .await
@@ -8299,7 +8320,7 @@ async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result()
     let barrel_path = format!("{workspace_id}/src/components/index.ts");
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "{ Overlay, Button }", 2);
-    let ctx = synced_type_provider_context(server, &app_uri);
+    let ctx = synced_type_provider_context(server, &app_uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -8560,7 +8581,7 @@ async fn goto_type_definition_delegates_to_provider() {
 
     // Set up mock to return a type definition when queried
     {
-        let ctx = synced_type_provider_context(server, &app_uri);
+        let ctx = synced_type_provider_context(server, &app_uri).await;
         if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
             &position,
             &ctx.carrier_line_index,
@@ -9200,7 +9221,7 @@ const outerLabel = 'outer'
     let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "{{ sl }}", 5);
-    let slot_ctx = synced_type_provider_context(server, &slot_uri);
+    let slot_ctx = synced_type_provider_context(server, &slot_uri).await;
     let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &slot_ctx.carrier_line_index,
@@ -9363,7 +9384,7 @@ const outerLabel = 'outer'
     let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
-    let slot_ctx = synced_type_provider_context(server, &slot_uri);
+    let slot_ctx = synced_type_provider_context(server, &slot_uri).await;
     let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &slot_ctx.carrier_line_index,
@@ -9509,7 +9530,7 @@ async fn script_member_access_completion_returns_number_members() {
     // Compute the TSX offset exactly as the completion handler does: the strict
     // mapper is None at the zero-width member boundary by design, so fall back to
     // the completion-boundary helper.
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let vue_source = server.documents.get(&uri).unwrap().source.clone();
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
@@ -9595,7 +9616,7 @@ async fn script_identifier_completion_is_not_suppressed() {
     // identifier position with prefix `myV`.
     let position = find_document_position(server, &uri, "myVal\n", 3);
 
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -9667,7 +9688,7 @@ const outerLabel = 'outer'
     let _child_uri = open_test_vue(server, "/workspace/src/TypedSlotComp.vue", child_source);
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.na", 11);
-    let slot_ctx = synced_type_provider_context(server, &slot_uri);
+    let slot_ctx = synced_type_provider_context(server, &slot_uri).await;
     let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &slot_ctx.carrier_line_index,
@@ -9796,7 +9817,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
 
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.di", 7);
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -9927,7 +9948,7 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
         include_str!("../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.disabled", 7);
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -10252,7 +10273,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
 
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.disabled", 7);
-    let _ctx = synced_type_provider_context(server, &uri);
+    let _ctx = synced_type_provider_context(server, &uri).await;
 
     let labels = completion_labels(
         server
@@ -10316,7 +10337,7 @@ const broken =
         recovery_source,
     );
     let position = find_document_position(server, &recovery_uri, "{{ cou }}", 6);
-    let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
+    let recovery_ctx = synced_type_provider_context(server, &recovery_uri).await;
     let recovery_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &recovery_ctx.carrier_line_index,
@@ -10450,7 +10471,7 @@ const broken =
         recovery_source,
     );
     let position = find_document_position(server, &recovery_uri, "{{ safeA }}", 8);
-    let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
+    let recovery_ctx = synced_type_provider_context(server, &recovery_uri).await;
     let recovery_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &recovery_ctx.carrier_line_index,
@@ -15138,7 +15159,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 
     server.ensure_current_file_synced(&uri).await;
 
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     provider.drop_open_path(&ctx.tsx_path);
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
@@ -15331,7 +15352,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -16348,16 +16369,17 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
             .await
             .expect("slot hover request should succeed"),
     );
-    let literal_debug = Some(synced_type_provider_context(server, &parent_uri)).and_then(|ctx| {
-        ctx.tsx_content.find("slotItem.name").map(|start| {
-            (
-                ctx.tsx_path.clone(),
-                start as u32 + "slotItem.".len() as u32,
-            )
-        })
-    });
+    let literal_debug =
+        Some(synced_type_provider_context(server, &parent_uri).await).and_then(|ctx| {
+            ctx.tsx_content.find("slotItem.name").map(|start| {
+                (
+                    ctx.tsx_path.clone(),
+                    start as u32 + "slotItem.".len() as u32,
+                )
+            })
+        });
     let direct_provider = provider.clone();
-    let direct_debug = Some(synced_type_provider_context(server, &parent_uri))
+    let direct_debug = Some(synced_type_provider_context(server, &parent_uri).await)
         .and_then(|ctx| {
             let tsx_path = ctx.tsx_path.clone();
             merge::carrier_position_to_tsx_offset_validated(
@@ -18203,12 +18225,15 @@ async fn plain_script_features_answer_on_every_provider_route() {
             version: 1,
             text: source.to_string(),
         });
-        // The production did_open drives the self-file shadow sync; this test
-        // opens through the registry directly, so drive it here.
+        // The production did_open drives the self-file shadow sync AND the
+        // background dependency publication (the DependencyReady receipt the
+        // navigation handlers capture); this test opens through the registry
+        // directly, so drive both here.
         assert!(
             server.sync_self_file_shadow_unresolved(&uri).await,
             "{kind}: the plain script's self-file shadow sync succeeds"
         );
+        server.publish_import_dependencies_settled(&uri).await;
         let ctx = server
             .type_provider_context(&uri)
             .expect("{kind}: the plain script is queryable through the self-file projection");
@@ -18697,7 +18722,7 @@ async fn code_action_threads_diagnostic_code_to_type_provider_and_maps_edit_back
 
     // Map that carrier range to TSX offsets so we can arm the keyed mock response
     // exactly where the handler will query.
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_start = merge::carrier_position_to_tsx_offset_validated(
         &decl_start,
         &ctx.carrier_line_index,
@@ -18979,7 +19004,7 @@ async fn code_action_source_only_request_does_not_leak_provider_quickfix() {
     // Arm the provider with a real `quickfix`-kind action exactly where the handler
     // would query (the carrier range mapped to TSX offsets). If the gate forwards a
     // source-only request, this action maps back and leaks into the response.
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_start = merge::carrier_position_to_tsx_offset_validated(
         &decl_start,
         &ctx.carrier_line_index,
@@ -24987,7 +25012,7 @@ async fn make_foreign_mapping_fixture() -> (
     // same-file definition would short-circuit the merge and never reach the
     // foreign-mapping path under test).
     let position = find_document_position(server, &parent_uri, "'hello'", 1);
-    let parent_ctx = synced_type_provider_context(server, &parent_uri);
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &parent_ctx.carrier_line_index,
@@ -25066,7 +25091,7 @@ async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances
     // document and carries a usable mapper — exactly the shape a merge-time
     // live-current resolver would ACCEPT and mis-map the provider's
     // request-start offsets through.
-    let parent_ctx = synced_type_provider_context(server, &parent_uri);
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
     let store = server.documents.provider_surfaces().clone();
     let raced_child_path = child_ide_path.clone();
     let pinned_child = store
@@ -25231,7 +25256,7 @@ async fn references_drop_provider_locations_when_surface_regenerates_mid_request
     // A provider references response at the mapped `msg` position, pointing at
     // the carrier's own IDE surface (would map back into the source).
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -25311,7 +25336,7 @@ async fn signature_help_drops_provider_result_when_surface_regenerates_mid_reque
     let server = service.inner();
 
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    let ctx = synced_type_provider_context(server, &uri);
+    let ctx = synced_type_provider_context(server, &uri).await;
     let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
         &ctx.carrier_line_index,
@@ -25636,7 +25661,7 @@ async fn contract_svelte_transition_family_names_hover_typed_without_shim_leak()
         let uri = workspace_uri(&workspace_id, "src/App.svelte");
         let mut position = find_document_position(server, &uri, needle, 0);
         position.character += shift;
-        let ctx = synced_type_provider_context(server, &uri);
+        let ctx = synced_type_provider_context(server, &uri).await;
         let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
             &position,
             &ctx.carrier_line_index,
@@ -26332,6 +26357,12 @@ async fn production_definition_handler_fails_closed_when_the_provider_wedges() {
     let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n<template><div>{{ count }}</div></template>\n";
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "{{ count", 3);
+
+    // Production-shaped readiness: surface committed (the open path's sync) and
+    // the DependencyReady receipt settled, so the definition actually reaches
+    // the wedged provider hop this test characterizes.
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
 
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -27740,6 +27771,13 @@ async fn shortened_budget_cuts_the_dead_tail_without_dropping_answered_requests(
         DEADLINE_TEST_SOURCE,
     );
     let wedged_pos = find_document_position(wedged_server, &wedged_uri, "{{ count", 3);
+
+    // Production-shaped readiness (surface + receipt), so the request reaches
+    // the wedged provider hop instead of answering natively without it.
+    wedged_server.ensure_current_file_synced(&wedged_uri).await;
+    wedged_server
+        .publish_import_dependencies_settled(&wedged_uri)
+        .await;
 
     let started = std::time::Instant::now();
     let wedged = super::nav_features_audit::handle_goto_definition_with_audit(

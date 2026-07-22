@@ -167,6 +167,16 @@ impl VerterLanguageServer {
             // No in-process provider: there is no engine query to gate.
             return DependencyReadiness::Ready;
         }
+        if self.is_self_file_projection(uri) {
+            // A SELF-FILE projection (plain script / rune module) serves its
+            // OWN-path provider buffer: its queries never depend on the
+            // imported-carrier closure being live, so the receipt does not
+            // gate them (a scratch `.ts` answers even pre-snapshot). The
+            // capture still enqueues background publication on a miss so
+            // cross-file legs heal.
+            let _ = self.dependency_readiness_capture(uri);
+            return DependencyReadiness::Ready;
+        }
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             // No canonical identity ⇒ no dependency tracking applies; the
             // provider-context capture is the remaining (fail-closed) gate.
@@ -174,11 +184,16 @@ impl VerterLanguageServer {
         };
         loop {
             let Some(key) = self.import_sync_freshness_key() else {
-                // Bootstrap (no published resolver): receipts cannot be minted
-                // yet. Publication still delivers what it can; the post-init
-                // sweep re-publishes and mints once a snapshot exists.
+                // Bootstrap (no published resolver): the receipt DIMENSION does
+                // not exist yet, so a receipt gate would structurally deny every
+                // provider query until init publishes a snapshot — breaking the
+                // editor-liveness contract the bootstrap unresolved sync exists
+                // for (open documents answer pre-snapshot). Enqueue best-effort
+                // background delivery and let the query proceed against the
+                // bootstrap surfaces; the post-init sweep re-publishes and
+                // mints real receipts once a snapshot exists.
                 self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
-                return DependencyReadiness::NotReady;
+                return DependencyReadiness::Ready;
             };
             if self.import_sync.is_fresh_at(&canonical_id, key) {
                 return DependencyReadiness::Ready;
@@ -216,8 +231,10 @@ impl VerterLanguageServer {
             return DependencyReadiness::Ready;
         };
         let Some(key) = self.import_sync_freshness_key() else {
+            // Bootstrap: no receipt dimension yet — same disposition as the
+            // joining variant (enqueue best-effort delivery, do not deny).
             self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
-            return DependencyReadiness::NotReady;
+            return DependencyReadiness::Ready;
         };
         if self.import_sync.is_fresh_at(&canonical_id, key) {
             return DependencyReadiness::Ready;
@@ -300,9 +317,58 @@ impl VerterLanguageServer {
 
         let mut outcome = ImportSyncOutcome::Complete;
         for import_id in import_ids {
+            if self.imported_carrier_already_delivered(&import_id) {
+                continue;
+            }
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(&import_id).await);
         }
         outcome
+    }
+
+    /// Whether `canonical_id`'s provider companions are ALREADY DELIVERED for
+    /// its live bytes, so the background publication may skip it entirely.
+    ///
+    /// The publication is a steady-state-quiet pass: re-running the carrier
+    /// gateway for a byte-fresh, already-loaded child would re-record a fresh
+    /// provider-surface generation (failing a concurrent request's post-await
+    /// surface validation into an empty answer) and, on tsserver, re-publish
+    /// the store + fire a store-changed notification for content the engine
+    /// already holds. Skip iff the committed state says the companion kinds
+    /// are live AND the recorded surface still byte-matches the child's live
+    /// source — an edited child (hash mismatch) always takes the full sync.
+    fn imported_carrier_already_delivered(&self, canonical_id: &str) -> bool {
+        let Some(state) = self.provider_sync_state_for_source(canonical_id) else {
+            return false;
+        };
+        // BOTH companion kinds must be live. Checking only the API (or only a
+        // present `ide_path`) is unsound: a pass whose IDE leg FAILED commits
+        // API-only state with no `ide_path` at all, and a skip keyed on that
+        // state would silently complete — and mint DependencyReady — over an
+        // undelivered IDE companion.
+        if !state.api_background_loaded || !state.ide_background_loaded {
+            return false;
+        }
+        let store = self.documents.provider_surfaces();
+        let recorded = state
+            .api_path
+            .as_deref()
+            .and_then(|path| store.current_snapshot(path))
+            .or_else(|| {
+                state
+                    .ide_path
+                    .as_deref()
+                    .and_then(|path| store.current_snapshot(path))
+            });
+        let Some(snapshot) = recorded else {
+            return false;
+        };
+        if snapshot.source_canonical.as_ref() != canonical_id {
+            return false;
+        }
+        let Some(live_source) = self.documents.host().get_source(canonical_id) else {
+            return false;
+        };
+        crate::provider_surface_store::ContentHash::of(&live_source) == snapshot.source_hash
     }
 
     /// Sync barrel (non-carrier re-export) imports and their framework-carrier
@@ -390,8 +456,16 @@ impl VerterLanguageServer {
         while !frontier.is_empty() && depth < MAX_BFS_DEPTH {
             let mut next: Vec<String> = Vec::new();
             for barrel_id in &frontier {
-                host.ensure_loaded(barrel_id);
-                let Some(barrel_analysis) = host.get_analysis(barrel_id) else {
+                // Order this node's host load with its document lifecycle (see
+                // `sync_imported_carrier_api_lightweight`): a barrel can be an
+                // OPEN document whose did_open commit is mid-flight.
+                let barrel_analysis = {
+                    let lifecycle_lane = self.ide_sync_lifecycle_lease(barrel_id);
+                    let _lifecycle_guard = lifecycle_lane.lock().await;
+                    host.ensure_loaded(barrel_id);
+                    host.get_analysis(barrel_id)
+                };
+                let Some(barrel_analysis) = barrel_analysis else {
                     continue;
                 };
                 for module_ref in barrel_analysis.module_references.iter() {
@@ -446,8 +520,12 @@ impl VerterLanguageServer {
         let mut outcome = ImportSyncOutcome::Complete;
 
         // Sync carrier dependencies first (so the provider has their virtual
-        // IDE targets).
+        // IDE targets). Already-delivered byte-fresh carriers are skipped —
+        // the same steady-state quietness as the direct-import leg.
         for carrier_id in &barrel_carrier_deps {
+            if self.imported_carrier_already_delivered(carrier_id) {
+                continue;
+            }
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);
         }
 
@@ -463,6 +541,11 @@ impl VerterLanguageServer {
                     continue;
                 }
             }
+
+            // Order this barrel's host upsert + provider sync with its document
+            // lifecycle (see `sync_imported_carrier_api_lightweight`).
+            let lifecycle_lane = self.ide_sync_lifecycle_lease(barrel_id);
+            let _lifecycle_guard = lifecycle_lane.lock().await;
 
             let Some(source) = host.get_source(barrel_id) else {
                 continue;

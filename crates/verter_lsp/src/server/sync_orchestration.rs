@@ -2046,6 +2046,17 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> ImportSyncOutcome {
+        // Serialize this child's host materialization + provider sync on the
+        // child's OWN document lane — the same lane `did_open`/`did_close` hold
+        // across their registry + host commits. A DETACHED background
+        // publication may reach an imported child at the exact moment the user
+        // opens that child; compiling the child concurrently with its open
+        // commit races host state (a poisoned scheduler entry then fails every
+        // later `ensure_loaded`), so the pass must ORDER with the lifecycle,
+        // never interleave it. Per-document: syncs of other files, and typing,
+        // are unaffected.
+        let lifecycle_lane = self.ide_sync_lifecycle_lease(canonical_id);
+        let _lifecycle_guard = lifecycle_lane.lock().await;
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let profile = self.documents.tsx_profile.read().clone();
         let snapshot = self.published_resolver();

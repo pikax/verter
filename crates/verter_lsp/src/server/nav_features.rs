@@ -645,12 +645,14 @@ async fn handle_completion_attempt(
     // new edit can land between releasing the mutex and reading source/analysis.
     // The fence is released before any provider await.
     let mut edit_fence = server.did_change_mutex.lock().await;
-    // NOTE: We do NOT call ensure_provider_synced here.  The debounced sync in
-    // did_change sends the update to TSGO within 50ms of the last keystroke.
-    // Flushing inline would serialize: sync → TSGO re-analysis → get_completions,
-    // which takes 2-3s on large files and blocks the entire completion pipeline.
-    // Instead we let TSGO answer with whatever version it has; if it's stale the
-    // response arrives fast and VS Code re-requests after the debounce fires.
+    // NOTE: completion starts NO sync work here. The eager did_change carrier
+    // refresh keeps the current-file surface fresh per keystroke, and the
+    // import-dependency closure is background-published (capture-only readiness
+    // below). Flushing inline would serialize: sync → TSGO re-analysis →
+    // get_completions, which takes 2-3s on large files and blocks the entire
+    // completion pipeline. Instead we let TSGO answer with whatever version it
+    // has; if it's stale the response arrives fast and VS Code re-requests
+    // after the debounce fires.
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {

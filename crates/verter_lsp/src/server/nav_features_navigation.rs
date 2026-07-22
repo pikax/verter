@@ -1045,12 +1045,7 @@ pub(super) async fn handle_rename(
     // shape as a provider error, with the child-prop completeness gate below
     // still refusing partial cross-file edits. Runs BEFORE the fence so a
     // joined publication's provider commands are written first.
-    let dependency_readiness = if server.is_self_file_projection(uri) {
-        // Self-file projections never take the provider rename leg below.
-        super::import_publication::DependencyReadiness::Ready
-    } else {
-        server.dependency_readiness_join(uri).await
-    };
+    let dependency_readiness = server.dependency_readiness_join(uri).await;
 
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
