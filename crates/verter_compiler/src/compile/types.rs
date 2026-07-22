@@ -70,6 +70,34 @@ impl CompileTarget {
         self.needs_script() || self.needs_tsx()
     }
 
+    /// Whether the emitted output actually carries the Vue runtime `props` /
+    /// `model` option objects, and therefore needs each member's broad runtime
+    /// constructor (`{ type: Boolean }`).
+    ///
+    /// This is deliberately NARROWER than [`Self::needs_script`]. Script
+    /// codegen is switched on by `TEMPLATE_DATA` as well, because template
+    /// data extraction consumes script BINDINGS — not the rendered runtime
+    /// props object. Only a target that asks for runtime script or template
+    /// output (`SCRIPT` / `TEMPLATE`) has a consumer for the constructors.
+    ///
+    /// This matters because classifying one member's constructor resolves that
+    /// member's whole type through Verter's own semantic engine. The LSP's
+    /// interactive profile is `IDE | TEMPLATE_DATA`, and the TSX it produces is
+    /// type-checked by the EXTERNAL TypeScript engine; the only thing IDE
+    /// codegen takes from the runtime macro bundle is the public binding NAMES
+    /// (`ide::script::setup`, the single `visit_runtime_macro_binding_names`
+    /// call). Classification there is work no TypeScript result depends on, and
+    /// it ran synchronously inside `did_change` on the LSP serve thread.
+    ///
+    /// This is the LIGHTER form of IDE compilation. The full fix — every IDE
+    /// extra produced asynchronously instead of being required before the
+    /// request path continues — is assessed in
+    /// `docs/arch/future/ide-compile-synchronous-extras.md`. Do not widen this
+    /// back to `needs_script()` without reading that document first.
+    pub fn needs_runtime_prop_constructors(self) -> bool {
+        self.intersects(Self::SCRIPT | Self::TEMPLATE)
+    }
+
     /// Whether VDOM/Vapor/SSR template codegen should run.
     pub fn needs_template_codegen(self) -> bool {
         self.intersects(Self::TEMPLATE)

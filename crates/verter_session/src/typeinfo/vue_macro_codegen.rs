@@ -64,6 +64,15 @@ const VUE_MACRO_CODEGEN_KEY_DOMAIN: &[u8] = b"verter:typeinfo:vue-macro-codegen:
 pub(crate) enum VueMacroCodegenDemand {
     /// Runtime names, optionality, and broad constructors only.
     Runtime,
+    /// Runtime names and optionality WITHOUT broad constructor
+    /// classification.
+    ///
+    /// A TSX-only (IDE) compile reads the public binding names out of this
+    /// bundle and never reads `RuntimeProp::type_shape`. Classifying a
+    /// member's broad constructor resolves that member's entire type through
+    /// the shared semantic engine, which is why the interactive LSP path does
+    /// not ask for it.
+    RuntimeBindingNames,
     /// Terminal TSC/IDE splice text only.
     Tsc,
     /// Both independent bundles in one inventory pass.
@@ -71,7 +80,37 @@ pub(crate) enum VueMacroCodegenDemand {
 }
 
 impl VueMacroCodegenDemand {
+    /// The single target -> demand mapping every compile entry point uses.
+    ///
+    /// `None` means the target consumes no macro semantics at all.
+    pub(crate) fn for_compile_target(
+        target: verter_compiler::compile::CompileTarget,
+    ) -> Option<Self> {
+        match (
+            target.needs_runtime_macro_semantics(),
+            target.needs_runtime_prop_constructors(),
+            target.needs_tsc(),
+        ) {
+            (true, _, true) => Some(Self::RuntimeAndTsc),
+            (true, true, false) => Some(Self::Runtime),
+            (true, false, false) => Some(Self::RuntimeBindingNames),
+            (false, _, true) => Some(Self::Tsc),
+            (false, _, false) => None,
+        }
+    }
+
     const fn wants_runtime(self) -> bool {
+        matches!(
+            self,
+            Self::Runtime | Self::RuntimeBindingNames | Self::RuntimeAndTsc
+        )
+    }
+
+    /// Whether the runtime bundle must carry per-member broad constructors.
+    ///
+    /// This is the single gate that keeps `ClassifyBroadRuntime` — and the
+    /// whole member-type resolution it forces — off a TSX-only compile.
+    const fn wants_runtime_constructors(self) -> bool {
         matches!(self, Self::Runtime | Self::RuntimeAndTsc)
     }
 
@@ -84,6 +123,7 @@ impl VueMacroCodegenDemand {
             Self::Runtime => 0,
             Self::Tsc => 1,
             Self::RuntimeAndTsc => 2,
+            Self::RuntimeBindingNames => 3,
         }
     }
 }
@@ -507,13 +547,7 @@ impl VerterHost {
         canonical_id: &str,
         target: verter_compiler::compile::CompileTarget,
     ) -> verter_compiler::compile::VueMacroSemanticInput {
-        let demand = match (target.needs_runtime_macro_semantics(), target.needs_tsc()) {
-            (true, true) => Some(VueMacroCodegenDemand::RuntimeAndTsc),
-            (true, false) => Some(VueMacroCodegenDemand::Runtime),
-            (false, true) => Some(VueMacroCodegenDemand::Tsc),
-            (false, false) => None,
-        };
-        demand
+        VueMacroCodegenDemand::for_compile_target(target)
             .map(|demand| {
                 self.produce_vue_macro_codegen(canonical_id, demand)
                     .compiler_input()
@@ -771,6 +805,7 @@ impl VerterHost {
                                         mac,
                                         payload_index,
                                         defaults_index,
+                                        demand.wants_runtime_constructors(),
                                         &mut state.counters,
                                         &mut walker_diagnostics,
                                     ),
@@ -799,6 +834,7 @@ impl VerterHost {
                                         subject,
                                         mac,
                                         effective_index,
+                                        demand.wants_runtime_constructors(),
                                         &mut state.counters,
                                     ),
                                     None => ProjectionFailure::Unsupported(
@@ -1056,6 +1092,7 @@ impl VerterHost {
         mac: &AnalyzedMacro,
         payload_index: usize,
         defaults_index: Option<usize>,
+        classify_constructors: bool,
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
@@ -1102,7 +1139,13 @@ impl VerterHost {
             .iter()
             .filter(|member| member.visibility.is_public())
         {
-            let type_shape = if direct_member_dependency_is_missing(
+            // A demand that never renders the runtime `props` option object
+            // asks nothing about the member's type: the whole per-member
+            // classification chain — and the cross-file type resolution it
+            // forces — is skipped rather than computed and discarded.
+            let type_shape = if !classify_constructors {
+                RuntimePropType::Unclassified
+            } else if direct_member_dependency_is_missing(
                 dispatch,
                 member.value,
                 &member_dependency_names,
@@ -1198,11 +1241,19 @@ impl VerterHost {
         runtime_subject: BroadRuntimeSubjectLocator,
         mac: &AnalyzedMacro,
         effective_index: usize,
+        classify_constructors: bool,
         counters: &mut VueMacroCodegenCounters,
     ) -> MacroRuntimeOutcome {
-        let classification = match classify_runtime(dispatch, runtime_subject, counters) {
-            Ok(classification) => classification,
-            Err(failure) => return failure.runtime(),
+        let value_type_shape = if classify_constructors {
+            match classify_runtime(dispatch, runtime_subject, counters) {
+                Ok(classification) => RuntimePropType::Resolved {
+                    constructors: classification.constructors,
+                    skip_check: classification.skip_check,
+                },
+                Err(failure) => return failure.runtime(),
+            }
+        } else {
+            RuntimePropType::Unclassified
         };
         let macro_index = macro_index(effective_index);
         let name = mac.model_name.as_deref().unwrap_or("modelValue");
@@ -1220,10 +1271,7 @@ impl VerterHost {
             prop: RuntimeProp {
                 name: name.to_owned(),
                 optional,
-                type_shape: RuntimePropType::Resolved {
-                    constructors: classification.constructors,
-                    skip_check: classification.skip_check,
-                },
+                type_shape: value_type_shape,
                 anchor: MacroAnchor::Synthesized {
                     macro_index,
                     row: SynthesizedRowKind::ModelProp,

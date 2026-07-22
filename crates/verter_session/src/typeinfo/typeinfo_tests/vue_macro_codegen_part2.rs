@@ -1093,3 +1093,140 @@ fn cancelled_winner_does_not_abort_live_sibling() {
         MacroRuntimeOutcome::Complete(_)
     ));
 }
+
+/// `CompileTarget::IDE` is TSX-only, and the TSX it produces is type-checked
+/// by the EXTERNAL TypeScript engine — never by Verter's own resolver. IDE
+/// codegen reads exactly one thing out of the runtime bundle: the public
+/// binding NAMES (`verter_compiler::ide::script::setup`, the
+/// `visit_runtime_macro_binding_names` call). It never reads
+/// `RuntimeProp::type_shape`.
+///
+/// Broad-runtime constructor classification (`ClassifyBroadRuntime`) resolves
+/// EVERY public member's type through the shared semantic engine. On a real
+/// component whose props include a CSS style object that walk expands the
+/// whole `csstype` property union, and the IDE compile that ran inside
+/// `did_change` on the LSP serve thread blocked every hover for seconds.
+///
+/// Mutation recipe: map `CompileTarget::IDE` back onto
+/// `VueMacroCodegenDemand::Runtime` in
+/// `VueMacroCodegenDemand::for_compile_target`. The first assertion then fails
+/// with `runtime_classifier_calls` = 3 (one per public prop).
+#[test]
+fn ide_only_target_takes_binding_names_without_broad_runtime_classification() {
+    use verter_compiler::compile::CompileTarget;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(
+        &host,
+        "/src/card-types.ts",
+        r#"export type Length = string | number;
+export interface BoxStyle {
+  width?: Length;
+  height?: Length;
+  margin?: Length;
+}
+export interface CardProps {
+  title: string;
+  boxStyle?: BoxStyle;
+  compact?: boolean;
+}"#,
+    );
+    upsert(
+        &host,
+        "/src/Card.vue",
+        r#"<script setup lang="ts">
+import type { CardProps } from './card-types'
+defineProps<CardProps>()
+</script>"#,
+    );
+
+    // `IDE | TEMPLATE_DATA` is the LSP's live interactive profile
+    // (`DocumentRegistry::new`), and it is the target that ran inside
+    // `did_change` on the serve thread. `TEMPLATE_DATA` switches script
+    // codegen on for BINDINGS, which must not be mistaken for a demand for
+    // the runtime `props` option object.
+    for target in [
+        CompileTarget::IDE,
+        CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+    ] {
+        assert_eq!(
+            VueMacroCodegenDemand::for_compile_target(target),
+            Some(VueMacroCodegenDemand::RuntimeBindingNames),
+            "a TSX-only compile takes binding names, never broad constructors"
+        );
+    }
+
+    let ide = produce(
+        &host,
+        "/src/Card.vue",
+        VueMacroCodegenDemand::for_compile_target(
+            CompileTarget::IDE | CompileTarget::TEMPLATE_DATA,
+        )
+        .expect("IDE consumes the runtime bundle's public binding names"),
+    );
+    assert_eq!(
+        ide.counters.runtime_classifier_calls, 0,
+        "a TSX-only compile must not drive per-member broad-runtime classification"
+    );
+    assert_eq!(
+        ide.counters.root_shallow_demands, 1,
+        "the one shallow surface that carries the binding names is still demanded"
+    );
+
+    let ide_props = runtime_props_shape(&ide);
+    assert_eq!(
+        ide_props
+            .props
+            .iter()
+            .map(|prop| (prop.name.as_str(), prop.optional))
+            .collect::<Vec<_>>(),
+        [("title", false), ("boxStyle", true), ("compact", true)],
+        "names and optionality — everything IDE codegen consumes — survive"
+    );
+    assert!(
+        ide_props
+            .props
+            .iter()
+            .all(|prop| matches!(prop.type_shape, RuntimePropType::Unclassified)),
+        "the IDE bundle asserts no runtime constructor classification at all, \
+         rather than claiming a semantic Unknown it never computed"
+    );
+
+    // The runtime/bundler target is unchanged: it still emits `props: {...}`
+    // option objects and therefore still classifies every member.
+    let bundler = produce(
+        &host,
+        "/src/Card.vue",
+        VueMacroCodegenDemand::for_compile_target(CompileTarget::BUNDLER)
+            .expect("bundler codegen consumes runtime macro semantics"),
+    );
+    assert_eq!(
+        bundler.counters.runtime_classifier_calls, 3,
+        "runtime codegen still classifies one broad constructor set per prop"
+    );
+    let bundler_props = runtime_props_shape(&bundler);
+    assert_eq!(
+        bundler_props
+            .props
+            .iter()
+            .map(|prop| (prop.name.as_str(), constructors(prop).to_vec()))
+            .collect::<Vec<_>>(),
+        [
+            ("title", vec![RuntimeConstructor::String]),
+            ("boxStyle", vec![RuntimeConstructor::Object]),
+            ("compact", vec![RuntimeConstructor::Boolean]),
+        ],
+        "the runtime path keeps its authoritative constructor classification"
+    );
+}
+
+fn runtime_props_shape(
+    output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
+) -> &verter_macro_dto::PropsRuntimeShape {
+    let bundle = output.runtime.as_ref().expect("runtime bundle");
+    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) = &bundle.entries[0].outcome
+    else {
+        panic!("complete props runtime shape expected: {bundle:?}");
+    };
+    props
+}

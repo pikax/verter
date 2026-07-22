@@ -2624,16 +2624,27 @@ impl VerterHost {
 
         let alloc = Allocator::new();
 
+        // The macro bundle demand FOLLOWS the caller's target instead of
+        // always asking for the heaviest one. A TSX-only (IDE) compile takes
+        // the public binding names; only a target that renders the runtime
+        // `props` option object pays for per-member broad-runtime
+        // classification, which resolves every member's type through the
+        // shared semantic engine. A Vue carrier always produces at least the
+        // names bundle, because the shared payload resolution underneath it is
+        // what yields this file's macro dependency diagnostics and its
+        // transitive macro type dependencies.
+        let macro_demand =
+            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::for_compile_target(
+                profile.target,
+            )
+            .unwrap_or(
+                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
+            );
         let macro_output = self
             .language_classifier()
             .classify(&snapshot.canonical_id)
             .is_vue()
-            .then(|| {
-                self.produce_vue_macro_codegen(
-                    &snapshot.canonical_id,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
-                )
-            });
+            .then(|| self.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand));
         let macro_dependency_diagnostics = macro_output
             .as_ref()
             .map(|output| super::vue_macro_dependency_diagnostics::collect(self, snapshot, output))
