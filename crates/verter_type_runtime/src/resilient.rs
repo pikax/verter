@@ -62,6 +62,20 @@ pub enum NotifySeverity {
 /// Component-meta can use a logging-only or no-op implementation.
 pub trait ProviderNotifier: Send + Sync + 'static {
     fn notify(&self, severity: NotifySeverity, message: String);
+
+    /// A freshly RESPAWNED provider child went live, carrying its process id
+    /// when the platform reports one.
+    ///
+    /// Structural, not prose: the editor tracks the provider by pid, and a
+    /// benchmark receipt must be able to COUNT engine restarts. A run that tore
+    /// its engine down and rebuilt it mid-flight is not a clean latency
+    /// measurement, and nothing else on the wire says so. The child the wrapper
+    /// was constructed with is not announced here — whoever spawned it already
+    /// did.
+    ///
+    /// Deliberately has no default body: a silent default is how a provider
+    /// silently inherits behaviour it was supposed to override.
+    fn provider_started(&self, pid: Option<u32>);
 }
 
 /// No-op notifier (logs via tracing only).
@@ -74,6 +88,10 @@ impl ProviderNotifier for TracingNotifier {
             NotifySeverity::Warning => tracing::warn!("{}", message),
             NotifySeverity::Error => tracing::error!("{}", message),
         }
+    }
+
+    fn provider_started(&self, pid: Option<u32>) {
+        tracing::info!("type provider respawned (pid: {pid:?})");
     }
 }
 
@@ -950,6 +968,7 @@ where
             match state.backend.spawn(Arc::clone(&new_crash_notify)).await {
                 Ok(provider) => {
                     let provider = Arc::new(provider);
+                    let child_pid = provider.child_pid();
 
                     // Replay + install atomically through the actor: the fresh provider
                     // is not made live until the current desired-state set (file set,
@@ -976,6 +995,10 @@ where
                         NotifySeverity::Info,
                         "TypeScript server restarted successfully.".to_string(),
                     );
+                    // Structural announcement of the NEW child: the editor's pid
+                    // tracking and any measurement receipt both follow this, not
+                    // the prose message above.
+                    state.notifier.provider_started(child_pid);
 
                     state.restart_count.store(0, Ordering::Relaxed);
                     spawn_crash_monitor(state, new_crash_notify);

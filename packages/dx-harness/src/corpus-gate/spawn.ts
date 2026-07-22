@@ -114,6 +114,12 @@ export interface CorpusGateLspHandle {
   readonly startup: CorpusRouteStartup;
   /** Latest provider child PID from `$/verter/typeProviderStarted`, if any. */
   providerPid(): number | null;
+  /**
+   * EVERY provider child the server announced, in order. Length > 1 means the
+   * engine was respawned mid-session — the run's latency then averages over a
+   * cold rebuild and is not a clean measurement.
+   */
+  providerPids(): readonly number[];
   /** Graceful shutdown + force-kill fallback; never hangs, idempotent. */
   dispose(): Promise<void>;
 }
@@ -323,6 +329,7 @@ export async function spawnCorpusGateLsp(
       route,
       startup,
       providerPid: () => providerStarts.at(-1) ?? relay?.process.pid ?? null,
+      providerPids: () => [...providerStarts],
       dispose,
     };
   } catch (error) {

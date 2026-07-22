@@ -17,7 +17,7 @@ import { GET_STATISTICS_METHOD } from "../core/startupGate.js";
 import { extractQuiescenceCounters, pollUntilQuiesced } from "../core/quiescence.js";
 import { summarizeKinds } from "./metrics.js";
 import { mineCorpusProbes, type CorpusProbe } from "./probes.js";
-import { ProcessTreeSampler } from "./processTree.js";
+import { ProcessTreeSampler, summarizeProviderLifecycle } from "./processTree.js";
 import { sampleManifestHash } from "./sample.js";
 import { spawnCorpusGateLsp, type CorpusGateLspHandle } from "./spawn.js";
 import { UNPROVEN_ISOLATION } from "./topology.js";
@@ -143,6 +143,7 @@ export async function runCorpusRoute(
   };
 
   let handle: CorpusGateLspHandle | null = null;
+  let providerPids: readonly number[] = [];
   try {
     handle = await spawn(route, config.corpusDir, {
       readyCapMs: config.startupReadyCapMs,
@@ -367,6 +368,9 @@ export async function runCorpusRoute(
       // One last topology pass so a provider that only appeared late is still
       // attributed, then freeze the samplers.
       refreshTreeRoots();
+      // Read the announcement list BEFORE disposal: a restart that happened
+      // during the session is evidence the receipt must carry.
+      providerPids = handle.providerPids();
       await treeSampler.refreshTopology().catch(() => undefined);
       treeSampler.stop();
       // Disposal is itself raced: teardown of a wedged server must not hang the gate.
@@ -388,6 +392,7 @@ export async function runCorpusRoute(
     kinds: summarizeKinds(observations),
     memory: treeSampler.trends(),
     providerAttribution: treeSampler.attribution(),
+    providerLifecycle: summarizeProviderLifecycle(providerPids),
     earlyStop: finalEarlyStop,
     // Fail-closed: the ORCHESTRATOR observes and stamps isolation. A route
     // runner never declares its own measurement valid.

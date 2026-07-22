@@ -89,6 +89,8 @@ export interface IsolationObservation {
   readonly executor: CorpusExecutorAttestation;
   /** Peak concurrent route sessions observed during this route's own window. */
   readonly observedConcurrentRoutes: number;
+  /** Type-provider respawns observed during this route's session. */
+  readonly providerRestarts: number;
 }
 
 /**
@@ -100,9 +102,25 @@ export interface IsolationObservation {
  * contradiction — a hard defect, not a downgrade.
  */
 export function classifyIsolation(observation: IsolationObservation): CorpusRouteIsolation {
-  const { topology, executor, observedConcurrentRoutes } = observation;
+  const { topology, executor, observedConcurrentRoutes, providerRestarts } = observation;
   const base = { topology, executor, observedConcurrentRoutes };
 
+  // An engine that was torn down and rebuilt mid-session invalidates the whole
+  // route's latency: everything measured after the respawn was redone against a
+  // cold engine, so the percentiles blend a warm engine with a rebuild. This is
+  // a property of the run itself, so it outranks every executor attestation.
+  if (providerRestarts > 0) {
+    return {
+      ...base,
+      mode: "contended",
+      latencyGating: false,
+      attestationContradicted: false,
+      evidence:
+        `the type provider restarted ${providerRestarts} time(s) during this route — ` +
+        `work after each restart ran against a COLD engine, so these percentiles are not a ` +
+        `measurement of a settled server`,
+    };
+  }
   if (observedConcurrentRoutes > 1) {
     return {
       ...base,

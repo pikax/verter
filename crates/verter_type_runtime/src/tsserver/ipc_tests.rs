@@ -585,6 +585,8 @@ async fn tsserver_shutdown_completes_within_timeout() {
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -993,6 +995,8 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         pending: Arc::clone(&pending),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1070,6 +1074,8 @@ async fn run_update_file_capture(
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1233,6 +1239,8 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1432,6 +1440,8 @@ async fn run_resync_capture(
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -1583,6 +1593,8 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2440,6 +2452,8 @@ fn resync_harness() -> ResyncHarness {
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2649,6 +2663,8 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -2783,6 +2799,8 @@ fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: Some(Arc::clone(&crash_notify)),
         membership_recovery: Mutex::new(None),
         cancellation: None,
@@ -3243,6 +3261,8 @@ fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTrans
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -3259,6 +3279,8 @@ fn test_transport_with_notify(
         pending: Arc::new(TsserverPendingRequests::default()),
         next_seq: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: Some(crash_notify),
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
@@ -3390,6 +3412,109 @@ async fn a_full_bound_tsserver_timeout_is_still_charged_to_hang_detection() {
         .await
         .expect("HANG_THRESHOLD consecutive full-bound timeouts must fire the restart")
         .unwrap();
+}
+
+/// Hops that were ALL IN FLIGHT during one window of engine silence are ONE
+/// piece of evidence, not `HANG_THRESHOLD` of them.
+///
+/// The LSP fans out: hover, definition, completion, references and a background
+/// diagnostics pull are routinely in flight at the same instant, all bounded by
+/// the same configured hop. When the engine is merely BUSY — building a cold
+/// program on a real monorepo — they all expire together, and charging each one
+/// independently trips the restart after a SINGLE bound's worth of silence. The
+/// restart discards the half-built program, so the next wave is cold too: a
+/// self-sustaining restart loop in which the engine never survives long enough
+/// to answer anything.
+#[tokio::test]
+async fn concurrent_full_bound_timeouts_are_one_strike_not_three() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    let notify = Arc::new(Notify::new());
+    let transport = Arc::new(test_transport_with_notify(stdin_tx, Arc::clone(&notify)));
+
+    let fired = Arc::new(AtomicU32::new(0));
+    let waiter = {
+        let notify = Arc::clone(&notify);
+        let fired = Arc::clone(&fired);
+        tokio::spawn(async move {
+            notify.notified().await;
+            fired.store(1, Ordering::Relaxed);
+        })
+    };
+    tokio::task::yield_now().await;
+
+    // Every hop is issued BEFORE any of them expires: one silence window.
+    let mut handles = Vec::new();
+    for _ in 0..(HANG_THRESHOLD + 2) {
+        let transport = Arc::clone(&transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .request_with_timeout(
+                    "quickinfo",
+                    serde_json::json!({}),
+                    std::time::Duration::from_millis(120),
+                )
+                .await
+        }));
+    }
+    for handle in handles {
+        let result = handle.await.expect("hop task must not panic");
+        assert!(result.is_err(), "an unanswered hop must time out");
+    }
+
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        1,
+        "hops that shared ONE window of engine silence are ONE strike, not one each"
+    );
+    assert_eq!(
+        fired.load(Ordering::Relaxed),
+        0,
+        "one window of silence must not restart a merely-busy engine"
+    );
+    waiter.abort();
+}
+
+/// A child that is EMITTING is working, not wedged — even when a full-bound hop
+/// goes unanswered.
+///
+/// A busy tsserver keeps producing output while it builds a cold program
+/// (`projectLoadingStart`/`Finish`, diagnostics events, telemetry). A WEDGED one
+/// produces nothing. Without this discrimination, a request whose answer the
+/// caller does not even use — `notify_carrier_changed` awaits `projectInfo`
+/// purely as an ordering fence and DISCARDS the body — is charged as proof the
+/// engine is hung, and three carrier changes against a cold project destroy it.
+#[tokio::test]
+async fn a_hop_is_not_charged_while_the_child_is_still_emitting() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    let notify = Arc::new(Notify::new());
+    let transport = Arc::new(test_transport_with_notify(stdin_tx, Arc::clone(&notify)));
+
+    for _ in 0..(HANG_THRESHOLD + 2) {
+        // The read loop stamps this on every line the child produces; simulate
+        // an event arriving DURING the hop.
+        let transport_for_traffic = Arc::clone(&transport);
+        let traffic = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            *transport_for_traffic
+                .last_message_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
+        });
+        let _ = transport
+            .request_with_timeout(
+                "projectInfo",
+                serde_json::json!({}),
+                std::time::Duration::from_millis(120),
+            )
+            .await;
+        traffic.await.expect("traffic task must not panic");
+    }
+
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        0,
+        "an unanswered hop against a child that kept emitting is not evidence of a wedge"
+    );
 }
 
 /// A caller with no ambient deadline — batch and background work — keeps its

@@ -14,11 +14,14 @@ pub(crate) use verter_type_runtime::resilient::{ResilientBackend, ResilientProvi
 /// LSP-specific notifier that uses `client.show_message()` / `client.log_message()`.
 pub(crate) struct LspNotifier {
     client: Arc<OnceCell<Client>>,
+    /// The provider kind (`tsserver` / `tsgo`) carried on the structural
+    /// respawn notification, matching the backend's own user label.
+    kind: &'static str,
 }
 
 impl LspNotifier {
-    pub fn new(client: Arc<OnceCell<Client>>) -> Self {
-        Self { client }
+    pub fn new(client: Arc<OnceCell<Client>>, kind: &'static str) -> Self {
+        Self { client, kind }
     }
 }
 
@@ -36,6 +39,27 @@ impl verter_type_runtime::resilient::ProviderNotifier for LspNotifier {
                     NotifySeverity::Error => tower_lsp_server::ls_types::MessageType::ERROR,
                 };
                 client.show_message(msg_type, message).await;
+            }
+        });
+    }
+
+    fn provider_started(&self, pid: Option<u32>) {
+        // No pid, no notification: the contract carries a real child process
+        // id, and fabricating one would make a restart look like a fresh start
+        // against a process that does not exist.
+        let Some(pid) = pid else {
+            tracing::warn!("{} respawned without a reportable child pid", self.kind);
+            return;
+        };
+        let client = self.client.clone();
+        let kind = self.kind.to_string();
+        tokio::spawn(async move {
+            if let Some(client) = client.get() {
+                client
+                    .send_notification::<crate::server::protocol_types::TypeProviderStarted>(
+                        crate::server::protocol_types::TypeProviderStartedParams { pid, kind },
+                    )
+                    .await;
             }
         });
     }

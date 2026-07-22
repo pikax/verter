@@ -79,7 +79,7 @@ pub fn new_owned(
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
 ) -> impl TypeProvider {
-    let notifier = Arc::new(LspNotifier::new(client));
+    let notifier = Arc::new(LspNotifier::new(client, "tsgo"));
     ResilientProvider::new(
         provider,
         crash_notify,

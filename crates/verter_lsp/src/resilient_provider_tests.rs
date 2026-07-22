@@ -94,7 +94,10 @@ fn make_resilient(
 ) {
     let crash_notify = Arc::new(Notify::new());
     let spawn_gate = Arc::new(Semaphore::new(0));
-    let notifier = Arc::new(LspNotifier::new(Arc::new(tokio::sync::OnceCell::new())));
+    let notifier = Arc::new(LspNotifier::new(
+        Arc::new(tokio::sync::OnceCell::new()),
+        "tsgo",
+    ));
     let provider = ResilientProvider::new(
         initial,
         Arc::clone(&crash_notify),
