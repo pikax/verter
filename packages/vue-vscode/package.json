@@ -288,6 +288,7 @@
             "shared-tsgo",
             "tsgo",
             "tsserver",
+            "editor-tsserver",
             "extension",
             "off"
           ],
@@ -297,6 +298,7 @@
             "Prefer the exact editor-owned Native Preview Program and activate managed TSGO only after an observed attach failure",
             "Use a separately managed TSGO process (operator override)",
             "Use workspace TypeScript version (tsserver)",
+            "Serve carriers from Verter's plugin inside VS Code's own tsserver instead of a Verter-managed engine. Avoids a second TypeScript process, but only serves when your tsserver keeps each carrier in a configured project",
             "Host TypeScript language service in the extension process (experimental)",
             "Disable TypeScript type checking"
           ],

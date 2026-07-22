@@ -1,6 +1,20 @@
 export const TYPE_PROVIDER_ROUTES = ["tsserver", "tsgo", "shared-tsgo"] as const;
 
-export type E2eTypeProviderRoute = (typeof TYPE_PROVIDER_ROUTES)[number];
+/**
+ * Routes outside the standard fixture matrix. `editor-tsserver` is the explicit
+ * editor-owned tier: it is never selected automatically, so it is exercised only
+ * by the acceptance fixture that owns it.
+ */
+export const NON_MATRIX_TYPE_PROVIDER_ROUTES = ["editor-tsserver"] as const;
+
+export type E2eTypeProviderRoute =
+  | (typeof TYPE_PROVIDER_ROUTES)[number]
+  | (typeof NON_MATRIX_TYPE_PROVIDER_ROUTES)[number];
+
+const SELECTABLE_TYPE_PROVIDER_ROUTES: readonly string[] = [
+  ...TYPE_PROVIDER_ROUTES,
+  ...NON_MATRIX_TYPE_PROVIDER_ROUTES,
+];
 
 export const STANDARD_E2E_FIXTURES = [
   "single-project",
@@ -30,7 +44,7 @@ export interface E2eRoute {
 }
 
 export const EDITOR_ACCEPTANCE_ROUTES: readonly E2eRoute[] = [
-  { fixture: "editor-owned-project", typeProvider: "tsserver" },
+  { fixture: "editor-owned-project", typeProvider: "editor-tsserver" },
   { fixture: "editor-owned-project", typeProvider: "shared-tsgo" },
 ] as const;
 
@@ -61,9 +75,9 @@ export function parseE2eRouteLabel(label: string): E2eRoute {
   }
   const fixture = label.slice(0, split);
   const typeProvider = label.slice(split + 1);
-  if (!TYPE_PROVIDER_ROUTES.includes(typeProvider as E2eTypeProviderRoute)) {
+  if (!SELECTABLE_TYPE_PROVIDER_ROUTES.includes(typeProvider)) {
     throw new Error(
-      `Unsupported VS Code E2E provider ${JSON.stringify(typeProvider)}; expected ${TYPE_PROVIDER_ROUTES.join(", ")}`,
+      `Unsupported VS Code E2E provider ${JSON.stringify(typeProvider)}; expected ${SELECTABLE_TYPE_PROVIDER_ROUTES.join(", ")}`,
     );
   }
   const [route] = selectE2eRoutes({ fixture, typeProvider });
@@ -74,10 +88,7 @@ export function selectE2eRoutes(options: {
   readonly fixture?: string;
   readonly typeProvider?: string;
 }): E2eRoute[] {
-  if (
-    options.typeProvider &&
-    !TYPE_PROVIDER_ROUTES.includes(options.typeProvider as E2eTypeProviderRoute)
-  ) {
+  if (options.typeProvider && !SELECTABLE_TYPE_PROVIDER_ROUTES.includes(options.typeProvider)) {
     throw new Error(`Unsupported VS Code E2E provider ${JSON.stringify(options.typeProvider)}`);
   }
   const selected = buildE2eRouteInventory().filter(

@@ -318,6 +318,18 @@ impl CliArgs {
     }
 }
 
+/// Whether a configured route may adopt an editor-tsserver plugin attestation.
+///
+/// EXPLICIT selection only. The editor-owned tsserver tier leaves the LSP with
+/// no engine of its own and hands carrier rename to the plugin inside VS Code's
+/// tsserver; whether that plugin can serve a workspace depends on tsserver's
+/// project topology, which cannot be known before carriers are published. The
+/// automatic policy therefore never adopts it, and `tsserver` selects the
+/// workspace tsserver its setting description advertises.
+pub(crate) fn route_consumes_editor_tsserver_attestation(type_provider: &str) -> bool {
+    type_provider == "editor-tsserver"
+}
+
 /// Create the type provider based on CLI args.
 ///
 /// Auto mode consumes neutral facts supplied by an editor client: an attested
@@ -352,9 +364,7 @@ async fn create_type_provider(
         })
         .unwrap_or_else(|| ".".to_string());
     let ws_canonical = verter_span::path::canonicalize_path(&workspace_root);
-    let editor_tsserver = if matches!(args.type_provider.as_str(), "off" | "tsgo" | "extension") {
-        None
-    } else {
+    let editor_tsserver = if route_consumes_editor_tsserver_attestation(&args.type_provider) {
         match args.editor_tsserver_attestation() {
             Ok(attestation) => attestation,
             Err(reason) => {
@@ -364,6 +374,8 @@ async fn create_type_provider(
                 None
             }
         }
+    } else {
+        None
     };
 
     match args.type_provider.as_str() {
@@ -377,11 +389,6 @@ async fn create_type_provider(
         }
         "shared-tsgo" => {
             let has_editor_rendezvous = args.shared_rendezvous().is_some();
-            if !has_editor_rendezvous {
-                if let Some(attestation) = &editor_tsserver {
-                    return editor_tsserver_topology(attestation);
-                }
-            }
             if !has_editor_rendezvous {
                 // No editor rendezvous: the managed fallback is all that is left,
                 // so its engine is chosen by capability and a route that cannot
@@ -414,10 +421,21 @@ async fn create_type_provider(
                 }
             }
         }
-        "tsserver" => {
+        "editor-tsserver" => {
             if let Some(attestation) = &editor_tsserver {
                 return editor_tsserver_topology(attestation);
             }
+            // Explicitly selected, but the editor's plugin never proved it is
+            // bound to a project in this workspace. There is no editor engine to
+            // defer to, so the managed tier serves rather than reporting a
+            // connected editor process that does not exist.
+            tracing::warn!(
+                "--type-provider=editor-tsserver: no attested editor tsserver plugin; \
+                 serving from the managed tier"
+            );
+            managed_fallback_topology(args, client_cell, host, &ws_canonical).await
+        }
+        "tsserver" => {
             match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
                 Ok(tp) => (Some(tp), TypeProviderKind::Tsserver, None),
                 Err(TsserverSpawnError::NativeFamily { major }) => {
@@ -470,10 +488,10 @@ async fn create_type_provider(
             )
         }
         _ => {
-            // Auto serving order is identity-based: the exact editor tsgo, the exact
-            // editor tsserver plugin, then pinned managed tsgo. Managed fallback is
-            // constructed lazily and stays cold until a bound demand observes that
-            // neither editor route can serve it.
+            // Auto serving order is identity-based: the exact editor tsgo, then
+            // the managed workspace engine. Managed fallback is constructed
+            // lazily and stays cold until a bound demand observes that the
+            // editor route cannot serve it.
             if args.shared_rendezvous().is_some() {
                 let provider =
                     wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
@@ -483,11 +501,8 @@ async fn create_type_provider(
                     Some(editor_native_preview_reason()),
                 );
             }
-            if let Some(attestation) = &editor_tsserver {
-                return editor_tsserver_topology(attestation);
-            }
 
-            // Neither editor route is available. Tier 2 admits tsgo OR tsserver,
+            // The editor route is unavailable. Tier 2 admits tsgo OR tsserver,
             // and a workspace that can supply neither gets an honest `None`.
             managed_fallback_topology(args, client_cell, host, &ws_canonical).await
         }
