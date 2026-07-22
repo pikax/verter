@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
@@ -62,6 +62,186 @@ fn summarize_tsserver_args(arguments: &serde_json::Value) -> String {
     format!("file={} line={} offset={}", file, line, offset)
 }
 
+/// In-flight requests awaiting a response, keyed by tsserver sequence number.
+///
+/// A `std::sync::Mutex`, not an async one: every critical section is a single
+/// map operation with no await inside it, and a synchronous lock is what lets
+/// [`TsserverPendingRequest::drop`] clean up. A cancelled request is dropped,
+/// not awaited to completion, so cleanup that could only run on an async path
+/// would never run at all.
+#[derive(Default)]
+struct TsserverPendingRequests {
+    map: StdMutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
+}
+
+impl TsserverPendingRequests {
+    fn insert(&self, seq: i64, tx: oneshot::Sender<serde_json::Value>) {
+        self.map.lock().unwrap().insert(seq, tx);
+    }
+
+    fn take(&self, seq: i64) -> Option<oneshot::Sender<serde_json::Value>> {
+        self.map.lock().unwrap().remove(&seq)
+    }
+
+    /// How many requests are in flight. The leak surface: a request abandoned
+    /// without releasing its slot shows up here and nowhere else.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+
+    /// Fail every in-flight request so callers return immediately instead of
+    /// waiting out their own timeouts.
+    fn drain_with_crash_error(&self) {
+        let drained: Vec<_> = self.map.lock().unwrap().drain().collect();
+        for (_seq, tx) in drained {
+            let _ = tx.send(serde_json::json!({
+                "success": false,
+                "message": "tsserver process crashed"
+            }));
+        }
+    }
+}
+
+/// Retention window for a written cancellation file.
+///
+/// A cancellation can only still matter while its request is queued at the
+/// engine. Requests are bounded by a deadline of seconds, and three consecutive
+/// unanswered hops restart the process outright, so a file this old is
+/// unreachable — nothing can still be waiting to observe it.
+const CANCEL_FILE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Hard cap on retained cancellation files, so the directory stays bounded even
+/// if the clock is adjusted underneath the TTL.
+const CANCEL_FILE_RETAIN_CAP: usize = 512;
+
+/// tsserver's per-request cancellation channel.
+///
+/// tsserver has no in-band cancel message. What it has is
+/// `--cancellationPipeName <prefix>*`: while it executes request N it polls for
+/// the existence of the file `<prefix>N` and throws `OperationCanceledException`
+/// out of the language-service call the moment it appears. A queued request is
+/// covered too — the name is bound when the request is dequeued, so the very
+/// first poll of an already-cancelled request sees the file.
+///
+/// The cancel being a file create is exactly the property this transport needs:
+/// it bypasses the stdin queue entirely, and a request is usually being
+/// cancelled precisely BECAUSE that queue is not draining. It is the structural
+/// equivalent of the tsgo transport's unbounded control lane.
+///
+/// Sequence numbers are unique and monotonic within a session, so a cancellation
+/// can only ever apply to the request that minted it: a file written after
+/// tsserver has already answered that seq names work it will never run again.
+struct TsserverCancellation {
+    /// Session-private directory holding the cancellation files.
+    dir: std::path::PathBuf,
+    /// The exact string tsserver concatenates the request id onto. Built once so
+    /// the path this side writes is byte-identical to the one tsserver stats.
+    prefix: String,
+    /// Files written but not yet reaped. tsserver clears its per-request name
+    /// without unlinking, so the writer owns cleanup.
+    written: StdMutex<std::collections::VecDeque<(std::path::PathBuf, std::time::Instant)>>,
+}
+
+impl TsserverCancellation {
+    /// Create the session's cancellation directory.
+    ///
+    /// `None` when it cannot be created or cannot be named to tsserver, in which
+    /// case the transport degrades to releasing the pending slot without telling
+    /// the engine to stop — never to a wrong cancellation.
+    fn create() -> Option<Self> {
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "verter-tsserver-cancel-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).ok()?;
+        let prefix = dir.join("c").to_str()?.to_string();
+        // tsserver rejects the whole template when the prefix itself contains a
+        // `*`, which would leave the session silently un-cancellable.
+        if prefix.contains('*') {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        }
+        Some(Self {
+            dir,
+            prefix,
+            written: StdMutex::new(std::collections::VecDeque::new()),
+        })
+    }
+
+    /// The `--cancellationPipeName` argument for this session.
+    fn pipe_name_arg(&self) -> String {
+        format!("{}*", self.prefix)
+    }
+
+    /// Tell tsserver to stop working on `seq`, and reap cancellations that can
+    /// no longer be observed.
+    fn cancel(&self, seq: i64) {
+        let path = std::path::PathBuf::from(format!("{}{seq}", self.prefix));
+        if std::fs::File::create(&path).is_err() {
+            return;
+        }
+        let mut written = self.written.lock().unwrap();
+        written.push_back((path, std::time::Instant::now()));
+        while written.len() > CANCEL_FILE_RETAIN_CAP
+            || written
+                .front()
+                .is_some_and(|(_, at)| at.elapsed() > CANCEL_FILE_TTL)
+        {
+            let Some((stale, _)) = written.pop_front() else {
+                break;
+            };
+            let _ = std::fs::remove_file(stale);
+        }
+    }
+}
+
+impl Drop for TsserverCancellation {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// One in-flight request's registration, released on drop.
+///
+/// The caller's future can be dropped at any await point — the request deadline
+/// elapsing upstream is the normal case, not an exotic one. Dropping it must
+/// leave nothing behind:
+///
+/// * the pending-map entry goes, or a provider that never answers leaks an entry
+///   per abandoned request for the life of the session;
+/// * the cancellation goes out, or tsserver keeps computing an answer no one
+///   will read — and on one JavaScript thread that abandoned work sits directly
+///   in front of every request that replaced it.
+struct TsserverPendingRequest {
+    seq: i64,
+    pending: Arc<TsserverPendingRequests>,
+    cancellation: Option<Arc<TsserverCancellation>>,
+    /// Cleared once the response is in hand — a completed request must not
+    /// cancel a seq the engine has already answered.
+    armed: bool,
+}
+
+impl TsserverPendingRequest {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TsserverPendingRequest {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.pending.take(self.seq);
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel(self.seq);
+        }
+    }
+}
+
 /// Message sent to the dedicated stdin writer task.
 enum TsserverStdinMessage {
     /// Write a newline-delimited JSON message to stdin.
@@ -95,7 +275,7 @@ struct TsserverTransport {
     /// Channel sender for writing to the child's stdin via the writer task.
     stdin_tx: mpsc::Sender<TsserverStdinMessage>,
     /// Pending request senders, keyed by sequence number.
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<TsserverPendingRequests>,
     next_seq: AtomicI64,
     /// Counts consecutive request timeouts. Reset to 0 on any successful response.
     /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
@@ -110,6 +290,10 @@ struct TsserverTransport {
     /// each fire `reloadProjects` (a full all-projects rebuild), saturating tsserver.
     /// The stamp coalesces those to at most one reload per cooldown window.
     membership_recovery: Mutex<Option<std::time::Instant>>,
+    /// Per-request cancellation channel for this session. `None` when the
+    /// session could not create its cancellation directory, in which case an
+    /// abandoned request still releases its slot but the engine keeps working.
+    cancellation: Option<Arc<TsserverCancellation>>,
 }
 
 /// Number of consecutive request timeouts before the transport signals a hang.
@@ -130,6 +314,28 @@ const HANG_THRESHOLD: u32 = 3;
 const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl TsserverTransport {
+    /// Charge one round-trip failure toward hang detection, firing the restart
+    /// notification once [`HANG_THRESHOLD`] consecutive failures accumulate.
+    ///
+    /// Only a hop that ran to its FULL configured bound reaches here. A hop the
+    /// caller's own deadline cut short is not evidence of anything: a cold
+    /// project legitimately takes longer than a 1.5s hover budget, and charging
+    /// those restarts a healthy engine mid-program-build. The restart throws away
+    /// the program, which makes the next requests cold too, which charges three
+    /// more — a loop in which the engine never gets far enough to answer, and
+    /// requests come back fast and EMPTY instead of slow and correct.
+    fn note_hang_failure(&self) {
+        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= HANG_THRESHOLD {
+            tracing::error!(
+                "tsserver appears hung ({count} consecutive timeouts) — triggering restart"
+            );
+            if let Some(notify) = &self.crash_notify {
+                notify.notify_waiters();
+            }
+        }
+    }
+
     /// Send a tsserver request and wait for the response.
     async fn request(
         &self,
@@ -140,14 +346,23 @@ impl TsserverTransport {
             .await
     }
 
-    /// Send a tsserver request with a custom response timeout. Split from
-    /// [`TsserverTransport::request`] so tests can exercise the timeout / hang
-    /// detection path without waiting the full production timeout.
+    /// Send a tsserver request with a custom configured response timeout. Split
+    /// from [`TsserverTransport::request`] so tests can exercise the timeout /
+    /// hang detection path without waiting the full production timeout.
+    ///
+    /// `configured` is an upper bound, not the bound: the hop actually issued is
+    /// the tighter of `configured` and what the ambient request deadline has
+    /// left (see [`crate::deadline::hop_budget`]). tsserver is one JavaScript
+    /// thread, so a hop that outlives the request that asked for it is pure
+    /// queue contention — and, worse, a hop bound that never wins the race
+    /// against the caller's 1.5-6s deadline means the failure branch below never
+    /// executes: the pending entry is never released and the engine is never told
+    /// to stop. Hang detection is the exception — see [`Self::note_hang_failure`].
     async fn request_with_timeout(
         &self,
         command: &str,
         arguments: serde_json::Value,
-        timeout: std::time::Duration,
+        configured: std::time::Duration,
     ) -> Result<serde_json::Value, TypeProviderError> {
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
@@ -169,18 +384,72 @@ impl TsserverTransport {
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                self.pending.lock().await.insert(seq, tx);
+                self.pending.insert(seq, tx);
+                // Armed from the instant the seq is registered: every exit from
+                // here on — return, error, or the caller's future being dropped
+                // mid-await — releases the registration and tells the engine to
+                // stop through the same path.
+                let mut registration = TsserverPendingRequest {
+                    seq,
+                    pending: Arc::clone(&self.pending),
+                    cancellation: self.cancellation.clone(),
+                    armed: true,
+                };
+
+                // The enqueue and the response wait SHARE one deadline, so the
+                // whole round-trip is bounded. An unbounded `send().await` on a
+                // full lane parks the request BEFORE the response bound even
+                // starts, and without charging anything toward hang detection.
+                let hop = crate::deadline::hop_budget(configured);
+                // Whether the engine actually got the bound it was promised. A
+                // shortened hop expiring is the CALLER running out of patience,
+                // not the engine failing to answer.
+                let full_bound = hop >= configured;
+                let deadline = tokio::time::Instant::now() + hop;
 
                 // tsserver uses newline-delimited JSON (no Content-Length framing)
                 let frame = format!("{body}\n");
-                self.stdin_tx
-                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
+                let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match self
+                    .stdin_tx
+                    .send_timeout(TsserverStdinMessage::Frame(frame.into_bytes()), send_budget)
                     .await
-                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                {
+                    Ok(()) => {}
+                    Err(mpsc::error::SendTimeoutError::Closed(_)) => {
+                        // The frame never reached the engine, so there is nothing
+                        // to cancel — release the slot without naming a seq the
+                        // engine has never seen.
+                        registration.disarm();
+                        self.pending.take(seq);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                    Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
+                        registration.disarm();
+                        self.pending.take(seq);
+                        if full_bound {
+                            self.note_hang_failure();
+                        }
+                        crate::type_runtime_trace_event!(
+                            "tsserver_transport_request_error",
+                            format!(
+                                "command={} seq={} message=stdin-enqueue-timeout",
+                                command, seq
+                            ),
+                        );
+                        return Err(TypeProviderError::new(format!(
+                            "request '{command}' stdin enqueue timed out after {hop:?}"
+                        )));
+                    }
+                }
 
-                let result = tokio::time::timeout(timeout, rx).await;
+                let rx_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let result = tokio::time::timeout(rx_budget, rx).await;
                 match result {
                     Ok(Ok(val)) => {
+                        // Answered: the read loop already took the entry, and an
+                        // engine that has replied must not be told to cancel.
+                        registration.disarm();
                         // Any response (even a tsserver-level error) proves the process
                         // is alive and answering — reset the hang detector.
                         self.consecutive_failures.store(0, Ordering::Relaxed);
@@ -195,6 +464,27 @@ impl TsserverTransport {
                                 format!("command={} seq={} message={}", command, seq, msg),
                             );
                             return Err(TypeProviderError::new(msg));
+                        }
+                        // A cancelled request answers `success: true` with a
+                        // `{ canceled: true }` body — a success-shaped envelope
+                        // carrying no result. Every feature parser reads the body
+                        // as an array and falls back to empty, so passing it on
+                        // would turn "the engine stopped early" into "there are
+                        // no results here": a silently wrong answer in place of a
+                        // visible failure.
+                        if val
+                            .get("body")
+                            .and_then(|body| body.get("canceled"))
+                            .and_then(|flag| flag.as_bool())
+                            == Some(true)
+                        {
+                            crate::type_runtime_trace_event!(
+                                "tsserver_transport_request_error",
+                                format!("command={} seq={} message=canceled", command, seq),
+                            );
+                            return Err(TypeProviderError::new(format!(
+                                "request '{command}' was canceled at the engine"
+                            )));
                         }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_result",
@@ -217,6 +507,9 @@ impl TsserverTransport {
                         Ok(val.get("body").cloned().unwrap_or(serde_json::Value::Null))
                     }
                     Ok(Err(_)) => {
+                        // The sender was dropped (drained on crash), so the seq is
+                        // already gone and the engine is not running the work.
+                        registration.disarm();
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
                             format!(
@@ -227,24 +520,19 @@ impl TsserverTransport {
                         Err(TypeProviderError::new("response channel closed"))
                     }
                     Err(_) => {
-                        // Timeout — clean up the pending entry to prevent leak
-                        self.pending.lock().await.remove(&seq);
-                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count >= HANG_THRESHOLD {
-                            tracing::error!(
-                                "tsserver appears hung ({count} consecutive timeouts) — triggering restart"
-                            );
-                            if let Some(notify) = &self.crash_notify {
-                                notify.notify_waiters();
-                            }
+                        // Timed out with the request live at the engine. Leave the
+                        // registration ARMED: dropping it is what releases the
+                        // pending entry and cancels the engine's work, on this
+                        // path and on the caller-dropped path alike.
+                        if full_bound {
+                            self.note_hang_failure();
                         }
                         crate::type_runtime_trace_event!(
                             "tsserver_transport_request_error",
                             format!("command={} seq={} message=timeout", command, seq),
                         );
                         Err(TypeProviderError::new(format!(
-                            "request '{command}' timed out after {}s",
-                            timeout.as_secs()
+                            "request '{command}' timed out after {hop:?}"
                         )))
                     }
                 }
@@ -295,17 +583,6 @@ impl TsserverTransport {
     }
 }
 
-/// Drain all pending requests with error responses.
-async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>) {
-    let mut guard = pending.lock().await;
-    for (_seq, tx) in guard.drain() {
-        let _ = tx.send(serde_json::json!({
-            "success": false,
-            "message": "tsserver process crashed"
-        }));
-    }
-}
-
 /// Read loop for tsserver stdout.
 ///
 /// tsserver can send responses in two formats:
@@ -315,7 +592,7 @@ async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::
 /// We handle the Content-Length format since modern tsserver uses it for responses.
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    pending: Arc<TsserverPendingRequests>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     crash_notify: Option<Arc<Notify>>,
@@ -328,7 +605,7 @@ async fn read_loop(
         match reader.read_line(&mut line_buf).await {
             Ok(0) => {
                 // EOF — process exited
-                drain_pending(&pending).await;
+                pending.drain_with_crash_error();
                 if let Some(notify) = &crash_notify {
                     notify.notify_waiters();
                 }
@@ -346,7 +623,7 @@ async fn read_loop(
                         // Read the blank line
                         line_buf.clear();
                         if reader.read_line(&mut line_buf).await.is_err() {
-                            drain_pending(&pending).await;
+                            pending.drain_with_crash_error();
                             if let Some(notify) = &crash_notify {
                                 notify.notify_waiters();
                             }
@@ -358,7 +635,7 @@ async fn read_loop(
                             .await
                             .is_err()
                         {
-                            drain_pending(&pending).await;
+                            pending.drain_with_crash_error();
                             if let Some(notify) = &crash_notify {
                                 notify.notify_waiters();
                             }
@@ -378,7 +655,7 @@ async fn read_loop(
                 }
             }
             Err(_) => {
-                drain_pending(&pending).await;
+                pending.drain_with_crash_error();
                 if let Some(notify) = &crash_notify {
                     notify.notify_waiters();
                 }
@@ -391,7 +668,7 @@ async fn read_loop(
 /// Handle a parsed tsserver message (response or event).
 async fn handle_message(
     msg: &serde_json::Value,
-    pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
+    pending: &TsserverPendingRequests,
     diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
     contents_cache: &Mutex<HashMap<String, Arc<str>>>,
 ) {
@@ -400,7 +677,7 @@ async fn handle_message(
     match msg_type {
         "response" => {
             if let Some(request_seq) = msg.get("request_seq").and_then(|v| v.as_i64()) {
-                if let Some(tx) = pending.lock().await.remove(&request_seq) {
+                if let Some(tx) = pending.take(request_seq) {
                     let _ = tx.send(msg.clone());
                 }
             }
@@ -1005,6 +1282,21 @@ impl TsserverTypeProvider {
             .arg("--useSyntaxServer=false")
             .arg("--disableAutomaticTypingAcquisition");
 
+        // Per-request cancellation. Without it an abandoned request keeps the
+        // single JavaScript thread busy ahead of every request that replaced it.
+        // Best-effort: a session that cannot create its directory still releases
+        // pending slots, it just cannot tell the engine to stop.
+        let cancellation = TsserverCancellation::create().map(Arc::new);
+        if let Some(cancellation) = &cancellation {
+            cmd.arg("--cancellationPipeName")
+                .arg(cancellation.pipe_name_arg());
+        } else {
+            tracing::warn!(
+                "tsserver cancellation directory unavailable — abandoned requests \
+                 will keep running at the engine"
+            );
+        }
+
         // Load `@verter/typescript-plugin` so carriers become configured-project
         // members. The plugin reads the carrier-publish store synchronously.
         for plugin_arg in tsserver_plugin_args(plugin_path) {
@@ -1054,8 +1346,7 @@ impl TsserverTypeProvider {
             .ok_or_else(|| TypeProviderError::new("no stdout"))?;
         let stderr = child.stderr.take();
 
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending = Arc::new(TsserverPendingRequests::default());
 
         // Use a channel + dedicated writer task instead of Arc<Mutex<ChildStdin>>
         // to eliminate contention between concurrent request() and command_no_response() calls.
@@ -1069,6 +1360,7 @@ impl TsserverTypeProvider {
             consecutive_failures: AtomicU32::new(0),
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
+            cancellation,
         });
 
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
