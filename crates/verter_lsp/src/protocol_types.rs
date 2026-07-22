@@ -137,9 +137,20 @@ impl tower_lsp_server::ls_types::notification::Notification for TypeProviderStat
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TypeProviderStatusParams {
-    /// Which type provider route is active: "tsgo", "tsserver",
-    /// "editor-tsserver", or "none".
+    /// Which type provider FAMILY is active: "tsgo", "tsserver",
+    /// "editor-tsserver", or "none". Two topologies share the "tsgo" family, so
+    /// this alone cannot identify the serving engine — see `topology`.
     pub kind: String,
+    /// WHICH engine is serving and who owns it: "shared-tsgo", "managed-tsgo",
+    /// "workspace-tsserver", "editor-tsserver", "extension-hosted", or "none".
+    ///
+    /// The status surface must name the topology, not the family: a working
+    /// attach to the editor's own tsgo and a second Verter-spawned tsgo both
+    /// reported "tsgo", which made a serving tier indistinguishable from a
+    /// broken one. Defaulted so an older client that never sends it still
+    /// deserializes.
+    #[serde(default)]
+    pub topology: String,
     /// Stable provenance for the selected route, or the failure reason for "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

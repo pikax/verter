@@ -48,6 +48,7 @@ impl MeasureServer {
                     type_provider: Some(Arc::clone(&provider_for_server)),
                     project_sync_mode: ProjectSyncMode::FullProject,
                     type_provider_kind: crate::TypeProviderKind::Tsgo,
+                    type_provider_topology: crate::TypeProviderTopology::ManagedTsgo,
                     mcp_port: None,
                     type_provider_reason: Some("measure".into()),
                     suppress_imported_carrier_prewarm: true,

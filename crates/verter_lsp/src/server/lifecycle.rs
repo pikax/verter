@@ -299,6 +299,7 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             .client
             .send_notification::<TypeProviderStatus>(TypeProviderStatusParams {
                 kind,
+                topology: server.type_provider_topology.wire().to_string(),
                 reason: reason.clone(),
                 recommendation: provider_recommendation(&server.type_provider_kind),
             })
@@ -1393,6 +1394,7 @@ mod provider_recommendation_tests {
     fn status_params_serialize_recommendation_camel_case_and_omit_when_absent() {
         let with = TypeProviderStatusParams {
             kind: "tsserver".into(),
+            topology: String::new(),
             reason: None,
             recommendation: provider_recommendation(&TypeProviderKind::Tsserver),
         };
@@ -1410,6 +1412,7 @@ mod provider_recommendation_tests {
 
         let without = TypeProviderStatusParams {
             kind: "tsgo".into(),
+            topology: String::new(),
             reason: None,
             recommendation: provider_recommendation(&TypeProviderKind::Tsgo),
         };

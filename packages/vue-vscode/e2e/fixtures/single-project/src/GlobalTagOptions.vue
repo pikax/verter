@@ -10,7 +10,14 @@ export default {
 
 <template>
   <div>
-    <GlobalCountComp :count="42" @ping="(evtPayload) => { void evtPayload; }" />
+    <GlobalCountComp
+      :count="42"
+      @ping="
+        (evtPayload) => {
+          void evtPayload;
+        }
+      "
+    />
     <global-count-comp :count="7" />
     <component :is="'GlobalCountComp'" :count="9" />
     <GlobalCountComp :count="'mistyped'" />

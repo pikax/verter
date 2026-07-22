@@ -985,6 +985,11 @@ export async function activateVueLanguageServer(
         log.info(
           `Type provider status: ${params.kind}${params.reason ? ` (${params.reason})` : ""}`,
         );
+        // A SEPARATE line: the existing one is parsed by the E2E attestation and
+        // the acceptance lane, and its shape is `kind (reason)`. The topology is
+        // the answer to "which engine is actually serving", so it is recorded
+        // where a log reader — or a bug report — cannot miss it.
+        log.info(`Type provider topology: ${params.topology ?? "unreported"}`);
         if (params.kind !== "none") {
           startupProbe?.markTypeProviderStarted(params.kind);
         }
@@ -1296,6 +1301,31 @@ async function establishEditorTsserverPlugin(
   }
 }
 
+/**
+ * Give Native Preview a document it activates on, so it starts a language-server
+ * session for this workspace.
+ *
+ * Native Preview declares `onLanguage:{java,type}script[react]` and starts its
+ * server for those documents; its public attestation API reports "Language
+ * server is not running." until a session exists. Forcing activation does not
+ * create one, so an editor whose open document is a `.vue`/`.svelte` carrier
+ * attested against an extension with no server and the shared tier declined —
+ * even though the engine the user wanted was installed and idle.
+ *
+ * A real workspace TypeScript file is preferred because it binds a real project;
+ * an untitled TypeScript document is the fallback for a carrier-only workspace.
+ * The document is loaded, never shown, so the user's editor layout is untouched.
+ */
+async function startNativePreviewLanguageServerSession(): Promise<void> {
+  const exclude = "**/{node_modules,.git,dist,out,build,target,coverage,.output,.nuxt}/**";
+  const [target] = await workspace.findFiles("**/*.{ts,tsx,mts,cts}", exclude, 1);
+  if (target) {
+    await workspace.openTextDocument(target);
+    return;
+  }
+  await workspace.openTextDocument({ language: "typescript", content: "" });
+}
+
 /** Load one real framework carrier through VS Code's TypeScript feature without changing editors. */
 async function prepareEditorTsserverConfiguredProject(workspaceRoot: string): Promise<void> {
   const exclude = "**/{node_modules,.git,dist,target}/**";
@@ -1402,6 +1432,7 @@ async function establishSharedTsgo(
       writeGlobalTsdk: async (value) => {
         await nativePreviewConfig.update("tsdk", value, ConfigurationTarget.Global);
       },
+      startSession: () => startNativePreviewLanguageServerSession(),
       hasAdvertisement: () => {
         try {
           return readdirSync(plan.controlDir).some(isShimAdvertisement);
