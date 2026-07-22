@@ -446,6 +446,9 @@ struct LspTransport {
     /// When the last hang strike was charged, so hops already in flight then are
     /// not counted as independent evidence. Cleared with the counter.
     last_strike_at: StdMutex<Option<std::time::Instant>>,
+    /// When the read loop last got ANY output from the child. A child that is
+    /// emitting is working, however slowly; a WEDGED child emits nothing.
+    last_message_at: Arc<StdMutex<std::time::Instant>>,
     /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the `shutdown`/`exit`
@@ -537,7 +540,20 @@ impl LspTransport {
     /// restart discards that program, so the next wave is cold too: a
     /// self-sustaining restart loop. `issued_at` is when this hop's bound
     /// started; only a hop issued at or after the last strike advances the count.
+    /// A hop is evidence of a WEDGE only if the child produced nothing at all
+    /// while it ran: a busy engine keeps emitting while it works.
+    fn child_was_silent_during(&self, issued_at: std::time::Instant) -> bool {
+        let last = *self
+            .last_message_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        last <= issued_at
+    }
+
     fn note_hang_failure(&self, method: &str, issued_at: std::time::Instant) {
+        if !self.child_was_silent_during(issued_at) {
+            return;
+        }
         let count = {
             let mut last = self
                 .last_strike_at
@@ -1009,6 +1025,7 @@ async fn read_loop(
     control_tx: mpsc::UnboundedSender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
     teardown_intent: Arc<AtomicBool>,
+    last_message_at: Arc<StdMutex<std::time::Instant>>,
 ) {
     let signal_crash = |crash_notify: &Option<Arc<Notify>>| {
         if teardown_intent.load(Ordering::SeqCst) {
@@ -1037,6 +1054,12 @@ async fn read_loop(
                     return;
                 }
                 Ok(_) => {
+                    // ANY output from the child proves its loop is turning. Hang
+                    // detection reads this to tell a busy engine from a wedged one.
+                    *last_message_at
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        std::time::Instant::now();
                     let line = header_buf.trim();
                     if line.is_empty() {
                         break; // End of headers
@@ -2075,6 +2098,8 @@ impl TsgoTypeProvider {
             writer_stall,
         ));
 
+        let last_message_at = Arc::new(StdMutex::new(std::time::Instant::now()));
+
         let transport = Arc::new(LspTransport {
             control_tx: control_tx.clone(),
             interactive_tx,
@@ -2084,6 +2109,7 @@ impl TsgoTypeProvider {
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
             last_strike_at: StdMutex::new(None),
+            last_message_at: Arc::clone(&last_message_at),
             crash_notify: crash_notify.as_ref().map(Arc::clone),
             teardown_intent: Arc::clone(&teardown_intent),
         });
@@ -2097,6 +2123,7 @@ impl TsgoTypeProvider {
             control_tx,
             crash_notify,
             Arc::clone(&teardown_intent),
+            last_message_at,
         ));
 
         Self {

@@ -128,6 +128,7 @@ fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
     }
@@ -147,6 +148,7 @@ fn test_transport_with_pending(
         next_id: AtomicI64::new(1),
         consecutive_failures: AtomicU32::new(0),
         last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         teardown_intent: Arc::new(AtomicBool::new(false)),
     }
@@ -169,6 +171,7 @@ fn test_transport_with_control(
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
             last_strike_at: StdMutex::new(None),
+            last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
             crash_notify: None,
             teardown_intent: Arc::new(AtomicBool::new(false)),
         },
@@ -2670,6 +2673,7 @@ async fn test_read_loop_exits_on_eof() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
@@ -2738,6 +2742,7 @@ async fn test_provider_operations_fail_after_process_death() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     let provider = TsgoTypeProvider {
@@ -2825,6 +2830,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
     let provider = TsgoTypeProvider {
         transport,
@@ -3111,6 +3117,7 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
         control_tx,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     // Spawn a mock "TSGO" task that reads requests from mock_stdout_writer
@@ -3427,6 +3434,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         mpsc::unbounded_channel().0,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(StdMutex::new(std::time::Instant::now())),
     ));
 
     // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
