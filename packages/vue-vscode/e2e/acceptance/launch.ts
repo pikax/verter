@@ -89,6 +89,13 @@ async function main(): Promise<void> {
     // The lane measures the LSP path, not the analysis sidebar or MCP endpoint.
     "verter.analysis.enabled": false,
     "verter.mcp.enabled": false,
+    // Diagnosis aid, off by default because verbose logging perturbs latency:
+    // `VERTER_ACCEPTANCE_TSSERVER_LOG=1` makes the editor's own tsserver write a
+    // verbose log under the isolated profile, which is the only way to see what
+    // the editor asked the plugin and what the plugin answered.
+    ...(process.env.VERTER_ACCEPTANCE_TSSERVER_LOG === "1"
+      ? { "typescript.tsserver.log": "verbose" }
+      : {}),
   });
 
   const logFile = path.join(os.tmpdir(), `verter-acceptance-${label}-${provider}.log`);
