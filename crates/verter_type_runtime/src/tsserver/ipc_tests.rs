@@ -1271,11 +1271,7 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
             .await
     });
     loop {
-        let response = {
-            let mut pending = transport.pending.lock().await;
-            let response = pending.drain().next().map(|(_, response)| response);
-            response
-        };
+        let response = transport.pending.take_any();
         if let Some(response) = response {
             let _ = response.send(serde_json::json!({}));
             break;

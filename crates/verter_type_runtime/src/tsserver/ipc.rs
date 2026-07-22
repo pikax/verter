@@ -90,6 +90,16 @@ impl TsserverPendingRequests {
         self.map.lock().unwrap().len()
     }
 
+    /// Take one arbitrary in-flight sender. Tests that need to answer "whatever
+    /// request the transport just issued" do not know its sequence number, so
+    /// they cannot use [`Self::take`]; this keeps them off the inner map.
+    #[cfg(test)]
+    fn take_any(&self) -> Option<oneshot::Sender<serde_json::Value>> {
+        let mut map = self.map.lock().unwrap();
+        let seq = *map.keys().next()?;
+        map.remove(&seq)
+    }
+
     /// Fail every in-flight request so callers return immediately instead of
     /// waiting out their own timeouts.
     fn drain_with_crash_error(&self) {

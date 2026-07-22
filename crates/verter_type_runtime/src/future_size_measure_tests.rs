@@ -44,6 +44,14 @@ impl TypeProvider for MeasureMock {
         Box::pin(async move { Ok(()) })
     }
 
+    // `load_file` is a REQUIRED trait method: the default that silently forwarded to
+    // the interactive `open_file` was removed precisely because one provider inherited
+    // it by accident and turned every background scan load into a diagnostic barrier.
+    // A measurement mock genuinely does not distinguish the two states, so it says so.
+    fn load_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async move { Ok(()) })
+    }
+
     fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async move { Ok(()) })
     }
