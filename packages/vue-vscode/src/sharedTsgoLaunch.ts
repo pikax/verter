@@ -21,7 +21,7 @@
  * refuse anyway). No `vscode` import — the whole surface is unit-testable without
  * the extension host.
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { randomBytes } from "crypto";
 
@@ -93,46 +93,132 @@ export function discoverRelayShim(opts: {
   return undefined;
 }
 
+/** One ordered tsdk source discovery probes, kept SEPARATE from every other source. */
+export interface NativePreviewTsdkCandidate {
+  /** Which setting/location contributed the directory (reported in logs). */
+  source: string;
+  /** The tsdk directory. */
+  dir: string;
+}
+
+/** The resolved real engine plus the source that supplied it. */
+export interface NativePreviewTsgoResolution {
+  /** The engine binary path. */
+  path: string;
+  /** Which source won (`VERTER_TSGO_BIN`, a tsdk setting, or `workspace node_modules`). */
+  source: string;
+}
+
+/**
+ * The ORDERED tsdk sources to probe, one candidate per source — never collapsed
+ * to a first-non-empty value.
+ *
+ * The order mirrors the Native Preview extension's own tsdk resolution
+ * (`js/ts.tsdk.path` → `typescript.tsdk` → `typescript.native-preview.tsdk`),
+ * with its shipped bundle last as the default it falls back to. Collapsing these
+ * with `||` is what made a workspace `typescript.tsdk` pointing at a TS 5.x
+ * `node_modules/typescript/lib` mask an installed Native Preview bundle: the
+ * masking value was the only directory ever probed.
+ */
+export function nativePreviewTsdkCandidates(opts: {
+  jsTsTsdkPath?: string;
+  typescriptTsdk?: string;
+  nativePreviewTsdk?: string;
+  nativePreviewExtensionPath?: string;
+}): NativePreviewTsdkCandidate[] {
+  const ordered: NativePreviewTsdkCandidate[] = [
+    { source: "js/ts.tsdk.path", dir: opts.jsTsTsdkPath },
+    { source: "typescript.tsdk", dir: opts.typescriptTsdk },
+    { source: "typescript.native-preview.tsdk", dir: opts.nativePreviewTsdk },
+    {
+      source: "native-preview bundle",
+      dir: opts.nativePreviewExtensionPath
+        ? join(opts.nativePreviewExtensionPath, "lib")
+        : undefined,
+    },
+  ].flatMap(({ source, dir }) => (dir && dir.trim() ? [{ source, dir: dir.trim() }] : []));
+
+  const seen = new Set<string>();
+  return ordered.filter(({ dir }) => (seen.has(dir) ? false : (seen.add(dir), true)));
+}
+
+/** Whether a directory BASENAME is a Verter rendezvous control dir. */
+export function isVerterSharedControlDirName(name: string): boolean {
+  return /^verter-shared-[0-9a-fA-F]+$/.test(name);
+}
+
+/**
+ * Whether a path sits inside a Verter-staged rendezvous tree
+ * (`…/verter-shared-<key>/…` or an `editor-tsdk` subtree).
+ *
+ * The bytes staged there are the RELAY SHIM, not an engine. A `tsdk` setting
+ * left pointing at one (a previous session's staging that outlived its restore)
+ * must never be adopted as the "real" tsgo — the shim would relay to itself.
+ */
+export function isVerterStagedPath(candidate: string): boolean {
+  return candidate
+    .split(/[\\/]+/)
+    .some((segment) => /^verter-shared-[0-9a-fA-F]+$/.test(segment) || segment === "editor-tsdk");
+}
+
+/** The engine basenames a tsdk directory may publish: native first, then legacy. */
+function engineBasenames(platform: NodeJS.Platform): string[] {
+  return platform === "win32" ? ["tsc.exe", "tsgo.exe"] : ["tsc", "tsgo"];
+}
+
 /**
  * Discover the native-preview tsgo binary the shim relays to (the REAL engine).
- * Order:
- *   1. `VERTER_TSGO_BIN` (an explicit absolute path — the provisioning seam), else
- *   2. `typescript.native-preview.tsdk` (a dir → `<tsdk>/tsc(.exe)`), else
- *   3. `<workspaceRoot>/node_modules/@typescript/typescript-<os>-<cpu>/lib/tsc(.exe)`.
  *
- * Returns `undefined` (fail-closed) when nothing resolves — the extension stays OWNED.
+ * EVERY source is tried, in order, until one yields an engine — the walk never
+ * stops at the first source that merely exists:
+ *   1. `VERTER_TSGO_BIN` (an explicit absolute path — the provisioning seam);
+ *   2. each `tsdkCandidates` entry, as `<tsdk>/<engine>` then `<tsdk>/lib/<engine>`,
+ *      where `<engine>` is the native `tsc[.exe]` then the legacy `tsgo[.exe]`;
+ *   3. `<workspaceRoot>/node_modules/@typescript/typescript-<os>-<cpu>/lib/<engine>`.
+ *
+ * A candidate inside a Verter-staged tree is refused ({@link isVerterStagedPath})
+ * and the walk continues. Returns `undefined` (fail-closed) when nothing
+ * resolves — the extension stays OWNED.
  */
 export function discoverNativePreviewTsgo(opts: {
   env?: Record<string, string | undefined>;
-  nativePreviewTsdk?: string;
+  tsdkCandidates?: NativePreviewTsdkCandidate[];
   workspaceRoot?: string;
   platform?: NodeJS.Platform;
   arch?: string;
   exists?: (p: string) => boolean;
-}): string | undefined {
+}): NativePreviewTsgoResolution | undefined {
   const {
     env = process.env,
-    nativePreviewTsdk,
+    tsdkCandidates = [],
     workspaceRoot,
     platform = process.platform,
     arch = process.arch,
   } = opts;
   const exists = opts.exists ?? existsSync;
-  const binName = platform === "win32" ? "tsc.exe" : "tsc";
+  const names = engineBasenames(platform);
+
+  const accept = (path: string): boolean => !isVerterStagedPath(path) && exists(path);
 
   const explicit = env.VERTER_TSGO_BIN;
-  if (explicit && exists(explicit)) return explicit;
+  if (explicit && accept(explicit)) return { path: explicit, source: "VERTER_TSGO_BIN" };
 
-  if (nativePreviewTsdk) {
-    const candidate = join(nativePreviewTsdk, binName);
-    if (exists(candidate)) return candidate;
+  for (const { source, dir } of tsdkCandidates) {
+    for (const base of [dir, join(dir, "lib")]) {
+      for (const name of names) {
+        const candidate = join(base, name);
+        if (accept(candidate)) return { path: candidate, source };
+      }
+    }
   }
 
   if (workspaceRoot) {
     const archDir = nativePreviewArchDir(platform, arch);
     if (archDir) {
-      const candidate = join(workspaceRoot, "node_modules", "@typescript", archDir, "lib", binName);
-      if (exists(candidate)) return candidate;
+      for (const name of names) {
+        const candidate = join(workspaceRoot, "node_modules", "@typescript", archDir, "lib", name);
+        if (accept(candidate)) return { path: candidate, source: "workspace node_modules" };
+      }
     }
   }
 
@@ -210,28 +296,111 @@ export const RELAY_REAL_TSGO_ENV = "VERTER_RELAY_REAL_TSGO";
 export const RELAY_CONTROL_DIR_ENV = "VERTER_RELAY_CONTROL_DIR";
 export const RELAY_SESSION_KEY_ENV = "VERTER_RELAY_SESSION_KEY";
 
+/** The scoped package name the staged tsdk publishes (drives the resolved layout). */
+export const STAGED_TSDK_PACKAGE = "@typescript/native-preview";
+
+/** The unscoped stem of {@link STAGED_TSDK_PACKAGE} — the platform-package prefix. */
+const STAGED_TSDK_STEM = "native-preview";
+
 /**
- * Stage a Native Preview tsdk directory containing a `tsgo` executable whose bytes
- * are the Verter relay shim. Native Preview owns the actual process spawn and argv;
- * the shim receives its real-engine/rendezvous inputs through the environment.
+ * Stage a Native Preview tsdk whose engine bytes are the Verter relay shim.
+ *
+ * Native Preview does NOT spawn `<tsdk>/tsgo`. Its tsdk validator reads
+ * `<tsdk>/package.json` (or its parent's), requires a `name` plus a matching
+ * `bin` entry, and then stats the platform package beside it:
+ *
+ * ```text
+ * <node_modules>/@typescript/<name>-<platform>-<arch>/lib/<tsgo|tsc>[.exe]
+ * ```
+ *
+ * A bare directory holding a single `tsgo` executable therefore can never be
+ * selected — which is why the editor-attach tier never armed. This stages the
+ * exact tree the validator accepts:
+ *
+ * ```text
+ * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview/package.json
+ * <controlDir>/editor-tsdk/node_modules/@typescript/native-preview-<os>-<arch>/lib/tsgo[.exe]
+ * ```
+ *
+ * `dir` is the value to write to `typescript.native-preview.tsdk`; `executable`
+ * is where the shim bytes land. Native Preview owns the actual process spawn and
+ * argv; the shim receives its real-engine/rendezvous inputs through the
+ * environment.
  */
 export function prepareEditorTsdk(opts: {
   shimPath: string;
   controlDir: string;
   platform?: NodeJS.Platform;
+  arch?: string;
   mkdir?: (path: string) => void;
   copy?: (source: string, destination: string) => void;
+  writeFile?: (path: string, content: string) => void;
   chmod?: (path: string, mode: number) => void;
 }): { dir: string; executable: string } {
   const platform = opts.platform ?? process.platform;
-  const dir = join(opts.controlDir, "editor-tsdk");
-  const executable = join(dir, platform === "win32" ? "tsgo.exe" : "tsgo");
-  (opts.mkdir ?? ((path) => void mkdirSync(path, { recursive: true })))(dir);
+  const arch = opts.arch ?? process.arch;
+  const mkdir = opts.mkdir ?? ((path: string) => void mkdirSync(path, { recursive: true }));
+
+  const modules = join(opts.controlDir, "editor-tsdk", "node_modules");
+  const dir = join(modules, ...STAGED_TSDK_PACKAGE.split("/"));
+  const engineName = platform === "win32" ? "tsgo.exe" : "tsgo";
+  const engineDir = join(modules, "@typescript", `${STAGED_TSDK_STEM}-${platform}-${arch}`, "lib");
+  const executable = join(engineDir, engineName);
+
+  mkdir(dir);
+  mkdir(engineDir);
+  (opts.writeFile ?? ((path: string, content: string) => writeFileSync(path, content)))(
+    join(dir, "package.json"),
+    `${JSON.stringify(
+      {
+        name: STAGED_TSDK_PACKAGE,
+        version: STAGED_TSDK_VERSION,
+        bin: { tsgo: join("..", `${STAGED_TSDK_STEM}-${platform}-${arch}`, "lib", engineName) },
+      },
+      null,
+      2,
+    )}\n`,
+  );
   (opts.copy ?? copyFileSync)(opts.shimPath, executable);
   if (platform !== "win32") {
     (opts.chmod ?? chmodSync)(executable, 0o755);
   }
   return { dir, executable };
+}
+
+/**
+ * The version the staged tsdk manifest reports. Native Preview only displays it;
+ * it is deliberately marked as the relay so the editor's version picker cannot
+ * present the staged tree as a real TypeScript install.
+ */
+export const STAGED_TSDK_VERSION = "0.0.0-verter-relay";
+
+/**
+ * The stale `verter-shared-<key>` control dirs under a temp root that this
+ * session may delete.
+ *
+ * Staging created one control dir per session and never removed it; 96 orphans
+ * (256 MB) accumulated on the reporting machine. Selection is deliberately
+ * narrow — a `verter-shared-<hex>` basename, never the LIVE session's key, and
+ * older than `maxAgeMs` so a concurrent editor window's rendezvous is left
+ * alone.
+ */
+export function orphanedControlDirs(opts: {
+  entries: string[];
+  currentSessionKey?: string;
+  now: number;
+  maxAgeMs: number;
+  modifiedAt: (name: string) => number | undefined;
+}): string[] {
+  const live = opts.currentSessionKey
+    ? `verter-shared-${opts.currentSessionKey}`.toLowerCase()
+    : undefined;
+  return opts.entries.filter((name) => {
+    if (!isVerterSharedControlDirName(name)) return false;
+    if (live && name.toLowerCase() === live) return false;
+    const modified = opts.modifiedAt(name);
+    return modified !== undefined && opts.now - modified >= opts.maxAgeMs;
+  });
 }
 
 /** The exact child environment that binds an editor-owned shim to this rendezvous. */
@@ -256,6 +425,8 @@ export interface SharedTsgoEngaged {
   engaged: true;
   shimPath: string;
   realTsgo: string;
+  /** Which tsdk source supplied {@link realTsgo} — reported honestly in logs. */
+  realTsgoSource: string;
   controlDir: string;
   sessionKey: string;
   /** The `--shared-*` args to append to the verter-lsp argv. */
@@ -274,7 +445,8 @@ export function planSharedTsgo(opts: {
   extensionPath: string;
   controlDirRoot: string;
   env?: Record<string, string | undefined>;
-  nativePreviewTsdk?: string;
+  /** Every tsdk source, in order — see {@link nativePreviewTsdkCandidates}. */
+  tsdkCandidates?: NativePreviewTsdkCandidate[];
   workspaceRoot?: string;
   platform?: NodeJS.Platform;
   arch?: string;
@@ -299,18 +471,24 @@ export function planSharedTsgo(opts: {
     return { engaged: false, reason: "relay shim binary not found (OWNED baseline)" };
   }
 
+  const tsdkCandidates = opts.tsdkCandidates ?? [];
   const realTsgo = discoverNativePreviewTsgo({
     env: opts.env,
-    nativePreviewTsdk: opts.nativePreviewTsdk,
+    tsdkCandidates,
     workspaceRoot: opts.workspaceRoot,
     platform: opts.platform,
     arch: opts.arch,
     exists: opts.exists,
   });
   if (!realTsgo) {
+    const searched = [
+      "VERTER_TSGO_BIN",
+      ...tsdkCandidates.map(({ source, dir }) => `${source} (${dir})`),
+      ...(opts.workspaceRoot ? ["workspace node_modules"] : []),
+    ].join(", ");
     return {
       engaged: false,
-      reason: "native-preview tsgo (tsdk) not found (OWNED baseline)",
+      reason: `native-preview tsgo not found in any source — searched ${searched} (OWNED baseline)`,
     };
   }
 
@@ -321,7 +499,15 @@ export function planSharedTsgo(opts: {
     mkdir: opts.mkdir,
   });
   const lspArgs = buildSharedLspArgs({ controlDir, sessionKey });
-  return { engaged: true, shimPath, realTsgo, controlDir, sessionKey, lspArgs };
+  return {
+    engaged: true,
+    shimPath,
+    realTsgo: realTsgo.path,
+    realTsgoSource: realTsgo.source,
+    controlDir,
+    sessionKey,
+    lspArgs,
+  };
 }
 
 /** Whether an effective provider mode should attempt the editor-owned tsgo tier. */

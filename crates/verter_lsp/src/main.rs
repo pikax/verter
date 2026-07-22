@@ -382,6 +382,12 @@ async fn create_type_provider(
                     return editor_tsserver_topology(attestation);
                 }
             }
+            if !has_editor_rendezvous {
+                // No editor rendezvous: the managed fallback is all that is left,
+                // so its engine is chosen by capability and a route that cannot
+                // obtain one reports None rather than an armed empty shell.
+                return managed_fallback_topology(args, client_cell, host, &ws_canonical).await;
+            }
             // Editor-owned tsgo is authoritative. The managed provider is represented
             // by a stateful lazy fallback: lifecycle/config updates are cached without
             // spawning, and only an observed shared attach/sync/decision failure on a
@@ -391,11 +397,7 @@ async fn create_type_provider(
             (
                 Some(provider),
                 TypeProviderKind::Tsgo,
-                Some(if has_editor_rendezvous {
-                    editor_native_preview_reason()
-                } else {
-                    lazy_managed_tsgo_reason()
-                }),
+                Some(editor_native_preview_reason()),
             )
         }
         "tsgo" => {
@@ -485,13 +487,9 @@ async fn create_type_provider(
                 return editor_tsserver_topology(attestation);
             }
 
-            let provider =
-                wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
-            (
-                Some(provider),
-                TypeProviderKind::Tsgo,
-                Some(lazy_managed_tsgo_reason()),
-            )
+            // Neither editor route is available. Tier 2 admits tsgo OR tsserver,
+            // and a workspace that can supply neither gets an honest `None`.
+            managed_fallback_topology(args, client_cell, host, &ws_canonical).await
         }
     }
 }
@@ -502,6 +500,237 @@ fn editor_native_preview_reason() -> String {
 
 fn lazy_managed_tsgo_reason() -> String {
     "editor attachment unavailable; managed TSGO will start only when a connected demand requires it".into()
+}
+
+/// The neutral facts the managed-fallback decision is taken from — gathered by
+/// [`probe_managed_engine`] with filesystem lookups only (no process spawn).
+#[derive(Debug, Clone)]
+struct ManagedEngineFacts {
+    /// The bound workspace root (named in every diagnostic).
+    workspace_root: String,
+    /// Whether ANY configured TypeScript project exists under the root. Both
+    /// managed engines are project-bound; without one neither may start.
+    has_configured_project: bool,
+    /// The first tsgo binary the toolchain resolver's tiers name, if any.
+    tsgo_candidate: Option<String>,
+    /// Resolver tier notes (stale override, untrusted cache, unsupported host).
+    tsgo_notes: Vec<String>,
+    /// The workspace/tsdk `tsserver.js`, if any.
+    tsserver: Option<String>,
+    /// The Node runtime tsserver needs, if any.
+    node: Option<String>,
+}
+
+/// Which managed engine the workspace can actually supply.
+#[derive(Debug, PartialEq, Eq)]
+enum ManagedEngineChoice {
+    /// A tsgo candidate exists — the preferred engine.
+    Tsgo {
+        /// Human-readable provenance for the selected engine.
+        detail: String,
+    },
+    /// No tsgo, but a Node-backed tsserver exists — the accepted fallback.
+    Tsserver {
+        /// Human-readable provenance, including WHY tsgo was not used.
+        detail: String,
+    },
+    /// No engine is obtainable. The provider must be `None`, never a shell
+    /// that later reports "connected" with nothing behind it.
+    None {
+        /// The actionable reason, surfaced in status and logs.
+        reason: String,
+    },
+}
+
+/// Choose the managed engine from neutral facts: tsgo preferred, tsserver
+/// accepted, nothing claimed that cannot be obtained.
+///
+/// A project pinned to TypeScript 5.x has no tsgo anywhere but ships a working
+/// tsserver; refusing it produced no semantics at all. Route selection is
+/// therefore capability-driven, and the chosen engine plus the reason for it are
+/// reported honestly.
+fn choose_managed_engine(facts: &ManagedEngineFacts) -> ManagedEngineChoice {
+    let notes = |prefix: &str| {
+        if facts.tsgo_notes.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}{}", facts.tsgo_notes.join("; "))
+        }
+    };
+
+    // Both managed engines are project-bound: neither may open a carrier into a
+    // config-less inferred project, so a workspace with no configured project
+    // obtains no managed engine at all.
+    if !facts.has_configured_project {
+        return ManagedEngineChoice::None {
+            reason: format!(
+                "no configured TypeScript project (tsconfig.json) found anywhere under {} — \
+                 the managed tsgo and tsserver engines are both project-bound and will not \
+                 start a config-less inferred project",
+                facts.workspace_root
+            ),
+        };
+    }
+
+    if let Some(tsgo) = &facts.tsgo_candidate {
+        return ManagedEngineChoice::Tsgo {
+            detail: format!("managed TSGO resolved to {tsgo}"),
+        };
+    }
+
+    match (&facts.tsserver, &facts.node) {
+        (Some(tsserver), Some(node)) => ManagedEngineChoice::Tsserver {
+            detail: format!(
+                "no supported tsgo engine is available for {}, falling back to the workspace \
+                 tsserver {tsserver} (node: {node}){}",
+                facts.workspace_root,
+                notes(" — ")
+            ),
+        },
+        (Some(tsserver), None) => ManagedEngineChoice::None {
+            reason: format!(
+                "no TypeScript engine available for {}: no supported tsgo candidate, and the \
+                 workspace tsserver {tsserver} cannot run because Node.js was not found on PATH \
+                 or in the standard locations{}",
+                facts.workspace_root,
+                notes(" — ")
+            ),
+        },
+        (None, _) => ManagedEngineChoice::None {
+            reason: format!(
+                "no TypeScript engine available for {}: no supported tsgo candidate \
+                 ({ENV_OVERRIDE_LABEL}, PATH, project-local node_modules, the update cache, the \
+                 bundled sidecar) and no workspace tsserver{}",
+                facts.workspace_root,
+                notes(" — ")
+            ),
+        },
+    }
+}
+
+/// The engine-override variable named in no-engine diagnostics.
+const ENV_OVERRIDE_LABEL: &str = verter_tsgo_api::toolchain::discovery::ENV_OVERRIDE_VAR;
+
+/// Whether an enumerated candidate can plausibly BE tsgo, judged without
+/// spawning it.
+///
+/// Enumeration is existence-only, so a TypeScript 5.x workspace contributes its
+/// `node_modules/.bin/tsc.cmd` shim as a "tsgo candidate". Treating that as an
+/// available engine sends the session down the tsgo route, where it dies at the
+/// version gate — the exact "no engine at all" outcome the tsserver fallback
+/// exists to prevent. Only the PROJECT-LOCAL tier can produce that confusion:
+/// the override, `PATH`, the update cache, and the bundled sidecar are operator-
+/// or policy-controlled, so they stay plausible and the real validator decides.
+///
+/// A project-local candidate is plausible when it sits inside the `@typescript`
+/// platform-package layout (which only tsgo publishes), or when the workspace's
+/// own TypeScript install is the TS7+ native family (so its `.bin` shim is tsgo's).
+fn plausible_tsgo_candidate(
+    candidate: &std::path::Path,
+    provenance: verter_tsgo_api::toolchain::discovery::Provenance,
+    workspace_ts_is_native_family: bool,
+) -> bool {
+    if provenance != verter_tsgo_api::toolchain::discovery::Provenance::ProjectLocal {
+        return true;
+    }
+    workspace_ts_is_native_family
+        || candidate
+            .components()
+            .any(|component| component.as_os_str() == "@typescript")
+}
+
+/// Gather [`ManagedEngineFacts`] for `workspace_root` — filesystem lookups only.
+///
+/// This is the EAGER availability probe: it decides whether a provider may be
+/// installed at all, so a route that cannot obtain an engine reports `None` with
+/// its reason instead of an armed shell that would log "connected" with nothing
+/// behind it. It never spawns a process, so it does not move the managed
+/// engine's cold start onto the startup path.
+fn probe_managed_engine(workspace_root: &str, tsdk: Option<&str>) -> ManagedEngineChoice {
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        verter_tsgo_api::toolchain::validation::Capability::Api,
+        Some(std::path::PathBuf::from(workspace_root)),
+    );
+    let enumeration = verter_tsgo_api::toolchain::discovery::enumerate_candidates(&request);
+    let workspace_tsserver = verter_lsp::tsserver::find_tsserver(tsdk, Some(workspace_root));
+    // A TS7+ workspace install is the native (tsgo) engine family: it is never
+    // served over the Node tsserver protocol, and it is what makes a project-local
+    // `.bin` shim a plausible tsgo candidate.
+    let workspace_ts_is_native_family = workspace_tsserver.as_deref().is_some_and(|path| {
+        verter_type_runtime::discovery::tsserver_native_family_major(path).is_some()
+    });
+    choose_managed_engine(&ManagedEngineFacts {
+        workspace_root: workspace_root.to_string(),
+        has_configured_project: verter_workspace::config::has_configured_ts_project_anywhere(
+            std::path::Path::new(workspace_root),
+        ),
+        tsgo_candidate: enumeration
+            .candidates
+            .iter()
+            .find(|c| {
+                plausible_tsgo_candidate(&c.path, c.provenance, workspace_ts_is_native_family)
+            })
+            .map(|c| c.path.to_string_lossy().into_owned()),
+        tsgo_notes: enumeration.notes,
+        tsserver: workspace_tsserver
+            .filter(|_| !workspace_ts_is_native_family)
+            .map(|p| p.to_string_lossy().into_owned()),
+        node: verter_lsp::tsserver::find_node(),
+    })
+}
+
+/// The managed-fallback topology for a session with NO editor route.
+///
+/// The engine is chosen by capability (tsgo preferred, tsserver accepted) and a
+/// route that cannot obtain one installs NO provider, so the kind reported to
+/// the editor is the engine that will actually serve — never a nominal TSGO in
+/// front of a Node tsserver, and never a provider with no engine behind it.
+async fn managed_fallback_topology(
+    args: &CliArgs,
+    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    host: &Arc<VerterHost>,
+    ws_canonical: &str,
+) -> (
+    Option<Arc<dyn TypeProvider>>,
+    TypeProviderKind,
+    Option<String>,
+) {
+    match probe_managed_engine(ws_canonical, args.tsdk.as_deref()) {
+        ManagedEngineChoice::Tsgo { detail } => {
+            tracing::info!("managed fallback: {detail}");
+            let provider =
+                wrap_shared_first_admission(args, host, ws_canonical, Arc::clone(client_cell));
+            (
+                Some(provider),
+                TypeProviderKind::Tsgo,
+                Some(format!("{}; {detail}", lazy_managed_tsgo_reason())),
+            )
+        }
+        ManagedEngineChoice::Tsserver { detail } => {
+            tracing::info!("managed fallback: {detail}");
+            match try_spawn_tsserver(args, ws_canonical, client_cell).await {
+                Ok(tp) => (Some(tp), TypeProviderKind::Tsserver, Some(detail)),
+                Err(TsserverSpawnError::NativeFamily { major }) => {
+                    let reason = format!(
+                        "workspace TypeScript {major}.x is the native (TSGO) family but no \
+                         supported tsgo engine could be resolved — no TypeScript intellisense"
+                    );
+                    tracing::warn!("{reason}");
+                    (None, TypeProviderKind::None, Some(reason))
+                }
+                Err(TsserverSpawnError::Unavailable(error)) => {
+                    let reason =
+                        format!("no supported tsgo engine, and tsserver failed to start: {error}");
+                    tracing::warn!("{reason}");
+                    (None, TypeProviderKind::None, Some(reason))
+                }
+            }
+        }
+        ManagedEngineChoice::None { reason } => {
+            tracing::warn!("no TypeScript type provider — running in verter-only mode: {reason}");
+            (None, TypeProviderKind::None, Some(reason))
+        }
+    }
 }
 
 fn editor_tsserver_topology(
