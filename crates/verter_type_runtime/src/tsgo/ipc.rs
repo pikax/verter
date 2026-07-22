@@ -443,6 +443,9 @@ struct LspTransport {
     /// When this reaches `HANG_THRESHOLD`, fires `crash_notify` to trigger a restart
     /// via the existing `ResilientTypeProvider` crash recovery machinery.
     consecutive_failures: AtomicU32,
+    /// When the last hang strike was charged, so hops already in flight then are
+    /// not counted as independent evidence. Cleared with the counter.
+    last_strike_at: StdMutex<Option<std::time::Instant>>,
     /// Shared with `ResilientTypeProvider` — signaled when the provider appears hung.
     crash_notify: Option<Arc<Notify>>,
     /// Deliberate-teardown intent. Set by `shutdown()` BEFORE the `shutdown`/`exit`
@@ -524,20 +527,50 @@ impl LspTransport {
     /// Only the response-timeout arm used to count, so a request parked on a
     /// full lane behind a stalled writer never reached this path, so the wedge
     /// detector never fired for a stdin-side deadlock.
-    fn note_hang_failure(&self) {
-        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+    /// CONSECUTIVE MEANS SEQUENTIAL IN TIME. A hop that was already in flight
+    /// when the previous strike was charged observed the SAME window of silence,
+    /// so it is not independent evidence. The LSP fans out — hover, definition,
+    /// completion, references and a background diagnostics pull are routinely in
+    /// flight at the same instant on the same bound — so charging each of them
+    /// separately reaches the threshold after a SINGLE bound's worth of silence
+    /// and restarts an engine that is merely busy building a cold program. The
+    /// restart discards that program, so the next wave is cold too: a
+    /// self-sustaining restart loop. `issued_at` is when this hop's bound
+    /// started; only a hop issued at or after the last strike advances the count.
+    fn note_hang_failure(&self, method: &str, issued_at: std::time::Instant) {
+        let count = {
+            let mut last = self
+                .last_strike_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.is_some_and(|at| issued_at < at) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+            self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1
+        };
         if count >= HANG_THRESHOLD {
             if self.teardown_intent.load(Ordering::SeqCst) {
                 tracing::debug!("TSGO request failures during deliberate teardown — not a hang");
             } else {
                 tracing::error!(
-                    "TSGO appears hung ({count} consecutive failures) — triggering restart"
+                    "TSGO appears hung ({count} successive unanswered full-bound hops, \
+                     latest '{method}') — triggering restart"
                 );
                 if let Some(notify) = &self.crash_notify {
                     notify.notify_waiters();
                 }
             }
         }
+    }
+
+    /// Clear hang-detection state after proof the engine is alive and answering.
+    fn clear_hang_evidence(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        *self
+            .last_strike_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// Send an LSP request at Interactive priority and wait for the response.
@@ -603,7 +636,13 @@ impl LspTransport {
                 // configured timeout, or what the ambient request deadline has
                 // left. Firing inside the caller's deadline is what makes the
                 // failure attributable to the engine rather than to the handler.
-                let hop = crate::deadline::hop_budget(std::time::Duration::from_secs(timeout_secs));
+                let configured = std::time::Duration::from_secs(timeout_secs);
+                let hop = crate::deadline::hop_budget(configured);
+                // Whether the engine actually got the bound it was promised. A
+                // shortened hop expiring is the CALLER running out of patience,
+                // not the engine failing to answer.
+                let full_bound = hop >= configured;
+                let issued_at = std::time::Instant::now();
                 let deadline = tokio::time::Instant::now() + hop;
                 let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
                 match self
@@ -623,7 +662,9 @@ impl LspTransport {
                         // for an id the engine has never seen.
                         registration.disarm();
                         self.pending.take(id);
-                        self.note_hang_failure();
+                        if full_bound {
+                            self.note_hang_failure(method, issued_at);
+                        }
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!("method={} id={} message=stdin-enqueue-timeout", method, id),
@@ -642,7 +683,7 @@ impl LspTransport {
                         // engine that has replied must not be told to cancel.
                         registration.disarm();
                         // Reset consecutive failures on any successful response
-                        self.consecutive_failures.store(0, Ordering::Relaxed);
+                        self.clear_hang_evidence();
                         // Check for JSON-RPC error
                         if let Some(err) = val.get("error") {
                             let msg = err
@@ -696,7 +737,9 @@ impl LspTransport {
                         // registration ARMED: dropping it is what removes the
                         // pending entry and cancels the engine's work, on this
                         // path and on the caller-dropped path alike.
-                        self.note_hang_failure();
+                        if full_bound {
+                            self.note_hang_failure(method, issued_at);
+                        }
                         crate::type_runtime_trace_event!(
                             "tsgo_transport_request_error",
                             format!("method={} id={} message=timeout", method, id),
@@ -2040,6 +2083,7 @@ impl TsgoTypeProvider {
             pending: Arc::clone(&pending),
             next_id: AtomicI64::new(1),
             consecutive_failures: AtomicU32::new(0),
+            last_strike_at: StdMutex::new(None),
             crash_notify: crash_notify.as_ref().map(Arc::clone),
             teardown_intent: Arc::clone(&teardown_intent),
         });
