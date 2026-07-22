@@ -431,6 +431,18 @@ impl TypeProvider for TsgoOwnedProvider {
         })
     }
 
+    /// The BACKGROUND load: cache content for import resolution only. It delivers
+    /// no `didOpen`, so it takes no diagnostic barrier — the inner `--lsp` provider's
+    /// `load_file` is local-only and the `--api` checker reads the same session.
+    ///
+    /// This override is load-bearing, not a courtesy delegation: [`Self::open_file`]
+    /// adds a synchronous `get_diagnostics` barrier, so inheriting the trait's
+    /// `load_file → open_file` default would turn every background load (the whole
+    /// workspace scan) into an editor open plus a blocking diagnostic round trip.
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.lsp.load_file(path, content)
+    }
+
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let lsp = Arc::clone(&self.lsp);
         let path = path.to_string();
