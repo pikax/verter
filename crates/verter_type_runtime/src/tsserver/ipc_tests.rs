@@ -1227,7 +1227,8 @@ async fn test_update_file_single_line_content() {
 
 /// Capture the wire frames the `notify_carrier_changed` body produces for a
 /// companion path: a plugin publication-token advance for warm ScriptInfo refresh,
-/// followed by the `updateOpen { changedFiles }` cold-resolution eviction.
+/// the `updateOpen { changedFiles }` cold-resolution eviction, then a response
+/// round-trip that fences later provider queries onto a subsequent host turn.
 async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::Value> {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
@@ -1260,6 +1261,35 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
             }),
         )
         .await;
+    let request_transport = Arc::clone(&transport);
+    let fence_file = file.clone();
+    let fence = tokio::spawn(async move {
+        request_transport
+            .request(
+                "projectInfo",
+                serde_json::json!({
+                    "file": fence_file,
+                    "needFileNameList": false,
+                }),
+            )
+            .await
+    });
+    loop {
+        let response = {
+            let mut pending = transport.pending.lock().await;
+            let response = pending.drain().next().map(|(_, response)| response);
+            response
+        };
+        if let Some(response) = response {
+            let _ = response.send(serde_json::json!({}));
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    fence
+        .await
+        .expect("fence request task must not panic")
+        .expect("fence response must complete the request");
 
     let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1288,15 +1318,17 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
 /// C10 eviction discriminator: `notify_carrier_changed` advances the plugin's
 /// carrier-store publication token (warm ScriptInfo replacement) and then fires an
 /// `updateOpen` `changedFiles` frame for the COMPANION path (cold negative-cache
-/// eviction). Omitting either command leaves one of those two stale states live.
+/// eviction). The final response-bearing request orders subsequent queries after
+/// the plugin's deferred graph refresh. Omitting any step leaves a stale state or
+/// permits a query to overtake the refresh.
 #[tokio::test]
 async fn tsserver_cold_read_no_sticky_ts2307() {
     let frames = run_notify_carrier_changed_capture("/proj/src/Comp.vue.tsx").await;
 
     assert_eq!(
         frames.len(),
-        2,
-        "carrier invalidation must issue exactly the warm-refresh token and cold-eviction touch"
+        3,
+        "carrier invalidation must issue the warm refresh, cold eviction, and ordering fence"
     );
     let configure = &frames[0];
     assert_eq!(configure["command"].as_str(), Some("configurePlugin"));
@@ -1330,6 +1362,19 @@ async fn tsserver_cold_read_no_sticky_ts2307() {
             .as_array()
             .is_some_and(|c| c.is_empty()),
         "the eviction is a content-preserving touch (empty textChanges): {frame}"
+    );
+
+    let fence = &frames[2];
+    assert_eq!(fence["command"].as_str(), Some("projectInfo"));
+    assert_eq!(
+        fence["arguments"]["file"].as_str(),
+        Some("/proj/src/Comp.vue.tsx"),
+        "the ordering fence targets the same newly-published companion"
+    );
+    assert_eq!(
+        fence["arguments"]["needFileNameList"].as_bool(),
+        Some(false),
+        "the fence must not materialize a project-wide file list"
     );
 }
 

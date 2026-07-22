@@ -1941,16 +1941,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       const context = getProgramSourceContext(fileName);
       if (context) {
-        const aliased = getAliasedNavigationResult(
-          ts,
-          context.checker,
-          context.sourceFile,
-          position,
-        );
-        if (aliased?.definitions.length) {
-          return { textSpan: aliased.textSpan, definitions: remapDefinitions(aliased.definitions) };
-        }
-
+        // A click inside a carrier module specifier targets the source file as a
+        // module. Resolve that syntax before alias retargeting: Svelte's callable
+        // default export is itself an alias candidate whose generated declaration
+        // span has no user-source token and would otherwise leak the IDE companion.
         const moduleNavigation = getModuleSpecifierNavigationResult(
           ts,
           context.sourceFile,
@@ -1962,6 +1956,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             textSpan: moduleNavigation.textSpan,
             definitions: remapDefinitions(moduleNavigation.definitions),
           };
+        }
+
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          return { textSpan: aliased.textSpan, definitions: remapDefinitions(aliased.definitions) };
         }
       }
 
@@ -1990,16 +1994,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       const context = getProgramSourceContext(fileName);
       if (context) {
-        const aliased = getAliasedNavigationResult(
-          ts,
-          context.checker,
-          context.sourceFile,
-          position,
-        );
-        if (aliased?.definitions.length) {
-          return remapDefinitions(aliased.definitions);
-        }
-
+        // Module-specifier syntax is more specific than symbol-alias navigation.
+        // In particular, Svelte's default export is an alias into generated code;
+        // handling it first preserves the intended source-file navigation target.
         const moduleNavigation = getModuleSpecifierNavigationResult(
           ts,
           context.sourceFile,
@@ -2008,6 +2005,16 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         );
         if (moduleNavigation?.definitions.length) {
           return remapDefinitions(moduleNavigation.definitions);
+        }
+
+        const aliased = getAliasedNavigationResult(
+          ts,
+          context.checker,
+          context.sourceFile,
+          position,
+        );
+        if (aliased?.definitions.length) {
+          return remapDefinitions(aliased.definitions);
         }
       }
 

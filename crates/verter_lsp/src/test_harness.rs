@@ -1284,6 +1284,19 @@ export namespace JSX {
 }
 "#;
 
+/// The Svelte 5 callable component contract consumed by the generated public
+/// facade. Keep the fixture dependency-free while preserving the real generic
+/// shape whose props must flow into a plain TypeScript importer.
+const SVELTE_TYPE_STUB_DTS: &str = r#"export interface Component<
+  Props extends Record<string, any> = {},
+  Exports extends Record<string, any> = {},
+  Bindings extends keyof Props | "" = string
+> {
+  (internals: unknown, props: Props): Exports;
+}
+export {};
+"#;
+
 /// Make the `external-ts-dx` fixture self-sufficient for the §2.9 plain-`.ts`-
 /// imports-`.vue`/`.svelte` enhanced-DX contract: provide a flat dependency-free
 /// `vue` type stub and materialise `@verter/types` from the bundled standalone
@@ -1296,9 +1309,6 @@ export namespace JSX {
 /// types-flow assertions become vacuous. A hand-written flat stub keeps the
 /// surface honest and deterministic while staying hermetic — no external corpus,
 /// no fragile pnpm-store transitive-symlink resolution.
-///
-/// The Svelte component carrier is self-contained (Verter synthesises its public
-/// instance surface with no `svelte` dependency), so no `svelte` stub is needed.
 ///
 /// Returns the fixture workspace root.
 pub(crate) fn materialize_external_ts_dx_deps() -> std::path::PathBuf {
@@ -1332,6 +1342,20 @@ pub(crate) fn materialize_external_ts_dx_deps() -> std::path::PathBuf {
                 r#"{"name":"vue","version":"3.0.0-stub","types":"index.d.ts","exports":{".":{"types":"./index.d.ts"},"./jsx-runtime":{"types":"./jsx-runtime/index.d.ts"}}}"#,
             )
             .expect("write external-ts-dx vue manifest");
+
+            // The Svelte public facade deliberately uses the native Svelte 5
+            // callable `Component<Props, Exports, Bindings>` type. Materialise
+            // exactly that type so the fixture verifies the authored prop surface
+            // instead of degrading through an unresolved `svelte` import.
+            let svelte_dir = node_modules.join("svelte");
+            std::fs::create_dir_all(&svelte_dir).expect("create external-ts-dx svelte package");
+            std::fs::write(svelte_dir.join("index.d.ts"), SVELTE_TYPE_STUB_DTS)
+                .expect("write external-ts-dx svelte types");
+            std::fs::write(
+                svelte_dir.join("package.json"),
+                r#"{"name":"svelte","version":"5.0.0-stub","types":"index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#,
+            )
+            .expect("write external-ts-dx svelte manifest");
 
             // `@verter/types` from the bundled standalone declaration.
             let types_dir = node_modules.join("@verter").join("types");
