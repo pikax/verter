@@ -176,12 +176,18 @@ async fn measure_type_runtime_future_sizes() {
     let tp: Arc<dyn TypeProvider> = Arc::new(MeasureMock);
     {
         let fut = tp.get_definition("synthetic.tsx", 0);
-        report("TypeProvider::get_definition (ProviderFuture)", size_of_val(&fut));
+        report(
+            "TypeProvider::get_definition (ProviderFuture)",
+            size_of_val(&fut),
+        );
         drop(fut);
     }
     {
         let fut = tp.get_hover("synthetic.tsx", 0);
-        report("TypeProvider::get_hover (ProviderFuture)", size_of_val(&fut));
+        report(
+            "TypeProvider::get_hover (ProviderFuture)",
+            size_of_val(&fut),
+        );
         drop(fut);
     }
     {
@@ -200,7 +206,10 @@ async fn measure_type_runtime_future_sizes() {
         );
         drop(fut);
     }
-    report("size_of ProviderFuture<()>", size_of::<ProviderFuture<'_, ()>>());
+    report(
+        "size_of ProviderFuture<()>",
+        size_of::<ProviderFuture<'_, ()>>(),
+    );
 
     // Deadline wrapper layers (public API; used by LSP audit harness).
     {
@@ -215,9 +224,10 @@ async fn measure_type_runtime_future_sizes() {
             tokio::time::timeout(Duration::from_secs(1), async { 7u8 }),
         );
         report("with_deadline(timeout(tiny))", size_of_val(&nested));
-        let at = with_deadline_at(tokio::time::Instant::now() + Duration::from_secs(1), async {
-            7u8
-        });
+        let at = with_deadline_at(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            async { 7u8 },
+        );
         report("with_deadline_at(tiny)", size_of_val(&at));
     }
 
@@ -229,18 +239,16 @@ async fn measure_type_runtime_future_sizes() {
     }
     {
         let fut = synthetic_timeout_oneshot();
-        report(
-            "synthetic timeout+oneshot (unboxed)",
-            size_of_val(&fut),
-        );
+        report("synthetic timeout+oneshot (unboxed)", size_of_val(&fut));
         drop(fut);
     }
     {
         // Mirror the production pattern: Box::pin around the transport shape.
-        let fut: ProviderFuture<'_, serde_json::Value> =
-            Box::pin(async move { synthetic_timeout_oneshot().await.map_err(|e| {
-                crate::protocol::TypeProviderError::new(e)
-            }) });
+        let fut: ProviderFuture<'_, serde_json::Value> = Box::pin(async move {
+            synthetic_timeout_oneshot()
+                .await
+                .map_err(|e| crate::protocol::TypeProviderError::new(e))
+        });
         report(
             "Box::pin(timeout+oneshot) ProviderFuture",
             size_of_val(&fut),
@@ -255,7 +263,9 @@ async fn measure_type_runtime_future_sizes() {
         let path_owned = "synthetic.tsx".to_string();
         let uri = "file:///synthetic.tsx".to_string();
         let transport = Arc::new(());
-        let contents = Arc::new(Mutex::new(std::collections::HashMap::<String, String>::new()));
+        let contents = Arc::new(Mutex::new(
+            std::collections::HashMap::<String, String>::new(),
+        ));
         let fut = async move {
             let _line_char = {
                 let guard = contents.lock().await;

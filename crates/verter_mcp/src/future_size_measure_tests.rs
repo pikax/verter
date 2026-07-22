@@ -14,9 +14,7 @@ use verter_diagnostics::Linter;
 use verter_session::{HostConfig, VerterHost};
 
 use crate::config::McpServerConfig;
-use crate::server::{
-    AnalyzeFileParams, CompileFileParams, FilePathParams, VerterMcpServer,
-};
+use crate::server::{AnalyzeFileParams, CompileFileParams, FilePathParams, VerterMcpServer};
 
 fn report(label: &str, bytes: usize) {
     eprintln!(
@@ -59,16 +57,12 @@ async fn measure_mcp_tool_future_sizes() {
         drop(fut);
     }
     {
-        let fut = server.get_component_api(Parameters(FilePathParams {
-            path: path.clone(),
-        }));
+        let fut = server.get_component_api(Parameters(FilePathParams { path: path.clone() }));
         report("VerterMcpServer::get_component_api", size_of_val(&fut));
         drop(fut);
     }
     {
-        let fut = server.get_framework_surface(Parameters(FilePathParams {
-            path: path.clone(),
-        }));
+        let fut = server.get_framework_surface(Parameters(FilePathParams { path: path.clone() }));
         report("VerterMcpServer::get_framework_surface", size_of_val(&fut));
         drop(fut);
     }
@@ -85,7 +79,10 @@ async fn measure_mcp_tool_future_sizes() {
 
     // Outer BoxFuture slot (what rmcp DynService / tool router holds).
     type BoxFut = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
+                + Send,
+        >,
     >;
     report("BoxFuture tool slot (rmcp boxes)", size_of::<BoxFut>());
     report(
@@ -136,10 +133,7 @@ async fn measure_mcp_tool_future_sizes() {
             let _ = (path, None::<bool>, None::<bool>, None::<bool>, host);
             Ok::<(), ()>(())
         };
-        report(
-            "synthetic compile_file-ish capture",
-            size_of_val(&fut),
-        );
+        report("synthetic compile_file-ish capture", size_of_val(&fut));
         drop(fut);
     }
 

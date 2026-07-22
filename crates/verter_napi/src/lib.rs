@@ -3272,12 +3272,7 @@ mod tests {
             drop(fut);
         }
         {
-            let fut = ws.resolve_import(
-                "/tmp/a.ts".into(),
-                "./b".into(),
-                None,
-                None,
-            );
+            let fut = ws.resolve_import("/tmp/a.ts".into(), "./b".into(), None, None);
             eprintln!(
                 "[future-size] NapiWorkspace::resolve_import: {} B ({:.1} KiB)",
                 size_of_val(&fut),
