@@ -9,10 +9,11 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _mycomp = session.open_fixture_file("src/MyComp.vue").await;
 
-        // `handle_rename` performs its OWN production sync-before-query (the same
-        // `ensure_provider_synced` contract the navigation handlers run), so no
-        // test-only sync helper is needed. `wait_until_ready` runs only as a
-        // best-effort WARM-UP (give the provider time to index); its result NO
+        // `handle_rename` never starts import-set work: it CAPTURES the
+        // DependencyReady receipt minted by the `did_open`-triggered background
+        // publication (or joins one in flight), so no test-only sync helper is
+        // needed. `wait_until_ready` runs only as a best-effort WARM-UP (give
+        // the publication + provider time to settle and index); its result NO
         // LONGER gates the cross-file assertion — a green run always EXECUTES R9.
         let _warm = session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await;
 
@@ -161,12 +162,11 @@ function renderTyped(): string {
 // its declared `: string` type, not a bare `fooRenamed` substring anywhere)
 // catches a mis-ranged edit crisply.
 //
-// WHAT THIS LANE DOES NOT DISCRIMINATE — `handle_rename`'s OWN
-// sync-before-query. Under tsserver, opening the parent EAGERLY prewarms the
-// imported child's `{carrier}.ts` PUBLIC-API surface (the `did_open`
-// imported-carrier prewarm), so the child API surface is already synced BEFORE
-// the rename — this lane would pass even if `handle_rename`'s
-// `ensure_provider_synced` were removed (the prewarm masks that axis). The
+// WHAT THIS LANE DOES NOT DISCRIMINATE — the closed-child DELIVERY axis.
+// Under tsserver, opening the parent EAGERLY prewarms the imported child's
+// `{carrier}.ts` PUBLIC-API surface (the `did_open` imported-carrier prewarm),
+// so the child API surface is already synced BEFORE the rename regardless of
+// the background dependency publication (the prewarm masks that axis). The
 // would-be discriminator for that axis is
 // `rename_cross_file_prop_child_closed_unprewarmed_tsserver` below, which
 // SUPPRESSES the prewarm; it is `#[ignore]`'d on the tsserver program-membership
@@ -757,36 +757,38 @@ async fn parent_did_open_prewarms_imported_child_carrier_api() {
 // SUPPRESSES the `did_open` imported-carrier-API prewarm (both the eager and the
 // deferred warmup). With the prewarm off, opening the parent App.vue does NOT
 // pre-sync the closed child MyComp.vue's `{carrier}.ts` API surface — so the ONLY
-// thing that could sync it is `handle_rename`'s own sync-before-query
-// (`ensure_provider_synced`, nav_features_navigation.rs:624). This body asserts
-// BOTH files are edited, so removing line 624 would make it fail (no child edit) —
-// the discrimination the masked default-prewarm lane (which records the child at
-// did_open regardless of line 624) cannot provide.
+// thing that could deliver it is the BACKGROUND import-dependency publication a
+// rename's readiness miss enqueues (the rename itself never starts the sync; it
+// retries below until a settled publication lets it capture DependencyReady).
+// This body asserts BOTH files are edited, so deleting the publication enqueue
+// would make it fail (no child edit) — the discrimination the masked
+// default-prewarm lane (which records the child at did_open regardless) cannot
+// provide.
 //
 // WHY `#[ignore]` (a CONFIRMED production gap, not a flaky/slow test):
 // under tsserver, a closed child is only cross-referenced by a rename initiated
 // from the parent if the child's `{carrier}.ts` was opened in tsserver BEFORE the
 // parent App.vue.tsx program was built. The did_open prewarm achieves that
-// (child opened first, parent IDE synced second). `ensure_provider_synced` runs
-// the OPPOSITE order (parent first, then children) AND at rename time App.vue.tsx
-// is already open from did_open, so the child opens into its own inferred project,
-// OUTSIDE App's configured-project program — tsserver's rename returns ONLY the
-// App.vue group. This was verified at the raw tsserver boundary: prewarmed = 2
-// rename groups (MyComp.vue.ts + App.vue.tsx), unprewarmed = 1 group (App only),
-// stable across 90 one-second retries (so it is project membership, not indexing
-// latency). The child sync itself is NOT a no-op: `ensure_imported_carrier_apis_synced`
-// discovers MyComp and `sync_imported_carrier_api_lightweight` opens its `.d.ts`
-// OK every attempt.
+// (child opened first, parent IDE synced second). The background dependency
+// publication runs the OPPOSITE order (parent first, then children) AND at
+// rename time App.vue.tsx is already open from did_open, so the child opens into
+// its own inferred project, OUTSIDE App's configured-project program —
+// tsserver's rename returns ONLY the App.vue group. This was verified at the raw
+// tsserver boundary: prewarmed = 2 rename groups (MyComp.vue.ts + App.vue.tsx),
+// unprewarmed = 1 group (App only), stable across 90 one-second retries (so it
+// is project membership, not indexing latency). The child sync itself is NOT a
+// no-op: the publication's imported-carrier leg discovers MyComp and
+// `sync_imported_carrier_api_lightweight` opens its `.d.ts` OK every attempt.
 //
 // Closing this requires a PRODUCTION fix to the tsserver sync ordering /
-// project-membership handling so a child opened at rename time is forced into the
-// parent's configured program (e.g. re-sync the parent IDE TSX to trigger a
-// program rebuild after a NEW child surface is opened, or open imported children
-// before the parent at the relevant sync points). That change affects EVERY
-// navigation handler that calls `ensure_provider_synced` (hover/definition/
-// references/rename), so it is cross-cutting and out of scope for this fail-closed
-// merge/store fix; it is tracked as the separate follow-up Block H-membership
-// (tsserver program-membership for cross-file nav handlers). The
+// project-membership handling so a child opened at publication time is forced
+// into the parent's configured program (e.g. re-sync the parent IDE TSX to
+// trigger a program rebuild after a NEW child surface is opened, or open
+// imported children before the parent at the relevant sync points). That change
+// affects the shared background publication every navigation feature depends on,
+// so it is cross-cutting and out of scope for this fail-closed merge/store fix;
+// it is tracked as the separate follow-up Block H-membership (tsserver
+// program-membership for cross-file nav handlers). The
 // `suppress_imported_carrier_prewarm` seam this lane uses is the exact mechanism
 // Block H-membership validates against.
 //
@@ -797,14 +799,14 @@ async fn parent_did_open_prewarms_imported_child_carrier_api() {
 // `VERTER_REQUIRE_TSSERVER=1`.
 //
 // TODO(follow-up): Block H-membership (tsserver program-membership for cross-file
-// nav handlers) lands the tsserver project-membership ordering fix in
-// `ensure_provider_synced` so a closed-child cross-file rename works WITHOUT the
-// did_open prewarm, then removes `#[ignore]` here — this lane will then go green,
-// and red when nav_features_navigation.rs:624 is removed.
+// nav handlers) lands the tsserver project-membership ordering fix in the shared
+// background dependency publication so a closed-child cross-file rename works
+// WITHOUT the did_open prewarm, then removes `#[ignore]` here — this lane will
+// then go green, and red when the readiness-miss publication enqueue is removed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "confirmed production gap, tracked as Block H-membership (tsserver program-membership for \
             cross-file nav handlers): closed-child cross-file rename depends on did_open prewarm \
-            ordering (tsserver project membership); ensure_provider_synced at rename time opens the \
+            ordering (tsserver project membership); the background dependency publication opens the \
             child after the parent program is built. Needs the Block H-membership sync-ordering fix \
             before this discriminating lane can pass — see the test comment."]
 async fn rename_cross_file_prop_child_closed_unprewarmed_tsserver() {
@@ -830,17 +832,20 @@ async fn rename_cross_file_prop_child_closed_unprewarmed_tsserver() {
     // Rename the `foo` prop usage in App.vue. `<MyComp foo="literal" …>`.
     let pos = session.find_position(&app, r#"foo="literal""#, 0);
 
-    // EACH rename invocation runs `handle_rename`'s own `ensure_provider_synced`,
-    // which syncs the closed child's `{carrier}.ts` API surface to tsserver. That
-    // sync is a no-response notification, so tsserver needs a moment to INDEX the
-    // surface before it reports a cross-file rename location against it; retry the
-    // rename in a bounded settle loop until BOTH files are edited.
+    // EACH rename invocation whose DependencyReady receipt is missing ENQUEUES
+    // the background dependency publication, which syncs the closed child's
+    // `{carrier}.ts` API surface to tsserver; a later attempt captures the
+    // minted receipt and takes the provider leg. The sync is a no-response
+    // notification, so tsserver also needs a moment to INDEX the surface before
+    // it reports a cross-file rename location against it; retry the rename in a
+    // bounded settle loop until BOTH files are edited.
     //
-    // This stays DISCRIMINATING: with `ensure_provider_synced` removed (and the
-    // prewarm suppressed), the child surface is NEVER sent to tsserver, so no
-    // amount of settling produces a child edit — the loop exhausts and the assert
-    // below fails. The settle window only lets tsserver index a surface the
-    // production sync DID send; it never substitutes for that sync.
+    // This stays DISCRIMINATING: with the readiness-miss publication enqueue
+    // removed (and the prewarm suppressed), the child surface is NEVER sent to
+    // tsserver, so no amount of settling produces a child edit — the loop
+    // exhausts and the assert below fails. The settle window only lets tsserver
+    // index a surface the background publication DID send; it never substitutes
+    // for that publication.
     let mut ws_edit = None;
     for attempt in 0..12 {
         let edits = session.rename_edits(&app, pos, "fooRenamed").await;

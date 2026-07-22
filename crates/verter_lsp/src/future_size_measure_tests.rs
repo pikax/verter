@@ -519,23 +519,17 @@ async fn measure_handler_future_sizes() {
             drop(fut);
         }
 
-        // Sync chain futures polled from handlers.
-        {
-            let fut = server.ensure_provider_synced(&uri);
-            report("ensure_provider_synced", size_of_val(&fut));
-            drop(fut);
-        }
+        // Sync chain futures polled from handlers, plus the handler-side
+        // readiness join (the import-set pass itself is a detached spawned
+        // task and never a handler-polled future).
         {
             let fut = server.ensure_current_file_synced(&uri);
             report("ensure_current_file_synced", size_of_val(&fut));
             drop(fut);
         }
         {
-            let fut = server.ensure_imported_carriers_synced_memoized(&uri);
-            report(
-                "ensure_imported_carriers_synced_memoized",
-                size_of_val(&fut),
-            );
+            let fut = server.dependency_readiness_join(&uri);
+            report("dependency_readiness_join", size_of_val(&fut));
             drop(fut);
         }
 

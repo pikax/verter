@@ -3807,9 +3807,10 @@ async fn debounced_sync_skipped_when_superseded() {
     );
 }
 
-/// ensure_provider_synced: when the file is dirty, it should trigger an immediate sync.
+/// The dirty-flag flush protocol (`ensure_current_file_synced`): when the file
+/// is dirty, it should trigger an immediate sync.
 #[tokio::test]
-async fn ensure_provider_synced_triggers_sync_when_dirty() {
+async fn dirty_flag_flush_triggers_sync_when_dirty() {
     use crate::type_provider::mock::MockTypeProvider;
     use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
@@ -3824,7 +3825,7 @@ async fn ensure_provider_synced_triggers_sync_when_dirty() {
     // Mark dirty
     needs_sync.insert(canonical_id.clone());
 
-    // Simulate ensure_provider_synced: check dirty → sync → clear
+    // Simulate the dirty-flag flush: check dirty → sync → clear
     if needs_sync.remove(&canonical_id).is_some() {
         let _ = sync.sync_tsx(&tsx_path, "synced content").await;
     }
@@ -3837,9 +3838,9 @@ async fn ensure_provider_synced_triggers_sync_when_dirty() {
     );
 }
 
-/// ensure_provider_synced: when the file is clean, no sync should happen.
+/// The dirty-flag flush protocol: when the file is clean, no sync should happen.
 #[tokio::test]
-async fn ensure_provider_synced_noop_when_clean() {
+async fn dirty_flag_flush_noop_when_clean() {
     use crate::type_provider::mock::MockTypeProvider;
     use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
@@ -3850,7 +3851,7 @@ async fn ensure_provider_synced_noop_when_clean() {
     let needs_sync: DashSet<String> = DashSet::new();
     let canonical_id = "C:/project/src/App.vue".to_string();
 
-    // Do NOT mark dirty — simulate ensure_provider_synced
+    // Do NOT mark dirty — simulate the dirty-flag flush
     if needs_sync.remove(&canonical_id).is_some() {
         unreachable!("should not enter sync path when clean");
     }
@@ -3901,7 +3902,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     }
 
     // Immediately after the 5th change, simulate the completion flush
-    // (ensure_provider_synced equivalent). This runs before any
+    // (the interactive dirty-flag flush equivalent). This runs before any
     // debounced task's delay elapses, so it is the first sync call.
     if needs_sync.remove(&canonical_id).is_some() {
         let _ = sync.sync_tsx(&tsx_path, "latest for completion").await;

@@ -48,7 +48,7 @@ pub(super) enum ImportSyncOutcome {
 
 impl ImportSyncOutcome {
     /// Fold two legs: the pass is `Complete` only when both are.
-    fn and(self, other: Self) -> Self {
+    pub(super) fn and(self, other: Self) -> Self {
         match (self, other) {
             (ImportSyncOutcome::Complete, ImportSyncOutcome::Complete) => {
                 ImportSyncOutcome::Complete
@@ -57,7 +57,7 @@ impl ImportSyncOutcome {
         }
     }
 
-    fn from_sync<T, E>(result: &Result<T, E>) -> Self {
+    pub(super) fn from_sync<T, E>(result: &Result<T, E>) -> Self {
         Self::from_ok(result.is_ok())
     }
 
@@ -69,7 +69,7 @@ impl ImportSyncOutcome {
         }
     }
 
-    fn is_complete(self) -> bool {
+    pub(super) fn is_complete(self) -> bool {
         self == ImportSyncOutcome::Complete
     }
 }
@@ -893,11 +893,14 @@ impl VerterLanguageServer {
         );
     }
 
-    /// Flush the active file's IDE TSX to the type provider for interactive queries.
+    /// Flush the active file's IDE TSX to the type provider.
     ///
-    /// Called by hover, completion, goto_definition, type_definition BEFORE making
-    /// a type provider query. Only syncs the IDE path (TSX) — API (.vue.ts) sync
-    /// is deferred to the coordinator.
+    /// Lifecycle-owned current-file surface repair: `did_open` (per the open
+    /// policy) and the residual hover/completion dirty-surface heal run it.
+    /// Navigation handlers (definition / typeDefinition / rename) never start
+    /// it — they CAPTURE the committed surface (fail closed) and gate their
+    /// dependency needs through the DependencyReady receipt instead. Only syncs
+    /// the IDE path (TSX) — API (.vue.ts) sync is deferred to the coordinator.
     ///
     /// Runs when:
     /// - File is in `needs_ide_sync`, OR
@@ -1421,64 +1424,6 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Legacy wrapper for backward compat — calls `ensure_current_file_synced`.
-    pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
-        self.ensure_current_file_synced(uri).await;
-        self.ensure_imported_carriers_synced_memoized(uri).await;
-    }
-
-    /// The current-file leg's imported-carrier + barrel preamble, wrapped in a
-    /// per-document singleflight + freshness memo. A go-to-definition
-    /// storm on an UNCHANGED document paid a full import-graph BFS re-walk + carrier
-    /// gateway reconcile on EVERY request; this skips both entirely when nothing
-    /// that could change the resolved import set has advanced since the last pass.
-    ///
-    /// The memo key is the workspace `(content_generation, snapshot_generation)`:
-    /// ANY content edit (this document OR a dependency carrier) bumps
-    /// `content_generation`, and any resolver re-publish (ownership/route change)
-    /// bumps the snapshot generation. Both are supersets of "the import set could
-    /// have changed", so a warm skip can never strand a stale carrier — a real edit
-    /// always misses the memo and re-runs the preamble, which re-pushes the changed
-    /// companions.
-    ///
-    /// A pass with any failed or requeued leg does NOT publish the memo: the memo
-    /// records that the import set was successfully delivered at this generation,
-    /// and a partial pass has not delivered it.
-    pub(super) async fn ensure_imported_carriers_synced_memoized(&self, uri: &Uri) {
-        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-            let _ = self.ensure_imported_carrier_apis_synced(uri).await;
-            let _ = self.ensure_barrel_imports_synced(uri).await;
-            return;
-        };
-
-        // Singleflight: coalesce a concurrent request storm on this document onto
-        // ONE import-set pass. A follower that acquires the lock after the leader
-        // finished sees a fresh memo and returns without re-walking.
-        let lock = self.import_sync.lock_for(&canonical_id);
-        let _guard = lock.lock().await;
-
-        let key = self.import_sync_freshness_key();
-        if let Some(key) = key {
-            if self.import_sync.is_fresh_at(&canonical_id, key) {
-                return; // The import set was already delivered at this generation.
-            }
-        }
-
-        let outcome = self
-            .ensure_imported_carrier_apis_synced(uri)
-            .await
-            .and(self.ensure_barrel_imports_synced(uri).await);
-
-        // Publish the memo only when the whole preamble DELIVERED under a stable
-        // key — never warm a torn generation, and never warm over a leg that has
-        // still to be retried.
-        if let Some(key) = key {
-            if outcome.is_complete() && self.import_sync_freshness_key() == Some(key) {
-                self.import_sync.record_delivered(canonical_id, key);
-            }
-        }
-    }
-
     /// Install `workspace` as the host's VFS workspace — the single entry point
     /// for replacing it.
     ///
@@ -1492,279 +1437,6 @@ impl VerterLanguageServer {
         self.documents.host().set_workspace(workspace_dyn);
         *self.vfs_workspace.write() = Some(workspace);
         self.import_sync.evict_all();
-    }
-
-    /// The workspace `(content_generation, resolver_snapshot_generation)` pair that
-    /// keys the import-set freshness memo. `None` when no published resolver exists
-    /// yet (bootstrap) — the caller then never memoizes and always runs the preamble.
-    fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
-        let content_generation = self.documents.host().workspace_read().content_generation();
-        let snapshot_generation = {
-            let ws = self.vfs_workspace.read();
-            let ws = ws.as_ref()?;
-            ws.load_published()?.snapshot.generation.0
-        };
-        Some((content_generation, snapshot_generation))
-    }
-
-    pub(super) async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) -> ImportSyncOutcome {
-        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
-            return ImportSyncOutcome::Complete;
-        }
-
-        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-            return ImportSyncOutcome::Complete;
-        };
-        let Some(analysis) = self.documents.get_analysis(uri) else {
-            return ImportSyncOutcome::Complete;
-        };
-
-        let mut import_ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
-            &analysis.imports,
-            Some(&canonical_id),
-            |parent, specifier| self.resolve_import_specifier(parent, specifier),
-        );
-
-        let snapshot = self.published_resolver();
-        let reader = LspProjectResolverReader::new(&self.documents);
-        let dynamic_ids = collect_priority_carrier_public_api_targets_from_module_references(
-            snapshot.as_ref(),
-            &reader,
-            &canonical_id,
-            &analysis.module_references,
-        );
-        let mut seen: HashSet<String> = import_ids.iter().cloned().collect();
-        for import_id in dynamic_ids {
-            if seen.insert(import_id.clone()) {
-                import_ids.push(import_id);
-            }
-        }
-
-        let mut outcome = ImportSyncOutcome::Complete;
-        for import_id in import_ids {
-            outcome = outcome.and(self.sync_imported_carrier_api_lightweight(&import_id).await);
-        }
-        outcome
-    }
-
-    /// Sync barrel (non-carrier re-export) imports and their framework-carrier
-    /// dependencies into the active type provider.
-    ///
-    /// When a component is imported through a barrel (`import { Comp } from './components'`),
-    /// possibly across several `export *` / `export { … } from` hops, `ensure_imported_carrier_apis_synced`
-    /// misses both the intermediate `.ts` barrels and the terminal carrier (`.vue` / `.svelte`)
-    /// re-export targets. This walks the re-export graph reachable from the template's component
-    /// usages (a bounded level-BFS), classifies each hop by its RESOLVED target's carrier-ness
-    /// (never by the specifier string, so aliased `@/…` and `export *` re-exports are followed,
-    /// and the terminal carrier is reached at any depth), syncs the discovered carrier
-    /// dependencies first, then syncs the intermediate barrels. Provider-neutral: both tsgo and
-    /// tsserver benefit (a bounded over-sync of unrelated barrel imports is acceptable — the
-    /// provider decides the actual symbol).
-    pub(super) async fn ensure_barrel_imports_synced(&self, uri: &Uri) -> ImportSyncOutcome {
-        let Some(sync) = &self.project_sync else {
-            return ImportSyncOutcome::Complete;
-        };
-        let Some(snapshot) = self.published_resolver() else {
-            return ImportSyncOutcome::Complete;
-        };
-        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-            return ImportSyncOutcome::Complete;
-        };
-        let Some(analysis) = self.documents.get_analysis(uri) else {
-            return ImportSyncOutcome::Complete;
-        };
-        let Some(template) = analysis.template.as_ref() else {
-            return ImportSyncOutcome::Complete;
-        };
-
-        let host = self.documents.host();
-        let mut barrel_ids: Vec<String> = Vec::new();
-        let mut barrel_carrier_deps: Vec<String> = Vec::new();
-        let mut seen_barrels = HashSet::new();
-        let mut seen_barrel_carrier = HashSet::new();
-
-        // Bounds (defensive): a pathological or cyclic re-export graph must never stall
-        // did_open. Truncate (with a trace) rather than spin.
-        const MAX_BFS_DEPTH: usize = 8;
-        const MAX_NON_CARRIER_NODES: usize = 128;
-        const MAX_RESOLVED_REFS: usize = 1024;
-        const MAX_CARRIER_TARGETS: usize = 512;
-        let mut resolved_refs_remaining: usize = MAX_RESOLVED_REFS;
-        // Trace each size cap at most once — the first time a genuinely-new node is
-        // dropped because the cap is full — so the truncation the comment promises is
-        // observable. Cheap: one trace per cap, never per skipped item.
-        let mut non_carrier_cap_traced = false;
-        let mut carrier_cap_traced = false;
-
-        // Seed the frontier from template component import sources that resolve to a
-        // non-carrier (barrel) module. A directly-resolved carrier is already handled by
-        // carrier sync.
-        let mut frontier: Vec<String> = Vec::new();
-        for component in &template.components {
-            let Some(import_source) = component.import_source.as_deref() else {
-                continue;
-            };
-            let Some(resolved) = self.resolve_import_specifier(&canonical_id, import_source) else {
-                continue;
-            };
-            if verter_workspace::path_is_carrier(&resolved) {
-                continue;
-            }
-            if seen_barrels.insert(resolved.clone()) {
-                if barrel_ids.len() < MAX_NON_CARRIER_NODES {
-                    frontier.push(resolved.clone());
-                    barrel_ids.push(resolved);
-                } else if !non_carrier_cap_traced {
-                    non_carrier_cap_traced = true;
-                    tracing::debug!(
-                        "barrel sync: non-carrier node cap ({MAX_NON_CARRIER_NODES}) reached; \
-                         truncating remaining barrel modules"
-                    );
-                }
-            }
-        }
-
-        // Level-BFS over re-export hops. Each module reference is resolved through the shared
-        // (alias-aware) workspace resolver and classified by its RESOLVED target's carrier-ness
-        // — never by the specifier string — so `export * from './x'` and aliased (`@/…`)
-        // re-exports are followed, and the terminal carrier is reached at any depth.
-        let mut depth = 0usize;
-        while !frontier.is_empty() && depth < MAX_BFS_DEPTH {
-            let mut next: Vec<String> = Vec::new();
-            for barrel_id in &frontier {
-                host.ensure_loaded(barrel_id);
-                let Some(barrel_analysis) = host.get_analysis(barrel_id) else {
-                    continue;
-                };
-                for module_ref in barrel_analysis.module_references.iter() {
-                    let Some(specifier) = module_ref.literal_specifier.as_deref() else {
-                        continue;
-                    };
-                    if resolved_refs_remaining == 0 {
-                        tracing::debug!(
-                            "barrel sync: resolved-ref budget exhausted; truncating re-export walk"
-                        );
-                        break;
-                    }
-                    resolved_refs_remaining -= 1;
-                    let Some(target) = self.resolve_import_specifier(barrel_id, specifier) else {
-                        continue;
-                    };
-                    if verter_workspace::path_is_carrier(&target) {
-                        if seen_barrel_carrier.insert(target.clone()) {
-                            if barrel_carrier_deps.len() < MAX_CARRIER_TARGETS {
-                                barrel_carrier_deps.push(target);
-                            } else if !carrier_cap_traced {
-                                carrier_cap_traced = true;
-                                tracing::debug!(
-                                    "barrel sync: carrier-target cap ({MAX_CARRIER_TARGETS}) reached; \
-                                     truncating remaining carrier re-export targets"
-                                );
-                            }
-                        }
-                    } else if seen_barrels.insert(target.clone()) {
-                        if barrel_ids.len() < MAX_NON_CARRIER_NODES {
-                            next.push(target.clone());
-                            barrel_ids.push(target);
-                        } else if !non_carrier_cap_traced {
-                            non_carrier_cap_traced = true;
-                            tracing::debug!(
-                                "barrel sync: non-carrier node cap ({MAX_NON_CARRIER_NODES}) reached; \
-                                 truncating remaining barrel modules"
-                            );
-                        }
-                    }
-                }
-            }
-            frontier = next;
-            depth += 1;
-        }
-        if !frontier.is_empty() {
-            tracing::debug!(
-                "barrel sync: BFS depth/size bound reached; truncating remaining re-export hops"
-            );
-        }
-
-        let mut outcome = ImportSyncOutcome::Complete;
-
-        // Sync carrier dependencies first (so the provider has their virtual
-        // IDE targets).
-        for carrier_id in &barrel_carrier_deps {
-            outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);
-        }
-
-        // Sync barrel files. Carrier import specifiers already carry their
-        // resolvable suffix before reaching the provider — the compiler rewrites
-        // in-project carrier imports to the `.vue.tsx` IDE carrier, and the
-        // resolver rewrites non-carrier importer specifiers to the `.verter.ts`
-        // API carrier — so the provider sends content unmodified.
-        for barrel_id in &barrel_ids {
-            // Skip if already synced
-            if let Some(state) = self.provider_sync_state_for_source(barrel_id) {
-                if state.shadow_background_loaded {
-                    continue;
-                }
-            }
-
-            let Some(source) = host.get_source(barrel_id) else {
-                continue;
-            };
-            // Framework carriers never sync as raw scripts.
-            let Some(file_language) =
-                crate::provider_sync::provider_script_language(host, barrel_id)
-            else {
-                continue;
-            };
-            let module_references = block_in_place_if_available(|| {
-                host.upsert(verter_session::UpsertRequest {
-                    canonical_id: Some(barrel_id.clone()),
-                    input_id: barrel_id.clone(),
-                    source: source.clone(),
-                    file_language,
-                    aliases: Vec::new(),
-                })
-                .map(|result| result.module_references)
-                .unwrap_or_default()
-            });
-            let reader = LspProjectResolverReader::new(&self.documents);
-            let Some(prepared) = prepare_non_carrier_provider_sync(
-                Some(&snapshot),
-                &reader,
-                barrel_id,
-                &source,
-                &module_references,
-            ) else {
-                continue;
-            };
-
-            if let Some(transition) = self.prepare_non_carrier_provider_sync_transition(barrel_id) {
-                self.close_provider_paths(&transition.stale_paths).await;
-                let result = sync
-                    .sync_file(&prepared.provider_path, &prepared.rewritten)
-                    .await;
-                outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
-                if let Err(error) = result {
-                    tracing::warn!(
-                        "barrel sync: failed to sync {}: {error}",
-                        prepared.provider_path
-                    );
-                } else {
-                    self.commit_provider_sync_state(barrel_id, transition.next);
-                }
-            } else {
-                let result = sync
-                    .sync_file(&prepared.provider_path, &prepared.rewritten)
-                    .await;
-                outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
-                if let Err(error) = result {
-                    tracing::warn!(
-                        "barrel sync: failed to sync {}: {error}",
-                        prepared.provider_path
-                    );
-                }
-            }
-        }
-        outcome
     }
 
     pub(super) fn current_file_needs_inline_type_provider_sync(&self, uri: &Uri) -> bool {
@@ -2345,6 +2017,7 @@ impl VerterLanguageServer {
             decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
             resync_coordinator: Arc::clone(&self.resync_coordinator),
             import_sync: Arc::clone(&self.import_sync),
+            server: self.clone(),
         };
 
         let ctx = context.to_owned();
@@ -2373,6 +2046,17 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
     ) -> ImportSyncOutcome {
+        // Serialize this child's host materialization + provider sync on the
+        // child's OWN document lane — the same lane `did_open`/`did_close` hold
+        // across their registry + host commits. A DETACHED background
+        // publication may reach an imported child at the exact moment the user
+        // opens that child; compiling the child concurrently with its open
+        // commit races host state (a poisoned scheduler entry then fails every
+        // later `ensure_loaded`), so the pass must ORDER with the lifecycle,
+        // never interleave it. Per-document: syncs of other files, and typing,
+        // are unaffected.
+        let lifecycle_lane = self.ide_sync_lifecycle_lease(canonical_id);
+        let _lifecycle_guard = lifecycle_lane.lock().await;
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let profile = self.documents.tsx_profile.read().clone();
         let snapshot = self.published_resolver();
