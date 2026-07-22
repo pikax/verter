@@ -1101,12 +1101,18 @@ impl VerterLanguageServer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The attested editor tsserver plugin owns carrier hover, navigation, and
-    /// rename directly in VS Code. The LSP has no local TypeProvider in this
-    /// topology and must not register a competing partial answer for the same
-    /// request; VS Code selects a single rename provider and can otherwise hide
-    /// the editor plugin's complete script+template edit set.
-    pub(super) fn editor_owns_carrier_source_features(&self) -> bool {
+    /// Whether the attested editor tsserver plugin owns carrier RENAME.
+    ///
+    /// Rename alone, because rename alone is exclusive: VS Code selects a
+    /// SINGLE rename provider, so a Verter rename would hide the editor
+    /// plugin's complete script+template edit set. Hover, definition and
+    /// references are MERGED across providers, so withholding Verter's native
+    /// answer there can only remove information — and when the editor plugin
+    /// cannot serve a carrier (tsserver parks it in an inferred project, or the
+    /// owning configured project is closed) withholding leaves the user with
+    /// nothing at all. Those features therefore always serve, exactly as
+    /// completion already does.
+    pub(super) fn editor_owns_carrier_rename(&self) -> bool {
         matches!(
             self.type_provider_kind,
             crate::TypeProviderKind::EditorTsserver

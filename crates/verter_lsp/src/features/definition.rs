@@ -584,57 +584,6 @@ use crate::features::references::{
     find_css_target_in_style_refs, find_css_target_in_template_refs_with_element, CssRefTarget,
 };
 
-/// CSS-ONLY definition: the class-intelligence branches alone (markup class
-/// token → rule, style class → usages). Served even when the editor owns
-/// carrier-source TS features — CSS-native results have no TS correlate, so
-/// the editor's TS plugin can never own them.
-pub fn css_only_definition_at_position(
-    position: &Position,
-    source: &str,
-    blocks: &[SfcBlock],
-    analysis: Option<&FileAnalysisSnapshot>,
-    line_index: &LineIndex,
-) -> Option<GotoDefinitionResponse> {
-    let analysis = analysis?;
-    let offset = line_index.position_to_offset(position)? as usize;
-
-    let in_template = blocks.iter().any(|b| {
-        b.tag_name == "template" && {
-            let (cs, ce) = b.content_range();
-            offset >= cs as usize && offset < ce as usize
-        }
-    });
-    if in_template {
-        if let Some(css_result) = css_definition_from_template(offset, source, analysis, line_index)
-        {
-            return css_result;
-        }
-    }
-
-    if !analysis.markup_class_tokens.is_empty() {
-        if let Some(token) = crate::features::references::markup_class_token_at(offset, analysis) {
-            return css_rule_definition(
-                &CssRefTarget::Class(token.name.clone()),
-                None,
-                analysis,
-                line_index,
-            );
-        }
-    }
-
-    let in_style = blocks.iter().any(|b| {
-        b.tag_name == "style" && {
-            let (cs, ce) = b.content_range();
-            offset >= cs as usize && offset < ce as usize
-        }
-    });
-    if in_style {
-        return css_definition_from_style(offset, source, analysis, line_index);
-    }
-
-    None
-}
-
 /// Detect if cursor is inside a template `class`/`:class`/`id` attribute
 /// value and navigate to the matching CSS rule(s) in style blocks.
 ///

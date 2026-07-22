@@ -2900,7 +2900,7 @@ async fn managed_tsgo_constructs_both_direct_provider_sync_and_editor_store_publ
 
 // @ai-generated - Proves editor tsserver owns carrier hover, navigation, and rename.
 #[tokio::test(flavor = "multi_thread")]
-async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
+async fn editor_tsserver_yields_only_rename_and_keeps_serving_merged_features() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
@@ -2922,12 +2922,16 @@ async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "{{ count", 3);
 
+    // MERGED features keep serving. VS Code aggregates hover, definition and
+    // references across every provider, so withholding Verter's native answer
+    // cannot promote the editor plugin's — it can only leave the user with
+    // nothing when the plugin has no answer for this carrier.
     let hover = super::nav_features::handle_hover(server, hover_params(&uri, position))
         .await
         .expect("hover request succeeds");
     assert!(
-        hover.is_none(),
-        "the LSP must not compete with the attested editor hover provider, got {hover:?}"
+        hover.is_some(),
+        "a merged feature must keep its native answer on the editor-owned route"
     );
 
     let definition = super::nav_features_navigation::handle_goto_definition(
@@ -2937,8 +2941,8 @@ async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
     .await
     .expect("definition request succeeds");
     assert!(
-        definition.is_none(),
-        "the LSP must not compete with the attested editor definition provider, got {definition:?}"
+        definition.is_some(),
+        "a merged feature must keep its native answer on the editor-owned route"
     );
 
     let references = super::nav_features_navigation::handle_references(
@@ -2958,8 +2962,8 @@ async fn editor_tsserver_yields_navigation_and_rename_to_the_editor_plugin() {
     .await
     .expect("references request succeeds");
     assert!(
-        references.is_none(),
-        "the LSP must not compete with the attested editor references provider, got {references:?}"
+        references.is_some_and(|found| !found.is_empty()),
+        "a merged feature must keep its native answer on the editor-owned route"
     );
 
     let prepare = super::nav_features_navigation::handle_prepare_rename(
