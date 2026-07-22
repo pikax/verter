@@ -3218,6 +3218,75 @@ mod tests {
         );
     }
 
+    /// Throwaway instrumentation: measure NAPI async VFS future sizes.
+    /// Run: cargo test -p verter_napi measure_napi_async -- --nocapture --ignored
+    #[tokio::test]
+    #[ignore = "throwaway instrumentation — run manually"]
+    async fn measure_napi_async_future_sizes() {
+        use std::mem::size_of_val;
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        eprintln!("=== napi async VFS futures profile={profile} ===");
+        let ws = NapiWorkspace::new(vec!["/tmp/verter-future-size".into()]);
+        {
+            let fut = ws.read_file("/tmp/verter-future-size/x.ts".into());
+            eprintln!(
+                "[future-size] NapiWorkspace::read_file: {} B ({:.1} KiB)",
+                size_of_val(&fut),
+                size_of_val(&fut) as f64 / 1024.0
+            );
+            drop(fut);
+        }
+        {
+            let fut = ws.file_exists("/tmp/verter-future-size/x.ts".into());
+            eprintln!(
+                "[future-size] NapiWorkspace::file_exists: {} B ({:.1} KiB)",
+                size_of_val(&fut),
+                size_of_val(&fut) as f64 / 1024.0
+            );
+            drop(fut);
+        }
+        {
+            let fut = ws.write_file("/tmp/x.ts".into(), "const x = 1".into());
+            eprintln!(
+                "[future-size] NapiWorkspace::write_file: {} B ({:.1} KiB)",
+                size_of_val(&fut),
+                size_of_val(&fut) as f64 / 1024.0
+            );
+            drop(fut);
+        }
+        {
+            let fut = ws.walk(
+                "/tmp/verter-future-size".into(),
+                vec!["node_modules".into()],
+                Some(vec![".ts".into()]),
+            );
+            eprintln!(
+                "[future-size] NapiWorkspace::walk: {} B ({:.1} KiB)",
+                size_of_val(&fut),
+                size_of_val(&fut) as f64 / 1024.0
+            );
+            drop(fut);
+        }
+        {
+            let fut = ws.resolve_import(
+                "/tmp/a.ts".into(),
+                "./b".into(),
+                None,
+                None,
+            );
+            eprintln!(
+                "[future-size] NapiWorkspace::resolve_import: {} B ({:.1} KiB)",
+                size_of_val(&fut),
+                size_of_val(&fut) as f64 / 1024.0
+            );
+            drop(fut);
+        }
+    }
+
     #[test]
     fn host_update_to_napi_exposes_module_references() {
         let result = host_update_to_napi(
