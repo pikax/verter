@@ -221,11 +221,30 @@ impl SharedTsgoOverlay {
         // file-existence surface the shadow-safety `file_exists` probes read, which the
         // snapshot/config generation (`carrier.generation()`) does NOT.
         let shadow_generation = self.inner.host.workspace_read().content_generation();
+        // EDITOR-DEMAND scope. The request pays only for the carriers the editor is
+        // working with: every carrier an editor lifecycle lane recorded (the open
+        // documents plus the import closure the background import publication delivers,
+        // both of which record INTERACTIVE), plus the queried carrier's own companion
+        // family whatever lane recorded it. That last clause is load-bearing: the
+        // `is_synced` gate below is unconditional, so a queried carrier scoped out would
+        // fail closed and admit the managed fallback.
+        //
+        // The workspace scan's BACKGROUND bulk is deliberately excluded. See
+        // `inject_all_dirty` for why charging a 1.5 s hover with a whole-project publish
+        // is what made every interactive request in the first ~30 s after open expire
+        // without reaching the engine.
+        let queried_source = carrier_source_of(provider_path);
         self.inner
             .core
-            .inject_all_dirty(&established, shadow_generation, |companion| {
-                self.injection_is_shadow_safe(companion)
-            })
+            .inject_all_dirty(
+                &established,
+                shadow_generation,
+                |companion, priority| {
+                    priority >= OverlayPriority::Normal
+                        || carrier_source_of(companion) == queried_source
+                },
+                |companion| self.injection_is_shadow_safe(companion),
+            )
             .await;
 
         // Admit managed when the queried carrier's current content is not
