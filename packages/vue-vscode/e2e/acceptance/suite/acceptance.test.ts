@@ -673,6 +673,11 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
       })),
       operations: table,
       carrierOverPlainTsP50Ratio: ratios,
+      // Raw per-request samples so failure counts and success-only latency can
+      // be computed offline without blending failed requests into percentiles.
+      // Every field is corpus-free by construction: verdicts, fixed marker
+      // tokens, probe classes and latencies only (see the Sample docs above).
+      samples,
       attribution: {
         hover:
           "engine-exclusive — a `typescript` count here means a TS quickinfo kind prefix, or " +
