@@ -82,8 +82,19 @@ Only the narrowest cut that removes engine work no TypeScript result depends on:
   classification that was never performed and no spurious member-degraded diagnostic is
   emitted.
 
-Measured effect (corpus F, debug profile, shared machine, A/B back to back inside one
-bench-harness lock hold, 6 `did_change` notifications on one real SFC):
+Measured effect on the semantic engine, one `did_change` on one real component, debug
+binary, `verter=debug` filter, counted off the server's own trace output:
+
+| metric | before | after | change |
+| --- | --- | --- | --- |
+| `execute_via_cold_build_helper` (total semantic dispatches) | 14,394 | 606 | −95.8% |
+| ... of which touch `csstype` | 4,736 | 76 | −98.4% |
+| ... `ClassifyBroadRuntime` | 1,196 | 0 | −100% |
+| `ENSURE_COMPILED_DONE` for that edit | 2.067 s | 350.3 ms | −83.1% |
+| server trace volume for that edit | 27.1 MB | 1.04 MB | −96.2% |
+
+Measured effect on latency (corpus F, debug profile, shared machine, A/B back to back
+inside one bench-harness lock hold, 6 `did_change` notifications on one real SFC):
 
 | metric | before | after | change |
 | --- | --- | --- | --- |
@@ -95,6 +106,10 @@ bench-harness lock hold, 6 `did_change` notifications on one real SFC):
 Corpus-gate non-regression on the same corpus/route, same lock hold: hover p95
 263 → 217 ms, hover max 4327 → 872 ms, definition p95 109 → 83 ms, server peak RSS
 639.5 → 470.6 MB, requests errored 2 → 0.
+
+The 606 dispatches that remain are the floor this document is about: they are what the
+required core plus the still-synchronous extras cost, and they are why the compile is
+still 340 ms rather than tens of milliseconds.
 
 ## Why the full refactor was deferred — blast radius
 
