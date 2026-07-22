@@ -59,11 +59,15 @@ pub trait TypeProvider: Send + Sync {
 
     /// Load a file into the type provider for import resolution only.
     /// Unlike `open_file`, this does NOT mark the file as editor-open and
-    /// does NOT trigger diagnostics. Used for background-synced .vue files.
-    /// Default: falls back to `open_file` (providers that don't distinguish).
-    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-        self.open_file(path, content)
-    }
+    /// does NOT trigger diagnostics. Used for background-synced carrier files.
+    ///
+    /// REQUIRED, deliberately without a default. A `self.open_file(...)` default
+    /// is silent: a wrapper that adds work to `open_file` (a diagnostic barrier, a
+    /// snapshot refresh) inherits that work for every background load without a
+    /// single line of code saying so, and a whole-workspace scan then runs on the
+    /// interactive lane. A provider that genuinely does not distinguish the two
+    /// states says so explicitly by forwarding to [`TypeProvider::open_file`] here.
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()>;
 

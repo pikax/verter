@@ -146,6 +146,10 @@ impl TypeProvider for MarkerOwned {
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async move { Ok(()) })
     }
+    /// This double does not distinguish a background load from an editor open.
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
+    }
     fn update_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async move { Ok(()) })
     }
