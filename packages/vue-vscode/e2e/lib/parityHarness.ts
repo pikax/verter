@@ -137,7 +137,10 @@ export function assertNoVirtualLocations(
   );
 }
 
-export async function definitionsAt(anchor: TokenAnchor): Promise<vscode.Location[]> {
+async function pollDefinitions(
+  anchor: TokenAnchor,
+  ready: (locations: readonly vscode.Location[]) => boolean,
+): Promise<vscode.Location[]> {
   const doc = await openRelative(anchor.file);
   const position = tokenPosition(doc, anchor);
   const locations = await pollUntil(
@@ -150,18 +153,24 @@ export async function definitionsAt(anchor: TokenAnchor): Promise<vscode.Locatio
           position,
         ),
       ),
-    (result) => result.length > 0,
+    ready,
   );
   assertNoVirtualLocations(locations, "definition");
   return locations;
+}
+
+export async function definitionsAt(anchor: TokenAnchor): Promise<vscode.Location[]> {
+  return pollDefinitions(anchor, (locations) => locations.length > 0);
 }
 
 export async function assertDefinitionTargetsFile(
   source: TokenAnchor,
   targetFile: string,
 ): Promise<void> {
-  const locations = await definitionsAt(source);
   const want = absoluteFile(targetFile);
+  const locations = await pollDefinitions(source, (candidate) =>
+    candidate.some((location) => path.normalize(location.uri.fsPath) === want),
+  );
   assert.ok(
     locations.some((location) => path.normalize(location.uri.fsPath) === want),
     `definition from ${source.file}#${source.token} did not reach ${targetFile}; got ${locations
@@ -174,18 +183,22 @@ export async function assertDefinitionTargetsToken(
   source: TokenAnchor,
   target: TokenAnchor,
 ): Promise<void> {
-  const locations = await definitionsAt(source);
   const targetDoc = await vscode.workspace.openTextDocument(
     vscode.Uri.file(absoluteFile(target.file)),
   );
   const expected = tokenOffset(targetDoc, target);
+  const hitsTarget = (location: vscode.Location): boolean => {
+    if (path.normalize(location.uri.fsPath) !== absoluteFile(target.file)) return false;
+    const start = targetDoc.offsetAt(location.range.start);
+    const end = targetDoc.offsetAt(location.range.end);
+    return start <= expected && expected <= Math.max(start, end);
+  };
+  // Capture-only navigation may first expose a native same-file fallback while
+  // the provider finishes its nonblocking project warm-up. Wait for the exact
+  // authored target, not merely the first non-empty partial location set.
+  const locations = await pollDefinitions(source, (candidate) => candidate.some(hitsTarget));
   assert.ok(
-    locations.some((location) => {
-      if (path.normalize(location.uri.fsPath) !== absoluteFile(target.file)) return false;
-      const start = targetDoc.offsetAt(location.range.start);
-      const end = targetDoc.offsetAt(location.range.end);
-      return start <= expected && expected <= Math.max(start, end);
-    }),
+    locations.some(hitsTarget),
     `definition from ${source.file}#${source.token} did not hit ${target.file}#${target.token}`,
   );
 }
@@ -781,6 +794,20 @@ export async function completionsAtOffset(
   offset: number,
   triggerCharacter?: string,
 ): Promise<string[]> {
+  return completionsAtOffsetUntil(
+    relative,
+    offset,
+    (labels) => labels.length > 0,
+    triggerCharacter,
+  );
+}
+
+export async function completionsAtOffsetUntil(
+  relative: string,
+  offset: number,
+  ready: (labels: readonly string[]) => boolean,
+  triggerCharacter?: string,
+): Promise<string[]> {
   const doc = await openRelative(relative);
   const position = doc.positionAt(offset);
   const list = await pollUntil(
@@ -792,7 +819,12 @@ export async function completionsAtOffset(
         position,
         triggerCharacter,
       )) ?? { items: [], isIncomplete: false },
-    (result) => (result.items?.length ?? 0) > 0,
+    (result) =>
+      ready(
+        (result.items ?? []).map((item) =>
+          typeof item.label === "string" ? item.label : item.label.label,
+        ),
+      ),
     15_000,
   );
   return (list.items ?? []).map((item) =>

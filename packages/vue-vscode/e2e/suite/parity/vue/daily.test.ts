@@ -141,7 +141,7 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
     // Provider may show the prop type as `string` or a literal like `"from-parent"`.
     await assertHoverNeedles(
       { file: "src/components/PropParent.vue", token: "contract-prop", occurrence: 0 },
-      ["contract-prop"],
+      ["contractProp"],
       { forbidUnknown: true },
     );
   });
@@ -214,7 +214,19 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
     const file = "src/diagnostics/UnusedBindings.vue";
     const doc = await openRelative(file);
     await waitForFileReady(doc);
-    const diagnostics = await settledDiagnostics(file);
+    const codeOf = (diagnostic: vscode.Diagnostic): string =>
+      typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+        ? String(diagnostic.code.value)
+        : String(diagnostic.code ?? "");
+    // Provider diagnostics are deliberately idle-scheduled and may land after
+    // the first stable empty editor snapshot. Wait for the expected suggestion
+    // instead of treating that pre-publication snapshot as authoritative.
+    const diagnostics = await pollUntil(
+      `${file} provider 6133`,
+      async () => vscode.languages.getDiagnostics(doc.uri),
+      (diags) => diags.some((diagnostic) => codeOf(diagnostic) === "6133"),
+      30_000,
+    );
     const errors = diagnostics.filter(
       (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
     );
@@ -228,11 +240,7 @@ suite(`Vue daily surface [${FIXTURE_NAME}]`, function () {
     );
 
     const unused = diagnostics.filter((diagnostic) => {
-      const code =
-        typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
-          ? String(diagnostic.code.value)
-          : String(diagnostic.code ?? "");
-      return code === "6133";
+      return codeOf(diagnostic) === "6133";
     });
     assert.equal(
       unused.length,

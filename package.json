@@ -90,7 +90,8 @@
     "shx": "0.4.0",
     "svelte": "5.56.3",
     "typescript": "7.0.2",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "vue": "3.5.34"
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",

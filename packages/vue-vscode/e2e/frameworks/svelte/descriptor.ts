@@ -29,7 +29,7 @@ export const svelteContract: FrameworkContractDescriptor = {
     ],
     hoverNeedles: ["jsValue", "label", "string"],
   },
-  directParentTag: { file: "src/DirectParent.svelte", token: "DirectChild", occurrence: 1 },
+  directParentTag: { file: "src/DirectParent.svelte", token: "DirectChild", occurrence: 2 },
   directChildFile: "src/components/DirectChild.svelte",
   directConsumerUse: { file: "src/direct-consumer.ts", token: "DirectChild", occurrence: 1 },
   directConsumerPropUse: {

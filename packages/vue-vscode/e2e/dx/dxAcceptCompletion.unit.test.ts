@@ -4,6 +4,7 @@ import {
   ACCEPT_SUGGESTION_COMMAND,
   acceptCompletion,
   classifyAcceptOutcome,
+  extractStaticImportText,
   TRIGGER_SUGGEST_COMMAND,
   type AcceptCompletionDeps,
 } from "./dxAcceptCompletion";
@@ -40,6 +41,33 @@ describe("classifyAcceptOutcome", () => {
         importAfter: "import { MyComp } from './c'",
       }).accepted,
     ).toBe(false);
+  });
+});
+
+describe("extractStaticImportText", () => {
+  it("does not mistake an accepted identifier edit for an auto-import edit", () => {
+    const before = `<script setup lang="ts">
+import { ref } from "vue";
+const doubled = comput(() => ref(1).value * 2);
+</script>`;
+    const afterWithoutImportEdit = before.replace("comput(", "computed(");
+
+    expect(extractStaticImportText(afterWithoutImportEdit)).toBe(extractStaticImportText(before));
+    expect(extractStaticImportText(before)).toBe('import { ref } from "vue";');
+  });
+
+  it("captures multiline and type-only static imports", () => {
+    const script = `<script lang="ts">
+import type {
+  Component,
+} from "vue";
+import "./side-effect";
+const value = import("./dynamic");
+</script>`;
+
+    expect(extractStaticImportText(script)).toContain("import type");
+    expect(extractStaticImportText(script)).toContain('import "./side-effect"');
+    expect(extractStaticImportText(script)).not.toContain("dynamic");
   });
 });
 
