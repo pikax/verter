@@ -67,7 +67,7 @@ use std::process::Command;
 // Captured from the current `verter-tsc` run over
 // `crates/verter_tsc/tests/cases/fixtures/diagnostics/`. Tuple =
 // `(fixture_relative_path, line, col, ts_code, count, stable_message_substring)`.
-// `count` pins multiplicity (raw total = 70; two keys repeat:
+// `count` pins multiplicity (raw total = 73; two keys repeat:
 // `src/DirectiveErrors.vue(1,1) TS7006` x3, `src/GenericComp.vue(1,1) TS6196` x2).
 // The final entry is the whole-program non-root diagnostic in `src/nonRootBad.ts` (the
 // old per-root loop dropped it; the whole-program call surfaces it).
@@ -85,10 +85,12 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/CrossComponentErrors.vue", 13, 7, 2322, 1, "'\"unknown\"' is not assignable to type 'Status'"),
     ("src/CrossComponentErrors.vue", 16, 7, 2322, 1, "'number' is not assignable to type 'string'"),
     ("src/DirectiveErrors.vue", 1, 1, 7006, 3, "Parameter '___VERTER___slotInstance' implicitly has an 'any' type"),
-    ("src/DirectiveErrors.vue", 4, 1, 6133, 1, "'vColor' is declared but its value is never read"),
+    ("src/DirectiveErrors.vue", 1, 1, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
+    ("src/DirectiveErrors.vue", 1, 1, 2353, 1, "'\"green\"' does not exist in type"),
     ("src/EmitErrors.vue", 8, 1, 2769, 1, "No overload matches this call"),
     ("src/EmitErrors.vue", 10, 1, 2769, 1, "No overload matches this call"),
     ("src/EmitErrors.vue", 12, 1, 2769, 1, "No overload matches this call"),
+    ("src/GenericComp.vue", 1, 1, 2314, 1, "Generic type '___VERTER___Attrs' requires 1 type argument"),
     ("src/GenericComp.vue", 1, 1, 2315, 1, "Type '___VERTER___attributes' is not generic"),
     ("src/GenericComp.vue", 1, 1, 6196, 2, "'T' is declared but never used"),
     ("src/GenericErrors.vue", 6, 1, 2322, 1, "'string' is not assignable to type 'User[]'"),
@@ -136,6 +138,7 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/ScriptSetupErrors.vue", 21, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/SlotErrors.vue", 10, 1, 2339, 1, "Property 'toFixed' does not exist on type 'boolean'"),
     ("src/SlotErrors.vue", 11, 1, 2339, 1, "Property 'toLowerCase' does not exist on type 'number'"),
+    ("src/TemplateExprErrors.vue", 7, 11, 2339, 1, "Property 'undefinedVar' does not exist"),
     ("src/TemplateExprErrors.vue", 9, 10, 2339, 1, "Property 'length' does not exist on type '42'"),
     ("src/TemplateExprErrors.vue", 11, 10, 2345, 1, "'string' is not assignable to parameter of type 'number'"),
     ("src/TemplateExprErrors.vue", 13, 10, 2362, 1, "left-hand side of an arithmetic operation must be of type"),
