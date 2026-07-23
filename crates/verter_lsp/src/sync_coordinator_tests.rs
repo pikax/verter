@@ -1185,10 +1185,12 @@ defineProps<{ msg: string }>()
     ));
 
     let ide_path = format!("{canonical_id}.tsx");
-    let api_path = format!("{canonical_id}.ts");
+    let api_path = format!("{canonical_id}.verter.ts");
     let provider = Arc::new(MockTypeProvider::new());
-    // Fail every file op so the new sync cannot succeed.
-    provider.set_fail_file_ops(true);
+    // Permit dependency-overlay publication, then fail both replacement carriers
+    // so the total-failure rollback path is exercised at the intended boundary.
+    provider.set_fail_sync_path(&ide_path);
+    provider.set_fail_sync_path(&api_path);
 
     let provider_sync_states = Arc::new(DashMap::new());
     let prior_state = ProviderSyncState {
@@ -1246,13 +1248,51 @@ defineProps<{ msg: string }>()
         )),
         "failed owner-change sync must REACH the sync and attempt the new `.tsx`, calls={calls:?}"
     );
-    // Discriminator: with the new sync failing, NOTHING must be closed.
-    // Pre-fix the stale-paths loop closed the IDE/API paths before syncing.
     assert!(
-        !calls
-            .iter()
-            .any(|call| matches!(call, MockCall::CloseFile { .. })),
-        "a failed owner-change sync must not close any provider path, calls={calls:?}"
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &api_path
+        )),
+        "failed owner-change sync must REACH the sync and attempt the new `.verter.ts`, calls={calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::UpdateFile { path, .. }
+                if path == &format!("{ide_path}.__verter_types.d.ts")
+        )),
+        "the existing dependency overlay must publish before the carrier failure, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call, MockCall::CloseFile { path } if path == &ide_path
+        )),
+        "a failed owner-change sync must preserve the prior IDE carrier, calls={calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call, MockCall::CloseFile { path } if path == &api_path
+        )),
+        "a failed owner-change sync must preserve the prior API carrier, calls={calls:?}"
+    );
+    assert!(
+        calls.iter().all(|call| !matches!(
+            call,
+            MockCall::CloseFile { path }
+                if path != &format!("{ide_path}.__verter_types.d.ts")
+        )),
+        "only the newly-created dependency overlay may be rollback-closed, calls={calls:?}"
+    );
+    let state = provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("the prior provider state remains committed");
+    assert_eq!(
+        state, prior_state,
+        "total replacement failure must retain the complete prior state"
     );
 }
 
@@ -1328,15 +1368,18 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
         crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
         "the recorded surface must carry the CarrierIde role"
     );
-    let profile = documents.tsx_profile.read().clone();
-    let ide = host
-        .get_ide(canonical_id, &profile)
-        .expect("IDE output should exist");
+    let delivered = deps
+        .project_sync
+        .as_ref()
+        .and_then(|sync| sync.synced_tsx_content(&ide_path))
+        .expect("the coordinator records the projected provider bytes");
     assert_eq!(
         snapshot.provider_content.as_ref(),
-        ide.code.as_ref(),
+        delivered.as_ref(),
         "the recorded surface must pin the EXACT bytes delivered to the provider"
     );
+    assert!(delivered.contains("from \"./App.vue.tsx.__verter_types\""));
+    assert!(!delivered.contains("from \"@verter/types\""));
 
     // A FAILED direct IDE sync records NOTHING (fail closed).
     let other_id = "/workspace/src/Other.vue";

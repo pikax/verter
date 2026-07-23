@@ -2195,31 +2195,30 @@ defineProps<{ msg: string }>()
         );
 
         let ide_path = format!("{canonical_id}.tsx");
-        let api_path = format!("{canonical_id}.ts");
+        let api_path = format!("{canonical_id}.verter.ts");
         let sync_states = DashMap::new();
         // Prior Owned state from a DIFFERENT owner → owner-change force-rebind
         // marks the same IDE/API paths stale.
-        sync_states.insert(
-            canonical_id.to_string(),
-            ProviderSyncState {
-                owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
-                    "/old/tsconfig.json".to_string(),
-                ),
-                ide_path: Some(ide_path.clone()),
-                api_path: Some(api_path.clone()),
-                decl_path: None,
-                ide_background_loaded: true,
-                api_background_loaded: true,
-                decl_background_loaded: false,
-                shadow_path: None,
-                shadow_background_loaded: false,
-                committed_ide_surface: None,
-                commit_stamp: None,
-            },
-        );
+        let prior_state = ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(ide_path.clone()),
+            api_path: Some(api_path.clone()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        };
+        sync_states.insert(canonical_id.to_string(), prior_state.clone());
 
         let provider = Arc::new(MockTypeProvider::new());
-        provider.set_fail_file_ops(true);
+        provider.set_fail_sync_path(&ide_path);
+        provider.set_fail_sync_path(&api_path);
         let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
 
         sync_file_to_provider(
@@ -2253,13 +2252,51 @@ defineProps<{ msg: string }>()
             )),
             "failed scanner sync must REACH the sync and attempt the new `.tsx`, calls={calls:?}"
         );
-        // Discriminator: with the new sync failing, NOTHING must be closed.
-        // Pre-fix the stale-paths loop closed both paths before the failing sync.
         assert!(
-            !calls
-                .iter()
-                .any(|call| matches!(call, MockCall::CloseFile { .. })),
-            "a failed owner-change scanner sync must not close any provider path, calls={calls:?}"
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. }
+                    | MockCall::UpdateFile { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                if path == &api_path
+            )),
+            "failed scanner sync must REACH the sync and attempt the new `.verter.ts`, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::LoadFile { path, .. }
+                    if path == &format!("{ide_path}.__verter_types.d.ts")
+            )),
+            "the dependency overlay must publish before the carrier failure, calls={calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call, MockCall::CloseFile { path } if path == &ide_path
+            )),
+            "a failed owner-change scanner sync must preserve the prior IDE carrier, calls={calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call, MockCall::CloseFile { path } if path == &api_path
+            )),
+            "a failed owner-change scanner sync must preserve the prior API carrier, calls={calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| !matches!(
+                call,
+                MockCall::CloseFile { path }
+                    if path != &format!("{ide_path}.__verter_types.d.ts")
+            )),
+            "only the newly-created dependency overlay may be rollback-closed, calls={calls:?}"
+        );
+        let state = sync_states
+            .get(canonical_id)
+            .map(|entry| entry.clone())
+            .expect("the prior provider state remains committed");
+        assert_eq!(
+            state, prior_state,
+            "total replacement failure must retain the complete prior state"
         );
     }
 
@@ -2589,13 +2626,15 @@ defineProps<{ msg: string }>()
             crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
             "the recorded surface must carry the CarrierIde role"
         );
-        let ide = host
-            .get_ide(&source, &profile)
-            .expect("IDE output should exist");
+        let delivered = sync
+            .synced_tsx_content(&ide_path)
+            .expect("the scanner records the projected provider bytes");
         assert_eq!(
             snapshot.provider_content.as_ref(),
-            ide.code.as_ref(),
+            delivered.as_ref(),
             "the recorded surface must pin the EXACT bytes delivered to the provider"
         );
+        assert!(delivered.contains("from \"./App.vue.tsx.__verter_types\""));
+        assert!(!delivered.contains("from \"@verter/types\""));
     }
 }

@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "generate": "node gen-vue-goldens.mjs",
-    "check": "node gen-vue-goldens.mjs --check"
+    "check": "node gen-vue-goldens.mjs --check",
+    "test": "pnpm run check"
   },
   "devDependencies": {
     "@vue/compiler-dom": "3.6.0-rc.1",
