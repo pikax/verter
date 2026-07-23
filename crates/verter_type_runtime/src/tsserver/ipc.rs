@@ -7,9 +7,9 @@
 //! Response: `{"seq":N,"type":"response","command":"...","request_seq":N,"success":true,"body":{...}}\n`
 //! Event:    `{"seq":N,"type":"event","event":"...","body":{...}}\n`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -70,24 +70,82 @@ fn summarize_tsserver_args(arguments: &serde_json::Value) -> String {
 /// not awaited to completion, so cleanup that could only run on an async path
 /// would never run at all.
 #[derive(Default)]
+struct TsserverPendingState {
+    map: HashMap<i64, oneshot::Sender<serde_json::Value>>,
+    closed: bool,
+    /// Start of the current non-empty interval. A provider that was idle for a
+    /// long time must receive a full silence allowance after new work arrives.
+    pending_since: Option<std::time::Instant>,
+}
+
+#[derive(Default)]
 struct TsserverPendingRequests {
-    map: StdMutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
+    state: StdMutex<TsserverPendingState>,
+    /// User-facing requests currently in flight. Background diagnostics may
+    /// enter tsserver only while this is zero.
+    interactive_in_flight: AtomicU32,
+    /// Wakes background diagnostics when the last interactive request exits.
+    interactive_idle: Notify,
+    /// Sequence number of the single active background request, or zero.
+    background_seq: AtomicI64,
+    /// Advanced whenever interactive traffic arrives. A background request
+    /// uses this to distinguish preemption from an ordinary provider failure.
+    background_preemption_epoch: AtomicU64,
+    /// Diagnostics are single-flight so they cannot build a background queue in
+    /// front of later user requests on tsserver's one JavaScript thread.
+    background_gate: Mutex<()>,
+    /// Synchronous configured-project builds currently bracketed by tsserver's
+    /// `projectLoadingStart` / `projectLoadingFinish` events.
+    project_loads_in_flight: AtomicI64,
 }
 
 impl TsserverPendingRequests {
-    fn insert(&self, seq: i64, tx: oneshot::Sender<serde_json::Value>) {
-        self.map.lock().unwrap().insert(seq, tx);
+    /// Atomically reject registrations after stdout has closed. Sharing this
+    /// lock with [`Self::drain_with_crash_error`] prevents an EOF/request race
+    /// from stranding an unbounded production request on a dead process.
+    fn insert(&self, seq: i64, tx: oneshot::Sender<serde_json::Value>) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return false;
+        }
+        if state.map.is_empty() {
+            state.pending_since = Some(std::time::Instant::now());
+        }
+        state.map.insert(seq, tx);
+        true
     }
 
     fn take(&self, seq: i64) -> Option<oneshot::Sender<serde_json::Value>> {
-        self.map.lock().unwrap().remove(&seq)
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = state.map.remove(&seq);
+        if state.map.is_empty() {
+            state.pending_since = None;
+        }
+        sender
+    }
+
+    fn pending_since(&self) -> Option<std::time::Instant> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending_since
     }
 
     /// How many requests are in flight. The leak surface: a request abandoned
     /// without releasing its slot shows up here and nowhere else.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.map.lock().unwrap().len()
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map
+            .len()
     }
 
     /// Take one arbitrary in-flight sender. Tests that need to answer "whatever
@@ -95,21 +153,76 @@ impl TsserverPendingRequests {
     /// they cannot use [`Self::take`]; this keeps them off the inner map.
     #[cfg(test)]
     fn take_any(&self) -> Option<oneshot::Sender<serde_json::Value>> {
-        let mut map = self.map.lock().unwrap();
-        let seq = *map.keys().next()?;
-        map.remove(&seq)
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let seq = *state.map.keys().next()?;
+        let sender = state.map.remove(&seq);
+        if state.map.is_empty() {
+            state.pending_since = None;
+        }
+        sender
     }
 
     /// Fail every in-flight request so callers return immediately instead of
-    /// waiting out their own timeouts.
+    /// waiting indefinitely, and reject later registrations on this dead
+    /// transport. A provider restart creates a new pending state.
     fn drain_with_crash_error(&self) {
-        let drained: Vec<_> = self.map.lock().unwrap().drain().collect();
+        let drained: Vec<_> = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.closed = true;
+            state.pending_since = None;
+            state.map.drain().collect()
+        };
         for (_seq, tx) in drained {
             let _ = tx.send(serde_json::json!({
                 "success": false,
                 "message": "tsserver process crashed"
             }));
         }
+    }
+}
+
+/// Admission guard for a user-facing tsserver request.
+///
+/// Entering the guard preempts the one active diagnostics request through
+/// tsserver's out-of-band cancellation pipe. Dropping the guard admits deferred
+/// diagnostics after all interactive work has drained.
+struct TsserverInteractiveRequest {
+    pending: Arc<TsserverPendingRequests>,
+}
+
+impl Drop for TsserverInteractiveRequest {
+    fn drop(&mut self) {
+        if self
+            .pending
+            .interactive_in_flight
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+        {
+            self.pending.interactive_idle.notify_waiters();
+        }
+    }
+}
+
+/// Clears the active-background marker on every exit path.
+struct TsserverBackgroundRequest {
+    pending: Arc<TsserverPendingRequests>,
+    seq: i64,
+}
+
+impl Drop for TsserverBackgroundRequest {
+    fn drop(&mut self) {
+        let _ = self.pending.background_seq.compare_exchange(
+            self.seq,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -156,9 +269,10 @@ struct TsserverCancellation {
 impl TsserverCancellation {
     /// Create the session's cancellation directory.
     ///
-    /// `None` when it cannot be created or cannot be named to tsserver, in which
-    /// case the transport degrades to releasing the pending slot without telling
-    /// the engine to stop — never to a wrong cancellation.
+    /// `None` when it cannot be created or cannot be named to tsserver. Provider
+    /// startup treats that as a failed transport invariant: running tsserver
+    /// without out-of-band cancellation would make its interactive lane
+    /// untrustworthy.
     fn create() -> Option<Self> {
         static NONCE: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -320,6 +434,52 @@ struct TsserverTransport {
 /// re-spawn, replay desired state) instead of timing out forever.
 const HANG_THRESHOLD: u32 = 3;
 
+/// A lost `projectLoadingFinish` must not disable wedge recovery forever. A
+/// healthy large-project build may be silent, but a child silent beyond this
+/// backstop is considered dead even while a load marker remains active.
+const LOADING_WEDGE_SILENCE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+const SILENCE_WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Provider-health watchdog, deliberately separate from request completion.
+/// Requests have no latency timeout. Only a process with pending work and no
+/// response/event output at all for the absolute silence cap is restarted; a
+/// slow engine that emits project-loading progress remains healthy.
+async fn watch_tsserver_silence(
+    pending: std::sync::Weak<TsserverPendingRequests>,
+    last_message_at: Arc<StdMutex<std::time::Instant>>,
+    crash_notify: Arc<Notify>,
+    poll: std::time::Duration,
+    silence_cap: std::time::Duration,
+) {
+    loop {
+        tokio::time::sleep(poll).await;
+        let Some(pending) = pending.upgrade() else {
+            return;
+        };
+        let Some(pending_since) = pending.pending_since() else {
+            continue;
+        };
+        let last_message = *last_message_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let silent_for = std::cmp::max(last_message, pending_since).elapsed();
+        if silent_for < silence_cap {
+            continue;
+        }
+        tracing::error!(
+            "tsserver emitted no output for {silent_for:?} while requests were pending; restarting"
+        );
+        crash_notify.notify_waiters();
+        return;
+    }
+}
+
+/// Quiet window before background engine work is admitted. This mirrors editor
+/// idle scheduling: bursts of hover/completion/navigation finish first instead
+/// of repeatedly starting and cancelling the same diagnostics or graph refresh.
+const BACKGROUND_IDLE_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Minimum interval between `reloadProjects` membership-recovery sends. A cold
 /// "Could not find source file" retry loop calls the recovery on every iteration;
 /// without a cooldown a storm of concurrent cold queries fires a `reloadProjects`
@@ -332,6 +492,45 @@ const HANG_THRESHOLD: u32 = 3;
 const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl TsserverTransport {
+    fn begin_interactive_request(&self) -> TsserverInteractiveRequest {
+        self.pending
+            .interactive_in_flight
+            .fetch_add(1, Ordering::AcqRel);
+        self.pending
+            .background_preemption_epoch
+            .fetch_add(1, Ordering::AcqRel);
+
+        let background_seq = self.pending.background_seq.swap(0, Ordering::AcqRel);
+        if background_seq != 0 {
+            if let Some(cancellation) = &self.cancellation {
+                cancellation.cancel(background_seq);
+            }
+            // Wake the background future immediately; the out-of-band file is
+            // what stops tsserver itself. A later engine response for this seq
+            // is intentionally ignored because no caller still owns it.
+            if let Some(tx) = self.pending.take(background_seq) {
+                let _ = tx.send(serde_json::json!({
+                    "success": true,
+                    "body": { "canceled": true }
+                }));
+            }
+        }
+
+        TsserverInteractiveRequest {
+            pending: Arc::clone(&self.pending),
+        }
+    }
+
+    async fn wait_for_interactive_idle(&self) {
+        loop {
+            let notified = self.pending.interactive_idle.notified();
+            if self.pending.interactive_in_flight.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Charge one round-trip failure toward hang detection, firing the restart
     /// notification once [`HANG_THRESHOLD`] consecutive failures accumulate.
     ///
@@ -375,6 +574,15 @@ impl TsserverTransport {
         if !self.child_was_silent_during(issued_at) {
             return;
         }
+        if self.pending.project_loads_in_flight.load(Ordering::Relaxed) > 0 {
+            let last = *self
+                .last_message_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.elapsed() < LOADING_WEDGE_SILENCE_CAP {
+                return;
+            }
+        }
         let count = {
             let mut last = self
                 .last_strike_at
@@ -406,14 +614,164 @@ impl TsserverTransport {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
+    fn finish_response(
+        &self,
+        command: &str,
+        seq: i64,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        self.clear_hang_evidence();
+        if let Some(false) = value.get("success").and_then(|flag| flag.as_bool()) {
+            let message = value
+                .get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or("unknown error");
+            crate::type_runtime_trace_event!(
+                "tsserver_transport_request_error",
+                format!("command={} seq={} message={}", command, seq, message),
+            );
+            return Err(TypeProviderError::new(message));
+        }
+        if value
+            .get("body")
+            .and_then(|body| body.get("canceled"))
+            .and_then(|flag| flag.as_bool())
+            == Some(true)
+        {
+            crate::type_runtime_trace_event!(
+                "tsserver_transport_request_error",
+                format!("command={} seq={} message=canceled", command, seq),
+            );
+            return Err(TypeProviderError::new(format!(
+                "request '{command}' was canceled at the engine"
+            )));
+        }
+        crate::type_runtime_trace_event!(
+            "tsserver_transport_request_result",
+            format!(
+                "command={} seq={} body_kind={}",
+                command,
+                seq,
+                value
+                    .get("body")
+                    .map(|body| match body {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Bool(_) => "bool",
+                        serde_json::Value::Number(_) => "number",
+                    })
+                    .unwrap_or("missing"),
+            ),
+        );
+        Ok(value
+            .get("body")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
     /// Send a tsserver request and wait for the response.
     async fn request(
         &self,
         command: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        self.request_with_timeout(command, arguments, std::time::Duration::from_secs(10))
-            .await
+        let _interactive = self.begin_interactive_request();
+        self.request_inner(command, arguments, None, None).await
+    }
+
+    /// Run a cancellable, single-flight background request only while the
+    /// interactive lane is idle. If user traffic arrives, tsserver is cancelled
+    /// out of band and the background request retries after the lane drains.
+    async fn request_background(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        let requests = [(command, arguments)];
+        let mut responses = self.request_background_batch(&requests).await?;
+        Ok(responses
+            .pop()
+            .expect("a one-frame background batch returns one response"))
+    }
+
+    /// Admit an ordered background transaction under one editor-idle quiet
+    /// window. Every frame remains independently cancellable; if interactive
+    /// traffic preempts any frame, the whole idempotent transaction restarts
+    /// after the interactive lane drains.
+    async fn request_background_batch(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+    ) -> Result<Vec<serde_json::Value>, TypeProviderError> {
+        self.request_background_batch_results(requests)
+            .await?
+            .into_iter()
+            .collect()
+    }
+
+    /// Variant used by diagnostics, where the semantic pass is authoritative
+    /// but syntactic and suggestion failures degrade independently. Admission
+    /// and preemption are transaction-wide; ordinary command errors remain
+    /// frame-local so the later diagnostic categories are still collected.
+    async fn request_background_batch_results(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+    ) -> Result<Vec<Result<serde_json::Value, TypeProviderError>>, TypeProviderError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.cancellation.is_none() {
+            return Err(TypeProviderError::new(
+                "tsserver background work requires an out-of-band cancellation channel",
+            ));
+        }
+
+        let _gate = self.pending.background_gate.lock().await;
+        loop {
+            self.wait_for_interactive_idle().await;
+            let epoch = self
+                .pending
+                .background_preemption_epoch
+                .load(Ordering::Acquire);
+            tokio::time::sleep(BACKGROUND_IDLE_GRACE).await;
+            if self.pending.interactive_in_flight.load(Ordering::Acquire) != 0
+                || self
+                    .pending
+                    .background_preemption_epoch
+                    .load(Ordering::Acquire)
+                    != epoch
+            {
+                continue;
+            }
+            let mut responses = Vec::with_capacity(requests.len());
+            let mut preempted = false;
+            for (command, arguments) in requests {
+                match self
+                    .request_inner(command, arguments.clone(), None, Some(epoch))
+                    .await
+                {
+                    Ok(response) => responses.push(Ok(response)),
+                    Err(error)
+                        if (error.message.contains("preempted")
+                            || error.message.contains("canceled"))
+                            && self
+                                .pending
+                                .background_preemption_epoch
+                                .load(Ordering::Acquire)
+                                != epoch =>
+                    {
+                        preempted = true;
+                        break;
+                    }
+                    Err(error) => responses.push(Err(error)),
+                }
+            }
+            if preempted {
+                continue;
+            }
+            return Ok(responses);
+        }
     }
 
     /// Send a tsserver request with a custom configured response timeout. Split
@@ -428,12 +786,30 @@ impl TsserverTransport {
     /// against the caller's 1.5-6s deadline means the failure branch below never
     /// executes: the pending entry is never released and the engine is never told
     /// to stop. Hang detection is the exception — see [`Self::note_hang_failure`].
+    #[cfg(test)]
     async fn request_with_timeout(
         &self,
         command: &str,
         arguments: serde_json::Value,
         configured: std::time::Duration,
     ) -> Result<serde_json::Value, TypeProviderError> {
+        let _interactive = self.begin_interactive_request();
+        self.request_inner(command, arguments, Some(configured), None)
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+        timeout: Option<std::time::Duration>,
+        background_epoch: Option<u64>,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        let Some(configured) = timeout else {
+            return self
+                .request_unbounded_inner(command, arguments, background_epoch)
+                .await;
+        };
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
             format!(
@@ -454,7 +830,9 @@ impl TsserverTransport {
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                self.pending.insert(seq, tx);
+                if !self.pending.insert(seq, tx) {
+                    return Err(TypeProviderError::new("tsserver process is not available"));
+                }
                 // Armed from the instant the seq is registered: every exit from
                 // here on — return, error, or the caller's future being dropped
                 // mid-await — releases the registration and tells the engine to
@@ -464,6 +842,33 @@ impl TsserverTransport {
                     pending: Arc::clone(&self.pending),
                     cancellation: self.cancellation.clone(),
                     armed: true,
+                };
+
+                let _background_request = if let Some(epoch) = background_epoch {
+                    self.pending.background_seq.store(seq, Ordering::Release);
+                    let slot = TsserverBackgroundRequest {
+                        pending: Arc::clone(&self.pending),
+                        seq,
+                    };
+                    // Close both admission races: interactive traffic may have
+                    // arrived after the idle check, or may have entered and
+                    // exited before this seq became visible.
+                    if self.pending.interactive_in_flight.load(Ordering::Acquire) != 0
+                        || self
+                            .pending
+                            .background_preemption_epoch
+                            .load(Ordering::Acquire)
+                            != epoch
+                    {
+                        registration.disarm();
+                        self.pending.take(seq);
+                        return Err(TypeProviderError::new(
+                            "tsserver background request preempted by interactive traffic",
+                        ));
+                    }
+                    Some(slot)
+                } else {
+                    None
                 };
 
                 // The enqueue and the response wait SHARE one deadline, so the
@@ -612,6 +1017,102 @@ impl TsserverTransport {
         .await
     }
 
+    /// Production request path. There is deliberately no latency timeout: a
+    /// cold configured project is valid work, not an empty result. Dropping the
+    /// caller future still removes the pending entry and sends tsserver's
+    /// out-of-band cancellation file through [`TsserverPendingRequest::drop`].
+    async fn request_unbounded_inner(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+        background_epoch: Option<u64>,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        crate::type_runtime_trace_scope_async!(
+            "tsserver_transport_request",
+            format!(
+                "command={} {}",
+                command,
+                summarize_tsserver_args(&arguments),
+            ),
+            async {
+                let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+                let message = serde_json::json!({
+                    "seq": seq,
+                    "type": "request",
+                    "command": command,
+                    "arguments": arguments,
+                });
+                let body = serde_json::to_string(&message)
+                    .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
+
+                let (tx, rx) = oneshot::channel();
+                if !self.pending.insert(seq, tx) {
+                    return Err(TypeProviderError::new("tsserver process is not available"));
+                }
+                let mut registration = TsserverPendingRequest {
+                    seq,
+                    pending: Arc::clone(&self.pending),
+                    cancellation: self.cancellation.clone(),
+                    armed: true,
+                };
+
+                let _background_request = if let Some(epoch) = background_epoch {
+                    self.pending.background_seq.store(seq, Ordering::Release);
+                    let slot = TsserverBackgroundRequest {
+                        pending: Arc::clone(&self.pending),
+                        seq,
+                    };
+                    if self.pending.interactive_in_flight.load(Ordering::Acquire) != 0
+                        || self
+                            .pending
+                            .background_preemption_epoch
+                            .load(Ordering::Acquire)
+                            != epoch
+                    {
+                        registration.disarm();
+                        self.pending.take(seq);
+                        return Err(TypeProviderError::new(
+                            "tsserver background request preempted by interactive traffic",
+                        ));
+                    }
+                    Some(slot)
+                } else {
+                    None
+                };
+
+                let frame = format!("{body}\n");
+                if self
+                    .stdin_tx
+                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
+                    .await
+                    .is_err()
+                {
+                    registration.disarm();
+                    self.pending.take(seq);
+                    return Err(TypeProviderError::new("stdin writer closed"));
+                }
+
+                let value = match rx.await {
+                    Ok(value) => value,
+                    Err(_) => {
+                        registration.disarm();
+                        crate::type_runtime_trace_event!(
+                            "tsserver_transport_request_error",
+                            format!(
+                                "command={} seq={} message=response channel closed",
+                                command, seq
+                            ),
+                        );
+                        return Err(TypeProviderError::new("response channel closed"));
+                    }
+                };
+                registration.disarm();
+                self.finish_response(command, seq, value)
+            }
+        )
+        .await
+    }
+
     /// Send a tsserver command without waiting for a response.
     async fn command_no_response(
         &self,
@@ -664,8 +1165,6 @@ impl TsserverTransport {
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
     pending: Arc<TsserverPendingRequests>,
-    diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
-    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     crash_notify: Option<Arc<Notify>>,
     last_message_at: Arc<StdMutex<std::time::Instant>>,
 ) {
@@ -721,8 +1220,7 @@ async fn read_loop(
                             return;
                         }
                         if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) {
-                            handle_message(&msg, &pending, &diagnostics_cache, &contents_cache)
-                                .await;
+                            handle_message(&msg, &pending);
                         }
                     }
                     continue;
@@ -730,7 +1228,7 @@ async fn read_loop(
 
                 // Try to parse as JSON directly (newline-delimited mode)
                 if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    handle_message(&msg, &pending, &diagnostics_cache, &contents_cache).await;
+                    handle_message(&msg, &pending);
                 }
             }
             Err(_) => {
@@ -745,12 +1243,7 @@ async fn read_loop(
 }
 
 /// Handle a parsed tsserver message (response or event).
-async fn handle_message(
-    msg: &serde_json::Value,
-    pending: &TsserverPendingRequests,
-    diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
-    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
-) {
+fn handle_message(msg: &serde_json::Value, pending: &TsserverPendingRequests) {
     let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
@@ -763,40 +1256,23 @@ async fn handle_message(
         }
         "event" => {
             let event_name = msg.get("event").and_then(|v| v.as_str()).unwrap_or("");
-            if event_name == "semanticDiag" || event_name == "syntaxDiag" {
-                if let Some(body) = msg.get("body") {
-                    let file = verter_span::path::canonicalize_path(
-                        body.get("file")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default(),
-                    );
-                    let content = {
-                        let cache = contents_cache.lock().await;
-                        cache.get(&file).cloned()
-                    };
-                    let diags = body
-                        .get("diagnostics")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|d| {
-                                    parse_tsserver_diagnostic(
-                                        d,
-                                        content.as_deref(),
-                                        Some(file.as_str()),
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    diagnostics_cache
-                        .lock()
-                        .await
-                        .entry(file)
-                        .and_modify(|existing| existing.extend(diags.iter().cloned()))
-                        .or_insert(diags);
-                }
+            if event_name == "projectLoadingStart" {
+                pending
+                    .project_loads_in_flight
+                    .fetch_add(1, Ordering::Relaxed);
+            } else if event_name == "projectLoadingFinish" {
+                let _ = pending.project_loads_in_flight.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |value| Some((value - 1).max(0)),
+                );
             }
+            // `semanticDiag` / `syntaxDiag` / `suggestionDiag` events carry a
+            // file but no ScriptInfo version in supported TypeScript protocol
+            // versions. They are therefore health/progress signals only here,
+            // never a diagnostics authority. Diagnostics are pulled
+            // synchronously below and fenced by the exact authored document
+            // version before LSP publication.
         }
         _ => {}
     }
@@ -1170,7 +1646,26 @@ fn tsserver_pos_to_byte_offset_checked(content: &str, line: u32, offset: u32) ->
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenKind {
     Source,
-    CarrierCompanion,
+    CarrierSource,
+}
+
+/// Last successful synchronous diagnostic pull for one exact local content
+/// generation. A transport failure may reuse it only while that same generation
+/// is still current; edits and close/reopen cycles draw a fresh global stamp.
+#[derive(Clone)]
+struct CachedDiagnostics {
+    content_generation: u64,
+    diagnostics: Vec<TypeDiagnostic>,
+}
+
+fn cached_diagnostics_for_generation(
+    cached: Option<&CachedDiagnostics>,
+    current_generation: Option<u64>,
+) -> Vec<TypeDiagnostic> {
+    cached
+        .filter(|cached| current_generation == Some(cached.content_generation))
+        .map(|cached| cached.diagnostics.clone())
+        .unwrap_or_default()
 }
 
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
@@ -1185,8 +1680,9 @@ pub struct TsserverTypeProvider {
     /// companion CONTENTLESSLY. Used by `update_file` to decide between `open` vs
     /// `updateOpen`. `load_file` adds to `contents` but NOT to `opened_files`.
     opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
-    /// Cached diagnostics from event notifications.
-    diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
+    /// Last successful synchronous diagnostics pull, fenced by local content
+    /// generation. Unversioned tsserver diagnostic events never enter it.
+    diagnostics_cache: Arc<Mutex<HashMap<String, CachedDiagnostics>>>,
     /// Workspace root path (forward slashes) for `projectRootPath` in open commands.
     workspace_root: String,
     /// Per-project roots for per-file `projectRootPath` matching.
@@ -1201,14 +1697,18 @@ pub struct TsserverTypeProvider {
     /// configured project (where `getExternalFiles` admitted it) instead of a fresh
     /// inferred/default project that would return empty/wrong results.
     carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>>,
-    /// Published companion path -> configured Program source identity.
-    ///
-    /// Non-editor plugin projects admit generated carrier content under the
-    /// authored source path. Diagnostic protocol requests must therefore name
-    /// that source while positions continue to decode against the companion bytes
-    /// cached locally. This map is routing metadata only: the source is never
-    /// opened by this provider, so the plugin remains the sole content authority.
+    /// IDE companion path -> authored framework source identity. Public APIs
+    /// continue to use companion paths for source-map offsets; tsserver queries
+    /// the source identity whose host snapshot contains those generated bytes.
     carrier_sources: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    /// Reverse source -> IDE companion edge for remapping provider response paths
+    /// back into the generated/source-map domain expected by the LSP.
+    carrier_companions: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    /// Internal LSP providers normalize managed authored Program identities back
+    /// to companion coordinates for the Rust source-map layer. On the editor's
+    /// direct plugin surface the plugin is already the sole mapper, so source
+    /// identities must pass through unchanged.
+    normalize_response_paths_to_companions: bool,
     /// Per-file content generation: a globally-unique, monotonically-increasing
     /// stamp written in lockstep with every `contents` write (open / load /
     /// update / carrier register) and dropped on close. A resync captures each
@@ -1226,9 +1726,33 @@ pub struct TsserverTypeProvider {
     content_generations: Arc<ContentGenerations>,
     /// Monotonic publication token delivered to the Verter tsserver plugin on
     /// every carrier-store advance. The plugin uses token changes to reload only
-    /// ScriptInfos whose manifest identity changed; an `updateOpen` touch alone
-    /// does not replace an already-warm external-file snapshot.
+    /// ScriptInfos whose manifest identity changed and to refresh external roots.
     carrier_store_refresh_generation: AtomicU64,
+    /// Explicit active authored-source working set for the internal LSP tsserver.
+    ///
+    /// The publish store may contain every workspace carrier; only companions in
+    /// this set are eligible to become eager configured-project roots. The plugin
+    /// creates closed, host-backed ScriptInfos for them, so carrier activation
+    /// never uses a protocol `open` and never competes for content ownership.
+    active_carrier_sources: Arc<parking_lot::RwLock<BTreeSet<String>>>,
+    /// One contentless authored-source bootstrap per configured project. The
+    /// internal tsserver has no editor-owned `.ts` open lifecycle, so one source
+    /// must cause the configured project to instantiate and invoke the plugin's
+    /// `getExternalFiles`; every other framework source remains plugin-owned.
+    project_bootstraps: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    /// Coalesces store/plugin invalidation into one idle refresh. Publication
+    /// callers await only its lightweight configure fence; Program construction
+    /// remains lazy and interactive requests can preempt the background lane.
+    carrier_refresh: Arc<TsserverCarrierRefresh>,
+}
+
+#[derive(Default)]
+struct TsserverCarrierRefresh {
+    requested_generation: AtomicU64,
+    applied_generation: AtomicU64,
+    running: AtomicBool,
+    completion: Notify,
+    failure: StdMutex<Option<(u64, TypeProviderError)>>,
 }
 
 impl Drop for TsserverTypeProvider {
@@ -1273,6 +1797,7 @@ async fn configure_tsserver_session(
                 "preferences": {
                     "providePrefixAndSuffixTextForRename": true,
                     "includeCompletionsForModuleExports": true,
+                    "includePackageJsonAutoImports": "on",
                     "includeCompletionsWithInsertText": true,
                     "includeCompletionsWithSnippetText": false,
                     "includeAutomaticOptionalChainCompletions": true,
@@ -1361,20 +1886,17 @@ impl TsserverTypeProvider {
             .arg("--useSyntaxServer=false")
             .arg("--disableAutomaticTypingAcquisition");
 
-        // Per-request cancellation. Without it an abandoned request keeps the
-        // single JavaScript thread busy ahead of every request that replaced it.
-        // Best-effort: a session that cannot create its directory still releases
-        // pending slots, it just cannot tell the engine to stop.
-        let cancellation = TsserverCancellation::create().map(Arc::new);
-        if let Some(cancellation) = &cancellation {
-            cmd.arg("--cancellationPipeName")
-                .arg(cancellation.pipe_name_arg());
-        } else {
-            tracing::warn!(
-                "tsserver cancellation directory unavailable — abandoned requests \
-                 will keep running at the engine"
-            );
-        }
+        // Per-request cancellation is a transport invariant. Without it an
+        // abandoned background diagnostic keeps the single JavaScript thread
+        // busy ahead of every user request that replaced it. Failing provider
+        // startup is safer than advertising an interactive lane we cannot honor.
+        let cancellation = Arc::new(TsserverCancellation::create().ok_or_else(|| {
+            TypeProviderError::new(
+                "tsserver cancellation directory unavailable; refusing an unpreemptible session",
+            )
+        })?);
+        cmd.arg("--cancellationPipeName")
+            .arg(cancellation.pipe_name_arg());
 
         // Load `@verter/typescript-plugin` so carriers become configured-project
         // members. The plugin reads the carrier-publish store synchronously.
@@ -1443,23 +1965,25 @@ impl TsserverTypeProvider {
             last_message_at: Arc::clone(&last_message_at),
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
-            cancellation,
+            cancellation: Some(cancellation),
         });
+        if let Some(notify) = crash_notify.as_ref() {
+            tokio::spawn(watch_tsserver_silence(
+                Arc::downgrade(&pending),
+                Arc::clone(&last_message_at),
+                Arc::clone(notify),
+                SILENCE_WATCHDOG_POLL,
+                LOADING_WEDGE_SILENCE_CAP,
+            ));
+        }
 
-        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
+        let diagnostics_cache: Arc<Mutex<HashMap<String, CachedDiagnostics>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Start the read loop
-        tokio::spawn(read_loop(
-            stdout,
-            pending,
-            Arc::clone(&diagnostics_cache),
-            Arc::clone(&contents_cache),
-            crash_notify,
-            last_message_at,
-        ));
+        tokio::spawn(read_loop(stdout, pending, crash_notify, last_message_at));
 
         // Log stderr
         if let Some(stderr) = stderr {
@@ -1494,8 +2018,13 @@ impl TsserverTypeProvider {
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             carrier_sources: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            carrier_companions: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            normalize_response_paths_to_companions: !plugin_response_remap,
             content_generations: Arc::new(ContentGenerations::default()),
             carrier_store_refresh_generation: AtomicU64::new(0),
+            active_carrier_sources: Arc::new(parking_lot::RwLock::new(BTreeSet::new())),
+            project_bootstraps: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            carrier_refresh: Arc::new(TsserverCarrierRefresh::default()),
         })
     }
 
@@ -1518,6 +2047,16 @@ impl TsserverTypeProvider {
     /// normalized form (the carrier map is keyed by normalized companion paths).
     fn project_file_name_for(&self, file: &str) -> Option<String> {
         self.carrier_projects.read().get(file).cloned()
+    }
+
+    /// Translate the LSP's generated companion identity to the authored source
+    /// identity used by the managed tsserver Program.
+    fn query_file_for(&self, file: &str) -> String {
+        self.carrier_sources
+            .read()
+            .get(file)
+            .cloned()
+            .unwrap_or_else(|| file.to_string())
     }
 }
 
@@ -1543,6 +2082,367 @@ fn inject_project_file_name(
         }
     }
     args
+}
+
+/// Map a tsserver Program source identity back to the generated companion
+/// identity consumed by the LSP sourcemap layer. TypeScript only ever sees the
+/// authored `.vue`/`.svelte` path; the companion remains a private Verter API
+/// boundary for byte-offset mapping.
+fn remap_carrier_response_path(
+    path: &str,
+    carrier_companions: &parking_lot::RwLock<HashMap<String, String>>,
+    normalize_to_companion: bool,
+) -> String {
+    let path = verter_span::path::canonicalize_path(path);
+    if !normalize_to_companion {
+        return path;
+    }
+    carrier_companions
+        .read()
+        .get(&path)
+        .cloned()
+        .unwrap_or(path)
+}
+
+async fn notify_carriers_changed_inner(
+    transport: Arc<TsserverTransport>,
+    files: Vec<String>,
+    refresh_generation: u64,
+    active_carrier_sources: Vec<String>,
+) -> Result<(), TypeProviderError> {
+    let Some(fence_file) = files.first().cloned() else {
+        return Ok(());
+    };
+
+    crate::type_runtime_trace_event!(
+        "tsserver_carrier_working_set",
+        format!(
+            "fence_file={} active_count={} active={}",
+            fence_file,
+            active_carrier_sources.len(),
+            active_carrier_sources.join("|")
+        ),
+    );
+
+    // The official Volar/Svelte model lets the configured project consume
+    // external roots lazily; forcing `projectInfo` here eagerly rebuilds the
+    // same program once per carrier and monopolizes tsserver's single JavaScript
+    // thread. Configure the plugin, then send one no-op tsserver configure only
+    // AFTER its response. The second response is a constant-cost host-turn
+    // fence: the plugin's `setImmediate` graph reconciliation runs between the
+    // two input turns, so a following diagnostic/hover cannot observe the new
+    // store manifest with the old configured-project roots.
+    transport
+        .request_background_batch(&[
+            (
+                "configurePlugin",
+                serde_json::json!({
+                    "pluginName": "@verter/typescript-plugin",
+                    "configuration": {
+                        "carrierStoreRefreshToken": refresh_generation,
+                        "activeCarrierSources": active_carrier_sources,
+                    }
+                }),
+            ),
+            ("configure", serde_json::json!({})),
+        ])
+        .await?;
+    Ok(())
+}
+
+fn schedule_carrier_refresh(
+    transport: Arc<TsserverTransport>,
+    active_sources: Arc<parking_lot::RwLock<BTreeSet<String>>>,
+    refresh: Arc<TsserverCarrierRefresh>,
+    generation: u64,
+    changed_file: String,
+) {
+    refresh
+        .requested_generation
+        .fetch_max(generation, Ordering::AcqRel);
+    if refresh
+        .running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    tokio::spawn(async move {
+        loop {
+            let target = refresh.requested_generation.load(Ordering::Acquire);
+            let active = active_sources.read().iter().cloned().collect();
+            if let Err(error) = notify_carriers_changed_inner(
+                Arc::clone(&transport),
+                vec![changed_file.clone()],
+                target,
+                active,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "failed to refresh tsserver carrier source membership: {}",
+                    error.message
+                );
+                *refresh
+                    .failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((target, error));
+                refresh.completion.notify_waiters();
+                refresh.running.store(false, Ordering::Release);
+                if refresh.requested_generation.load(Ordering::Acquire) > target
+                    && refresh
+                        .running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    continue;
+                }
+                return;
+            }
+            refresh.applied_generation.store(target, Ordering::Release);
+            {
+                let mut failure = refresh
+                    .failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if failure
+                    .as_ref()
+                    .is_some_and(|(generation, _)| *generation <= target)
+                {
+                    *failure = None;
+                }
+            }
+            refresh.completion.notify_waiters();
+
+            if refresh.requested_generation.load(Ordering::Acquire)
+                == refresh.applied_generation.load(Ordering::Acquire)
+            {
+                refresh.running.store(false, Ordering::Release);
+                if refresh.requested_generation.load(Ordering::Acquire)
+                    == refresh.applied_generation.load(Ordering::Acquire)
+                    || refresh
+                        .running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+async fn wait_for_carrier_refresh(
+    refresh: &TsserverCarrierRefresh,
+    generation: u64,
+) -> Result<(), TypeProviderError> {
+    loop {
+        let notified = refresh.completion.notified();
+        if refresh.applied_generation.load(Ordering::Acquire) >= generation {
+            return Ok(());
+        }
+        if let Some((failed_generation, error)) = refresh
+            .failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            if *failed_generation >= generation {
+                return Err(error.clone());
+            }
+        }
+        notified.await;
+    }
+}
+
+/// Activate one already-published IDE carrier without recompiling it. Workspace-
+/// scan carriers remain closed store-backed roots. The one editor-active source
+/// is opened contentlessly so tsserver retains its ordinary project lifecycle;
+/// the plugin supplies its generated snapshot lazily from the carrier store.
+struct PublishedCarrierActivation {
+    transport: Arc<TsserverTransport>,
+    opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
+    carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    active_sources: Arc<parking_lot::RwLock<BTreeSet<String>>>,
+    project_bootstraps: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+}
+
+async fn activate_published_carrier_inner(
+    activation: PublishedCarrierActivation,
+    source: String,
+    companion: String,
+    project_file_name: String,
+    script_kind_name: &'static str,
+) -> Result<bool, TypeProviderError> {
+    activation
+        .carrier_projects
+        .write()
+        .insert(source.clone(), project_file_name.clone());
+    let newly_active = activation.active_sources.write().insert(source.clone());
+
+    // Unlike VS Code's editor-owned tsserver, the internal LSP process receives
+    // no ordinary TypeScript didOpen event that would instantiate the configured
+    // project and its global plugin. Reserve one bootstrap per project. Once the
+    // plugin exists, its `getExternalFiles` hook admits READY authored framework
+    // sources as closed, host-backed ScriptInfos, matching Volar/Svelte. The
+    // editor-active source remains open so the configured project has a durable
+    // owner. The plugin patches the managed source ScriptInfo's protocol
+    // coordinates to its versioned generated snapshot without transferring that
+    // snapshot over the protocol.
+    let reserved_bootstrap = {
+        let mut bootstraps = activation.project_bootstraps.write();
+        if bootstraps.contains_key(&project_file_name) {
+            false
+        } else {
+            bootstraps.insert(project_file_name.clone(), source.clone());
+            true
+        }
+    };
+    let project_root = project_file_name
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_else(|| project_file_name.clone());
+    if reserved_bootstrap {
+        // The global plugin is instantiated as part of configured-project
+        // creation. A transient generated-path root creates that project without
+        // transferring bytes. It is closed after the authored source has become
+        // the durable editor-active root.
+        if let Err(error) = open_carrier_source_contentless(
+            &activation.transport,
+            &activation.opened_files,
+            &activation.carrier_projects,
+            &companion,
+            script_kind_name,
+            &project_root,
+        )
+        .await
+        {
+            let mut bootstraps = activation.project_bootstraps.write();
+            if bootstraps.get(&project_file_name) == Some(&source) {
+                bootstraps.remove(&project_file_name);
+            }
+            drop(bootstraps);
+            activation.active_sources.write().remove(&source);
+            activation.carrier_projects.write().remove(&source);
+            return Err(error);
+        }
+    }
+
+    if let Err(error) = open_carrier_source_contentless(
+        &activation.transport,
+        &activation.opened_files,
+        &activation.carrier_projects,
+        &source,
+        script_kind_name,
+        &project_root,
+    )
+    .await
+    {
+        if reserved_bootstrap {
+            activation.opened_files.lock().await.remove(&companion);
+            let _ = activation
+                .transport
+                .command_no_response("close", serde_json::json!({ "file": companion }))
+                .await;
+            let mut bootstraps = activation.project_bootstraps.write();
+            if bootstraps.get(&project_file_name) == Some(&source) {
+                bootstraps.remove(&project_file_name);
+            }
+        }
+        activation.active_sources.write().remove(&source);
+        return Err(error);
+    }
+
+    if !reserved_bootstrap {
+        return Ok(newly_active);
+    }
+    activation.opened_files.lock().await.remove(&companion);
+    if let Err(error) = activation
+        .transport
+        .command_no_response("close", serde_json::json!({ "file": companion }))
+        .await
+    {
+        {
+            let mut bootstraps = activation.project_bootstraps.write();
+            if bootstraps.get(&project_file_name) == Some(&source) {
+                bootstraps.remove(&project_file_name);
+            }
+        }
+        activation.active_sources.write().remove(&source);
+        activation.carrier_projects.write().remove(&source);
+        activation.opened_files.lock().await.remove(&source);
+        return Err(error);
+    }
+    Ok(newly_active)
+}
+
+struct CarrierMetadataCaches<'a> {
+    contents: &'a Mutex<HashMap<String, Arc<str>>>,
+    generations: &'a ContentGenerations,
+    projects: &'a parking_lot::RwLock<HashMap<String, String>>,
+    sources: &'a parking_lot::RwLock<HashMap<String, String>>,
+    companions: &'a parking_lot::RwLock<HashMap<String, String>>,
+}
+
+async fn cache_carrier_metadata(
+    caches: CarrierMetadataCaches<'_>,
+    file: &str,
+    content: Arc<str>,
+    source: &str,
+    project_file_name: &str,
+) -> bool {
+    let is_ide_companion = file.ends_with(".tsx") || file.ends_with(".jsx");
+    let mut content_changed = store_content_if_changed_bump_generation(
+        caches.contents,
+        caches.generations,
+        file,
+        Arc::clone(&content),
+    )
+    .await;
+    let project_changed = caches
+        .projects
+        .write()
+        .insert(file.to_string(), project_file_name.to_string())
+        .as_deref()
+        != Some(project_file_name);
+    if is_ide_companion {
+        let source_content_changed = store_content_if_changed_bump_generation(
+            caches.contents,
+            caches.generations,
+            source,
+            Arc::clone(&content),
+        )
+        .await;
+        content_changed |= source_content_changed;
+        caches
+            .projects
+            .write()
+            .insert(source.to_string(), project_file_name.to_string());
+        caches
+            .companions
+            .write()
+            .insert(source.to_string(), file.to_string());
+        let source_changed = caches
+            .sources
+            .write()
+            .insert(file.to_string(), source.to_string())
+            .as_deref()
+            != Some(source);
+        content_changed |= source_changed;
+    }
+    content_changed || project_changed
+}
+
+fn carrier_metadata_requires_refresh(
+    metadata_changed: bool,
+    active_sources: &BTreeSet<String>,
+    source: &str,
+    companion: &str,
+) -> bool {
+    metadata_changed
+        && (companion.ends_with(".tsx") || companion.ends_with(".jsx"))
+        && active_sources.contains(source)
 }
 
 impl TypeProvider for TsserverTypeProvider {
@@ -1662,12 +2562,15 @@ impl TypeProvider for TsserverTypeProvider {
                     project_root,
                 ),
                 async {
-                    // Read old content's line count BEFORE inserting new content.
-                    // tsserver validates the end line against the old file's line map,
-                    // so we must use the actual old line count (not a hardcoded sentinel).
-                    let old_line_count = {
+                    // Read the old document's exact UTF-16 end BEFORE inserting
+                    // new content. A line-only sentinel is wrong for a document
+                    // without a trailing newline and can leave an old suffix in
+                    // ScriptInfo, splitting its line table from the Program.
+                    let old_end = {
                         let cache = contents_cache.lock().await;
-                        cache.get(&file).map(|c| c.lines().count() as u32 + 1)
+                        cache
+                            .get(&file)
+                            .map(|c| byte_offset_to_tsserver_pos(c, c.len() as u32))
                     };
 
                     store_content_bump_generation(
@@ -1681,9 +2584,9 @@ impl TypeProvider for TsserverTypeProvider {
                     let mut opened = opened_files.lock().await;
                     if opened.contains_key(&file) {
                         drop(opened);
-                        if let Some(end_line) = old_line_count {
+                        if let Some((end_line, end_offset)) = old_end {
                             tracing::debug!(
-                                "tsserver update_file: updateOpen for {file} (end_line={end_line})"
+                                "tsserver update_file: updateOpen for {file} (end={end_line}:{end_offset})"
                             );
                             // Use updateOpen with textChanges spanning the old content
                             transport
@@ -1694,7 +2597,7 @@ impl TypeProvider for TsserverTypeProvider {
                                             "fileName": file,
                                             "textChanges": [{
                                                 "start": { "line": 1, "offset": 1 },
-                                                "end": { "line": end_line, "offset": 1 },
+                                                "end": { "line": end_line, "offset": end_offset },
                                                 "newText": content,
                                             }]
                                         }]
@@ -1704,8 +2607,8 @@ impl TypeProvider for TsserverTypeProvider {
                             crate::type_runtime_trace_event!(
                                 "tsserver_update_file_result",
                                 format!(
-                                    "file={} mode=update_open old_line_count={}",
-                                    file, end_line
+                                    "file={} mode=update_open old_end={}:{}",
+                                    file, end_line, end_offset
                                 ),
                             );
                             Ok(())
@@ -1781,11 +2684,46 @@ impl TypeProvider for TsserverTypeProvider {
         let opened_files = Arc::clone(&self.opened_files);
         let carrier_projects = Arc::clone(&self.carrier_projects);
         let carrier_sources = Arc::clone(&self.carrier_sources);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let project_bootstraps = Arc::clone(&self.project_bootstraps);
+        let carrier_refresh = Arc::clone(&self.carrier_refresh);
+        let refresh_generation = self
+            .carrier_store_refresh_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_close_file",
                 format!("file={}", file),
                 async {
+                    let carrier_source = carrier_sources.read().get(&file).cloned();
+                    if let Some(source) = carrier_source.as_ref() {
+                        if let Some(project) = carrier_projects.read().get(source).cloned() {
+                            let mut bootstraps = project_bootstraps.write();
+                            if bootstraps.get(&project) == Some(source) {
+                                bootstraps.remove(&project);
+                            }
+                        }
+                        carrier_sources.write().remove(&file);
+                        carrier_companions.write().remove(source);
+                        active_sources.write().remove(source);
+                        carrier_projects.write().remove(source);
+                        if opened_files.lock().await.remove(source) == Some(OpenKind::CarrierSource)
+                        {
+                            transport
+                                .command_no_response("close", serde_json::json!({ "file": source }))
+                                .await?;
+                        }
+                        forget_content(&contents_cache, &content_generations, source).await;
+                        schedule_carrier_refresh(
+                            Arc::clone(&transport),
+                            Arc::clone(&active_sources),
+                            Arc::clone(&carrier_refresh),
+                            refresh_generation,
+                            source.clone(),
+                        );
+                    }
                     forget_content(&contents_cache, &content_generations, &file).await;
                     opened_files.lock().await.remove(&file);
                     // Retract the carrier→project routing for a closed companion so
@@ -1794,10 +2732,11 @@ impl TypeProvider for TsserverTypeProvider {
                     // companion left). A no-op for a real `.ts`/`.tsx` file (never in
                     // the carrier map).
                     carrier_projects.write().remove(&file);
-                    carrier_sources.write().remove(&file);
-                    transport
-                        .command_no_response("close", serde_json::json!({ "file": file }))
-                        .await?;
+                    if carrier_source.is_none() {
+                        transport
+                            .command_no_response("close", serde_json::json!({ "file": file }))
+                            .await?;
+                    }
                     crate::type_runtime_trace_event!(
                         "tsserver_close_file_result",
                         "closed=true".to_string()
@@ -1811,66 +2750,49 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn notify_carrier_changed(&self, companion_path: &str) -> ProviderFuture<'_, ()> {
         let file = Self::normalize_path(companion_path);
-        let transport = Arc::clone(&self.transport);
         let refresh_generation = self
             .carrier_store_refresh_generation
             .fetch_add(1, Ordering::Relaxed)
             + 1;
-        Box::pin(async move {
-            // Advance the plugin's project-scoped carrier-store token first. The
-            // plugin compares manifest versions, reloads changed virtual ScriptInfos,
-            // clears that configured project's semantic cache, and refreshes its
-            // external-file list on the next event-loop turn. This is the warm-
-            // snapshot invalidation path; the updateOpen touch below remains the
-            // cold negative-resolution eviction path.
-            transport
-                .command_no_response(
-                    "configurePlugin",
-                    serde_json::json!({
-                        "pluginName": "@verter/typescript-plugin",
-                        "configuration": {
-                            "carrierStoreRefreshToken": refresh_generation,
-                        }
-                    }),
-                )
-                .await?;
-            // Evict tsserver's sticky resolution cache for a companion whose
-            // content the carrier-publish store has now warmed. `updateOpen` with
-            // an empty `changedFiles` edit is the documented file-changed signal:
-            // it forces tsserver to re-resolve references to `file` (clearing a
-            // negative `fileExists`/module-resolution result cached while the
-            // companion's blob did not yet exist on disk) without mutating its
-            // content — the plugin serves the now-ready bytes on the re-read.
-            transport
-                .command_no_response(
-                    "updateOpen",
-                    serde_json::json!({
-                        "changedFiles": [{
-                            "fileName": file,
-                            "textChanges": [],
-                        }]
-                    }),
-                )
-                .await?;
-            // `configurePlugin` deliberately schedules graph mutation with
-            // `setImmediate` so it cannot corrupt a project being updated
-            // re-entrantly. Complete one response round-trip after the two
-            // fire-and-forget notifications: the next provider query is then
-            // written on a later host turn, after the plugin's scheduled refresh
-            // had an opportunity to reload the changed ScriptInfo/project roots.
-            // `projectInfo` can legitimately report that a just-published member
-            // is still cold; its response is the ordering fence, not its body.
-            let _ = transport
-                .request(
-                    "projectInfo",
-                    serde_json::json!({
-                        "file": file,
-                        "needFileNameList": false,
-                    }),
-                )
-                .await;
-            Ok(())
-        })
+        schedule_carrier_refresh(
+            Arc::clone(&self.transport),
+            Arc::clone(&self.active_carrier_sources),
+            Arc::clone(&self.carrier_refresh),
+            refresh_generation,
+            file,
+        );
+        let refresh = Arc::clone(&self.carrier_refresh);
+        Box::pin(async move { wait_for_carrier_refresh(&refresh, refresh_generation).await })
+    }
+
+    fn notify_carriers_changed<'a>(
+        &'a self,
+        companion_paths: &'a [String],
+    ) -> ProviderFuture<'a, ()> {
+        let mut files: Vec<String> = companion_paths
+            .iter()
+            .map(|path| Self::normalize_path(path))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        let refresh_generation = self
+            .carrier_store_refresh_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        if let Some(file) = files.into_iter().next() {
+            schedule_carrier_refresh(
+                Arc::clone(&self.transport),
+                Arc::clone(&self.active_carrier_sources),
+                Arc::clone(&self.carrier_refresh),
+                refresh_generation,
+                file,
+            );
+            let refresh = Arc::clone(&self.carrier_refresh);
+            return Box::pin(async move {
+                wait_for_carrier_refresh(&refresh, refresh_generation).await
+            });
+        }
+        Box::pin(async { Ok(()) })
     }
 
     fn register_carrier_member(
@@ -1888,36 +2810,35 @@ impl TypeProvider for TsserverTypeProvider {
         let content_generations = Arc::clone(&self.content_generations);
         let carrier_projects = Arc::clone(&self.carrier_projects);
         let carrier_sources = Arc::clone(&self.carrier_sources);
-        let opened_files = Arc::clone(&self.opened_files);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
         let transport = Arc::clone(&self.transport);
-        let script_kind_name = if file.ends_with(".jsx") {
-            "JSX"
-        } else if file.ends_with(".tsx") {
-            "TSX"
-        } else if file.ends_with(".js") {
-            "JS"
-        } else {
-            "TS"
-        };
-        let is_ide_companion = file.ends_with(".tsx") || file.ends_with(".jsx");
-        // `projectRootPath` for the project-load `open` is the tsconfig's directory.
-        let project_root = project_file_name
-            .rsplit_once('/')
-            .map(|(dir, _)| dir.to_string())
-            .unwrap_or_else(|| project_file_name.clone());
+        let opened_files = Arc::clone(&self.opened_files);
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let project_bootstraps = Arc::clone(&self.project_bootstraps);
+        let carrier_refresh = Arc::clone(&self.carrier_refresh);
+        let refresh_generation = self
+            .carrier_store_refresh_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let script_kind_name = if file.ends_with(".jsx") { "JSX" } else { "TSX" };
         Box::pin(async move {
             // Hydrate the LOCAL position-conversion content for the companion —
-            // the bytes are NEVER forwarded to tsserver (the `open` below carries
-            // NO `fileContent`; the `@verter/typescript-plugin`'s `getScriptSnapshot`
-            // serves the engine-side content from the publish store). Filling
-            // `contents` lets `byte_offset_to_tsserver_pos` (request offsets) and
-            // `parse_tsserver_location` (response spans) work for the carrier instead
-            // of the `(1, offset + 1)` line-1 sentinel.
-            store_content_bump_generation(
-                &contents_cache,
-                &content_generations,
+            // the generated bytes also back the managed process's single active
+            // source ScriptInfo. Closed workspace carriers remain lazy store-
+            // backed roots; this active snapshot keeps ScriptInfo's protocol
+            // line table identical to the Program's plugin projection.
+            let _metadata_changed = cache_carrier_metadata(
+                CarrierMetadataCaches {
+                    contents: &contents_cache,
+                    generations: &content_generations,
+                    projects: &carrier_projects,
+                    sources: &carrier_sources,
+                    companions: &carrier_companions,
+                },
                 &file,
                 Arc::clone(&content),
+                &source,
+                &project_file_name,
             )
             .await;
             // Record the owning configured project so carrier queries route there
@@ -1925,42 +2846,6 @@ impl TypeProvider for TsserverTypeProvider {
             // member, so its default-project resolution is otherwise undecided —
             // `ensureDefaultProjectForFile` would throw `No Project` for a virtual
             // companion on no real-disk path).
-            carrier_projects
-                .write()
-                .insert(file.clone(), project_file_name.clone());
-
-            // CONTENTLESS open of the companion: tsserver does not compute
-            // diagnostics for a file that is not a session buffer, and a carrier's
-            // owning CONFIGURED PROJECT is not created until a file it contains is
-            // opened (without it, `getProject(projectFileName)` misses and
-            // `ensureDefaultProjectForFile` throws `No Project`). The `open` carries
-            // a `projectRootPath` so tsserver creates/finds the configured project
-            // and admits the companion via `getExternalFiles`, and carries NO
-            // `fileContent` so the plugin's `getScriptSnapshot` remains the SOLE
-            // content authority (this is a membership + diagnostics-buffer signal,
-            // never a competing carrier-content open). BOTH companions are opened:
-            // the IDE `.tsx` is the diagnostics surface, and the public-API
-            // `.verter.ts` is re-exported by the IDE companion
-            // (`export { default } from './{name}.verter.ts'`), so its program
-            // contribution must also be loaded for the IDE surface's own
-            // diagnostics (e.g. a no-default-export error) to resolve. Tracked in
-            // `opened_files` (idempotent; a later `close_file` retracts it). Tagged
-            // `CarrierCompanion` so a resync replays it CONTENTLESSLY — never
-            // resending bytes that would make tsserver its content authority.
-            open_carrier_companion_contentless(
-                &transport,
-                &opened_files,
-                &carrier_projects,
-                &file,
-                script_kind_name,
-                &project_root,
-            )
-            .await?;
-            // Record diagnostic routing only after companion membership signaling
-            // succeeds. This never opens the source or sends source content.
-            if is_ide_companion {
-                carrier_sources.write().insert(file.clone(), source);
-            }
             // No per-open project verification: the carrier reaching this point is
             // ALREADY a confirmed configured-project member. The fail-closed gate
             // against an inferred / ownerless / ambiguous carrier lives UPSTREAM at
@@ -1976,6 +2861,132 @@ impl TypeProvider for TsserverTypeProvider {
             // loaded project on demand. A synchronous per-open `projectInfo` round-trip
             // would add latency to every carrier open AND race-close a legitimately-
             // owned companion that is merely still settling.
+            activate_published_carrier_inner(
+                PublishedCarrierActivation {
+                    transport: Arc::clone(&transport),
+                    opened_files: Arc::clone(&opened_files),
+                    carrier_projects,
+                    active_sources: Arc::clone(&active_sources),
+                    project_bootstraps,
+                },
+                source.clone(),
+                file.clone(),
+                project_file_name,
+                script_kind_name,
+            )
+            .await?;
+
+            schedule_carrier_refresh(
+                Arc::clone(&transport),
+                active_sources,
+                Arc::clone(&carrier_refresh),
+                refresh_generation,
+                file,
+            );
+            wait_for_carrier_refresh(&carrier_refresh, refresh_generation).await?;
+
+            Ok(())
+        })
+    }
+
+    fn activate_carrier_member(
+        &self,
+        source_path: &str,
+        companion_path: &str,
+        project_file_name: &str,
+        script_kind: crate::traits::CarrierScriptKind,
+    ) -> ProviderFuture<'_, ()> {
+        let source = Self::normalize_path(source_path);
+        let companion = Self::normalize_path(companion_path);
+        let project_file_name = Self::normalize_path(project_file_name);
+        let transport = Arc::clone(&self.transport);
+        let opened_files = Arc::clone(&self.opened_files);
+        let carrier_projects = Arc::clone(&self.carrier_projects);
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let project_bootstraps = Arc::clone(&self.project_bootstraps);
+        let refresh = Arc::clone(&self.carrier_refresh);
+        let refresh_generation = &self.carrier_store_refresh_generation;
+        Box::pin(async move {
+            let newly_active = activate_published_carrier_inner(
+                PublishedCarrierActivation {
+                    transport: Arc::clone(&transport),
+                    opened_files,
+                    carrier_projects,
+                    active_sources: Arc::clone(&active_sources),
+                    project_bootstraps,
+                },
+                source,
+                companion.clone(),
+                project_file_name,
+                script_kind.tsserver_name(),
+            )
+            .await?;
+            if newly_active {
+                let generation = refresh_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                schedule_carrier_refresh(
+                    transport,
+                    active_sources,
+                    Arc::clone(&refresh),
+                    generation,
+                    companion,
+                );
+                wait_for_carrier_refresh(&refresh, generation).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn register_carrier_metadata(
+        &self,
+        source_path: &str,
+        companion_path: &str,
+        content: &str,
+        project_file_name: &str,
+    ) -> ProviderFuture<'_, ()> {
+        let source = Self::normalize_path(source_path);
+        let file = Self::normalize_path(companion_path);
+        let project_file_name = Self::normalize_path(project_file_name);
+        let content: Arc<str> = Arc::from(content);
+        let contents_cache = Arc::clone(&self.contents);
+        let content_generations = Arc::clone(&self.content_generations);
+        let carrier_projects = Arc::clone(&self.carrier_projects);
+        let carrier_sources = Arc::clone(&self.carrier_sources);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let transport = Arc::clone(&self.transport);
+        let refresh = Arc::clone(&self.carrier_refresh);
+        let refresh_generation = &self.carrier_store_refresh_generation;
+        Box::pin(async move {
+            let metadata_changed = cache_carrier_metadata(
+                CarrierMetadataCaches {
+                    contents: &contents_cache,
+                    generations: &content_generations,
+                    projects: &carrier_projects,
+                    sources: &carrier_sources,
+                    companions: &carrier_companions,
+                },
+                &file,
+                content,
+                &source,
+                &project_file_name,
+            )
+            .await;
+            if carrier_metadata_requires_refresh(
+                metadata_changed,
+                &active_sources.read(),
+                &source,
+                &file,
+            ) {
+                let generation = refresh_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                schedule_carrier_refresh(
+                    transport,
+                    active_sources,
+                    Arc::clone(&refresh),
+                    generation,
+                    file,
+                );
+                wait_for_carrier_refresh(&refresh, generation).await?;
+            }
             Ok(())
         })
     }
@@ -1987,10 +2998,11 @@ impl TypeProvider for TsserverTypeProvider {
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let trigger = trigger_character.map(|s| s.to_string());
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let project_file_name = self.project_file_name_for(&file);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -2002,7 +3014,7 @@ impl TypeProvider for TsserverTypeProvider {
 
             let mut args = inject_project_file_name(
                 serde_json::json!({
-                    "file": file,
+                    "file": query_file,
                     "line": line,
                     "offset": col,
                     "includeExternalModuleExports": true,
@@ -2042,9 +3054,10 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let project_file_name = self.project_file_name_for(&file);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col, cache_hit) = {
                 let cache = contents_cache.lock().await;
@@ -2067,18 +3080,17 @@ impl TypeProvider for TsserverTypeProvider {
                     // companion not yet a configured-project member fails with
                     // "Could not find source file". On that NARROW cold error,
                     // recover the companion's membership (re-query
-                    // `getExternalFiles`) and re-issue `quickinfo`, bounded by a
-                    // short deadline with cooperative sleeps. The recovery fires
-                    // ONLY on the cold miss, never on a warm hover.
-                    let cold_deadline =
-                        std::time::Instant::now() + std::time::Duration::from_millis(2500);
+                    // `getExternalFiles`) and re-issue `quickinfo`. Recovery is
+                    // attempt-bounded, never time-bounded: a slow valid project
+                    // is awaited, while a structurally absent source cannot spin.
+                    let mut recovery_attempts = 0_u8;
                     let result = loop {
                         let r = transport
                             .request(
                                 "quickinfo",
                                 inject_project_file_name(
                                     serde_json::json!({
-                                        "file": file,
+                                        "file": query_file,
                                         "line": line,
                                         "offset": col,
                                     }),
@@ -2089,10 +3101,11 @@ impl TypeProvider for TsserverTypeProvider {
                         match r {
                             Err(e)
                                 if tsserver_diag_error_is_companion_not_ready(&e.message)
-                                    && std::time::Instant::now() < cold_deadline =>
+                                    && recovery_attempts < 2 =>
                             {
+                                recovery_attempts += 1;
                                 recover_companion_membership(&transport).await;
-                                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                                tokio::task::yield_now().await;
                             }
                             other => break other,
                         }
@@ -2165,8 +3178,10 @@ impl TypeProvider for TsserverTypeProvider {
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             if items.is_empty() {
                 return Ok(Vec::new());
@@ -2197,12 +3212,15 @@ impl TypeProvider for TsserverTypeProvider {
                     let result = transport
                         .request(
                             "completionEntryDetails",
-                            serde_json::json!({
-                                "file": file,
-                                "line": line,
-                                "offset": col,
-                                "entryNames": entry_names,
-                            }),
+                            inject_project_file_name(
+                                serde_json::json!({
+                                    "file": query_file,
+                                    "line": line,
+                                    "offset": col,
+                                    "entryNames": entry_names,
+                                }),
+                                &project_file_name,
+                            ),
                         )
                         .await;
 
@@ -2258,8 +3276,10 @@ impl TypeProvider for TsserverTypeProvider {
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             // tsserver resolves through `completionEntryDetails`. A non-tsserver
             // resolve key cannot have originated here — fail closed.
@@ -2289,12 +3309,15 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "completionEntryDetails",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                        "entryNames": [entry],
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "line": line,
+                            "offset": col,
+                            "entryNames": [entry],
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await?;
 
@@ -2313,7 +3336,14 @@ impl TypeProvider for TsserverTypeProvider {
             };
             Ok(completion_entry_details_to_resolve_result(
                 detail,
-                &file,
+                // Managed carriers are queried under their authored source
+                // identity while the host serves generated companion bytes.
+                // TypeScript therefore names the SOURCE in codeActions, even
+                // though the offsets belong to the generated snapshot cached
+                // under both identities. Match that wire target here; the LSP
+                // envelope still routes the resulting byte edits through the
+                // companion path and its authoritative source map.
+                &query_file,
                 &cache_snapshot,
             ))
         })
@@ -2321,24 +3351,24 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
+        let content_generations = Arc::clone(&self.content_generations);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let normalize_response_paths = self.normalize_response_paths_to_companions;
         // Route a carrier companion's diagnostic passes to its OWNING configured
         // project (so `semanticDiagnosticsSync` type-checks it where
         // `getExternalFiles` admitted it, not a fresh inferred project that returns
         // empty). `None` for a non-carrier file (its default project is correct).
-        let project_file_name = self.project_file_name_for(&file);
-        let diagnostic_file = self
-            .carrier_sources
-            .read()
-            .get(&file)
-            .cloned()
-            .unwrap_or_else(|| file.clone());
+        let project_file_name = self.project_file_name_for(&query_file);
+        let diagnostic_file = query_file;
         Box::pin(async move {
-            let content = {
+            let (content, request_generation) = {
                 let cache = contents_cache.lock().await;
-                cache.get(&file).cloned()
+                let generation = content_generations.map.lock().get(&file).copied();
+                (cache.get(&file).cloned(), generation)
             };
 
             // Pull all three tsserver diagnostic passes synchronously and union
@@ -2356,32 +3386,59 @@ impl TypeProvider for TsserverTypeProvider {
             // "Could not find source file: <companion>". On that NARROW error,
             // recover the companion's configured-project membership (re-query
             // `getExternalFiles` — see `recover_companion_membership`) and re-issue
-            // the semantic pass, bounded by a short deadline with cooperative
-            // sleeps (never a busy-spin). The recovery fires ONLY on this cold miss,
+            // the semantic pass, bounded by recovery attempts rather than elapsed
+            // time (never a busy-spin). The recovery fires ONLY on this cold miss,
             // so a warm pull never pays it. Only this error is retried: a genuine
             // module-not-found arrives in the SUCCESS body (so it never reaches the
             // error path) and timeouts / closed channels are distinct terminal
             // strings that fall straight through.
-            let cold_deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
-            let semantic_result = loop {
-                let result = transport
-                    .request(
+            let mut recovery_attempts = 0_u8;
+            let (semantic_result, syntactic_result, suggestion_result) = loop {
+                let requests = [
+                    (
                         "semanticDiagnosticsSync",
                         inject_project_file_name(
-                            serde_json::json!({ "file": diagnostic_file }),
+                            serde_json::json!({ "file": diagnostic_file.clone() }),
                             &project_file_name,
                         ),
-                    )
-                    .await;
-                match result {
-                    Err(e)
-                        if tsserver_diag_error_is_companion_not_ready(&e.message)
-                            && std::time::Instant::now() < cold_deadline =>
+                    ),
+                    (
+                        "syntacticDiagnosticsSync",
+                        inject_project_file_name(
+                            serde_json::json!({ "file": diagnostic_file.clone() }),
+                            &project_file_name,
+                        ),
+                    ),
+                    (
+                        "suggestionDiagnosticsSync",
+                        inject_project_file_name(
+                            serde_json::json!({ "file": diagnostic_file.clone() }),
+                            &project_file_name,
+                        ),
+                    ),
+                ];
+                let (semantic, syntactic, suggestion) =
+                    match transport.request_background_batch_results(&requests).await {
+                        Ok(results) => {
+                            let mut results = results.into_iter();
+                            (
+                                results.next().expect("diagnostic batch has semantic frame"),
+                                results.next(),
+                                results.next(),
+                            )
+                        }
+                        Err(error) => (Err(error), None, None),
+                    };
+                match &semantic {
+                    Err(error)
+                        if tsserver_diag_error_is_companion_not_ready(&error.message)
+                            && recovery_attempts < 2 =>
                     {
+                        recovery_attempts += 1;
                         recover_companion_membership(&transport).await;
-                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                        tokio::task::yield_now().await;
                     }
-                    other => break other,
+                    _ => break (semantic, syntactic, suggestion),
                 }
             };
 
@@ -2393,16 +3450,8 @@ impl TypeProvider for TsserverTypeProvider {
                         Some(file.as_str()),
                     );
 
-                    let syntactic = transport
-                        .request(
-                            "syntacticDiagnosticsSync",
-                            inject_project_file_name(
-                                serde_json::json!({ "file": diagnostic_file }),
-                                &project_file_name,
-                            ),
-                        )
-                        .await
-                        .ok()
+                    let syntactic = syntactic_result
+                        .and_then(Result::ok)
                         .map(|body| {
                             parse_tsserver_diagnostics_body(
                                 &body,
@@ -2412,16 +3461,8 @@ impl TypeProvider for TsserverTypeProvider {
                         })
                         .unwrap_or_default();
 
-                    let suggestion = transport
-                        .request(
-                            "suggestionDiagnosticsSync",
-                            inject_project_file_name(
-                                serde_json::json!({ "file": diagnostic_file }),
-                                &project_file_name,
-                            ),
-                        )
-                        .await
-                        .ok()
+                    let suggestion = suggestion_result
+                        .and_then(Result::ok)
                         .map(|body| {
                             parse_tsserver_diagnostics_body(
                                 &body,
@@ -2431,8 +3472,33 @@ impl TypeProvider for TsserverTypeProvider {
                         })
                         .unwrap_or_default();
 
-                    let diags = merge_diagnostic_sets(semantic, syntactic, suggestion);
-                    diagnostics_cache.lock().await.insert(file, diags.clone());
+                    let mut diags = merge_diagnostic_sets(semantic, syntactic, suggestion);
+                    for diagnostic in &mut diags {
+                        for related in &mut diagnostic.related_information {
+                            related.path = remap_carrier_response_path(
+                                &related.path,
+                                &carrier_companions,
+                                normalize_response_paths,
+                            );
+                        }
+                    }
+                    // Cache only if the file remained on the exact content
+                    // generation that initiated the pull. The caller applies
+                    // its own authored-document version fence before publish;
+                    // this guard prevents a later transport failure from
+                    // reviving a response that raced an edit or close/reopen.
+                    let current_generation = content_generations.map.lock().get(&file).copied();
+                    if let Some(content_generation) = request_generation {
+                        if current_generation == Some(content_generation) {
+                            diagnostics_cache.lock().await.insert(
+                                file.clone(),
+                                CachedDiagnostics {
+                                    content_generation,
+                                    diagnostics: diags.clone(),
+                                },
+                            );
+                        }
+                    }
                     Ok(diags)
                 }
                 Err(e) if tsserver_diag_error_is_companion_not_ready(&e.message) => {
@@ -2445,10 +3511,15 @@ impl TypeProvider for TsserverTypeProvider {
                     Err(e)
                 }
                 Err(_) => {
-                    // Any other failure (timeout, closed channel) falls back to the
-                    // last cached diagnostics for this file.
+                    // A transport failure may reuse only a last-good pull from
+                    // this exact local content generation. tsserver diagnostic
+                    // events carry no version and are intentionally never cached.
+                    let current_generation = content_generations.map.lock().get(&file).copied();
                     let cache = diagnostics_cache.lock().await;
-                    Ok(cache.get(&file).cloned().unwrap_or_default())
+                    Ok(cached_diagnostics_for_generation(
+                        cache.get(&file),
+                        current_generation,
+                    ))
                 }
             }
         })
@@ -2456,9 +3527,12 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let project_file_name = self.project_file_name_for(&file);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let normalize_response_paths = self.normalize_response_paths_to_companions;
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -2473,7 +3547,7 @@ impl TypeProvider for TsserverTypeProvider {
                     "definition",
                     inject_project_file_name(
                         serde_json::json!({
-                            "file": file,
+                            "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
@@ -2482,7 +3556,7 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = {
+            let mut locs: Vec<TypeLocation> = {
                 let cache = contents_cache.lock().await;
                 result
                     .as_array()
@@ -2493,6 +3567,13 @@ impl TypeProvider for TsserverTypeProvider {
                     })
                     .unwrap_or_default()
             };
+            for location in &mut locs {
+                location.path = remap_carrier_response_path(
+                    &location.path,
+                    &carrier_companions,
+                    normalize_response_paths,
+                );
+            }
 
             Ok(locs)
         })
@@ -2504,9 +3585,12 @@ impl TypeProvider for TsserverTypeProvider {
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let project_file_name = self.project_file_name_for(&file);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let normalize_response_paths = self.normalize_response_paths_to_companions;
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -2521,7 +3605,7 @@ impl TypeProvider for TsserverTypeProvider {
                     "typeDefinition",
                     inject_project_file_name(
                         serde_json::json!({
-                            "file": file,
+                            "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
@@ -2530,7 +3614,7 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = {
+            let mut locs: Vec<TypeLocation> = {
                 let cache = contents_cache.lock().await;
                 result
                     .as_array()
@@ -2541,6 +3625,13 @@ impl TypeProvider for TsserverTypeProvider {
                     })
                     .unwrap_or_default()
             };
+            for location in &mut locs {
+                location.path = remap_carrier_response_path(
+                    &location.path,
+                    &carrier_companions,
+                    normalize_response_paths,
+                );
+            }
 
             Ok(locs)
         })
@@ -2548,9 +3639,12 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
-        let project_file_name = self.project_file_name_for(&file);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let normalize_response_paths = self.normalize_response_paths_to_companions;
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -2565,7 +3659,7 @@ impl TypeProvider for TsserverTypeProvider {
                     "references",
                     inject_project_file_name(
                         serde_json::json!({
-                            "file": file,
+                            "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
@@ -2574,7 +3668,7 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = {
+            let mut locs: Vec<TypeLocation> = {
                 let cache = contents_cache.lock().await;
                 result
                     .get("refs")
@@ -2586,6 +3680,13 @@ impl TypeProvider for TsserverTypeProvider {
                     })
                     .unwrap_or_default()
             };
+            for location in &mut locs {
+                location.path = remap_carrier_response_path(
+                    &location.path,
+                    &carrier_companions,
+                    normalize_response_paths,
+                );
+            }
 
             Ok(locs)
         })
@@ -2597,8 +3698,12 @@ impl TypeProvider for TsserverTypeProvider {
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let normalize_response_paths = self.normalize_response_paths_to_companions;
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -2611,13 +3716,16 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "rename",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                        "findInComments": false,
-                        "findInStrings": false,
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "line": line,
+                            "offset": col,
+                            "findInComments": false,
+                            "findInStrings": false,
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await?;
 
@@ -2631,7 +3739,7 @@ impl TypeProvider for TsserverTypeProvider {
                 let guard = contents_cache.lock().await;
                 crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
             };
-            let locs = {
+            let mut locs: Vec<RenameLocation> = {
                 // Bind a `Copy` `&HashMap` for the per-target closures; the lock is already dropped,
                 // so the disk fallback inside the parser runs unlocked.
                 let cache: &HashMap<String, Arc<str>> = &cache_snapshot;
@@ -2663,6 +3771,13 @@ impl TypeProvider for TsserverTypeProvider {
                     })
                     .unwrap_or_default()
             };
+            for location in &mut locs {
+                location.path = remap_carrier_response_path(
+                    &location.path,
+                    &carrier_companions,
+                    normalize_response_paths,
+                );
+            }
 
             Ok(locs)
         })
@@ -2674,8 +3789,10 @@ impl TypeProvider for TsserverTypeProvider {
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -2688,11 +3805,14 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "signatureHelp",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "line": line,
+                            "offset": col,
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await;
 
@@ -2829,8 +3949,12 @@ impl TypeProvider for TsserverTypeProvider {
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
+        let normalize_response_paths = self.normalize_response_paths_to_companions;
+        let project_file_name = self.project_file_name_for(&query_file);
         // tsserver's `getCodeFixes` keys fixes off the diagnostic error codes in
         // the requested range. With no numeric codes there is nothing to fix, so
         // short-circuit rather than issue a useless round-trip.
@@ -2854,14 +3978,17 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "getCodeFixes",
-                    serde_json::json!({
-                        "file": file,
-                        "startLine": sl,
-                        "startOffset": sc,
-                        "endLine": el,
-                        "endOffset": ec,
-                        "errorCodes": error_codes,
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "startLine": sl,
+                            "startOffset": sc,
+                            "endLine": el,
+                            "endOffset": ec,
+                            "errorCodes": error_codes,
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await;
 
@@ -2912,7 +4039,13 @@ impl TypeProvider for TsserverTypeProvider {
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
                 let combined_result = transport
-                    .request("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
+                    .request(
+                        "getCombinedCodeFix",
+                        inject_project_file_name(
+                            combined_code_fix_args(&query_file, fix_id),
+                            &project_file_name,
+                        ),
+                    )
                     .await;
                 if let Ok(body) = combined_result {
                     // Snapshot ONLY this combined response's target files, taken FRESH (the request
@@ -2933,14 +4066,25 @@ impl TypeProvider for TsserverTypeProvider {
             }
 
             actions.extend(combined);
+            for action in &mut actions {
+                for edit in &mut action.edits {
+                    edit.path = remap_carrier_response_path(
+                        &edit.path,
+                        &carrier_companions,
+                        normalize_response_paths,
+                    );
+                }
+            }
             Ok(actions)
         })
     }
 
     fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let content = {
                 let cache = contents_cache.lock().await;
@@ -2953,14 +4097,17 @@ impl TypeProvider for TsserverTypeProvider {
             let end_line = content.lines().count() as u32 + 1;
 
             let result = transport
-                .request(
+                .request_background(
                     "encodedSemanticClassifications-full",
-                    serde_json::json!({
-                        "file": file,
-                        "start": { "line": 1, "offset": 1 },
-                        "end": { "line": end_line, "offset": 1 },
-                        "format": "2020",
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "start": { "line": 1, "offset": 1 },
+                            "end": { "line": end_line, "offset": 1 },
+                            "format": "2020",
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await;
 
@@ -3004,8 +4151,10 @@ impl TypeProvider for TsserverTypeProvider {
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -3018,12 +4167,15 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "documentHighlights",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                        "filesToSearch": [file],
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "line": line,
+                            "offset": col,
+                            "filesToSearch": [query_file],
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await;
 
@@ -3086,8 +4238,10 @@ impl TypeProvider for TsserverTypeProvider {
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         let file = Self::normalize_path(path);
+        let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             let (sl, sc, el, ec) = {
                 let cache = contents_cache.lock().await;
@@ -3102,13 +4256,16 @@ impl TypeProvider for TsserverTypeProvider {
             };
 
             let result = transport
-                .request(
+                .request_background(
                     "provideInlayHints",
-                    serde_json::json!({
-                        "file": file,
-                        "start": sl,
-                        "length": (el.saturating_sub(sl) + 1) * 200, // Approximate byte range
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "start": sl,
+                            "length": (el.saturating_sub(sl) + 1) * 200, // Approximate byte range
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await;
 
@@ -3301,6 +4458,25 @@ async fn store_content_bump_generation(
     generations.map.lock().insert(file.to_string(), next);
 }
 
+/// Store carrier-local projection bytes only when their immutable snapshot
+/// identity changed. Returning `false` lets repeated membership activation avoid
+/// a plugin refresh while preserving the generation invariant for real updates.
+async fn store_content_if_changed_bump_generation(
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    generations: &ContentGenerations,
+    file: &str,
+    content: Arc<str>,
+) -> bool {
+    let mut guard = contents.lock().await;
+    if guard.get(file).is_some_and(|current| current == &content) {
+        return false;
+    }
+    let next = generations.next_generation();
+    guard.insert(file.to_string(), content);
+    generations.map.lock().insert(file.to_string(), next);
+    true
+}
+
 /// Forget a file's content AND its generation (on close). Combined with the
 /// globally-unique counter, a later reopen of the same path draws a fresh
 /// generation a stale captured one cannot match.
@@ -3314,20 +4490,20 @@ async fn forget_content(
     generations.map.lock().remove(file);
 }
 
-/// The contentless carrier-companion open, factored out of `register_carrier_member`
-/// so the open-failure rollback is unit-testable against a bare transport WITHOUT
-/// spawning a tsserver child. The trait method delegates here, so this IS the
-/// production carrier-open path.
+/// Open one active carrier identity without transferring generated bytes,
+/// factored out so send-failure rollback is unit-testable against a bare
+/// transport. Both transient bootstrap companions and durable authored
+/// identities resolve lazily through the store-backed plugin.
 ///
-/// Atomically marks the companion opened (`opened_files`) and, only if newly marked,
-/// issues the CONTENTLESS `open`. On a transport-send FAILURE it ROLLS BACK the
+/// Atomically marks the carrier identity opened (`opened_files`) and, only if newly
+/// marked, issues its `open`. On a transport-send FAILURE it ROLLS BACK the
 /// optimistic `opened_files` mark AND the `carrier_projects` routing entry, so a
 /// later registration RE-ATTEMPTS the open instead of observing a phantom "already
 /// opened" (`opened_now == false`) and skipping it forever — which would leave the
-/// companion never a configured-project member (a phantom-registered carrier). The
+/// identity never a configured-project member (a phantom-registered carrier). The
 /// atomic check-and-mark (not a check-then-mark) keeps two concurrent registrations
 /// from both issuing the open.
-async fn open_carrier_companion_contentless(
+async fn open_carrier_source_contentless(
     transport: &TsserverTransport,
     opened_files: &Arc<Mutex<HashMap<String, OpenKind>>>,
     carrier_projects: &Arc<parking_lot::RwLock<HashMap<String, String>>>,
@@ -3338,7 +4514,7 @@ async fn open_carrier_companion_contentless(
     let opened_now = opened_files
         .lock()
         .await
-        .insert(file.to_string(), OpenKind::CarrierCompanion)
+        .insert(file.to_string(), OpenKind::CarrierSource)
         .is_none();
     if opened_now {
         if let Err(error) = transport
@@ -3364,8 +4540,8 @@ async fn open_carrier_companion_contentless(
 struct ResyncEntry {
     file: String,
     kind: OpenKind,
-    /// The captured `Source` content (`None` for a carrier companion, which is
-    /// always reopened contentlessly).
+    /// The captured active snapshot. Ordinary sources reopen with their bytes;
+    /// managed carriers remain contentless and resolve through the plugin.
     content: Option<Arc<str>>,
     /// The per-file content generation at capture time; re-checked before a
     /// `Source` reopen so a concurrent edit's newer bytes are never overwritten.
@@ -3411,10 +4587,9 @@ async fn resync_capture(
 /// concurrent `update_file` has not landed newer bytes since capture; if it has,
 /// the now-stale reopen is SKIPPED — the update already pushed the current bytes,
 /// so resending the captured ones would overwrite them (the stale-reopen bug this
-/// gate closes). A `CarrierCompanion` entry is reopened CONTENTLESSLY and routed
-/// to its OWN configured project (the plugin's `getScriptSnapshot` stays the sole
-/// engine-side content authority — resending bytes would make tsserver the
-/// carrier's content owner); it carries no bytes, so it needs no generation gate.
+/// gate closes). A `CarrierSource` reopens contentlessly and routes to its own
+/// configured project. Closed workspace carriers are not tracked here at all;
+/// they remain lazy store roots.
 async fn resync_apply(
     transport: &TsserverTransport,
     entries: Vec<ResyncEntry>,
@@ -3465,7 +4640,7 @@ async fn resync_apply(
                     )
                     .await?;
             }
-            OpenKind::CarrierCompanion => {
+            OpenKind::CarrierSource => {
                 let project_root = carrier_projects
                     .read()
                     .get(&entry.file)

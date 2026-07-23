@@ -2,6 +2,7 @@ import type tsModule from "typescript/lib/tsserverlibrary";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import {
+  activeCarrierSources,
   CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   cleanupCarrierVirtualImportPath,
   containingFileAwareExists,
@@ -48,6 +49,7 @@ import { prepareVueJsxCarrier } from "./helpers/vueJsxAuthority";
 const processBoundProjects = new Set<string>();
 const processStoreDirByProject = new Map<string, string | undefined>();
 const processEditorOwnsCarrierMembershipByProject = new Map<string, boolean>();
+const processActiveCarrierSourcesByProject = new Map<string, readonly string[]>();
 const processUpdateProjectConfig = new Map<string, (config: Record<string, unknown>) => void>();
 interface ProcessEditorProjectRuntime {
   readonly projectKey: string;
@@ -111,6 +113,119 @@ function liveEditorProjectRuntimes(): ProcessEditorProjectRuntime[] {
   return live;
 }
 let processCurrentConfig: Record<string, unknown> | undefined;
+
+interface ManagedCarrierCoordinateSource {
+  readonly version: string;
+  readonly text: string;
+}
+
+interface ManagedCarrierCoordinatePatch {
+  readonly originalPositionToLineOffset: tsModule.server.ScriptInfo["positionToLineOffset"];
+  readonly originalLineOffsetToPosition: tsModule.server.ScriptInfo["lineOffsetToPosition"];
+  readonly sources: Map<string, () => ManagedCarrierCoordinateSource | undefined>;
+  cachedVersion?: string;
+  cachedText?: string;
+  cachedLineStarts?: readonly number[];
+}
+
+/**
+ * A ScriptInfo belongs to ProjectService and can be shared by several plugin
+ * factories. Keep one process-wide patch per object and register each owning
+ * configured project as a live source of generated coordinates.
+ */
+const managedCarrierCoordinatePatches = new WeakMap<object, ManagedCarrierCoordinatePatch>();
+
+function lineStartsFor(text: string): readonly number[] {
+  const starts = [0];
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text.charCodeAt(index);
+    if (character === 13 && text.charCodeAt(index + 1) === 10) {
+      index += 1;
+    } else if (character !== 10 && character !== 13) {
+      continue;
+    }
+    starts.push(index + 1);
+  }
+  return starts;
+}
+
+function generatedPositionToLineOffset(
+  text: string,
+  lineStarts: readonly number[],
+  position: number,
+): tsModule.server.protocol.Location {
+  const clamped = Math.max(0, Math.min(position, text.length));
+  let low = 0;
+  let high = lineStarts.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (lineStarts[middle] > clamped) high = middle;
+    else low = middle + 1;
+  }
+  const lineIndex = Math.max(0, low - 1);
+  return {
+    line: lineIndex + 1,
+    offset: clamped - lineStarts[lineIndex] + 1,
+  };
+}
+
+function generatedLineOffsetToPosition(
+  text: string,
+  lineStarts: readonly number[],
+  line: number,
+  offset: number,
+): number {
+  if (line <= 0) return 0;
+  if (line > lineStarts.length) return text.length;
+  const lineStart = lineStarts[line - 1];
+  const nextLineStart = line < lineStarts.length ? lineStarts[line] : text.length;
+  return Math.max(lineStart, Math.min(nextLineStart, lineStart + Math.max(0, offset - 1)));
+}
+
+function patchManagedCarrierCoordinates(
+  scriptInfo: tsModule.server.ScriptInfo,
+  projectKey: string,
+  source: () => ManagedCarrierCoordinateSource | undefined,
+): void {
+  let patch = managedCarrierCoordinatePatches.get(scriptInfo);
+  if (patch === undefined) {
+    patch = {
+      originalPositionToLineOffset: scriptInfo.positionToLineOffset.bind(scriptInfo),
+      originalLineOffsetToPosition: scriptInfo.lineOffsetToPosition.bind(scriptInfo),
+      sources: new Map(),
+    };
+    managedCarrierCoordinatePatches.set(scriptInfo, patch);
+    const current = () => {
+      let result: ManagedCarrierCoordinateSource | undefined;
+      for (const candidate of patch!.sources.values()) {
+        result = candidate() ?? result;
+      }
+      return result;
+    };
+    const lineStarts = (snapshot: ManagedCarrierCoordinateSource) => {
+      if (patch!.cachedVersion !== snapshot.version || patch!.cachedText !== snapshot.text) {
+        patch!.cachedVersion = snapshot.version;
+        patch!.cachedText = snapshot.text;
+        patch!.cachedLineStarts = lineStartsFor(snapshot.text);
+      }
+      return patch!.cachedLineStarts!;
+    };
+    scriptInfo.positionToLineOffset = (position) => {
+      const snapshot = current();
+      return snapshot === undefined
+        ? patch!.originalPositionToLineOffset(position)
+        : generatedPositionToLineOffset(snapshot.text, lineStarts(snapshot), position);
+    };
+    scriptInfo.lineOffsetToPosition = (line, offset) => {
+      const snapshot = current();
+      return snapshot === undefined
+        ? patch!.originalLineOffsetToPosition(line, offset)
+        : generatedLineOffsetToPosition(snapshot.text, lineStarts(snapshot), line, offset);
+    };
+  }
+  patch.sources.delete(projectKey);
+  patch.sources.set(projectKey, source);
+}
 
 const SVELTE_JSX_RUNTIME_SUBPATHS = new Map<string, string>([
   ["@verter/svelte-jsx/jsx-runtime", "jsx-runtime.d.ts"],
@@ -395,8 +510,6 @@ function diagnosticIdentity(
 }
 
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
-  const priorNonEditorExternalsByProject = new WeakMap<tsModule.server.Project, Set<string>>();
-
   // The resolved store dir per configured project, recorded by `create` (which
   // has the plugin config) so `getExternalFiles` (which does NOT receive the
   // config) can reuse the same store. Keyed by the project name (tsconfig path).
@@ -423,15 +536,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     let editorOwnsSourceFeatures = editorOwnsCarrierSourceFeatures(effectiveConfig);
     let providerOnlyCompletions = e2eProviderOnlyCompletions(effectiveConfig);
     let carrierStoreRefreshToken = effectiveConfig[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
+    const activeKey = (fileName: string) => {
+      const normalized = normalizePath(fileName);
+      return info.serverHost.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
+    };
+    let activeSourceKeys = new Set(activeCarrierSources(effectiveConfig).map(activeKey));
     const projectKey = info.project.getProjectName();
-    if (!priorNonEditorExternalsByProject.has(info.project)) {
-      priorNonEditorExternalsByProject.set(info.project, new Set());
-    }
     processBoundProjects.add(projectKey);
     processCurrentConfig = effectiveConfig;
     writeEditorTsserverAttestation(processCurrentConfig, processBoundProjects);
     processStoreDirByProject.set(projectKey, storeDir);
     processEditorOwnsCarrierMembershipByProject.set(projectKey, editorOwnsMembership);
+    processActiveCarrierSourcesByProject.set(projectKey, activeCarrierSources(effectiveConfig));
     // PROJECT-SCOPED reader: `create(info)` is per configured project, so every
     // carrier the host hooks serve comes ONLY from this project's manifest entry
     // — a sibling tsconfig's carrier (compiled under different `paths`/`types`/
@@ -449,7 +565,57 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // The configuration updater closes over this mutable context so every response
     // provider sees the same project-scoped reader as the live host hooks.
     let remapContext: CarrierRemapContext;
-    let invalidatedReadyVersions = store.readyFileVersions();
+    // Carrier sources this exact configured project has attempted to resolve.
+    // This is the dependency relevance frontier for publication invalidation:
+    // a newly ready imported carrier must clear a prior wildcard/TS2307 cache,
+    // while an unrelated background-warmed carrier must not rebuild the Program.
+    const observedCarrierImportKeys = new Set<string>();
+    const servedReadyVersions = () => {
+      const versions = new Map<string, string>();
+      for (const [providerPath, version] of store.readyFileVersions()) {
+        const ready = store.readyFile(providerPath);
+        const source = store.ownedSourceFor(providerPath)?.source_uri;
+        const active =
+          source !== undefined &&
+          (activeSourceKeys.has(activeKey(source)) ||
+            observedCarrierImportKeys.has(activeKey(source)));
+        const requestPath =
+          !editorOwnsMembership && ready?.role === "CarrierIde" ? source : providerPath;
+        const loaded =
+          requestPath !== undefined &&
+          info.project.projectService.getScriptInfo?.(normalizePath(requestPath)) !== undefined;
+        if (!active && !loaded) continue;
+        if (!editorOwnsMembership && ready?.role === "CarrierIde") {
+          if (source !== undefined) versions.set(normalizePath(source), version);
+        } else {
+          versions.set(normalizePath(providerPath), version);
+        }
+      }
+      return versions;
+    };
+    let invalidatedReadyVersions = servedReadyVersions();
+    const desiredCarrierRoots = () => {
+      const activeSources = store
+        .readyIdeSources()
+        .filter((source) => activeSourceKeys.has(activeKey(source)));
+      const roots = !editorOwnsMembership
+        ? activeSources
+        : activeSources.flatMap((source) => {
+            const companion = store.companionForSource(source);
+            return companion !== undefined && store.readyFile(companion) !== undefined
+              ? [companion]
+              : [];
+          });
+      return [...new Map(roots.map((root) => [activeKey(root), root])).values()];
+    };
+    let managedCarrierRoots = new Map(
+      desiredCarrierRoots().map((fileName) => [
+        info.serverHost.useCaseSensitiveFileNames
+          ? normalizePath(fileName)
+          : normalizePath(fileName).toLowerCase(),
+        normalizePath(fileName),
+      ]),
+    );
     const pendingScriptInfoReloads = new Set<string>();
     let pendingResolutionCacheClear = false;
     let refreshScheduled = false;
@@ -460,26 +626,32 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const nextEditorOwnsSourceFeatures = editorOwnsCarrierSourceFeatures(config);
       const nextProviderOnlyCompletions = e2eProviderOnlyCompletions(config);
       const nextCarrierStoreRefreshToken = config[CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY];
+      const nextActiveSourceKeys = new Set(activeCarrierSources(config).map(activeKey));
+      const activeWorkingSetChanged =
+        nextActiveSourceKeys.size !== activeSourceKeys.size ||
+        [...nextActiveSourceKeys].some((fileName) => !activeSourceKeys.has(fileName));
       const storeChanged = nextStoreDir !== storeDir;
       const publicationAdvanced = !Object.is(
         nextCarrierStoreRefreshToken,
         carrierStoreRefreshToken,
       );
-      const servingStateChanged =
+      const configuredServingStateChanged =
         storeChanged ||
         nextResponseRemap !== responseRemap ||
         nextEditorOwnsMembership !== editorOwnsMembership ||
         nextEditorOwnsSourceFeatures !== editorOwnsSourceFeatures ||
         nextProviderOnlyCompletions !== providerOnlyCompletions ||
-        publicationAdvanced;
+        activeWorkingSetChanged;
       storeDir = nextStoreDir;
       responseRemap = nextResponseRemap;
       editorOwnsMembership = nextEditorOwnsMembership;
       editorOwnsSourceFeatures = nextEditorOwnsSourceFeatures;
       providerOnlyCompletions = nextProviderOnlyCompletions;
       carrierStoreRefreshToken = nextCarrierStoreRefreshToken;
+      activeSourceKeys = nextActiveSourceKeys;
       processStoreDirByProject.set(projectKey, storeDir);
       processEditorOwnsCarrierMembershipByProject.set(projectKey, editorOwnsMembership);
+      processActiveCarrierSourcesByProject.set(projectKey, activeCarrierSources(config));
       if (storeChanged) {
         store = new DiskCarrierStoreReader(
           storeDir,
@@ -498,15 +670,22 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (publicationAdvanced || storeChanged) {
         vueJsxContentCache.clear();
       }
-      const nextReadyVersions = store.readyFileVersions();
+      const nextReadyVersions = servedReadyVersions();
+      const relevantReadyVersionsChanged =
+        nextReadyVersions.size !== invalidatedReadyVersions.size ||
+        [...nextReadyVersions].some(
+          ([providerPath, version]) => invalidatedReadyVersions.get(providerPath) !== version,
+        );
       for (const [providerPath, version] of nextReadyVersions) {
         if (invalidatedReadyVersions.get(providerPath) !== version) {
           pendingScriptInfoReloads.add(providerPath);
         }
       }
       invalidatedReadyVersions = nextReadyVersions;
+      const servingStateChanged =
+        configuredServingStateChanged || (publicationAdvanced && relevantReadyVersionsChanged);
       if (!servingStateChanged) return;
-      if (publicationAdvanced || storeChanged) {
+      if ((publicationAdvanced && relevantReadyVersionsChanged) || storeChanged) {
         pendingResolutionCacheClear = true;
       }
       // The configure request can arrive while tsserver is updating this project's
@@ -518,68 +697,130 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         refreshScheduled = true;
         setImmediate(() => {
           refreshScheduled = false;
-          // TypeScript incorporates plugin `getExternalFiles` into configured
-          // project roots only through its targeted file-name reload path. A
-          // normal dirty graph pass reads the new list after building the old
-          // roots, which is too late. Both TS 5.9 and TS 6 expose this stable
-          // runtime method (although it is omitted from the public declaration).
-          // Use it only for the concrete configured project; never clear every
-          // editor project or mutate the graph inside `configurePlugin`.
-          const configuredProject = info.project as typeof info.project & {
-            getConfigFilePath?: () => tsModule.server.NormalizedPath;
-          };
+          // Dynamic carrier membership belongs to this configured project, not
+          // to the tsserver protocol's open-file set. Internal hosts reconcile
+          // authored source identities; editor-owned hosts reconcile distinct
+          // companions. Both use TypeScript's public Project/ScriptInfo API. This
+          // is the official Svelte ownership model: create a closed ScriptInfo
+          // backed by the host, then add/remove the project root. It avoids one
+          // protocol open per generated file and any private whole-project reload.
+          const configuredProject = info.project;
           const projectService = info.project.projectService as unknown as {
-            reloadFileNamesOfConfiguredProject?: (project: typeof configuredProject) => boolean;
             clearSemanticCache?: (project: typeof configuredProject) => void;
             getScriptInfo?: (fileName: string) =>
               | {
+                  fileName: string;
                   reloadFromFile?: () => boolean;
                 }
               | undefined;
+            getOrCreateScriptInfoForNormalizedPath?: (
+              fileName: tsModule.server.NormalizedPath,
+              openedByClient: boolean,
+              fileContent?: string,
+              scriptKind?: tsModule.ScriptKind,
+              hasMixedContent?: boolean,
+              hostToQueryFileExistsOn?: { fileExists(path: string): boolean },
+            ) => tsModule.server.ScriptInfo | undefined;
           };
           // A configured project may have cached Svelte's ambient `*.svelte`
-          // fallback before the authored carrier was published. Clearing only
-          // the target project's semantic/resolution cache is therefore the
-          // first refresh step; a dirty graph alone retains the stale module
-          // resolution. This private runtime method is present across supported
-          // TS 5.x/6.x and is deliberately invoked through this narrow cast.
+          // fallback before the authored carrier was published. Clear only this
+          // project's semantic/resolution cache before changing its roots.
           if (pendingResolutionCacheClear) {
             pendingResolutionCacheClear = false;
             projectService.clearSemanticCache?.(configuredProject);
           }
+          const canonicalRoot = (fileName: string) => {
+            const normalized = normalizePath(fileName);
+            return info.serverHost.useCaseSensitiveFileNames
+              ? normalized
+              : normalized.toLowerCase();
+          };
+          const nextCarrierRoots = new Map(
+            desiredCarrierRoots().map((fileName) => [
+              canonicalRoot(fileName),
+              normalizePath(fileName),
+            ]),
+          );
+          let membershipChanged = false;
+          let managedContentUpdated = false;
+          for (const [key, fileName] of managedCarrierRoots) {
+            if (nextCarrierRoots.has(key)) continue;
+            const scriptInfo = projectService.getScriptInfo?.(fileName);
+            if (
+              scriptInfo !== undefined &&
+              configuredProject.isRoot(scriptInfo as tsModule.server.ScriptInfo)
+            ) {
+              configuredProject.removeFile(scriptInfo as tsModule.server.ScriptInfo, false, true);
+              membershipChanged = true;
+            }
+          }
+          for (const fileName of nextCarrierRoots.values()) {
+            let scriptInfo = projectService.getScriptInfo?.(fileName) as
+              | tsModule.server.ScriptInfo
+              | undefined;
+            if (scriptInfo === undefined) {
+              const ready = editorOwnsMembership
+                ? store.readyFile(fileName)
+                : (store.readyFileForSource(fileName) ?? store.readyFile(fileName));
+              if (ready !== undefined) {
+                scriptInfo = projectService.getOrCreateScriptInfoForNormalizedPath?.(
+                  ts.server.toNormalizedPath(fileName),
+                  false,
+                  undefined,
+                  manifestScriptKind(ts, ready.script_kind),
+                  false,
+                  info.serverHost,
+                );
+              }
+            }
+            if (scriptInfo !== undefined && !configuredProject.isRoot(scriptInfo)) {
+              configuredProject.addRoot(scriptInfo);
+              membershipChanged = true;
+            }
+            if (scriptInfo !== undefined) {
+              managedContentUpdated =
+                synchronizeManagedCarrierScriptInfo(fileName, scriptInfo) || managedContentUpdated;
+              patchCarrierScriptInfoCoordinates(fileName, scriptInfo);
+            }
+          }
+          managedCarrierRoots = nextCarrierRoots;
           // External carrier roots are virtual: their ScriptInfos have no disk
           // watcher that can observe the content-addressed blob swap. Refresh
-          // only companions whose manifest identity advanced, using the patched
+          // only roots whose manifest identity advanced, using the patched
           // serverHost.readFile as the sole content authority, before rebuilding
           // the configured graph. This covers both IDE roots and imported API
           // carriers without reloading every carrier on each keystroke.
+          let contentReloaded = managedContentUpdated;
           for (const providerPath of pendingScriptInfoReloads) {
             pendingScriptInfoReloads.delete(providerPath);
             try {
-              projectService.getScriptInfo?.(providerPath)?.reloadFromFile?.();
+              contentReloaded =
+                projectService.getScriptInfo?.(providerPath)?.reloadFromFile?.() === true ||
+                contentReloaded;
             } catch (error) {
               logger.info(
                 `[Verter] failed to reload carrier ScriptInfo ${providerPath}: ${String(error)}`,
               );
             }
           }
-          if (
-            typeof configuredProject.getConfigFilePath === "function" &&
-            typeof projectService.reloadFileNamesOfConfiguredProject === "function"
-          ) {
-            projectService.reloadFileNamesOfConfiguredProject(configuredProject);
-            info.project.refreshDiagnostics();
-            return;
+          // addRoot/removeFile and real ScriptInfo.reloadFromFile calls already
+          // dirty the project. A config-only serving change may do neither, so
+          // retain the narrow fallback for that case.
+          if (!membershipChanged && !contentReloaded) {
+            (
+              info.project as typeof info.project & {
+                markAsDirty?: () => void;
+              }
+            ).markAsDirty?.();
           }
-          // `markAsDirty` is a stable tsserver runtime method but intentionally
-          // omitted from the public plugin declaration. Keep the cast narrow;
-          // `refreshDiagnostics` is the typed public notification surface.
-          (
-            info.project as typeof info.project & {
-              markAsDirty?: () => void;
-            }
-          ).markAsDirty?.();
-          info.project.refreshDiagnostics();
+          // The internal LSP requests diagnostics explicitly and must keep its
+          // single tsserver thread available for interactive queries. Scheduling
+          // configured-project diagnostics here eagerly walks the user's whole
+          // graph after every carrier activation. VS Code's direct TypeScript
+          // surface still needs the normal editor diagnostic refresh.
+          if (editorOwnsMembership) {
+            info.project.refreshDiagnostics();
+          }
         });
       }
     });
@@ -735,6 +976,59 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return false;
     };
 
+    const patchCarrierScriptInfoCoordinates = (
+      fileName: string,
+      knownScriptInfo?: tsModule.server.ScriptInfo,
+    ) => {
+      if (editorOwnsMembership || store.readyFileForSource(fileName) === undefined) return;
+      const scriptInfo =
+        knownScriptInfo ?? info.project.projectService.getScriptInfo(normalizePath(fileName));
+      if (
+        scriptInfo === undefined ||
+        typeof scriptInfo.positionToLineOffset !== "function" ||
+        typeof scriptInfo.lineOffsetToPosition !== "function"
+      ) {
+        return;
+      }
+      patchManagedCarrierCoordinates(scriptInfo, projectKey, () => {
+        if (editorOwnsMembership || info.project.isClosed()) return undefined;
+        const ready = store.readyFileForSource(fileName);
+        const text = ready === undefined ? undefined : carrierContent(fileName);
+        return ready === undefined || text === undefined
+          ? undefined
+          : { version: `${ready.version}:${ready.content_hash}`, text };
+      });
+    };
+
+    const synchronizeManagedCarrierScriptInfo = (
+      fileName: string,
+      scriptInfo: tsModule.server.ScriptInfo,
+    ): boolean => {
+      if (
+        editorOwnsMembership ||
+        !activeSourceKeys.has(activeKey(fileName)) ||
+        scriptInfo.isScriptOpen?.() === false ||
+        typeof scriptInfo.editContent !== "function" ||
+        typeof scriptInfo.getSnapshot !== "function"
+      ) {
+        return false;
+      }
+      const ready = store.readyFileForSource(fileName);
+      const generated = ready === undefined ? undefined : carrierContent(fileName);
+      if (ready === undefined || generated === undefined) return false;
+
+      const snapshot = scriptInfo.getSnapshot();
+      const currentLength = snapshot.getLength();
+      if (snapshot.getText(0, currentLength) === generated) return false;
+
+      // Managed LSP sources have no editor-owned TypeScript buffer. Advance the
+      // one active ScriptInfo on the plugin's deferred project turn, after the
+      // store version is visible. Background carriers stay closed and lazy; no
+      // generated bytes cross the tsserver protocol.
+      scriptInfo.editContent(0, currentLength, generated);
+      return true;
+    };
+
     // A configured editor project can answer for its visible framework source
     // through the companion request router even though that raw mixed-content
     // file is deliberately absent from the TypeScript Program. Expose that
@@ -778,6 +1072,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       const hostSnapshot = _getScriptSnapshot?.(fileName);
       const content = carrierContent(fileName);
       if (content !== undefined) {
+        patchCarrierScriptInfoCoordinates(fileName);
         return ts.ScriptSnapshot.fromString(content);
       }
       return hostSnapshot;
@@ -883,6 +1178,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       store.companionForSource(sourcePath) ?? toIdeCarrierFileName(sourcePath) ?? undefined;
     const importedCarrierForSource = (sourcePath: string): string | undefined =>
       store.apiCompanionForSource(sourcePath) ?? ideCarrierForSource(sourcePath);
+    const apiCarrierForEsmSpecifier = (
+      containingFile: string,
+      moduleName: string,
+    ): string | undefined => {
+      if (!/^\.\.?[\\/]/.test(moduleName) || !moduleName.endsWith(".verter.js")) {
+        return undefined;
+      }
+      const jsAlias = normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+      const provider = `${jsAlias.slice(0, -".js".length)}.ts`;
+      const owned = store.ownedSourceFor(provider);
+      return owned?.role === "CarrierApi" && sameStorePath(store, owned.provider_uri, provider)
+        ? provider
+        : undefined;
+    };
 
     const createModuleResolver =
       (containingFile: string) =>
@@ -945,6 +1254,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           );
         }
 
+        // Generated carriers use the ESM-compatible `.verter.js` specifier for
+        // their physical `.verter.ts` API sibling. This is TypeScript's normal
+        // source-extension substitution convention; the explicit store lookup
+        // keeps the same behavior in minimal/custom hosts whose original module
+        // resolver does not probe virtual files through `fileExists`.
+        const apiCarrier = apiCarrierForEsmSpecifier(containingFile, moduleName);
+        if (apiCarrier !== undefined) {
+          return {
+            extension: ts.Extension.Ts,
+            isExternalLibraryImport: false,
+            resolvedFileName: apiCarrier,
+          };
+        }
+
         // An already-IDE-carrier-shaped relative specifier resolves to itself.
         if (isRelativeVueTs(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
@@ -962,6 +1285,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // so an already-open project never resolves to an unreadable virtual file.
         if (isRelativeVue(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          observedCarrierImportKeys.add(activeKey(resolved));
           const importedCarrier = importedCarrierForSource(resolved);
           if (importedCarrier) {
             return {
@@ -994,6 +1318,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (!carrierSource) {
           return;
         }
+        observedCarrierImportKeys.add(activeKey(normalizePath(path.resolve(carrierSource))));
         const importedCarrier = importedCarrierForSource(
           normalizePath(path.resolve(carrierSource)),
         );
@@ -1256,12 +1581,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       position: number;
     }
 
+    /**
+     * Whether this project uses the editor-owned two-identity topology for a
+     * framework source. Internal LSP tsserver projects instead keep generated
+     * content directly under the authored source identity, so their semantic
+     * feature calls pass through to the original LanguageService.
+     */
+    const usesEditorCarrierRouting = (fileName: string): boolean =>
+      editorOwnsMembership && isVue(fileName);
+
     /** Resolve one visible source position into its exact configured companion. */
     function editorCarrierPosition(
       fileName: string,
       position: number,
     ): EditorCarrierPosition | null {
-      if (!editorOwnsSourceFeatures || !isVue(fileName)) return null;
+      if (!editorOwnsSourceFeatures || !usesEditorCarrierRouting(fileName)) return null;
       const runtime = editorOwnerForSource(fileName);
       if (runtime === undefined) return null;
       const runtimeStore = runtime.getStore();
@@ -1392,7 +1726,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
      */
     const editorYieldsCarrierSourceFeatures = (fileName: string): boolean => {
       if (!editorOwnsMembership || editorOwnsSourceFeatures) return false;
-      if (isVue(fileName)) return true;
+      if (usesEditorCarrierRouting(fileName)) return true;
       return isCarrierCompanionPath(store, fileName);
     };
 
@@ -1603,28 +1937,68 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (diagnostic.start === undefined || diagnostic.length === undefined) {
         return undefined;
       }
+      // Store publication and TypeScript Program synchronization are separate
+      // event-loop turns. A geterr already queued by the editor may therefore
+      // observe the preceding companion SourceFile after the manifest has
+      // advanced to a new content/map pair. Never combine those revisions: a
+      // stale generated offset can still map successfully, but to a plausible
+      // and wrong authored line. Drop that one response and let the targeted
+      // ScriptInfo reload + refreshDiagnostics query the new Program.
+      const publishedReady = targetStore.readyFile(diagnosticFile.fileName);
+      if (publishedReady === undefined) {
+        return undefined;
+      }
+      const publishedVersion = `${publishedReady.version}:${publishedReady.content_hash}`;
+      const diagnosticVersion = (
+        diagnosticFile as tsModule.SourceFile & { readonly version?: unknown }
+      ).version;
+      if (typeof diagnosticVersion === "string") {
+        if (diagnosticVersion !== publishedVersion) return undefined;
+      } else {
+        // `SourceFile.version` is present on real language-service Programs but
+        // not declared on the public SourceFile type and absent from some test
+        // or third-party hosts. Preserve correctness there with a byte check.
+        const publishedCompanionText = targetRuntime.readCompanion(diagnosticFile.fileName);
+        if (
+          publishedCompanionText === undefined ||
+          diagnosticFile.text !== publishedCompanionText
+        ) {
+          return undefined;
+        }
+      }
       const mapped = remapCarrierSpan(
         targetStore,
         diagnosticFile.fileName,
         { start: diagnostic.start, length: diagnostic.length },
-        targetRuntime.readCompanion,
+        () => diagnosticFile.text,
         targetRuntime.readSource,
       );
       if (mapped === null) {
         return undefined;
       }
       const sourceText = targetRuntime.readSource(mapped.fileName);
+      const programSourceFile = program.getSourceFile(mapped.fileName);
+      // In the internal source-identity topology, a Program SourceFile named
+      // `Comp.vue` / `Comp.svelte` can contain the generated projection. The
+      // mapped span below is measured against the AUTHORED source, so attaching
+      // it to that generated SourceFile makes tsserver serialize its line/column
+      // through the wrong line table. Reuse the Program object only when its
+      // bytes exactly match the current editor/disk snapshot; otherwise create
+      // the diagnostic SourceFile from the authored bytes, as Volar/Svelte do at
+      // their raw-source response boundary.
       const sourceFile =
-        program.getSourceFile(mapped.fileName) ??
-        (sourceText === undefined
-          ? undefined
-          : ts.createSourceFile(
-              mapped.fileName,
-              sourceText,
-              ts.ScriptTarget.Latest,
-              true,
-              ts.ScriptKind.TSX,
-            ));
+        programSourceFile !== undefined &&
+        (sourceText === undefined || programSourceFile.text === sourceText)
+          ? programSourceFile
+          : sourceText === undefined
+            ? undefined
+            : ts.createSourceFile(
+                mapped.fileName,
+                sourceText,
+                ts.ScriptTarget.Latest,
+                true,
+                ts.ScriptKind.TSX,
+              );
       if (sourceFile === undefined) {
         return undefined;
       }
@@ -1672,7 +2046,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) {
           return { spans: [], endOfLineState: 0 as tsModule.EndOfLineState };
         }
-        if (!isVue(fileName)) {
+        if (!usesEditorCarrierRouting(fileName)) {
           return _getEncodedSemanticClassifications(fileName, span, format);
         }
         const routed = editorCarrierSelection(fileName, {
@@ -1718,7 +2092,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     if (_getDocumentHighlights) {
       languageService.getDocumentHighlights = (fileName, position, filesToSearch) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-        if (!isVue(fileName)) {
+        if (!usesEditorCarrierRouting(fileName)) {
           return _getDocumentHighlights(fileName, position, filesToSearch);
         }
         const routed = editorCarrierPosition(fileName, position);
@@ -1968,7 +2342,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       languageService.getDefinitionAndBoundSpan.bind(languageService);
     languageService.getDefinitionAndBoundSpan = (fileName, position) => {
       if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-      if (isVue(fileName)) {
+      if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
         const result = routed.runtime.languageService.getDefinitionAndBoundSpan(
@@ -2023,7 +2397,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _getDefinitionAtPosition = languageService.getDefinitionAtPosition.bind(languageService);
     languageService.getDefinitionAtPosition = (fileName, position) => {
       if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-      if (isVue(fileName)) {
+      if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         return routed === null
           ? undefined
@@ -2071,7 +2445,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       languageService.getTypeDefinitionAtPosition.bind(languageService);
     languageService.getTypeDefinitionAtPosition = (fileName, position) => {
       if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-      if (isVue(fileName)) {
+      if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         return routed === null
           ? undefined
@@ -2105,7 +2479,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const _getQuickInfoAtPosition = languageService.getQuickInfoAtPosition.bind(languageService);
     languageService.getQuickInfoAtPosition = (fileName, position) => {
       if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-      if (isVue(fileName)) {
+      if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
         const quickInfo = routed.runtime.languageService.getQuickInfoAtPosition(
@@ -2179,7 +2553,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       data,
     ) => {
       if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-      if (isVue(fileName)) {
+      if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
         const result = routed.runtime.languageService.getCompletionEntryDetails(
@@ -2311,7 +2685,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     ) => {
       let result: tsModule.CompletionInfo | undefined;
       if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-      if (isVue(fileName)) {
+      if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
         const scriptOwned = isInsideSfcScript(routed.runtime.readSource(fileName), position);
@@ -2461,7 +2835,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     if (_getReferencesAtPosition) {
       languageService.getReferencesAtPosition = (fileName, position) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierPosition(fileName, position);
           if (routed === null) return undefined;
           const queryReferences = routed.runtime.sourceFeatures.getReferencesAtPosition;
@@ -2514,7 +2888,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     if (_findReferences) {
       languageService.findReferences = (fileName, position) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierPosition(fileName, position);
           if (routed === null) return undefined;
           const queryReferences = routed.runtime.sourceFeatures.findReferences;
@@ -2591,7 +2965,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     if (_getImplementationAtPosition) {
       languageService.getImplementationAtPosition = (fileName, position) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierPosition(fileName, position);
           return routed === null
             ? undefined
@@ -2624,7 +2998,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             localizedErrorMessage: "The selected type provider owns this framework source.",
           };
         }
-        if (!isVue(fileName)) {
+        if (!usesEditorCarrierRouting(fileName)) {
           return _getRenameInfo(fileName, position, preferences);
         }
         const routed = editorCarrierPosition(fileName, position);
@@ -2668,7 +3042,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         preferences?: tsModule.UserPreferences | boolean,
       ) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierPosition(fileName, position);
           if (routed === null) return undefined;
           const queryRenameLocations = routed.runtime.sourceFeatures.findRenameLocations;
@@ -2750,7 +3124,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         includeInteractiveActions,
       ) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return [];
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierSelection(fileName, positionOrRange);
           if (routed === null) return [];
           return routed.runtime.languageService.getApplicableRefactors(
@@ -2784,7 +3158,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         preferences,
       ) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return [];
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierSelection(fileName, { pos: start, end });
           if (routed === null || typeof routed.selection === "number") return [];
           return routed.runtime.languageService.getCodeFixesAtPosition(
@@ -2847,7 +3221,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         interactiveRefactorArguments,
       ) => {
         if (editorYieldsCarrierSourceFeatures(fileName)) return undefined;
-        if (isVue(fileName)) {
+        if (usesEditorCarrierRouting(fileName)) {
           const routed = editorCarrierSelection(fileName, positionOrRange);
           if (routed === null) return undefined;
           return routed.runtime.languageService.getEditsForRefactor(
@@ -2912,9 +3286,17 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   // environment fallback for a project `create` has not yet seen.
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const projectKey = project.getProjectName();
-    const editorOwnsMembership =
-      processEditorOwnsCarrierMembershipByProject.get(projectKey) ??
-      editorOwnsCarrierMembership(processCurrentConfig);
+    const canonical = (fileName: string) => {
+      const normalized = normalizePath(fileName);
+      return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
+    };
+    const activeSources = new Set(
+      (processActiveCarrierSourcesByProject.get(projectKey) ?? []).map(canonical),
+    );
+    const editorOwnsMembership = processStoreDirByProject.has(projectKey)
+      ? (processEditorOwnsCarrierMembershipByProject.get(projectKey) ??
+        editorOwnsCarrierMembership(processCurrentConfig))
+      : editorOwnsCarrierMembership(processCurrentConfig);
     if (editorOwnsMembership) {
       const storeDir =
         processStoreDirByProject.get(projectKey) ?? resolveCarrierStoreDir(undefined);
@@ -2923,78 +3305,40 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         projectKey,
         ts.sys.useCaseSensitiveFileNames,
       );
-      const out = store.isAvailable() ? store.readyIdeCompanions() : [];
+      const candidates = store.isAvailable()
+        ? store
+            .readyIdeSources()
+            .filter((source) => activeSources.has(canonical(source)))
+            .flatMap((source) => {
+              const companion = store.companionForSource(source);
+              return companion !== undefined && store.readyFile(companion) !== undefined
+                ? [companion]
+                : [];
+            })
+        : [];
+      const out = [...new Map(candidates.map((root) => [canonical(root), root])).values()];
       project.projectService.logger.info(
         `[Verter] getExternalFiles(${projectKey}): editor owns sources; ${out.length} companion root(s)`,
       );
       return out;
     }
-    const recorded = processStoreDirByProject.get(projectKey);
-    const storeDir = recorded ?? resolveCarrierStoreDir(undefined);
-    // The reader is scoped to this project, so only its ready source identities
-    // are admitted — never a sibling tsconfig's carriers.
+    const storeDir = processStoreDirByProject.get(projectKey) ?? resolveCarrierStoreDir(undefined);
+    // The reader is scoped to this configured project, never a sibling tsconfig.
     const store = new DiskCarrierStoreReader(
       storeDir,
       projectKey,
       ts.sys.useCaseSensitiveFileNames,
     );
-    if (!store.isAvailable()) {
-      return [];
-    }
-    // VS Code registers the contributed framework languages as extra file
-    // extensions, so matching carriers are already configured-project roots.
-    // Returning one of those same paths again as a plugin external file makes
-    // TypeScript 6 acquire two documents for one identity and can trip
-    // ProjectService.setDocument while an open file is reassigned. External
-    // files are only the ready carriers the project does not already own.
-    const canonical = (fileName: string) => {
-      const normalized = normalizePath(fileName);
-      return ts.sys.useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
-    };
-    // TypeScript includes plugin externals in `getRootFiles()` after the first
-    // graph build. Subtract exactly the prior external set to recover the true
-    // configured-root baseline; filtering the live roots directly would make an
-    // external retract itself on the next call and oscillate the graph.
-    const priorExternals = priorNonEditorExternalsByProject.get(project) ?? new Set<string>();
-    const configuredRoots = new Set(
-      project
-        .getRootFiles()
-        .map(canonical)
-        .filter((root) => !priorExternals.has(root)),
-    );
-    // Advertise BOTH identities of every ready carrier:
-    // - the SOURCE identity, so host hooks substitute its generated content
-    //   without a second document identity;
-    // - the COMPANION identity (`{carrier}.tsx`/`.jsx`), so the configured
-    //   project KEEPS the companion the Rust host opened. Without a companion
-    //   root, the open companion's membership is transient: any project
-    //   structure reload (reloadProjects, tsconfig recompute) drops it into a
-    //   per-file inferred project, and every projectFileName-targeted query
-    //   then fails closed ("Could not find source file"). Companions are
-    //   distinct paths from their sources, so the double-identity hazard above
-    //   does not apply to them.
-    const sources = store
-      .readyIdeSources()
-      .filter((source) => !configuredRoots.has(canonical(source)));
-    const companions = store
-      .readyIdeCompanions()
-      .filter((companion) => !configuredRoots.has(canonical(companion)));
-    // Dedupe on the canonical key, not the raw string: on a case-insensitive
-    // host the store can surface case-variant spellings of one identity (e.g.
-    // drive-letter case), and raw-string dedupe would advertise both — the
-    // double-identity hazard above.
-    const seen = new Set<string>();
-    const out = [...sources, ...companions].filter((file) => {
-      const key = canonical(file);
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
-    });
-    priorNonEditorExternalsByProject.set(project, new Set(out.map(canonical)));
+    // Match official Volar/Svelte ownership: only the explicit authored-source
+    // working set becomes external roots. Imported carriers enter the Program
+    // through ordinary module resolution; background publication alone must
+    // never turn every workspace carrier into a configured-project root.
+    const candidates = store.isAvailable()
+      ? store.readyIdeSources().filter((source) => activeSources.has(canonical(source)))
+      : [];
+    const out = [...new Map(candidates.map((root) => [canonical(root), root])).values()];
     project.projectService.logger.info(
-      `[Verter] getExternalFiles(${projectKey}): ${sources.length} ready carrier source(s), ${companions.length} companion(s)`,
+      `[Verter] getExternalFiles(${projectKey}): ${out.length} framework source root(s)`,
     );
     return out;
   };

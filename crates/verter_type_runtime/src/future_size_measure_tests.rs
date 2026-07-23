@@ -247,7 +247,7 @@ async fn measure_type_runtime_future_sizes() {
         let fut: ProviderFuture<'_, serde_json::Value> = Box::pin(async move {
             synthetic_timeout_oneshot()
                 .await
-                .map_err(|e| crate::protocol::TypeProviderError::new(e))
+                .map_err(crate::protocol::TypeProviderError::new)
         });
         report(
             "Box::pin(timeout+oneshot) ProviderFuture",

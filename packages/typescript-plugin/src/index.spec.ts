@@ -214,6 +214,16 @@ function createInfo(
     markAsDirty: () => {},
     refreshDiagnostics: () => {},
   };
+  const rootScriptInfos = new Set<unknown>();
+  project.isRoot = (scriptInfo: unknown) => rootScriptInfos.has(scriptInfo);
+  project.addRoot = (scriptInfo: unknown) => {
+    rootScriptInfos.add(scriptInfo);
+    project.markAsDirty();
+  };
+  project.removeFile = (scriptInfo: unknown) => {
+    rootScriptInfos.delete(scriptInfo);
+    project.markAsDirty();
+  };
 
   return {
     config: storeDir === undefined ? undefined : { carrierStoreDir: storeDir },
@@ -340,7 +350,10 @@ describe("editor tsserver attestation", () => {
 
     const commandReceiver = init({ typescript: ts } as any);
     commandReceiver.create(createInfo(undefined, { diskFiles: {} }, "/dev/null/inferredProject1*"));
-    commandReceiver.onConfigurationChanged!({ carrierStoreDir: directory });
+    commandReceiver.onConfigurationChanged!({
+      carrierStoreDir: directory,
+      activeCarrierSources: ["d:/ws/src/A.vue"],
+    });
 
     expect(configured.getExternalFiles!(configuredInfo.project, 0 as any)).toContain(
       "d:/ws/src/A.vue",
@@ -351,6 +364,104 @@ describe("editor tsserver attestation", () => {
 });
 
 describe("host-proxy matrix: getScriptSnapshot", () => {
+  it("advances only the active managed ScriptInfo from a published store version", async () => {
+    const source = "d:/ws/src/A.vue";
+    const raw = "<template>{{ value }}</template>";
+    const generated = "const value: string = missingName;\n";
+    const cold = vueAndSvelteManifest();
+    cold.projects["d:/ws/tsconfig.json"].ready_files = {};
+    const dir = track(writeStore(cold, {}));
+    const info = createInfo(dir, { diskFiles: { [source]: raw } });
+    let scriptText = raw;
+    let editCount = 0;
+    const scriptInfo = {
+      fileName: source,
+      isScriptOpen: () => true,
+      getSnapshot: () => ts.ScriptSnapshot.fromString(scriptText),
+      editContent: (start: number, end: number, text: string) => {
+        scriptText = scriptText.slice(0, start) + text + scriptText.slice(end);
+        editCount += 1;
+      },
+      reloadFromFile: () => false,
+      positionToLineOffset: (position: number) => ({ line: 1, offset: position + 1 }),
+      lineOffsetToPosition: (_line: number, offset: number) => offset - 1,
+    };
+    info.project.projectService.getScriptInfo = (fileName: string) =>
+      fileName === source ? scriptInfo : undefined;
+    info.project.projectService.getOrCreateScriptInfoForNormalizedPath = (fileName: string) =>
+      fileName === source ? scriptInfo : undefined;
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const ready = vueAndSvelteManifest();
+    ready.epoch = 2;
+    writeFileSync(join(dir, "blobs/A.vue.tsx"), generated, "utf8");
+    writeFileSync(join(dir, "blobs/W.svelte.tsx"), "export {};\n", "utf8");
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(ready), "utf8");
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      carrierStoreRefreshToken: 1,
+      activeCarrierSources: [source],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(scriptText).toBe(generated);
+    expect(editCount).toBe(1);
+  });
+
+  it("serializes managed carrier protocol positions against the current generated version", async () => {
+    const source = "d:/ws/src/A.vue";
+    const raw = "<template>{{ value }}</template>";
+    const generated = ["/* generated preamble */", "const value = 1;", "unknownValue;", ""].join(
+      "\n",
+    );
+    const dir = track(
+      writeStore(vueAndSvelteManifest(), {
+        "blobs/A.vue.tsx": generated,
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: { [source]: raw } });
+    const scriptInfo = {
+      fileName: source,
+      positionToLineOffset: (position: number) => ({ line: 1, offset: position + 1 }),
+      lineOffsetToPosition: (_line: number, offset: number) => offset - 1,
+    };
+    info.project.projectService.getScriptInfo = (fileName: string) =>
+      fileName === source ? scriptInfo : undefined;
+
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const snapshot = info.languageServiceHost.getScriptSnapshot(source);
+    expect(snapshot.getText(0, snapshot.getLength())).toBe(generated);
+    const generatedOffset = generated.indexOf("unknownValue");
+    expect(scriptInfo.positionToLineOffset(generatedOffset)).toEqual({ line: 3, offset: 1 });
+    expect(scriptInfo.lineOffsetToPosition(3, 1)).toBe(generatedOffset);
+
+    const nextGenerated = "/* v2 */\r\nconst astral = '𝕏';\r\nnextUnknown;\r\n";
+    const nextManifest = vueAndSvelteManifest();
+    nextManifest.epoch = 2;
+    nextManifest.projects["d:/ws/tsconfig.json"].ready_files[`${source}.tsx`] = {
+      content_hash: "a2",
+      version: 6,
+      script_kind: "TSX",
+      role: "CarrierIde",
+      map_hash: "0",
+      blob_rel: "blobs/A-v2.vue.tsx",
+    };
+    writeFileSync(join(dir, "blobs/A-v2.vue.tsx"), nextGenerated, "utf8");
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(nextManifest), "utf8");
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      carrierStoreRefreshToken: 2,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const nextOffset = nextGenerated.indexOf("nextUnknown");
+    expect(scriptInfo.positionToLineOffset(nextOffset)).toEqual({ line: 3, offset: 1 });
+    expect(scriptInfo.lineOffsetToPosition(3, 1)).toBe(nextOffset);
+  });
+
   it("delegates companion snapshot and version requests through the project host lifecycle", () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
@@ -628,6 +739,16 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     expect(snapshot.getText(0, snapshot.getLength())).toBe(
       "export default class W { declare $props: { label: string } }",
     );
+
+    const selfImport = info.languageServiceHost.resolveModuleNameLiterals(
+      [{ text: "./W.svelte.verter.js" }],
+      "d:/ws/src/W.svelte.tsx",
+      undefined,
+      {},
+      undefined,
+    )[0]?.resolvedModule;
+    expect(selfImport?.resolvedFileName).toBe("d:/ws/src/W.svelte.verter.ts");
+    expect(selfImport?.extension).toBe(ts.Extension.Ts);
   });
 
   it("resolves the Svelte projection JSX runtime from the plugin-owned package", () => {
@@ -752,8 +873,8 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
   });
 });
 
-describe("getExternalFiles = ready carrier source + companion identities", () => {
-  it("returns source and companion identities backed by ready IDE carriers", () => {
+describe("getExternalFiles carrier working-set ownership", () => {
+  it("advertises only active ready framework sources, never warmed storage identities", () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
         "blobs/A.vue.tsx": "x",
@@ -761,22 +882,20 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
       }),
     );
     const info = createInfo(dir, { diskFiles: {} });
+    info.config = {
+      carrierStoreDir: dir,
+      activeCarrierSources: ["d:/ws/src/A.vue"],
+    };
     const plugin = init({ typescript: ts } as any);
     // `create` records the store dir for the project before getExternalFiles.
     plugin.create(info);
 
-    // The opened source stays the project member while host hooks substitute its
-    // ready generated carrier content. The companion must ALSO be advertised:
-    // without companion roots, tsserver attaches the Rust-opened companion only
-    // transiently and any project reload evicts it into an inferred project,
-    // breaking every projectFileName-targeted query.
+    // Match official Volar/Svelte host architecture: the authored working set
+    // owns Program roots. W.svelte is ready in the background store but is not
+    // active and must not inflate this configured project.
     const files = plugin.getExternalFiles!(info.project, 0 as any);
-    expect(files.sort()).toEqual([
-      "d:/ws/src/A.vue",
-      "d:/ws/src/A.vue.tsx",
-      "d:/ws/src/W.svelte",
-      "d:/ws/src/W.svelte.tsx",
-    ]);
+    expect(files).toEqual(["d:/ws/src/A.vue"]);
+    expect(files).not.toContain("d:/ws/src/W.svelte");
     // B.vue is owned but not ready, so neither identity may be advertised.
     expect(files).not.toContain("d:/ws/src/B.vue");
     expect(files).not.toContain("d:/ws/src/B.vue.tsx");
@@ -789,7 +908,7 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual([]);
   });
 
-  it("does not re-advertise framework sources that are already configured roots", () => {
+  it("does not turn background-ready carriers into configured-project roots", () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
         "blobs/A.vue.tsx": "export const A = 1;",
@@ -797,15 +916,14 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
       }),
     );
     const info = createInfo(dir, { diskFiles: {} });
-    info.project.getRootFiles = () => ["D:\\ws\\src\\A.vue"];
+    info.config = {
+      carrierStoreDir: dir,
+      activeCarrierSources: [],
+    };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    expect(plugin.getExternalFiles!(info.project, 0 as any).sort()).toEqual([
-      "d:/ws/src/A.vue.tsx",
-      "d:/ws/src/W.svelte",
-      "d:/ws/src/W.svelte.tsx",
-    ]);
+    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual([]);
   });
 
   it("collapses case-variant spellings of one identity on a case-insensitive host", () => {
@@ -823,6 +941,11 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     });
     const dir = track(writeStore(manifest, { "blobs/A.vue.tsx": "x" }));
     const info = createInfo(dir, { diskFiles: {} });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/src/A.vue"],
+    };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
@@ -833,8 +956,8 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     sys.useCaseSensitiveFileNames = false;
     try {
       const files = plugin.getExternalFiles!(info.project, 0 as any);
-      const aIdentities = files.filter((file) => file.toLowerCase() === "d:/ws/src/a.vue");
-      expect(aIdentities).toEqual(["d:/ws/src/A.vue"]);
+      const aIdentities = files.filter((file) => file.toLowerCase() === "d:/ws/src/a.vue.tsx");
+      expect(aIdentities).toEqual(["d:/ws/src/A.vue.tsx"]);
     } finally {
       sys.useCaseSensitiveFileNames = original;
     }
@@ -850,10 +973,15 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
       }),
     );
     const info = createInfo(dir, { diskFiles: {} });
+    info.config = {
+      carrierStoreDir: dir,
+      activeCarrierSources: ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"],
+    };
     let graphRoots: string[] = [];
     info.project.getRootFiles = () => graphRoots;
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
+    plugin.onConfigurationChanged!(info.config);
 
     const first = plugin.getExternalFiles!(info.project, 0 as any).sort();
     graphRoots = [...first];
@@ -861,12 +989,7 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     graphRoots = [...second];
     const third = plugin.getExternalFiles!(info.project, 0 as any).sort();
 
-    expect(first).toEqual([
-      "d:/ws/src/A.vue",
-      "d:/ws/src/A.vue.tsx",
-      "d:/ws/src/W.svelte",
-      "d:/ws/src/W.svelte.tsx",
-    ]);
+    expect(first).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
     expect(second).toEqual(first);
     expect(third).toEqual(first);
   });
@@ -882,6 +1005,7 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"],
     };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
@@ -907,6 +1031,7 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/src/A.vue"],
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
     };
     init({ typescript: ts } as any).create(info);
@@ -930,6 +1055,7 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     info.config = {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/src/A.vue"],
     };
     init({ typescript: ts } as any).create(info);
 
@@ -959,6 +1085,48 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     expect(diagnostics).toBe(0);
   });
 
+  it("does not rebuild or diagnose for an inactive background carrier publication", async () => {
+    const initial = vueAndSvelteManifest();
+    const dir = track(
+      writeStore(initial, {
+        "blobs/A.vue.tsx": "export const active = true;",
+        "blobs/W.svelte.tsx": "export const warmed = 1;",
+      }),
+    );
+    const info = createInfo(dir, { diskFiles: {} });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/src/A.vue"],
+      carrierStoreRefreshToken: 1,
+    };
+    let dirty = 0;
+    let diagnostics = 0;
+    info.project.markAsDirty = () => dirty++;
+    info.project.refreshDiagnostics = () => diagnostics++;
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const next = vueAndSvelteManifest();
+    next.epoch = initial.epoch + 1;
+    next.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/W.svelte.tsx"] = {
+      ...next.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/W.svelte.tsx"],
+      content_hash: "warmed-2",
+      version: 2,
+    };
+    writeFileSync(join(dir, "blobs/W.svelte.tsx"), "export const warmed = 2;", "utf8");
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(next), "utf8");
+    plugin.onConfigurationChanged!({
+      ...info.config,
+      carrierStoreRefreshToken: 2,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(dirty).toBe(0);
+    expect(diagnostics).toBe(0);
+    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["d:/ws/src/A.vue.tsx"]);
+  });
+
   it("rebinds an already-created editor project without refreshing inside the configure request", async () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
@@ -975,13 +1143,14 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     plugin.create(info);
     expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual([]);
 
-    plugin.onConfigurationChanged!({ carrierStoreDir: dir });
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      activeCarrierSources: ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"],
+    });
 
     expect(plugin.getExternalFiles!(info.project, 0 as any).sort()).toEqual([
       "d:/ws/src/A.vue",
-      "d:/ws/src/A.vue.tsx",
       "d:/ws/src/W.svelte",
-      "d:/ws/src/W.svelte.tsx",
     ]);
     const snap = info.languageServiceHost.getScriptSnapshot("d:/ws/src/A.vue");
     expect(snap.getText(0, snap.getLength())).toBe("x");
@@ -990,11 +1159,11 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
 
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(dirty).toBe(1);
-    expect(diagnostics).toBe(1);
+    expect(dirty).toBe(2);
+    expect(diagnostics).toBe(0);
   });
 
-  it("reloads only the configured project's external roots after reconfiguration", async () => {
+  it("reconciles store companions as explicit configured-project roots", async () => {
     const dir = track(
       writeStore(vueAndSvelteManifest(), {
         "blobs/A.vue.tsx": "x",
@@ -1003,6 +1172,18 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     );
     const info = createInfo(undefined, { diskFiles: {} });
     info.project.getConfigFilePath = () => "d:/ws/tsconfig.json";
+    const addedRoots: string[] = [];
+    const roots = new Set<{ fileName: string }>();
+    const removedRoots: string[] = [];
+    info.project.isRoot = (scriptInfo: { fileName: string }) => roots.has(scriptInfo);
+    info.project.addRoot = (scriptInfo: { fileName: string }) => {
+      roots.add(scriptInfo);
+      addedRoots.push(scriptInfo.fileName);
+    };
+    info.project.removeFile = (scriptInfo: { fileName: string }) => {
+      roots.delete(scriptInfo);
+      removedRoots.push(scriptInfo.fileName);
+    };
     let targetedReloads = 0;
     let globalReloads = 0;
     info.project.projectService.reloadFileNamesOfConfiguredProject = (project: unknown) => {
@@ -1014,16 +1195,70 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    plugin.onConfigurationChanged!({ carrierStoreDir: dir });
+    const activeCarrierSources = ["d:/ws/src/A.vue", "d:/ws/src/W.svelte"];
+    plugin.onConfigurationChanged!({ carrierStoreDir: dir, activeCarrierSources });
     expect(targetedReloads).toBe(0);
 
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(targetedReloads).toBe(1);
+    expect(addedRoots.sort()).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(targetedReloads).toBe(0);
+    expect(globalReloads).toBe(0);
+
+    const retracted = vueAndSvelteManifest();
+    retracted.epoch = 2;
+    retracted.projects["d:/ws/tsconfig.json"].ready_files = {};
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(retracted), "utf8");
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      carrierStoreRefreshToken: 1,
+      activeCarrierSources,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(removedRoots.sort()).toEqual(["d:/ws/src/A.vue", "d:/ws/src/W.svelte"]);
+    expect(targetedReloads).toBe(0);
     expect(globalReloads).toBe(0);
   });
 
-  it("reloads a configured project when a same-directory carrier publication advances", async () => {
+  it("activates a carrier published after the working-set signal without a protocol open", async () => {
+    const manifest = vueAndSvelteManifest();
+    manifest.projects["d:/ws/tsconfig.json"].ready_files = {};
+    const dir = track(writeStore(manifest, {}));
+    const info = createInfo(undefined, { diskFiles: {} });
+    info.project.getConfigFilePath = () => "d:/ws/tsconfig.json";
+    const addedRoots: string[] = [];
+    const roots = new Set<{ fileName: string }>();
+    info.project.isRoot = (scriptInfo: { fileName: string }) => roots.has(scriptInfo);
+    info.project.addRoot = (scriptInfo: { fileName: string }) => {
+      roots.add(scriptInfo);
+      addedRoots.push(scriptInfo.fileName);
+    };
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    const activeCarrierSources = ["d:/ws/src/A.vue"];
+    plugin.onConfigurationChanged!({ carrierStoreDir: dir, activeCarrierSources });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(addedRoots).toEqual([]);
+
+    const published = vueAndSvelteManifest();
+    published.epoch = 2;
+    writeFileSync(join(dir, "blobs/A.vue.tsx"), "export const A = 1;", "utf8");
+    writeFileSync(join(dir, "blobs/W.svelte.tsx"), "export const W = 1;", "utf8");
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(published), "utf8");
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      carrierStoreRefreshToken: 1,
+      activeCarrierSources,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(addedRoots).toEqual(["d:/ws/src/A.vue"]);
+    expect(plugin.getExternalFiles!(info.project, 0 as any)).toEqual(["d:/ws/src/A.vue"]);
+  });
+
+  it("reloads only the changed companion snapshot when a publication advances", async () => {
     const initial = vueAndSvelteManifest();
     const dir = track(
       writeStore(initial, {
@@ -1045,7 +1280,7 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
       refreshOrder.push("clear-resolution-cache");
     };
     info.project.projectService.getScriptInfo = (fileName: string) =>
-      fileName === "d:/ws/src/A.vue.tsx"
+      fileName === "d:/ws/src/A.vue"
         ? {
             reloadFromFile: () => {
               reloadedScriptInfos.push(fileName);
@@ -1063,9 +1298,10 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
-    const companion = "d:/ws/src/A.vue.tsx";
-    expect(info.languageServiceHost.getScriptVersion(companion)).toBe("5:a1");
-    const stale = info.languageServiceHost.getScriptSnapshot(companion);
+    const source = "d:/ws/src/A.vue";
+    const companion = `${source}.tsx`;
+    expect(info.languageServiceHost.getScriptVersion(source)).toBe("5:a1");
+    const stale = info.languageServiceHost.getScriptSnapshot(source);
     expect(stale.getText(0, stale.getLength())).toBe("export const value = 'stale';");
 
     const published = vueAndSvelteManifest();
@@ -1088,16 +1324,11 @@ describe("getExternalFiles = ready carrier source + companion identities", () =>
     expect(targetedReloads).toBe(0);
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(targetedReloads).toBe(1);
-    expect(reloadedScriptInfos).toEqual([companion]);
-    expect(refreshOrder).toEqual([
-      "clear-resolution-cache",
-      "reload-script-info",
-      "reload-project-files",
-      "diagnostics",
-    ]);
-    expect(info.languageServiceHost.getScriptVersion(companion)).toBe("5:a2");
-    const fresh = info.languageServiceHost.getScriptSnapshot(companion);
+    expect(targetedReloads).toBe(0);
+    expect(reloadedScriptInfos).toEqual([source]);
+    expect(refreshOrder).toEqual(["clear-resolution-cache", "reload-script-info"]);
+    expect(info.languageServiceHost.getScriptVersion(source)).toBe("5:a2");
+    const fresh = info.languageServiceHost.getScriptSnapshot(source);
     expect(fresh.getText(0, fresh.getLength())).toBe("export const value = 'fresh';");
   });
 
@@ -1373,6 +1604,16 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     // Two per-project plugin instances, each `create`d for its own tsconfig.
     const infoA = createInfo(dir, { diskFiles: {} }, "d:/ws/a/tsconfig.json");
     const infoB = createInfo(dir, { diskFiles: {} }, "d:/ws/b/tsconfig.json");
+    infoA.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/a/src/A.vue"],
+    };
+    infoB.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      activeCarrierSources: ["d:/ws/b/src/B.svelte"],
+    };
     const pluginA = init({ typescript: ts } as any);
     const pluginB = init({ typescript: ts } as any);
     pluginA.create(infoA);
@@ -1382,14 +1623,14 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     const filesB = pluginB.getExternalFiles!(infoB.project, 0 as any);
 
     // Project A sees ONLY its Vue carrier; project B sees ONLY its Svelte carrier.
-    expect(filesA).toEqual(["d:/ws/a/src/A.vue", "d:/ws/a/src/A.vue.tsx"]);
-    expect(filesB).toEqual(["d:/ws/b/src/B.svelte", "d:/ws/b/src/B.svelte.tsx"]);
+    expect(filesA).toEqual(["d:/ws/a/src/A.vue.tsx"]);
+    expect(filesB).toEqual(["d:/ws/b/src/B.svelte.tsx"]);
     // The leak the fix closes: neither project advertises the OTHER's carrier.
     expect(filesA).not.toContain("d:/ws/b/src/B.svelte");
     expect(filesB).not.toContain("d:/ws/a/src/A.vue");
   });
 
-  it("a single plugin instance, queried for a DIFFERENT project, scopes to that project", () => {
+  it("a project without an explicit working-set signal advertises no carrier roots", () => {
     // `getExternalFiles` may be called for a project this plugin instance has
     // not `create`d (the env-fallback path); it still scopes by the project arg.
     const dir = track(
@@ -1400,19 +1641,28 @@ describe("getExternalFiles is project-scoped (no cross-tsconfig leak)", () => {
     );
     process.env.VERTER_CARRIER_STORE_DIR = dir;
     const info = createInfo(dir, { diskFiles: {} }, "d:/ws/a/tsconfig.json");
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+    };
     const plugin = init({ typescript: ts } as any);
     plugin.create(info);
 
     // Query for project B via a project stub carrying B's name — the store dir
     // comes from the env fallback (B was never `create`d on this instance).
+    plugin.onConfigurationChanged!(info.config);
     const projectB: any = {
       getProjectName: () => "d:/ws/b/tsconfig.json",
       getRootFiles: () => [],
       getFileNames: () => [],
-      projectService: { logger: { info: () => {} } },
+      projectService: {
+        logger: { info: () => {} },
+        getScriptInfo: (fileName: string) =>
+          fileName === "d:/ws/b/src/B.svelte.tsx" ? { isScriptOpen: () => true } : undefined,
+      },
     };
     const filesB = plugin.getExternalFiles!(projectB, 0 as any);
-    expect(filesB).toEqual(["d:/ws/b/src/B.svelte", "d:/ws/b/src/B.svelte.tsx"]);
+    expect(filesB).toEqual([]);
     expect(filesB).not.toContain("d:/ws/a/src/A.vue");
   });
 
@@ -1715,6 +1965,53 @@ describe("editor-owned source diagnostic routing", () => {
       code: 6133,
       reportsUnnecessary: true,
     });
+  });
+
+  // Non-editor hosts use the authored carrier path as the generated Program
+  // identity. Editor-only companion routing must never intercept that path.
+  it("passes non-editor carrier-source semantic features through to the configured Program", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: "const foo = 1;\n" } });
+    const requests: Array<{ method: string; fileName: string; position: number }> = [];
+    const quickInfo = {
+      kind: ts.ScriptElementKind.constElement,
+      kindModifiers: "",
+      textSpan: { start: 6, length: 3 },
+      displayParts: [{ kind: "text", text: "const foo: number" }],
+    };
+    info.languageService.__lsImpl = {
+      getQuickInfoAtPosition: (fileName: string, position: number) => {
+        requests.push({ method: "quickInfo", fileName, position });
+        return quickInfo;
+      },
+      getCompletionsAtPosition: (fileName: string, position: number) => {
+        requests.push({ method: "completions", fileName, position });
+        return { entries: [], isGlobalCompletion: false, isMemberCompletion: false };
+      },
+      getDefinitionAtPosition: (fileName: string, position: number) => {
+        requests.push({ method: "definition", fileName, position });
+        return [];
+      },
+    };
+
+    init({ typescript: ts } as any).create(info);
+
+    expect(info.languageService.getQuickInfoAtPosition(sourcePath, 6)).toEqual(quickInfo);
+    expect(info.languageService.getCompletionsAtPosition(sourcePath, 6, {})).toMatchObject({
+      entries: [],
+    });
+    expect(info.languageService.getDefinitionAtPosition(sourcePath, 6)).toEqual([]);
+    expect(requests).toEqual(
+      expect.arrayContaining([
+        { method: "quickInfo", fileName: sourcePath, position: 6 },
+        { method: "completions", fileName: sourcePath, position: 6 },
+        { method: "definition", fileName: sourcePath, position: 6 },
+      ]),
+    );
+    expect(
+      requests.every(({ fileName, position }) => fileName === sourcePath && position === 6),
+    ).toBe(true);
   });
 
   it("queries the ready companion and maps its diagnostic onto the source file", () => {
@@ -2030,6 +2327,119 @@ describe("editor-owned source diagnostic routing", () => {
       start: 6,
       length: 3,
     });
+  });
+
+  it("does not attach mapped diagnostics to a generated Program impostor under the source identity", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText = "const foo = 1;\n";
+    const companionText = mappableBlobs()["blobs/A.vue.tsx"];
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+    const companionFile = ts.createSourceFile(
+      companionPath,
+      companionText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    // A source-identity Program may contain the generated projection. Reusing
+    // this SourceFile after mapping the span to authored offsets makes VS Code
+    // decode those offsets through the wrong line table.
+    const generatedImpostor = ts.createSourceFile(
+      sourcePath,
+      "\n\n\nconst foo = 1;\n",
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) =>
+        fileName === sourcePath
+          ? generatedImpostor
+          : fileName === companionPath
+            ? companionFile
+            : undefined,
+    });
+    info.languageService.__lsImpl = {
+      getSemanticDiagnostics: () => [
+        {
+          file: companionFile,
+          start: 6,
+          length: 3,
+          category: ts.DiagnosticCategory.Error,
+          code: 2304,
+          messageText: "Cannot find name 'foo'.",
+        },
+      ],
+    };
+    init({ typescript: ts } as any).create(info);
+
+    const diagnostics = info.languageService.getSemanticDiagnostics(sourcePath);
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].file).not.toBe(generatedImpostor);
+    expect(diagnostics[0].file?.fileName).toBe(sourcePath);
+    expect(diagnostics[0].file?.text).toBe(sourceText);
+    expect({ start: diagnostics[0].start, length: diagnostics[0].length }).toEqual({
+      start: 6,
+      length: 3,
+    });
+  });
+
+  it("drops a diagnostic whose Program snapshot predates the published source map", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const sourcePath = "d:/ws/src/A.vue";
+    const companionPath = "d:/ws/src/A.vue.tsx";
+    const sourceText = "const foo = 1;\n";
+    const info = createInfo(dir, { diskFiles: { [sourcePath]: sourceText } });
+    info.config = {
+      carrierStoreDir: dir,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: true,
+    };
+
+    // The manifest/map already describe the latest companion, but TypeScript
+    // can issue the geterr it scheduled for the preceding Program before the
+    // companion ScriptInfo reload runs. Mapping this stale offset through the
+    // latest map would publish a plausible-looking diagnostic on the wrong
+    // source line. The stale result must fail closed; refreshDiagnostics will
+    // ask again after the ScriptInfo advances.
+    const staleCompanionFile = ts.createSourceFile(
+      companionPath,
+      mappableBlobs()["blobs/A.vue.tsx"],
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    );
+    // Language-service SourceFiles carry the exact `getScriptVersion` token
+    // used to build them. Keep the bytes equal to prove revision identity—not
+    // an O(n) content comparison—is what rejects an obsolete Program.
+    (staleCompanionFile as ts.SourceFile & { version: string }).version = "0:old";
+    info.languageService.getProgram = () => ({
+      getSourceFile: (fileName: string) =>
+        fileName === companionPath ? staleCompanionFile : undefined,
+    });
+    info.languageService.__lsImpl = {
+      getSemanticDiagnostics: () => [
+        {
+          file: staleCompanionFile,
+          start: 6,
+          length: 3,
+          category: ts.DiagnosticCategory.Error,
+          code: 2304,
+          messageText: "Cannot find name 'foo'.",
+        },
+      ],
+    };
+    init({ typescript: ts } as any).create(info);
+
+    expect(info.languageService.getSemanticDiagnostics(sourcePath)).toEqual([]);
   });
 
   // @ai-generated - Proves every editor-facing semantic request stays on the configured
@@ -2725,6 +3135,7 @@ describe("editor-owned source diagnostic routing", () => {
       carrierStoreDir: dir,
       [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: false,
+      activeCarrierSources: [sourcePath],
     };
     const requests: string[] = [];
     info.languageService.__lsImpl = {

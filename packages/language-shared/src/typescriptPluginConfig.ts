@@ -34,6 +34,23 @@ export const E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY = "e2eProviderOnlyCompleti
  */
 export const CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY = "carrierStoreRefreshToken";
 
+/**
+ * Snapshot of the internal LSP tsserver's active carrier working set.
+ * Publication and activation are deliberately separate: the manifest may hold
+ * every compiled carrier, while only these authored source identities are
+ * eligible to become configured-project roots. The plugin serves generated
+ * snapshots under those identities, matching official framework plugins.
+ */
+export const ACTIVE_CARRIER_SOURCES_CONFIG_KEY = "activeCarrierSources";
+
+export function activeCarrierSources(
+  config: { readonly [ACTIVE_CARRIER_SOURCES_CONFIG_KEY]?: unknown } | undefined,
+): readonly string[] {
+  const value = config?.[ACTIVE_CARRIER_SOURCES_CONFIG_KEY];
+  if (!Array.isArray(value)) return [];
+  return value.filter((candidate): candidate is string => typeof candidate === "string");
+}
+
 export function editorOwnsCarrierMembership(
   config: { readonly [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]?: unknown } | undefined,
 ): boolean {
