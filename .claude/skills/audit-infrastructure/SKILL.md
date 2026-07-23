@@ -104,14 +104,14 @@ Every public audited entry-point follows the same lifecycle: stamp a request id,
 
 ### LSP
 
-`verter_lsp::audit_harness::run_with_audit(host, method, canonical_id, position, budget, body, populate)` wraps each LSP handler future in:
+`verter_lsp::audit_harness::run_with_audit(host, method, canonical_id, position, body, populate)` wraps each LSP handler future in:
 
 1. An `LspAuditSession` keyed by `LspMethodTag` and the canonical (constructed via `VerterHost::lsp_audit_begin`).
-2. `tokio::time::timeout(budget, body)` driving the per-method budget from `LspMethodTimeoutsConfig`.
-3. `finalize_ok(payload)` on success or `finalize_cancelled()` on timeout (publishing the cancellation marker).
+2. The same explicit `request_deadlines` policy used when audit is disabled. Production defaults every request deadline to zero (unbounded); audit never adds a feature/provider timeout.
+3. `finalize_ok(payload)` on success or RPC error. `audit_supersede` is an observational latency SLO only: exceeding it emits telemetry but does not cancel or alter the response. Explicit client cancellation may still finalize a session with `finalize_cancelled()` through the cancellation lifecycle.
 4. Optional drain to `VERTER_LSP_AUDIT_TRACE_OUT` (JSON-lines append, configurable via env var).
 
-Audit-disabled fast path returns `body.await` directly without any registration cost.
+Audit-disabled fast path runs the body under the identical explicit request-deadline policy without registration cost. The audit-on and audit-off paths are therefore semantically equivalent.
 
 ### MCP
 

@@ -147,6 +147,10 @@ Svelte block projectors consume parser-owned structural spans. In particular, `{
 
 Private component-call checks may map only byte-identical authored tokens. Synthetic scaffolding, quoted/escaped property spellings, rewritten spreads, and transformed directive names stay unmapped. Legacy intrinsic `on:event|modifier={handler}` projects to the lowercase Svelte DOM attribute (`onevent={handler}`); modifiers are runtime listener behavior and never survive as TSX attribute syntax.
 
+The Svelte IDE carrier's public facade inlines the syntactic `$props()` annotation directly into `Component<Props, Exports, Bindings>`. Facade scaffolding stays unmapped; a byte-identical annotation is emitted as one mapped insertion per authored line because V3 source-map state does not carry across generated newlines. This lets tsgo definitions on a public prop land on the authored annotation member without assigning provenance to synthetic facade text. The higher-layer Svelte public-API projector prefers the resolved semantic contract when available (captured syntax is the fallback) and records prop-name anchors from typed local declaration origins, so tsserver targets in `.svelte.verter.ts` map through that surface's own source map to the same authored member.
+
+Vue IDE self-instance declarations reference the public API as `InstanceType<typeof import('./Foo.vue.verter')['default']>` (and the JSDoc equivalent). The relative specifier is basename-only and omits the physical `.ts` extension, avoiding `allowImportingTsExtensions` diagnostics while resolving the exact virtual `.verter.ts` surface. Do not use `InstanceType<import(...)['default']>`: `import(...)` there is not a value query and forces the old `@ts-ignore` workaround.
+
 ## Binding Metadata Flow
 
 1. `script/process.rs` parses `<script setup>` -> walks AST -> classifies bindings as `BindingType` (SetupConst, SetupRef, Props, etc.)
