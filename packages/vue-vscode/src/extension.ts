@@ -29,6 +29,7 @@ import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+  State as LanguageClientState,
   TransportKind,
   RevealOutputChannelOn,
 } from "vscode-languageclient/node";
@@ -84,6 +85,11 @@ import { shouldRestartLanguageServerForConfigurationChange } from "./languageSer
 import { createTypeScriptPluginRefreshScheduler } from "./typescriptPluginRefreshScheduler";
 import { clientProcessLifetimeArg } from "./clientProcessLifetime";
 import { addShowRecentAuditRecordsCommand } from "./audit";
+import {
+  PlainScriptDocumentSync,
+  shouldSuppressPlainScriptDiagnostics,
+  snapshotPlainScriptDocument,
+} from "./plainScriptDocumentSync";
 import {
   buildRelayEditorEnv,
   isShimAdvertisement,
@@ -170,7 +176,6 @@ async function activateExtension(context: ExtensionContext) {
         }
       >
     | undefined;
-  let clientListenersRegistered = false;
   let deferredFeaturesRegistered = false;
   let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
   let tsPluginConfigured = false;
@@ -386,10 +391,6 @@ async function activateExtension(context: ExtensionContext) {
     })
       .then((runtime) => {
         server = runtime;
-        if (!clientListenersRegistered) {
-          context.subscriptions.push(addDidChangeTextDocumentListener(getStartedClient));
-          clientListenersRegistered = true;
-        }
         return runtime;
       })
       .catch((error) => {
@@ -630,8 +631,8 @@ export async function activateVueLanguageServer(
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      // The base TS/JS surface + every registered framework's client language
-      // id, derived from the manifest (one `{ scheme: "file", language }` each).
+      // Framework carriers only. Plain TS/JS buffers are synchronized below
+      // without registering competing editor features.
       ...frameworkDocumentSelector(),
       // Virtual files from the Verter Analysis panel — route through the LSP
       // so it can provide position-mapped features (hover, definition, etc.)
@@ -690,6 +691,17 @@ export async function activateVueLanguageServer(
     traceOutputChannel: log,
     revealOutputChannelOn: RevealOutputChannelOn.Never,
     middleware: {
+      handleDiagnostics: (uri, diagnostics, next) => {
+        const openDocument = workspace.textDocuments.find(
+          (document) => document.uri.toString() === uri.toString(),
+        );
+        if (shouldSuppressPlainScriptDiagnostics(uri, openDocument?.languageId)) {
+          next(uri, []);
+          return;
+        }
+        next(uri, diagnostics);
+      },
+
       provideCompletionItem: async (document, position, context, token, next) => {
         if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, context, token);
@@ -860,6 +872,40 @@ export async function activateVueLanguageServer(
     clientOptions,
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
+  const plainScriptSync = new PlainScriptDocumentSync();
+  workspace.textDocuments.forEach((document) => {
+    plainScriptSync.observeOpen(snapshotPlainScriptDocument(document));
+  });
+  context.subscriptions.push(
+    workspace.onDidOpenTextDocument((document) => {
+      plainScriptSync.observeOpen(snapshotPlainScriptDocument(document));
+    }),
+    workspace.onDidChangeTextDocument((event) => {
+      plainScriptSync.observeChange(snapshotPlainScriptDocument(event.document));
+    }),
+    workspace.onDidCloseTextDocument((document) => {
+      plainScriptSync.observeClose(snapshotPlainScriptDocument(document));
+    }),
+  );
+  const bindPlainScriptSync = (targetClient: LanguageClient) => {
+    const sender = {
+      sendNotification(method: string, params: unknown) {
+        void targetClient.sendNotification(method, params);
+      },
+    };
+    context.subscriptions.push(
+      targetClient.onDidChangeState(({ newState }) => {
+        const state =
+          newState === LanguageClientState.Running
+            ? "running"
+            : newState === LanguageClientState.Stopped
+              ? "stopped"
+              : "starting";
+        plainScriptSync.observeClientState(state, sender);
+      }),
+    );
+  };
+  bindPlainScriptSync(client);
 
   // Track type provider child PID for orphan cleanup on restart failure.
   let typeProviderPid: number | undefined;
@@ -1221,7 +1267,10 @@ export async function activateVueLanguageServer(
     restarting = true;
     try {
       const success = await restartLanguageServer({
-        stop: () => client.stop(),
+        stop: () => {
+          plainScriptSync.disconnect();
+          return client.stop();
+        },
         createAndStart: async () => {
           client = createLanguageServer(
             buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
@@ -1230,6 +1279,7 @@ export async function activateVueLanguageServer(
             ]),
             clientOptions,
           );
+          bindPlainScriptSync(client);
           registerTypeProviderPidListener(client);
           registerHeartbeatMonitor(client);
           registerMcpListener(client);
@@ -1677,31 +1727,6 @@ function getStatisticsInitialization(rootPath: string | undefined) {
     maxSessionEntries: config.get<number>("maxSessionEntries") ?? undefined,
     maxPersistedEntries: config.get<number>("maxPersistedEntries") ?? undefined,
   };
-}
-
-function addDidChangeTextDocumentListener(getClient: GetClient): Disposable {
-  return workspace.onDidChangeTextDocument((e) => {
-    // Only forward TS/JS changes — .vue changes are handled by the LSP's own did_change.
-    // Sending .vue here would cause redundant notifications and TSGO flooding.
-    if (e.document.languageId !== "typescript" && e.document.languageId !== "javascript") {
-      return;
-    }
-    const client = getClient();
-
-    client.sendNotification(NotificationType.OnDidChangeTsOrJsFile, {
-      uri: e.document.uri.toString(true),
-      changes: e.contentChanges.map((x) => ({
-        range: {
-          start: {
-            line: x.range.start.line,
-            character: x.range.start.character,
-          },
-          end: { line: x.range.end.line, character: x.range.end.character },
-        },
-        text: x.text,
-      })),
-    });
-  });
 }
 
 function addCompilePreviewCommand(

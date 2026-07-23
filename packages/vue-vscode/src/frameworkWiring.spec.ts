@@ -23,16 +23,17 @@ describe("framework wiring (manifest-driven)", () => {
     expect(ids).toEqual([...CLIENT_FRAMEWORK_LANGUAGE_IDS]);
   });
 
-  it("builds the document selector from the manifest framework rows + the plain TS/JS base", () => {
+  // @ai-generated - Guards VS Code's ownership of plain TypeScript/JavaScript features.
+  // Mutation: add TS/JS to DOCUMENT_SELECTOR_BASE_LANGUAGE_IDS; this test fails, then passes restored.
+  it("builds the document selector from framework carriers only", () => {
     const selector = frameworkDocumentSelector();
     // Every framework client language id is selected for the file scheme.
     expect(selector).toContainEqual({ scheme: "file", language: "vue" });
     expect(selector).toContainEqual({ scheme: "file", language: "svelte" });
-    // The plain TS/JS base is selected.
-    expect(selector).toContainEqual({ scheme: "file", language: "javascript" });
-    expect(selector).toContainEqual({ scheme: "file", language: "typescript" });
-    // The React dialects are NOT in the LSP document selector — they are
-    // activation / plugin-configure surfaces only (Vue selector preserved).
+    // VS Code already owns plain TS/JS editor features.
+    expect(selector).not.toContainEqual({ scheme: "file", language: "javascript" });
+    expect(selector).not.toContainEqual({ scheme: "file", language: "typescript" });
+    // React dialects are activation / plugin-configure surfaces only.
     expect(selector).not.toContainEqual({ scheme: "file", language: "javascriptreact" });
     expect(selector).not.toContainEqual({ scheme: "file", language: "typescriptreact" });
   });

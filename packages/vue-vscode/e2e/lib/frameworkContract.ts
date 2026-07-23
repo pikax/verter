@@ -441,6 +441,7 @@ async function assertTypedHover(local: LocalCarrierCase): Promise<void> {
 async function assertTypedComponentHover(
   anchor: ContractAnchor,
   requiredSurface: readonly string[],
+  expectedHoverCount?: number,
 ): Promise<void> {
   const doc = await openWorkspaceFile(anchor.file);
   const hovers = await poll(
@@ -453,6 +454,15 @@ async function assertTypedComponentHover(
       )) ?? [],
     (result) => result.length > 0,
   );
+  // @ai-generated - Plain TS must have exactly one owner in VS Code.
+  // Mutation: select TS/JS in the Verter client; vue-contract@tsserver fails here with 2 !== 1.
+  if (expectedHoverCount !== undefined) {
+    assert.equal(
+      hovers.length,
+      expectedHoverCount,
+      `${anchor.file} must not receive duplicate hover results`,
+    );
+  }
   const text = hovers
     .flatMap((hover) => hover.contents)
     .map((content) => (typeof content === "string" ? content : content.value))
@@ -557,6 +567,7 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
       assertTypedComponentHover(
         descriptor.directConsumerUse,
         descriptor.directComponentHoverNeedles,
+        1,
       ),
     );
     test(id("import.deep-barrel.sfc-tag-to-child"), () =>
@@ -578,6 +589,7 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
       assertTypedComponentHover(
         descriptor.barrelConsumerUse,
         descriptor.barrelComponentHoverNeedles,
+        1,
       ),
     );
     test(id("import.deep-barrel.public-type.clean-diagnostics"), () =>
