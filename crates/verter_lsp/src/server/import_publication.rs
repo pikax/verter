@@ -401,19 +401,38 @@ impl VerterLanguageServer {
         let Some(sync) = &self.project_sync else {
             return ImportSyncOutcome::Complete;
         };
-        // The tsserver plugin resolves carrier imports from the durable store
-        // through the configured project's normal module resolver. Walking or
-        // rewriting barrels here adds no membership and recreates the original
-        // per-file publication flood.
-        if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
-            return ImportSyncOutcome::Complete;
-        }
         let Some(snapshot) = self.published_resolver() else {
             return ImportSyncOutcome::Complete;
         };
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return ImportSyncOutcome::Complete;
         };
+        // A tsserver project that explicitly permits TypeScript-extension
+        // imports and owns this framework carrier can keep the authored
+        // `.vue`/`.svelte` specifiers: the plugin resolves them from the durable
+        // store, so publishing rewritten barrel buffers would only create
+        // duplicate script identities. Without that explicit permission, retain
+        // the `.verter.ts` compatibility projection. The decision is made from
+        // the effective owning project, never globally, so adjacent projects can
+        // choose independently.
+        let tsserver_uses_authored_specifiers =
+            matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver)
+                && verter_workspace::path_is_carrier(&canonical_id)
+                && self
+                    .vfs_workspace
+                    .read()
+                    .as_ref()
+                    .and_then(|workspace| workspace.load_published())
+                    .filter(|published| published.ownership_ready)
+                    .is_some_and(|published| {
+                        crate::carrier_provider_projection::configured_owners_allow_authored_carrier_specifiers(
+                            &published.snapshot,
+                            &canonical_id,
+                        )
+                    });
+        if tsserver_uses_authored_specifiers {
+            return ImportSyncOutcome::Complete;
+        }
         let Some(ingress) = self.documents.host().get_script_ingress(&canonical_id) else {
             return ImportSyncOutcome::Complete;
         };
@@ -506,12 +525,6 @@ impl VerterLanguageServer {
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);
         }
 
-        // The tsserver plugin owns carrier-specifier resolution and keeps
-        // ordinary TS/JS files under TypeScript's disk authority, matching the
-        // official Vue and Svelte plugin architecture. Rewritten barrel copies
-        // create duplicate script identities and force configured-project
-        // rebuilds. tsgo has no host plugin, so it retains the rewritten-file
-        // publication path below.
         // Publish only barrel files whose export-from specifiers need a provider
         // rewrite (or whose framework self-file projection changes their bytes).
         // Unchanged non-carrier modules remain disk-resolved by the provider;

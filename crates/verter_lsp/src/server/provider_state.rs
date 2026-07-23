@@ -138,7 +138,14 @@ impl VerterLanguageServer {
             .as_ref()
             .and_then(|sync| sync.synced_tsx_content(ide_path))
             .unwrap_or_else(|| std::sync::Arc::from(ide_code));
-        let _ = crate::provider_surface_store::record_carrier_companion_surface(
+        let workspace = self.vfs_workspace.read().clone();
+        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            workspace.as_deref(),
+            canonical_id,
+            ide_code,
+            self.position_encoding.read().clone(),
+        );
+        let _ = crate::provider_surface_store::record_carrier_companion_surface_with_rewrites(
             store,
             Some(&self.documents),
             host,
@@ -147,6 +154,7 @@ impl VerterLanguageServer {
             crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
             provider_code.as_ref(),
             map_json,
+            Some(prepared.rewrites),
         );
     }
 
@@ -184,8 +192,8 @@ impl VerterLanguageServer {
         self.type_provider_context(uri)
     }
 
-    /// Make a tsserver workspace-symbol query complete without paying the
-    /// all-carrier cost during startup or ordinary hover/completion. TypeScript
+    /// Make a workspace-symbol query complete without paying the all-carrier
+    /// cost during startup or ordinary hover/completion. TypeScript
     /// references/rename can only prove a project-wide answer when every
     /// framework source in the owning configured project is a Program root.
     /// The official framework-plugin model keeps that full set external; Verter
@@ -197,18 +205,15 @@ impl VerterLanguageServer {
     /// fail closed (rename must never emit a partial edit; references must never
     /// claim a partial workspace result). Vue and Svelte share the descriptor-
     /// owned `path_is_carrier` classification.
-    pub(super) async fn prepare_tsserver_workspace_symbol_frontier(&self, uri: &Uri) -> bool {
-        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
-            return true;
-        }
+    pub(super) async fn prepare_workspace_symbol_frontier(&self, uri: &Uri) -> bool {
         let Some(coordinator) = &self.carrier_publish_coordinator else {
-            // Embedders/tests may inject a tsserver-shaped provider without the
+            // Embedders/tests may inject a provider without the
             // managed store topology. There is no Verter-owned frontier to
             // prepare on that route; delegate completeness to that provider.
             return true;
         };
         let canonical = crate::documents::uri_to_canonical_id(uri);
-        let expected_sources = {
+        let (expected_sources, owner_key) = {
             // The server-side workspace is the publication authority used by
             // the scanner and membership reconciler. Test embedders may install
             // that handle without repointing the semantic host, while production
@@ -236,7 +241,9 @@ impl VerterLanguageServer {
                 return false;
             };
             let verter_workspace::workspace_snapshot::ProjectPayload::Configured {
-                membership, ..
+                tsconfig_path,
+                membership,
+                ..
             } = &project.payload
             else {
                 return false;
@@ -252,16 +259,38 @@ impl VerterLanguageServer {
             }
             sources.sort_unstable();
             sources.dedup();
-            sources
+            (sources, tsconfig_path.as_str().to_string())
         };
 
         if expected_sources.is_empty() {
             return true;
         }
-        match coordinator
-            .activate_published_sources(&expected_sources)
-            .await
-        {
+        let activation = if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+            // TSGO consumes explicit companion buffers. The editor-facing
+            // tsserver store can be fully advertised while those local opens
+            // are still parked, so only receipt-gated direct-open state proves
+            // this provider's project graph is complete.
+            Ok(expected_sources
+                .iter()
+                .filter(|source| {
+                    self.provider_sync_states
+                        .get(source.as_str())
+                        .is_some_and(|state| {
+                            state.owner_binding.owner_key() == Some(owner_key.as_str())
+                                && state.ide_background_loaded
+                                && state.api_background_loaded
+                                && state.commit_stamp.is_some()
+                        })
+                })
+                .count())
+        } else {
+            coordinator
+                .activate_published_sources(&expected_sources)
+                .await
+                .map_err(|error| error.to_string())
+        };
+
+        match activation {
             Ok(activated) if activated == expected_sources.len() => true,
             Ok(activated) => {
                 tracing::debug!(

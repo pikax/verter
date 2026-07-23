@@ -153,6 +153,12 @@ real_provider_test!(
             .open_fixture_file("src/diagnostics/BadPropParent.vue")
             .await;
 
+        session.ensure_synced(&uri).await;
+        session.settle_import_dependencies(&uri).await;
+        session
+            .server()
+            .test_run_declaration_closure_pass(1)
+            .await;
         // This positive control prevents the clean JSX-environment assertion
         // above from passing through a suppressed or disconnected diagnostic
         // channel. The child component requires `count: number`, while the

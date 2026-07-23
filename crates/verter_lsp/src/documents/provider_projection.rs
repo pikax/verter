@@ -100,6 +100,12 @@ pub enum ProviderPositionMapper {
     /// per-request read path) shares ONE allocation instead of deep-copying the
     /// source map and its precomputed lookup tables.
     SourceMap(Arc<PositionMapper>),
+    /// Source-map-backed carrier mapping followed by deterministic, same-line
+    /// edits applied to the exact buffer delivered to TypeScript.
+    RewrittenSourceMap {
+        base: Arc<PositionMapper>,
+        rewrites: Arc<GeneratedRewriteMapper>,
+    },
     /// Line-only rewrite-aware mapping (self-file rune module).
     SelfFile(SelfFileProviderMapper),
 }
@@ -111,6 +117,19 @@ impl ProviderPositionMapper {
         ProviderPositionMapper::SourceMap(Arc::new(mapper))
     }
 
+    /// Compose a compiler source map with post-compile provider-buffer edits.
+    #[must_use]
+    pub fn rewritten_source_map(mapper: PositionMapper, rewrites: GeneratedRewriteMapper) -> Self {
+        if rewrites.is_empty() {
+            Self::source_map(mapper)
+        } else {
+            ProviderPositionMapper::RewrittenSourceMap {
+                base: Arc::new(mapper),
+                rewrites: Arc::new(rewrites),
+            }
+        }
+    }
+
     /// Map a generated provider-buffer position back to the user-source
     /// position. `None` when the provider position has no user-source
     /// correlation (synthetic region / prelude / inside a rewritten specifier).
@@ -118,6 +137,9 @@ impl ProviderPositionMapper {
     pub fn tsx_to_carrier(&self, pos: TsPosition) -> Option<SourceMapped> {
         match self {
             ProviderPositionMapper::SourceMap(m) => m.tsx_to_carrier(pos),
+            ProviderPositionMapper::RewrittenSourceMap { base, rewrites } => {
+                base.tsx_to_carrier(rewrites.provider_to_generated(pos)?)
+            }
             ProviderPositionMapper::SelfFile(m) => m.tsx_to_carrier(pos),
         }
     }
@@ -129,6 +151,13 @@ impl ProviderPositionMapper {
     pub fn carrier_to_tsx(&self, pos: LspPosition) -> Option<GeneratedMapped> {
         match self {
             ProviderPositionMapper::SourceMap(m) => m.carrier_to_tsx(pos),
+            ProviderPositionMapper::RewrittenSourceMap { base, rewrites } => {
+                let mapped = base.carrier_to_tsx(pos)?;
+                Some(GeneratedMapped {
+                    pos: rewrites.generated_to_provider(mapped.pos)?,
+                    run: mapped.run,
+                })
+            }
             ProviderPositionMapper::SelfFile(m) => m.carrier_to_tsx(pos),
         }
     }
@@ -144,6 +173,11 @@ impl ProviderPositionMapper {
     ) -> Option<(LspPosition, LspPosition)> {
         match self {
             ProviderPositionMapper::SourceMap(m) => m.tsx_range_to_carrier(start, end),
+            ProviderPositionMapper::RewrittenSourceMap { base, rewrites } => base
+                .tsx_range_to_carrier(
+                    rewrites.provider_to_generated(start)?,
+                    rewrites.provider_to_generated(end)?,
+                ),
             ProviderPositionMapper::SelfFile(m) => m.tsx_range_to_carrier(start, end),
         }
     }
@@ -160,6 +194,9 @@ impl ProviderPositionMapper {
     pub(crate) fn mapped_run_ending_at_src(&self, line: u32, col: u32) -> Option<TsPosition> {
         match self {
             ProviderPositionMapper::SourceMap(m) => m.mapped_run_ending_at_src(line, col),
+            ProviderPositionMapper::RewrittenSourceMap { base, rewrites } => {
+                rewrites.generated_to_provider(base.mapped_run_ending_at_src(line, col)?)
+            }
             ProviderPositionMapper::SelfFile(_) => None,
         }
     }
@@ -175,6 +212,9 @@ impl ProviderPositionMapper {
     pub(crate) fn helper_preamble_end(&self) -> Option<TsPosition> {
         match self {
             ProviderPositionMapper::SourceMap(m) => m.helper_preamble_end(),
+            ProviderPositionMapper::RewrittenSourceMap { base, rewrites } => {
+                rewrites.generated_to_provider(base.helper_preamble_end()?)
+            }
             ProviderPositionMapper::SelfFile(_) => None,
         }
     }
@@ -205,6 +245,150 @@ struct RewriteSegment {
     provider_start: u32,
     /// Provider column where the rewritten specifier ends (exclusive).
     provider_end: u32,
+}
+
+/// Coordinate transform for deterministic same-line edits applied to a
+/// generated provider buffer after compilation.
+///
+/// Positions inside replacement text fail closed because those characters have
+/// no faithful one-to-one origin. Positions after a replacement retain their
+/// line and are shifted by the cumulative encoded-width delta on that line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedRewriteMapper {
+    rewrites: Vec<RewriteSegment>,
+}
+
+impl GeneratedRewriteMapper {
+    /// Build from replacements whose byte spans index into the generated buffer
+    /// before any replacement is applied.
+    #[must_use]
+    pub fn new(
+        replacements: &[(usize, usize, String)],
+        line_index: &super::line_index::LineIndex,
+    ) -> Self {
+        let mut rewrites = replacement_segments(replacements, line_index);
+        shift_provider_segments(&mut rewrites);
+        Self { rewrites }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rewrites.is_empty()
+    }
+
+    #[must_use]
+    pub fn identity_hash16(&self) -> [u8; 16] {
+        rewrite_identity_hash16(&self.rewrites)
+    }
+
+    #[must_use]
+    pub fn generated_to_provider(&self, pos: TsPosition) -> Option<TsPosition> {
+        Some(TsPosition {
+            line: pos.line,
+            character: source_col_to_provider(&self.rewrites, pos.line, pos.character)?,
+        })
+    }
+
+    #[must_use]
+    pub fn provider_to_generated(&self, pos: TsPosition) -> Option<TsPosition> {
+        Some(TsPosition {
+            line: pos.line,
+            character: provider_col_to_source(&self.rewrites, pos.line, pos.character)?,
+        })
+    }
+}
+
+fn replacement_segments(
+    replacements: &[(usize, usize, String)],
+    line_index: &super::line_index::LineIndex,
+) -> Vec<RewriteSegment> {
+    let mut rewrites = Vec::with_capacity(replacements.len());
+    for (byte_start, byte_end, replacement) in replacements {
+        let Some(start_pos) = line_index.offset_to_position(*byte_start as u32) else {
+            continue;
+        };
+        let Some(end_pos) = line_index.offset_to_position(*byte_end as u32) else {
+            continue;
+        };
+        if start_pos.line != end_pos.line {
+            continue;
+        }
+        let provider_width = encoded_len(replacement, &line_index.encoding());
+        let src_width = end_pos.character.saturating_sub(start_pos.character);
+        rewrites.push(RewriteSegment {
+            line: start_pos.line,
+            src_start: start_pos.character,
+            src_end: start_pos.character + src_width,
+            provider_start: start_pos.character,
+            provider_end: start_pos.character + provider_width,
+        });
+    }
+    rewrites.sort_by_key(|rewrite| (rewrite.line, rewrite.src_start));
+    rewrites
+}
+
+fn shift_provider_segments(rewrites: &mut [RewriteSegment]) {
+    let mut current_line = u32::MAX;
+    let mut line_delta: i64 = 0;
+    for rewrite in rewrites {
+        if rewrite.line != current_line {
+            current_line = rewrite.line;
+            line_delta = 0;
+        }
+        if line_delta != 0 {
+            let shift =
+                |column: u32| u32::try_from(i64::from(column) + line_delta).unwrap_or(column);
+            rewrite.provider_start = shift(rewrite.provider_start);
+            rewrite.provider_end = shift(rewrite.provider_end);
+        }
+        line_delta += i64::from(rewrite.provider_end - rewrite.provider_start)
+            - i64::from(rewrite.src_end - rewrite.src_start);
+    }
+}
+
+fn source_col_to_provider(rewrites: &[RewriteSegment], line: u32, column: u32) -> Option<u32> {
+    let mut delta: i64 = 0;
+    for rewrite in rewrites.iter().filter(|rewrite| rewrite.line == line) {
+        if column < rewrite.src_start {
+            break;
+        }
+        if column < rewrite.src_end {
+            return None;
+        }
+        delta += i64::from(rewrite.provider_end - rewrite.provider_start)
+            - i64::from(rewrite.src_end - rewrite.src_start);
+    }
+    u32::try_from(i64::from(column) + delta).ok()
+}
+
+fn provider_col_to_source(rewrites: &[RewriteSegment], line: u32, column: u32) -> Option<u32> {
+    let mut delta: i64 = 0;
+    for rewrite in rewrites.iter().filter(|rewrite| rewrite.line == line) {
+        if column < rewrite.provider_start {
+            break;
+        }
+        if column < rewrite.provider_end {
+            return None;
+        }
+        delta += i64::from(rewrite.provider_end - rewrite.provider_start)
+            - i64::from(rewrite.src_end - rewrite.src_start);
+    }
+    u32::try_from(i64::from(column) - delta).ok()
+}
+
+fn rewrite_identity_hash16(rewrites: &[RewriteSegment]) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    for rewrite in rewrites {
+        hasher.update(&rewrite.line.to_le_bytes());
+        hasher.update(&rewrite.src_start.to_le_bytes());
+        hasher.update(&rewrite.src_end.to_le_bytes());
+        hasher.update(&rewrite.provider_start.to_le_bytes());
+        hasher.update(&rewrite.provider_end.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest.as_bytes()[..16]);
+    out
 }
 
 /// A line-only, rewrite-aware source↔provider mapper for a self-file provider

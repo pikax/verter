@@ -149,7 +149,7 @@ pub(crate) mod protocol_types;
 pub use self::protocol_types::*;
 
 #[path = "../server_utils.rs"]
-mod server_utils;
+pub(crate) mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
     attr_name_match_rank, carrier_language_for, compute_verter_diagnostics_for_with_views,
@@ -915,14 +915,18 @@ impl VerterLanguageServer {
     }
 
     pub fn new(client: Client, config: LspConfig) -> Self {
+        let vfs_workspace: Arc<
+            parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
+        > = Arc::new(parking_lot::RwLock::new(None));
         let project_sync = config.type_provider.as_ref().map(|tp| {
             // Bind the sync to the active engine kind so the carrier-companion
             // content opens are suppressed for tsserver (the plugin serves the
             // carrier from the publish store) and flow through for tsgo.
-            ProjectSync::new_with_kind(
+            ProjectSync::new_with_kind_and_workspace(
                 Arc::clone(tp),
                 config.project_sync_mode,
                 config.type_provider_kind,
+                Arc::clone(&vfs_workspace),
             )
         });
 
@@ -936,10 +940,6 @@ impl VerterLanguageServer {
         let provider_sync_states = Arc::new(DashMap::new());
         let decl_overlay_owner = Arc::new(DeclOverlayOwner::default());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
-        let vfs_workspace: Arc<
-            parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
-        > = Arc::new(parking_lot::RwLock::new(None));
-
         // The live editor-membership publisher. Managed tsgo still opens its own
         // companion buffers directly, but VS Code's TypeScript service is a
         // separate consumer and requires the same durable carrier store for

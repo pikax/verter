@@ -6,6 +6,53 @@
 
 use super::*;
 
+fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr) -> bool {
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            TypeExpr::Primitive(PrimitiveName::Boolean)
+            | TypeExpr::Literal(LiteralValue::Boolean(_)) => return true,
+            TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                pending.extend(members.iter());
+            }
+            TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => pending.push(inner),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn merge_semantic_prop_definitions(
+    native: &mut Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
+    semantic: Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
+) {
+    let mut semantic = semantic
+        .into_iter()
+        .map(|prop| (prop.name.clone(), prop))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for native_prop in native.iter_mut() {
+        let Some(enrichment) = semantic.remove(&native_prop.name) else {
+            continue;
+        };
+        if enrichment.type_annotation.is_some() {
+            native_prop.type_annotation = enrichment.type_annotation;
+        }
+        native_prop.has_default = enrichment.has_default;
+        native_prop.is_required = enrichment.is_required;
+        native_prop.is_boolean = enrichment.is_boolean;
+        // Authored span and usage facts remain native-analysis authority.
+    }
+
+    // Semantic-only declarations have no honest authored span in this file.
+    // Append them without disturbing native source order or fabricating one.
+    let mut remaining = semantic.into_values().collect::<Vec<_>>();
+    remaining.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    native.extend(remaining);
+}
+
 #[derive(Clone)]
 pub(super) struct SemanticSnapshot {
     pub(super) version: i32,
@@ -138,13 +185,17 @@ impl DocumentRegistry {
                 let mut analysis = host.get_analysis(&work_canonical)?;
                 if is_framework_carrier {
                     let mut semantic_props = host
-                        .get_component_meta_with_resolution(&work_canonical)
-                        .map(|(component_meta, _resolution)| {
+                        .get_component_meta_output(&work_canonical)
+                        .ok()
+                        .flatten()
+                        .map(|output| {
+                            let (component_meta, _resolution, types) = output.into_parts();
                             component_meta
                                 .props
                                 .into_iter()
-                                .map(|prop| {
-                                    let is_boolean = prop.raw_type.as_deref() == Some("boolean");
+                                .zip(types.into_lanes().props)
+                                .map(|(prop, prop_type)| {
+                                    let is_boolean = type_expr_contains_boolean(&prop_type);
                                     verter_semantic::analysis::AnalyzedPropDefinition {
                                         name: prop.name,
                                         type_annotation: prop.raw_type,
@@ -170,14 +221,15 @@ impl DocumentRegistry {
                                     .props
                                     .into_iter()
                                     .map(|prop| {
-                                        let is_boolean =
-                                            prop.type_annotation.as_deref() == Some("boolean");
                                         verter_semantic::analysis::AnalyzedPropDefinition {
                                             name: prop.name,
                                             type_annotation: prop.type_annotation,
                                             has_default: prop.has_default,
                                             is_required: !prop.optional,
-                                            is_boolean,
+                                            // This compatibility sidecar exposes
+                                            // display text only. Do not recover
+                                            // semantic meaning from that string.
+                                            is_boolean: false,
                                             used_in_template: false,
                                             used_in_script: false,
                                             span: verter_span::Span::new(0, 0),
@@ -190,7 +242,10 @@ impl DocumentRegistry {
                     if !semantic_props.is_empty() {
                         let mut template =
                             analysis.template.as_deref().cloned().unwrap_or_default();
-                        template.prop_definitions = semantic_props;
+                        merge_semantic_prop_definitions(
+                            &mut template.prop_definitions,
+                            semantic_props,
+                        );
                         analysis.template = Some(Arc::new(template));
                     }
                 }
@@ -315,4 +370,52 @@ fn clamp_to_char_boundary(source: &str, offset: usize) -> usize {
         position -= 1;
     }
     position
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_semantic::analysis::AnalyzedPropDefinition;
+
+    fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
+        AnalyzedPropDefinition {
+            name: name.to_string(),
+            type_annotation: Some("string".to_string()),
+            has_default: false,
+            is_required: false,
+            is_boolean: false,
+            used_in_template: true,
+            used_in_script: true,
+            span,
+        }
+    }
+
+    #[test]
+    fn semantic_prop_enrichment_preserves_authored_spans_and_native_only_rows() {
+        let authored_span = verter_span::Span::new(11, 19);
+        let untouched_span = verter_span::Span::new(25, 31);
+        let mut native = vec![
+            prop("enabled", authored_span),
+            prop("nativeOnly", untouched_span),
+        ];
+        let semantic = vec![AnalyzedPropDefinition {
+            name: "enabled".to_string(),
+            type_annotation: Some("boolean".to_string()),
+            has_default: true,
+            is_required: true,
+            is_boolean: true,
+            used_in_template: false,
+            used_in_script: false,
+            span: verter_span::Span::new(0, 0),
+        }];
+
+        merge_semantic_prop_definitions(&mut native, semantic);
+
+        assert_eq!(native.len(), 2, "native-only declarations stay published");
+        assert_eq!(native[0].span, authored_span);
+        assert!(native[0].used_in_template && native[0].used_in_script);
+        assert!(native[0].is_boolean && native[0].has_default && native[0].is_required);
+        assert_eq!(native[1].name, "nativeOnly");
+        assert_eq!(native[1].span, untouched_span);
+    }
 }

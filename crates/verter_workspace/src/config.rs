@@ -421,6 +421,13 @@ fn load_compiler_options_inner(
         compiler_options.check_js = check_js;
     }
 
+    if let Some(allow_importing_ts_extensions) = raw_compiler_options
+        .get("allowImportingTsExtensions")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.allow_importing_ts_extensions = allow_importing_ts_extensions;
+    }
+
     // `disableSolutionSearching` stops default-project selection from climbing a
     // solution to its ancestor solution. An explicit `false` overrides an
     // inherited `true` (TS last-wins through the `extends` chain).

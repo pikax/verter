@@ -1017,6 +1017,20 @@ fn install_test_resolver_for_root(
     root: &str,
     tsconfig: Option<&str>,
 ) {
+    install_test_resolver_for_root_with_options(
+        server,
+        root,
+        tsconfig,
+        verter_workspace::IdeProjectCompilerOptions::default(),
+    );
+}
+
+fn install_test_resolver_for_root_with_options(
+    server: &VerterLanguageServer,
+    root: &str,
+    tsconfig: Option<&str>,
+    compiler_options: verter_workspace::IdeProjectCompilerOptions,
+) {
     let vfs_ws = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
         verter_workspace::FilesystemOptions::default(),
     ));
@@ -1062,7 +1076,7 @@ fn install_test_resolver_for_root(
                     spec,
                     materialized_files: Default::default(),
                 },
-                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                compiler_options: compiler_options.clone(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             },
@@ -1088,13 +1102,13 @@ fn install_test_resolver_for_root(
         project.id = verter_workspace::workspace_snapshot::ProjectId(i as u32);
     }
 
-    let resolver = verter_workspace::ProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
-            root.to_string(),
-            root.to_string(),
-            tsconfig.map(|s| s.to_string()),
-        ),
-    ]);
+    let mut resolver_project = crate::project_resolver::IdeProjectConfig::new(
+        root.to_string(),
+        root.to_string(),
+        tsconfig.map(|s| s.to_string()),
+    );
+    resolver_project.compiler_options = compiler_options;
+    let resolver = verter_workspace::ProjectResolver::new(vec![resolver_project]);
 
     let snapshot = std::sync::Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
@@ -3060,7 +3074,7 @@ async fn editor_tsserver_yields_only_rename_and_keeps_serving_merged_features() 
         "a merged feature must keep its native answer on the editor-owned route"
     );
 
-    let prepare = super::nav_features_navigation::handle_prepare_rename(
+    let prepare = super::rename_prepare::handle_prepare_rename(
         server,
         TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -3197,7 +3211,7 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     );
     let position = find_document_position(server, &uri, "shared", 0);
 
-    let prepare = super::nav_features_navigation::handle_prepare_rename(
+    let prepare = super::rename_prepare::handle_prepare_rename(
         server,
         TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -3284,7 +3298,7 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
 
     // Prepare-rename must NOT fail closed (it returns Ok — a real prepare, never the
     // multi-claimant Err).
-    let prepare = super::nav_features_navigation::handle_prepare_rename(
+    let prepare = super::rename_prepare::handle_prepare_rename(
         server,
         TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
@@ -5511,6 +5525,7 @@ async fn completion_recomputes_native_props_when_document_version_advances_durin
         .await;
     let server = service.inner();
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+
     server.ensure_current_file_synced(&app_uri).await;
     let ide_path = server
         .active_ide_path_for_uri(&app_uri)
@@ -14432,7 +14447,7 @@ async fn tsgo_barrel_receipt_does_not_truncate_a_deep_reexport_chain() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tsserver_barrel_resolution_is_fully_plugin_and_disk_owned() {
+async fn tsserver_barrel_resolution_skips_rewrites_when_ts_extensions_are_allowed() {
     // Official tsserver framework plugins keep ordinary TS/JS modules under
     // TypeScript's disk authority and resolve framework carriers through their
     // already-published store membership. The import-publication lane therefore
@@ -14455,6 +14470,15 @@ async fn tsserver_barrel_resolution_is_fully_plugin_and_disk_owned() {
 
     let server = service.inner();
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+    install_test_resolver_for_root_with_options(
+        server,
+        &workspace_id,
+        Some(&format!("{workspace_id}/tsconfig.json")),
+        verter_workspace::IdeProjectCompilerOptions {
+            allow_importing_ts_extensions: true,
+            ..Default::default()
+        },
+    );
     provider.clear_calls();
 
     server
@@ -14464,11 +14488,148 @@ async fn tsserver_barrel_resolution_is_fully_plugin_and_disk_owned() {
     let calls = provider.calls();
     assert!(
         calls.is_empty(),
-        "tsserver barrel resolution must not publish or push per-file buffers; calls={calls:?}"
+        "a project that allows TS extension imports must keep authored carrier specifiers and publish no rewritten barrel buffers; calls={calls:?}"
     );
 
     drain_handle.abort();
     drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tsserver_barrel_resolution_rewrites_carrier_exports_without_ts_extension_permission() {
+    let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean }>()\n</script>\n";
+    let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
+    let top_barrel = "export * from './Foo'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { Foo } from './components'\n</script>\n<template><Foo /></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/components/Foo/Foo.vue", "vue", foo),
+                ("src/components/Foo/index.ts", "typescript", mid_barrel),
+                ("src/components/index.ts", "typescript", top_barrel),
+                ("src/Usage.vue", "vue", usage),
+            ],
+            crate::TypeProviderKind::Tsserver,
+        )
+        .await;
+
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+    provider.clear_calls();
+    service
+        .inner()
+        .ensure_barrel_imports_synced_for_test(&usage_uri)
+        .await;
+
+    let rewritten = provider
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, content }
+            | MockCall::OpenFileBackground { path, content }
+            | MockCall::LoadFile { path, content }
+            | MockCall::UpdateFile { path, content } => Some((path, content)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rewritten.len(),
+        1,
+        "only the barrel whose carrier specifier changes should be published: {rewritten:?}"
+    );
+    assert!(
+        rewritten[0]
+            .0
+            .replace('\\', "/")
+            .ends_with("/src/components/Foo/index.ts")
+            && rewritten[0].1.contains("'./Foo.vue.verter.ts'"),
+        "the compatibility buffer must target the carrier API surface: {rewritten:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+// @ai-generated - Exact configured ownership, including genuine overlap, owns
+// the allowImportingTsExtensions barrel policy.
+#[test]
+fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
+    use verter_workspace::workspace_snapshot::{
+        OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    };
+
+    fn configured_project(
+        id: u32,
+        root: &str,
+        tsconfig: &str,
+        allow_importing_ts_extensions: bool,
+    ) -> OwnershipProject {
+        let root = verter_workspace::CanonicalPath::new(root);
+        OwnershipProject {
+            id: ProjectId(id),
+            root: root.clone(),
+            workspace_root: verter_workspace::CanonicalPath::new("/workspace"),
+            payload: ProjectPayload::Configured {
+                tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                membership: verter_workspace::ConfiguredMembership {
+                    spec: verter_workspace::StaticMembershipSpec {
+                        files: Vec::new(),
+                        include: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::from_root_and_pattern(&root, "**/*"),
+                        )],
+                        exclude: Arc::from([]),
+                    },
+                    materialized_files: Default::default(),
+                },
+                compiler_options: verter_workspace::IdeProjectCompilerOptions {
+                    allow_importing_ts_extensions,
+                    ..Default::default()
+                },
+                references: Vec::new(),
+                workspace_aliases: Vec::new(),
+            },
+        }
+    }
+
+    let adjacent = verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects: vec![
+            configured_project(0, "/workspace/a", "/workspace/a/tsconfig.json", true),
+            configured_project(1, "/workspace/b", "/workspace/b/tsconfig.json", false),
+        ],
+        resolver: verter_workspace::ProjectResolver::new(Vec::new()),
+        generation: SnapshotGeneration(1),
+    };
+    assert!(
+        crate::carrier_provider_projection::configured_owners_allow_authored_carrier_specifiers(
+            &adjacent,
+            "/workspace/a/App.vue"
+        ),
+        "the true adjacent project must keep authored carrier specifiers"
+    );
+    assert!(
+        !crate::carrier_provider_projection::configured_owners_allow_authored_carrier_specifiers(
+            &adjacent,
+            "/workspace/b/App.svelte"
+        ),
+        "the false adjacent project must retain compatibility rewrites"
+    );
+
+    let overlapping = verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects: vec![
+            configured_project(0, "/workspace", "/workspace/tsconfig.a.json", true),
+            configured_project(1, "/workspace", "/workspace/tsconfig.b.json", false),
+        ],
+        resolver: verter_workspace::ProjectResolver::new(Vec::new()),
+        generation: SnapshotGeneration(1),
+    };
+    assert!(
+        !crate::carrier_provider_projection::configured_owners_allow_authored_carrier_specifiers(
+            &overlapping,
+            "/workspace/App.vue"
+        ),
+        "one non-true co-owner must keep the single shared buffer compatible"
+    );
 }
 
 // @ai-generated - Guards compiled package barrels from publishing unrelated import closure files.
@@ -24721,6 +24882,48 @@ async fn self_file_shadow_sync_records_shadow_surface_on_success_only() {
 /// content the provider has not received. After an edit that has NOT been
 /// re-synced, the context either fails closed (`None`) or still serves the
 /// recorded surface byte-exactly.
+#[tokio::test]
+async fn repaired_provider_context_flushes_an_edited_self_file_immediately() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const count = $state(0);\n".to_string(),
+    });
+    assert!(server.sync_self_file_shadow_unresolved(&uri).await);
+
+    let _ = server.documents.did_change(
+        &uri,
+        2,
+        "export const count = $state(1);\nexport const fresh = true;\n",
+    );
+    assert!(
+        server.type_provider_context(&uri).is_none(),
+        "the edited document must invalidate the old provider surface"
+    );
+
+    let repaired = server
+        .repaired_type_provider_context(&uri)
+        .await
+        .expect("an interactive request must flush the current self-file before querying");
+    assert_eq!(repaired.tsx_path, "/workspace/store.svelte.ts");
+    assert!(
+        repaired.tsx_content.contains("export const fresh = true"),
+        "the repaired request surface must contain the latest authored bytes"
+    );
+    assert!(provider.file_sync_calls().iter().any(|call| matches!(
+        call,
+        MockCall::UpdateFile { path, content }
+            if path == "/workspace/store.svelte.ts" && content.contains("fresh")
+    )));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_query_context_serves_recorded_surface_never_torn_live_pair() {
     let (service, _provider, uri) = make_request_surface_carrier().await;
@@ -27401,6 +27604,170 @@ fn import_sync_verb_count(provider: &MockTypeProvider) -> usize {
             )
         })
         .count()
+}
+
+#[tokio::test]
+async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplete() {
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/MyComp.vue", "vue", READINESS_CHILD_SOURCE),
+                ("src/App.vue", "vue", READINESS_PARENT_SOURCE),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+
+    // This regression needs the production configured-project membership
+    // frontier, not the broad spec-only fixture default.
+    let workspace = server
+        .vfs_workspace
+        .read()
+        .clone()
+        .expect("test workspace is installed");
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let child_id = format!("{workspace_id}/src/MyComp.vue");
+    let root = verter_workspace::CanonicalPath::new(&workspace_id);
+    let tsconfig = format!("{workspace_id}/tsconfig.json");
+    let spec = verter_workspace::StaticMembershipSpec {
+        files: Vec::new(),
+        include: vec![verter_workspace::CompiledGlob::new(
+            verter_workspace::NormalizedGlob::from_root_and_pattern(&root, "**/*"),
+        )],
+        exclude: Arc::from([]),
+    };
+    let materialized_files = [
+        verter_workspace::CanonicalPath::new(&app_id),
+        verter_workspace::CanonicalPath::new(&child_id),
+    ]
+    .into_iter()
+    .collect();
+    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        root: root.clone(),
+        workspace_root: root.clone(),
+        payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+            tsconfig_path: verter_workspace::CanonicalPath::new(&tsconfig),
+            membership: verter_workspace::ConfiguredMembership {
+                spec,
+                materialized_files,
+            },
+            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            references: Vec::new(),
+            workspace_aliases: Vec::new(),
+        },
+    }];
+    let resolver = verter_workspace::ProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            workspace_id.clone(),
+            workspace_id.clone(),
+            Some(tsconfig),
+        ),
+    ]);
+    let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects,
+        resolver,
+        generation: verter_workspace::workspace_snapshot::SnapshotGeneration(2),
+    });
+    let views = crate::workspace_state::build_lsp_views(&*workspace, &snapshot, vec![]);
+    workspace.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+
+    server.ensure_current_file_synced(&app_uri).await;
+    let position = find_document_position(server, &app_uri, "handleCustom(payload", 1);
+    let ctx = server
+        .type_provider_context(&app_uri)
+        .expect("the initiating carrier surface is ready");
+    let offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("rename position maps into the provider projection");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: offset,
+            end: offset + "handleCustom".len() as u32,
+        }],
+    );
+
+    let profile = server.documents.tsx_profile.read().clone();
+    let _ = server
+        .documents
+        .host()
+        .ensure_ide_compiled(&child_id, &profile);
+    let child_ide = server
+        .documents
+        .host()
+        .get_ide(&child_id, &profile)
+        .expect("the closed child has an IDE projection for publication");
+    let parked_child_admission = match server
+        .reconcile_carrier_via_gateway(&child_id, child_ide.is_jsx, Some(&child_ide))
+        .await
+    {
+        crate::external_ts::CarrierSyncDecision::DirectOpen { pending, .. } => pending,
+        _ => panic!("managed tsgo publication must return a pending direct-open"),
+    };
+    // Model the exact two-phase window: durable editor-store publication has
+    // committed, but local tsgo has not confirmed the returned direct-open.
+    server.provider_sync_states.remove(&child_id);
+
+    let coordinator = server
+        .carrier_publish_coordinator
+        .as_ref()
+        .expect("managed tsgo also publishes the editor-facing carrier store");
+    let advertised = coordinator
+        .activate_published_sources(&[app_id.clone(), child_id.clone()])
+        .await
+        .expect("store advertisement inspection succeeds");
+    assert_eq!(
+        advertised, 2,
+        "precondition: the editor tsserver store is complete while local tsgo admission is parked"
+    );
+    assert!(
+        server
+            .provider_sync_state_for_source(&child_id)
+            .is_none_or(|state| !state.ide_background_loaded || state.commit_stamp.is_none()),
+        "precondition: store completeness must not imply local tsgo completeness"
+    );
+
+    let started = std::time::Instant::now();
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                },
+                position,
+            },
+            new_name: "renamedHandler".to_string(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("incomplete rename must fail closed without a protocol error");
+    assert!(
+        edit.is_none(),
+        "a same-file provider subset must never escape"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "rename must not join the parked background publication"
+    );
+
+    drop(parked_child_admission);
+    drain_handle.abort();
+    drop(service);
 }
 
 /// A definition CANCELLED by its request deadline must not prevent

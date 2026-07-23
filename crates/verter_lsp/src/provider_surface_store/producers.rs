@@ -505,11 +505,52 @@ pub fn record_carrier_companion_surface(
     code: &str,
     source_map_json: Option<&str>,
 ) -> Option<u64> {
+    let inferred_rewrites = (kind == ProviderSurfaceKind::CarrierIde).then(|| {
+        crate::carrier_provider_projection::infer_carrier_provider_rewrites(
+            code,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        )
+    });
+    record_carrier_companion_surface_with_rewrites(
+        store,
+        documents,
+        host,
+        canonical_id,
+        provider_path,
+        kind,
+        code,
+        source_map_json,
+        inferred_rewrites,
+    )
+}
+
+/// Rewrite-aware form of [`record_carrier_companion_surface`] for a carrier IDE
+/// buffer whose generated imports were projected after compilation.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn record_carrier_companion_surface_with_rewrites(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    canonical_id: &str,
+    provider_path: &str,
+    kind: ProviderSurfaceKind,
+    code: &str,
+    source_map_json: Option<&str>,
+    rewrites: Option<crate::documents::provider_projection::GeneratedRewriteMapper>,
+) -> Option<u64> {
     let carrier_source = resolve_carrier_source(documents, host, canonical_id)?;
+    // The receipt contract stamps the compiler map JSON identity separately
+    // from provider-content identity. Post-compile rewrites are already covered
+    // by the content hash and must not manufacture a different map hash than
+    // the receipt for those same bytes.
     let map_hash = source_map_json.map(hash16_of_str).unwrap_or([0u8; 16]);
     let source_map = source_map_json
         .and_then(|json| PositionMapper::from_json(json).ok())
-        .map(ProviderPositionMapper::source_map);
+        .map(|mapper| match rewrites {
+            Some(rewrites) => ProviderPositionMapper::rewritten_source_map(mapper, rewrites),
+            None => ProviderPositionMapper::source_map(mapper),
+        });
     let mut surface = RecordSurface::carrier_legacy(
         kind,
         provider_path.to_string(),
