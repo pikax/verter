@@ -12,6 +12,7 @@ import {
   assertDefinitionTargetsToken,
   assertHoverNeedles,
   completionsAtOffset,
+  completionsAtOffsetUntil,
   ensureParityReady,
   findOffset,
   openRelative,
@@ -19,11 +20,7 @@ import {
   registerFrameworkTest,
   failParityGap,
 } from "../../../lib/parityHarness";
-import {
-  ACCEPT_SUGGESTION_COMMAND,
-  TRIGGER_SUGGEST_COMMAND,
-  classifyAcceptOutcome,
-} from "../../../dx/dxAcceptCompletion";
+import { acceptCompletionInEditor } from "../../../dx/dxScenarioRunner";
 
 function parityFramework(): "vue" | "svelte" | null {
   if (FIXTURE_NAME === "vue-parity") return "vue";
@@ -163,10 +160,13 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
           );
         }
       } else {
-        // Authored snippet prop `header` must resolve to the child's typed
-        // `header?: Snippet<...>` contract. There is only one `header` token in
-        // the parent fixture; a same-file fallback would be vacuous.
-        await assertDefinitionTargetsFile({ file: parent, token: "header", occurrence: 0 }, child);
+        // A snippet name is an authored local declaration. The child's prop
+        // contract supplies its contextual type without replacing that symbol
+        // identity, matching declaration-site TypeScript navigation.
+        await assertDefinitionTargetsToken(
+          { file: parent, token: "header", occurrence: 0 },
+          { file: parent, token: "header", occurrence: 0 },
+        );
       }
     } catch (err) {
       failParityGap(
@@ -212,18 +212,12 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
           child,
         );
       } else {
-        // `{label}` shorthand or label= — land on child $props field or parent local
-        try {
-          await assertDefinitionTargetsFile(
-            { file: parent, token: "{label}", occurrence: 0, caretOffset: 1 },
-            child,
-          );
-        } catch {
-          await assertDefinitionTargetsToken(
-            { file: parent, token: "label", occurrence: 1 },
-            { file: parent, token: "label", occurrence: 0 },
-          );
-        }
+        // Svelte shorthand `{label}` is a local expression as well as a prop;
+        // its authored symbol identity is the local binding.
+        await assertDefinitionTargetsToken(
+          { file: parent, token: "{label}", occurrence: 0, caretOffset: 1 },
+          { file: parent, token: "label", occurrence: 0 },
+        );
       }
     } catch (err) {
       failParityGap(
@@ -373,25 +367,18 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
       } else {
         const marker = "<!-- SNIPPET_NAME_COMPLETE_SITE -->";
         const at = findOffset(doc, marker) + marker.length;
-        await editor.edit((eb) =>
-          eb.insert(doc.positionAt(at), "\n  <IdeSurfaceChild>\n    {#snippet "),
+        // Snippet declarations may use arbitrary local names. Complete the
+        // component's typed snippet prop names on its attribute surface.
+        await editor.edit((eb) => eb.insert(doc.positionAt(at), "\n  <IdeSurfaceChild "));
+        const offset =
+          findOffset(editor.document, "<IdeSurfaceChild ") + "<IdeSurfaceChild ".length;
+        const labels = await completionsAtOffsetUntil(parent, offset, (candidate) =>
+          candidate.some(
+            (label) => label === "header" || label.includes("header") || label === "children",
+          ),
         );
-        const offset = findOffset(editor.document, "{#snippet ") + "{#snippet ".length;
-        const labels = await completionsAtOffset(parent, offset);
-        const hit = labels.some(
-          (l) =>
-            l === "header" || l.startsWith("header") || l.includes("header") || l === "children",
-        );
-        if (!hit) {
-          // Some servers complete snippet names only via prop completion on the tag.
-          const propOffset =
-            findOffset(editor.document, "<IdeSurfaceChild>") + "<IdeSurfaceChild".length;
-          const propLabels = await completionsAtOffset(parent, propOffset);
-          if (!propLabels.some((l) => l === "header" || l.includes("header") || l === "children")) {
-            throw new Error(
-              `snippet/slot name completion missing; snippet=${labels.slice(0, 20)}; props=${propLabels.slice(0, 20)}`,
-            );
-          }
+        if (!labels.some((l) => l === "header" || l.includes("header") || l === "children")) {
+          throw new Error(`snippet prop completion missing; sample=${labels.slice(0, 30)}`);
         }
       }
     } catch (err) {
@@ -471,11 +458,21 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
           }
         }
       } else {
-        const doc = await openRelative(parent);
-        // onPick={ — complete onPick
+        const doc = await reopenFresh(parent);
+        const editor = await vscode.window.showTextDocument(doc);
+        // Complete a local handler inside a real edit-time prop expression.
         const needle = "{onPick}";
-        const offset = findOffset(doc, needle) + 1;
-        const labels = await completionsAtOffset(parent, offset);
+        const start = findOffset(doc, needle);
+        await editor.edit((eb) =>
+          eb.replace(
+            new vscode.Range(doc.positionAt(start), doc.positionAt(start + needle.length)),
+            "onPick={on}",
+          ),
+        );
+        const offset = findOffset(editor.document, "onPick={on}") + "onPick={on".length;
+        const labels = await completionsAtOffsetUntil(parent, offset, (candidate) =>
+          candidate.some((label) => label === "onPick" || label.startsWith("onPick")),
+        );
         if (!labels.some((l) => l === "onPick" || l.startsWith("onPick"))) {
           throw new Error(`event handler completion missing onPick; sample=${labels.slice(0, 30)}`);
         }
@@ -490,6 +487,8 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         `Event handler local completion failed: ${String(err)}`,
         "product-gap",
       );
+    } finally {
+      await reopenFresh(parentFile(fw!)).catch(() => undefined);
     }
   });
 
@@ -525,6 +524,12 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
     if (!fw) throw new Error("TEST_DEFECT: parity suite loaded for an inapplicable fixture");
     const parent = parentFile(fw);
     try {
+      const hasStringMember = (labels: readonly string[]): boolean =>
+        labels.some((label) =>
+          ["length", "toUpperCase", "charAt", "includes", "slice"].some(
+            (member) => label === member || label.startsWith(member),
+          ),
+        );
       const doc = await openRelative(parent);
       // Inside header slot: title. should offer string methods OR after title token
       // Prefer completing members on a known string slot prop via template expression.
@@ -535,15 +540,9 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         const at = findOffset(doc, span) + "{{ title".length;
         await editor.edit((eb) => eb.insert(doc.positionAt(at), "."));
         const offset = findOffset(editor.document, "{{ title.") + "{{ title.".length;
-        const labels = await completionsAtOffset(parent, offset, ".");
+        const labels = await completionsAtOffsetUntil(parent, offset, hasStringMember, ".");
         // string members: length, toUpperCase, charAt, …
-        if (
-          !labels.some((l) =>
-            ["length", "toUpperCase", "charAt", "includes", "slice"].some(
-              (m) => l === m || l.startsWith(m),
-            ),
-          )
-        ) {
+        if (!hasStringMember(labels)) {
           throw new Error(
             `slot prop member completion missing string methods; sample=${labels.slice(0, 40)}`,
           );
@@ -553,14 +552,8 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         const at = findOffset(doc, span) + "{title".length;
         await editor.edit((eb) => eb.insert(doc.positionAt(at), "."));
         const offset = findOffset(editor.document, "{title.") + "{title.".length;
-        const labels = await completionsAtOffset(parent, offset, ".");
-        if (
-          !labels.some((l) =>
-            ["length", "toUpperCase", "charAt", "includes", "slice"].some(
-              (m) => l === m || l.startsWith(m),
-            ),
-          )
-        ) {
+        const labels = await completionsAtOffsetUntil(parent, offset, hasStringMember, ".");
+        if (!hasStringMember(labels)) {
           throw new Error(
             `snippet prop member completion missing string methods; sample=${labels.slice(0, 40)}`,
           );
@@ -659,6 +652,8 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
             "vscode.executeCompletionItemProvider",
             doc.uri,
             pos,
+            undefined,
+            100,
           )) ?? { items: [] },
         (list) =>
           (list.items ?? []).some((item) => {
@@ -668,25 +663,24 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         12_000,
       );
 
-      const docBefore = editor.document.getText();
-      const importBefore = scriptBlockText(editor.document);
-      await vscode.commands.executeCommand(TRIGGER_SUGGEST_COMMAND);
-      await sleep(300);
-      await vscode.commands.executeCommand(ACCEPT_SUGGESTION_COMMAND);
-      await sleep(400);
-      const docAfter = editor.document.getText();
+      // This is an editor-acceptance proof, not a latency assertion. A fresh
+      // tsserver completion request may still be resolving the selected item
+      // after the list-readiness probe above, so use the shared real-accept
+      // driver with a settle budget that does not race the suggestion widget.
+      let acceptError: unknown;
+      try {
+        await acceptCompletionInEditor(editor, 750);
+      } catch (error) {
+        acceptError = error;
+      }
       const importAfter = scriptBlockText(editor.document);
-      const outcome = classifyAcceptOutcome({
-        docBefore,
-        docAfter,
-        importBefore,
-        importAfter,
-      });
-      if (!outcome.accepted && !/import\s*\{[^}]*\bcomputed\b/.test(importAfter)) {
+      if (!/import\s*\{[^}]*\bcomputed\b/.test(importAfter)) {
         const list = await vscode.commands.executeCommand<vscode.CompletionList>(
           "vscode.executeCompletionItemProvider",
           doc.uri,
           pos,
+          undefined,
+          100,
         );
         const item = (list?.items ?? []).find((i) => {
           const label = typeof i.label === "string" ? i.label : i.label.label;
@@ -696,7 +690,7 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
         // additionalTextEdits path still counts as auto-import capability
         if (!(item.additionalTextEdits && item.additionalTextEdits.length > 0)) {
           throw new Error(
-            `accept did not insert import for computed; outcome=${JSON.stringify(outcome)}`,
+            `accept did not insert import for computed; acceptError=${String(acceptError)}; script=${JSON.stringify(importAfter)}`,
           );
         }
       }

@@ -14,6 +14,8 @@
  * deps to `vscode.commands.executeCommand` and the active editor's document.
  */
 
+import ts from "typescript";
+
 /** The VS Code command that opens the suggestion widget. */
 export const TRIGGER_SUGGEST_COMMAND = "editor.action.triggerSuggest";
 /** The VS Code command that accepts the selected suggestion (applies its edits). */
@@ -43,6 +45,34 @@ export function classifyAcceptOutcome(snap: AcceptSnapshot): AcceptClassificatio
   const docChanged = snap.docAfter !== snap.docBefore;
   const importChanged = snap.importAfter !== snap.importBefore;
   return { docChanged, importChanged, accepted: docChanged && importChanged };
+}
+
+/**
+ * Extract only static import declarations from a script/SFC-script snapshot.
+ *
+ * The acceptance oracle must not use the whole `<script>` block as its import
+ * fingerprint: accepting `comput` -> `computed` changes that block even when
+ * the completion's additional import edit was dropped. TypeScript's parser is
+ * used here so multiline, type-only, side-effect, and import-equals forms are
+ * handled without a regex grammar.
+ */
+export function extractStaticImportText(scriptSnapshot: string): string {
+  const openTagEnd = /^\s*<script\b[^>]*>/i.exec(scriptSnapshot)?.[0].length;
+  const scriptText = openTagEnd === undefined ? scriptSnapshot : scriptSnapshot.slice(openTagEnd);
+  const sourceFile = ts.createSourceFile(
+    "completion-accept.ts",
+    scriptText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  return sourceFile.statements
+    .filter(
+      (statement): statement is ts.ImportDeclaration | ts.ImportEqualsDeclaration =>
+        ts.isImportDeclaration(statement) || ts.isImportEqualsDeclaration(statement),
+    )
+    .map((statement) => statement.getText(sourceFile))
+    .join("\n");
 }
 
 /** Injected dependencies for {@link acceptCompletion}. */

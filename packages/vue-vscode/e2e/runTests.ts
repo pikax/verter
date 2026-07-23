@@ -161,7 +161,15 @@ function removeE2eProfile(profile: E2eProfile): void {
   ) {
     throw new Error(`Refusing to remove unexpected E2E profile path: ${target}`);
   }
-  fs.rmSync(target, { recursive: true, force: true });
+  // Electron reports the extension-host exit before Windows has necessarily
+  // released every log-file handle. Let Node's recursive remover retry EBUSY /
+  // EPERM instead of turning a fully green product run into a harness failure.
+  fs.rmSync(target, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
 }
 
 async function main() {
@@ -236,9 +244,16 @@ async function main() {
     // never false-green a current zero-exit crash that writes no fresh summary.
     clearRunArtifacts(logFile);
     try {
+      const exercisesNativeSemanticSurface = fixture in PARITY_FIXTURE_CONFIGS;
       writeVsCodeUserSettings(profile.userDataDir, {
         "verter.experimental.exposeBindingsTesting":
           fixture === "vue-parity" || fixture === "svelte-parity",
+        // The product intentionally keeps Verter-native semantic enrichment and
+        // hover contribution off by default. Parity fixtures explicitly exercise
+        // those opt-in surfaces; acceptance/performance fixtures keep the default
+        // provider-only hot path.
+        "verter.analysis.enabled": exercisesNativeSemanticSurface,
+        "verter.hover.nativeSemantics": exercisesNativeSemanticSurface,
       });
       if (typeProvider === "shared-tsgo") {
         const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;

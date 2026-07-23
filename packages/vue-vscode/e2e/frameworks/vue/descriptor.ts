@@ -29,7 +29,7 @@ export const vueContract: FrameworkContractDescriptor = {
     ],
     hoverNeedles: ["jsValue", "label", "string"],
   },
-  directParentTag: { file: "src/DirectParent.vue", token: "DirectChild", occurrence: 1 },
+  directParentTag: { file: "src/DirectParent.vue", token: "DirectChild", occurrence: 2 },
   directChildFile: "src/components/DirectChild.vue",
   directConsumerUse: { file: "src/direct-consumer.ts", token: "DirectChild", occurrence: 1 },
   directConsumerPropUse: {

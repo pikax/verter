@@ -1,6 +1,6 @@
 import esbuild from "esbuild";
 import { fileURLToPath } from "url";
-import { cpSync, mkdirSync, existsSync, readdirSync, lstatSync, rmSync } from "fs";
+import { cpSync, mkdirSync, existsSync, readdirSync, lstatSync, rmSync, statSync } from "fs";
 import path from "path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -74,9 +74,11 @@ function lstatSafe(p) {
 /**
  * Copy the LSP binary into bin/ so it gets bundled in the VSIX.
  *
- * Search order: target/release/ then target/debug/.
+ * The newest local Cargo artifact wins. This matters for `prepare:e2e`, which
+ * builds debug immediately before this script; retaining an older `bin/` copy
+ * silently runs stale product code in acceptance tests.
  * In CI, the binary is placed here by the workflow before vsce package runs.
- * Locally, this picks up whatever you last built with cargo build.
+ * When no newer local artifact exists, that pre-placed binary is retained.
  */
 function prepareLspBinary() {
   const ext = process.platform === "win32" ? ".exe" : "";
@@ -84,21 +86,26 @@ function prepareLspBinary() {
   const binDir = path.join(__dirname, "bin");
   const binDst = path.join(binDir, binName);
 
-  // Already placed by CI or previous run
-  if (existsSync(binDst)) {
-    console.log(`LSP binary already at bin/${binName}`);
+  const candidates = ["release", "debug"]
+    .map((profile) => ({
+      profile,
+      src: path.join(monorepoRoot, "target", profile, binName),
+    }))
+    .filter(({ src }) => existsSync(src))
+    .map((candidate) => ({ ...candidate, modified: statSync(candidate.src).mtimeMs }))
+    .sort((left, right) => right.modified - left.modified);
+
+  const newest = candidates[0];
+  const destinationModified = existsSync(binDst) ? statSync(binDst).mtimeMs : -Infinity;
+  if (newest && newest.modified > destinationModified) {
+    mkdirSync(binDir, { recursive: true });
+    cpSync(newest.src, binDst);
+    console.log(`LSP binary copied from target/${newest.profile}/${binName}`);
     return;
   }
-
-  // Find from cargo build output
-  for (const profile of ["release", "debug"]) {
-    const src = path.join(monorepoRoot, "target", profile, binName);
-    if (existsSync(src)) {
-      mkdirSync(binDir, { recursive: true });
-      cpSync(src, binDst);
-      console.log(`LSP binary copied from target/${profile}/${binName}`);
-      return;
-    }
+  if (existsSync(binDst)) {
+    console.log(`LSP binary at bin/${binName} is current`);
+    return;
   }
 
   console.warn(`Warning: LSP binary not found — run 'cargo build --release -p verter_lsp' first`);

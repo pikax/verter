@@ -4,7 +4,7 @@
 import { strict as assert } from "node:assert";
 import * as vscode from "vscode";
 
-import { FIXTURE_NAME, waitForFileReady } from "../../../helpers";
+import { FIXTURE_NAME, waitForDiagnostics, waitForFileReady } from "../../../helpers";
 import {
   assertCleanErrors,
   assertCompletionsInclude,
@@ -55,7 +55,16 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
     const relative = "src/diagnostics/UnusedBindings.svelte";
     const doc = await openRelative(relative);
     await waitForFileReady(doc);
-    const diagnostics = await settledDiagnostics(relative);
+    const diagnostics = await waitForDiagnostics(doc.uri, {
+      timeoutMs: 12_000,
+      predicate: (diagnostic) => {
+        const code =
+          typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
+            ? String(diagnostic.code.value)
+            : String(diagnostic.code ?? "");
+        return code === "6133" && doc.getText(diagnostic.range) === "trulyUnused";
+      },
+    });
     const errors = diagnostics.filter(
       (diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error,
     );
@@ -236,7 +245,9 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
     try {
       await assertDefinitionTargetsToken(
         { file: "src/components/PropParent.svelte", token: "contractProp", occurrence: 1 },
-        { file: "src/components/PropChild.svelte", token: "contractProp", occurrence: 0 },
+        // TypeScript's JSX property definition is the authored public type
+        // member, not the implementation-local destructured binding.
+        { file: "src/components/PropChild.svelte", token: "contractProp", occurrence: 1 },
       );
     } catch (err) {
       failParityGap(

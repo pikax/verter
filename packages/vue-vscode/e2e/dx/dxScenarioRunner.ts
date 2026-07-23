@@ -18,6 +18,7 @@ import * as vscode from "vscode";
 import { readTestLog, sleep } from "../helpers";
 import {
   acceptCompletion,
+  extractStaticImportText,
   type AcceptCompletionDeps,
   type AcceptOutcome,
 } from "./dxAcceptCompletion";
@@ -78,8 +79,9 @@ export function scriptBlockText(doc: vscode.TextDocument): string {
 /**
  * Wire the real accept-path dependencies for an editor: commands run through
  * `vscode.commands.executeCommand`, the document text is the whole document, and
- * the import text is the `<script>` block, so a real auto-import accept registers as
- * BOTH a document and an import change.
+ * the import fingerprint contains only parsed static import declarations, so a
+ * completion that changes an identifier without applying its additional import
+ * edit cannot produce a false positive.
  */
 export function acceptCompletionDeps(
   editor: vscode.TextEditor,
@@ -88,7 +90,7 @@ export function acceptCompletionDeps(
   return {
     runCommand: (command) => vscode.commands.executeCommand(command),
     readDocText: () => editor.document.getText(),
-    readImportText: () => scriptBlockText(editor.document),
+    readImportText: () => extractStaticImportText(scriptBlockText(editor.document)),
     settle: () => sleep(settleMs),
   };
 }
