@@ -146,6 +146,8 @@ pub struct SvelteSnippetImportCandidate {
 pub struct SvelteLegacyProp {
     /// The exported binding name.
     pub name: String,
+    /// Exact SFC-absolute span of the exported prop name token.
+    pub name_span: Span,
     /// Whether the declaration carries an initializer (an optional prop).
     pub has_default: bool,
 }
@@ -699,6 +701,7 @@ fn capture_svelte_candidates(
                         {
                             out.legacy_props.push(SvelteLegacyProp {
                                 name: spec.exported.name().to_string(),
+                                name_span: oxc_span_to_verter(spec.exported.span()),
                                 // A re-export carries no initializer of its own;
                                 // optionality follows the underlying binding,
                                 // which this layer does not resolve — default to
@@ -1226,6 +1229,7 @@ fn capture_legacy_export_let(
             if let Some(name) = binding_name(&d.id) {
                 out.legacy_props.push(SvelteLegacyProp {
                     name,
+                    name_span: oxc_span_to_verter(d.id.span()),
                     has_default: d.init.is_some(),
                 });
             }

@@ -448,6 +448,62 @@ import type { Attrs } from './types'
       },
     });
   });
+
+  it("returns a source map for a simple Svelte public API", () => {
+    const host = new VerterHost();
+    host.upsert({
+      inputId: "Simple.svelte",
+      fileKind: "svelte",
+      source: `<script lang="ts">
+export let count: number
+</script>
+<div>{count}</div>`,
+    });
+
+    const result = host.getPublicApi("Simple.svelte", "public");
+    expect(result).toEqual({
+      value: {
+        code: expect.any(String),
+        sourceMap: expect.any(String),
+      },
+      error: null,
+    });
+    const sourceMap = JSON.parse(result.value!.sourceMap!);
+    expect(sourceMap.sources).toEqual(["Simple.svelte"]);
+    expect(sourceMap.sourcesContent).toEqual([
+      `<script lang="ts">
+export let count: number
+</script>
+<div>{count}</div>`,
+    ]);
+    const code = result.value!.code!;
+    const generatedOffset = code.indexOf("count");
+    const generatedPrefix = code.slice(0, generatedOffset);
+    const generatedLine = generatedPrefix.split("\n").length - 1;
+    const generatedColumn = generatedPrefix.length - generatedPrefix.lastIndexOf("\n") - 1;
+    const authoredPrefix = sourceMap.sourcesContent[0].slice(
+      0,
+      sourceMap.sourcesContent[0].indexOf("count: number"),
+    );
+    const authoredLine = authoredPrefix.split("\n").length - 1;
+    const authoredColumn = authoredPrefix.length - authoredPrefix.lastIndexOf("\n") - 1;
+
+    const firstSegment = sourceMap.mappings.split(";")[generatedLine].split(",")[0];
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const decoded: number[] = [];
+    for (let index = 0; index < firstSegment.length; ) {
+      let value = 0;
+      let shift = 0;
+      let digit: number;
+      do {
+        digit = alphabet.indexOf(firstSegment[index++]);
+        value += (digit & 31) << shift;
+        shift += 5;
+      } while ((digit & 32) !== 0);
+      decoded.push((value & 1) !== 0 ? -(value >> 1) : value >> 1);
+    }
+    expect(decoded).toEqual([generatedColumn, 0, authoredLine, authoredColumn]);
+  });
 });
 
 // Tier 6 §8.2 / T9.5 — close-host repeated-spawn lifecycle test.

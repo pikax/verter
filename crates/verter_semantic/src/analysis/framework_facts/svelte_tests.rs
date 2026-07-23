@@ -567,12 +567,14 @@ fn export_owner_role_only_flip_changes_candidate_hash() {
 
 #[test]
 fn captures_legacy_export_let_props() {
-    let c = capture("export let name;\nexport let count = 0;");
+    let source = "export let name;\nexport let count = 0;";
+    let c = capture(source);
     let names: Vec<&str> = c.legacy_props.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"name"));
     assert!(names.contains(&"count"));
     let count = c.legacy_props.iter().find(|p| p.name == "count").unwrap();
     assert!(count.has_default);
+    assert_eq!(count.name_span.slice(source), "count");
 }
 
 #[test]
@@ -1217,6 +1219,7 @@ fn full_candidates() -> SvelteScriptCandidates {
         module_exports: vec![module_export("meta", "meta", Span::new(37, 41))],
         legacy_props: vec![SvelteLegacyProp {
             name: "legacy".to_string(),
+            name_span: Span::new(42, 48),
             has_default: true,
         }],
         dispatcher_events: Some(payload_ref(1, MacroPayloadPosition::TypeArgument, 0x22)),

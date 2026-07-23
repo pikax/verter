@@ -228,8 +228,9 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 owner,
             )
         });
-        let resolved_props =
-            resolver_ctx.and_then(|ctx| resolve_public_props_text(host, ctx, resolved_canonical));
+        let resolved_props = resolver_ctx.and_then(|ctx| {
+            resolve_public_props_text(host, ctx, resolved_canonical, script_facts.as_deref())
+        });
         let resolved_props_text = resolved_props.as_ref().map(|props| props.text.clone());
         // The resolved contract is the public surface authority when available:
         // besides normalizing aliases/default optionality, it carries the typed
@@ -375,7 +376,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         Ok(Some(ComponentApiProjection {
             response: TscResponse {
                 code: Arc::from(code.as_str()),
-                source_map,
+                source_map: Some(source_map),
             },
             contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
         }))
@@ -388,8 +389,9 @@ struct ResolvedPublicProps {
     /// Prop NAME-token map anchors: each rendered prop name's byte offset
     /// within [`Self::text`] paired with its authored SFC-absolute byte offset
     /// (the `$props()` annotation member / local interface member name). Only
-    /// props with a typed LOCAL origin contribute an anchor; the anchors are
-    /// valid ONLY while [`Self::text`] ships byte-identical in the carrier.
+    /// props with a typed LOCAL origin, or a parser-owned legacy `export let`
+    /// name span, contribute an anchor; the anchors are valid ONLY while
+    /// [`Self::text`] ships byte-identical in the carrier.
     name_mappings: Vec<PropNameMapping>,
 }
 
@@ -515,6 +517,7 @@ fn resolve_public_props_text(
     host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::ResolverContext,
     owner: &str,
+    script_facts: Option<&verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>,
 ) -> Option<ResolvedPublicProps> {
     use crate::typeinfo::framework_surface::{ResolvedOutcome, SvelteSurfaceSource};
 
@@ -524,7 +527,8 @@ fn resolve_public_props_text(
         owner,
         SvelteSurfaceSource::RunesProps,
     );
-    let outcome = if matches!(runes, ResolvedOutcome::Missing) {
+    let uses_legacy = matches!(&runes, ResolvedOutcome::Missing);
+    let outcome = if uses_legacy {
         crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
             host,
             ctx,
@@ -560,8 +564,8 @@ fn resolve_public_props_text(
             }
         })
         .collect::<Vec<_>>();
-    // The authored NAME-token span per prop, from the surface's typed
-    // member-declaration origins: a prop DECLARED in the owner file (a `Local`
+    // The authored NAME-token span per prop first comes from the surface's
+    // typed member-declaration origins: a prop DECLARED in the owner file (a `Local`
     // hop — the `$props()` annotation member, or a local interface member)
     // carries its SFC-absolute member-declaration span, which STARTS at the
     // member name token. A prop declared in an imported module (an `Import`
@@ -569,7 +573,7 @@ fn resolve_public_props_text(
     // map, so it contributes NO anchor (honest unmapped, never a cross-file
     // guess). The final assembly byte-verifies each anchor against the raw
     // source before admitting it (fail closed on any drift).
-    let local_name_starts: std::collections::HashMap<&str, u32> = props
+    let mut local_name_starts: std::collections::HashMap<&str, u32> = props
         .prop_origins
         .iter()
         .filter(|entry| {
@@ -586,6 +590,18 @@ fn resolve_public_props_text(
             )
         })
         .collect();
+    // Legacy props have no type-declaration origin; their parser-owned binding
+    // spans are the direct authored name-token authority.
+    if uses_legacy {
+        for prop in script_facts
+            .into_iter()
+            .flat_map(|facts| facts.legacy_props.iter())
+        {
+            local_name_starts
+                .entry(prop.name.as_str())
+                .or_insert(prop.name_span.start);
+        }
+    }
     let mut name_mappings: Vec<PropNameMapping> = Vec::new();
     let mut text = String::new();
     if contract_props.is_empty() {
@@ -918,14 +934,15 @@ struct RebasedNameMapping {
 /// the generated token at the recorded offset in `code` AND the authored
 /// token at the recorded SFC-absolute offset in `source`. Any drift (a
 /// shifted render, a stale span, a non-identifier key rendered quoted) drops
-/// the anchor rather than publishing a mis-map. No admitted anchors ⇒ `None`
-/// (the projection then behaves exactly as before this map existed).
+/// the anchor rather than publishing a mis-map. With no admitted anchors, the
+/// map still preserves the authored source identity/content with empty
+/// mappings, matching the Vue public-API contract.
 fn build_api_source_map(
     code: &str,
     source: &str,
     canonical: &str,
     mappings: &[RebasedNameMapping],
-) -> Option<Arc<str>> {
+) -> Arc<str> {
     let admitted: Vec<verter_compiler::tsc::script::GeneratedMapping> = mappings
         .iter()
         .filter(|mapping| {
@@ -952,16 +969,11 @@ fn build_api_source_map(
             ]
         })
         .collect();
-    if admitted.is_empty() {
-        return None;
-    }
-    Some(Arc::from(
-        verter_compiler::tsc::script::build_tsc_source_map(
-            code,
-            source,
-            Some(canonical),
-            &admitted,
-        ),
+    Arc::from(verter_compiler::tsc::script::build_tsc_source_map(
+        code,
+        source,
+        Some(canonical),
+        &admitted,
     ))
 }
 
@@ -1131,6 +1143,21 @@ fn collect_fact_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_map_preserves_source_identity_without_prop_anchors() {
+        let source = "<script>export let count;</script>";
+        let map = build_api_source_map(
+            "declare const Component: unknown;\n",
+            source,
+            "Simple.svelte",
+            &[],
+        );
+        let map: serde_json::Value = serde_json::from_str(&map).expect("valid source map");
+        assert_eq!(map["sources"], serde_json::json!(["Simple.svelte"]));
+        assert_eq!(map["sourcesContent"], serde_json::json!([source]));
+        assert_eq!(map["mappings"], "");
+    }
 
     #[test]
     fn native_component_props_preserve_dispatcher_payloads_as_callbacks() {

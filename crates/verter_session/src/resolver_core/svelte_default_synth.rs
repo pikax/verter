@@ -404,10 +404,12 @@ mod tests {
             legacy_props: vec![
                 SvelteLegacyProp {
                     name: "name".to_string(),
+                    name_span: verter_span::Span::new(0, 4),
                     has_default: false,
                 },
                 SvelteLegacyProp {
                     name: "count".to_string(),
+                    name_span: verter_span::Span::new(5, 10),
                     has_default: true,
                 },
             ],
