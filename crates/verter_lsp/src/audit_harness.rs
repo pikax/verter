@@ -7,16 +7,13 @@
 //! 1. Resolves the canonical id from the request URI.
 //! 2. Opens an [`verter_session::host_lsp_audit::LspAuditSession`] keyed by
 //!    [`verter_audit::payloads::tags::LspMethodTag`] and the canonical.
-//! 3. Wraps the handler body in [`tokio::time::timeout`] with the
-//!    per-method budget from
-//!    [`verter_session::types::LspMethodTimeoutsConfig`].
+//! 3. Runs the handler under the same explicitly configured request deadline
+//!    whether audit is enabled or disabled. The audit SLO is observational.
 //! 4. On `Ok(value)`: assembles a populated
 //!    [`verter_audit::LspRequestPayload`] (response size, position,
 //!    enumerable counts) and finalises the session with
 //!    `finalize_ok`.
-//! 5. On timeout (or any other supersede signal that translates to a
-//!    deadline): finalises the session with `finalize_cancelled`,
-//!    storing the cancellation marker in the records store.
+//! 5. Records requests that exceed the audit SLO without cancelling them.
 //! 6. Drains the published record into `VERTER_LSP_AUDIT_TRACE_OUT`
 //!    when the env var is set.
 //!
@@ -101,17 +98,12 @@ pub fn drain_to_trace_out(record: &RequestAuditRecord) {
     }
 }
 
-/// Run a handler body under `deadline`, failing it closed on expiry.
-///
-/// The deadline mechanism for handlers that carry no audit tag —
-/// signature help, document highlight, type definition, prepare-rename,
-/// completion-item resolve. They round-trip the type provider exactly like the
-/// audited handlers do, so a wedged provider parks them exactly as hard; what
-/// they lack is an audit identity, not a need for a bound.
+/// Run a handler body under an explicitly configured deadline, failing it closed
+/// on expiry. A zero deadline is the production default and means unbounded.
 ///
 /// [`run_with_audit`] funnels through here too, so there is one place where a
-/// request deadline is applied and one place where it becomes an ambient scope
-/// for the provider hops underneath.
+/// configured diagnostic deadline is applied and one place where it becomes an
+/// ambient scope for provider hops underneath.
 pub async fn run_with_deadline<T, F>(
     deadline: std::time::Duration,
     body: F,
@@ -133,26 +125,22 @@ where
     }
 }
 
-/// Run an async handler body under audit + the method's request deadline.
+/// Run an async handler body under audit and any explicitly configured request
+/// deadline.
 ///
 /// `method`, `canonical_id`, and `position` are used to construct the audit
-/// session and the position-bound payload base; `method` also selects both
-/// duration bounds from
-/// [`verter_session::types::LspMethodTimeoutsConfig`], so a handler cannot be
-/// wired to another method's budget. `body` is the handler future; `populate`
-/// merges the handler's result into the payload (response size, num_*).
+/// session and the position-bound payload base. `method` also selects the
+/// observational audit SLO and the explicit diagnostic/test deadline from
+/// [`verter_session::types::LspMethodTimeoutsConfig`]. `body` is the handler
+/// future; `populate` merges the handler's result into the payload.
 ///
 /// On success: finalises with the merged payload.
-/// On timeout: finalises with the cancellation marker.
-/// On audit-disabled: runs `body` under the production request deadline only.
+/// On explicit configured timeout: finalises with the RPC error.
+/// On audit-disabled: runs `body` directly unless a non-default explicit bound
+/// was supplied by a diagnostic/test host configuration.
 ///
-/// The deadline is published to the body as an ambient
-/// [`verter_type_runtime::deadline`] scope, so a provider round-trip inside it
-/// bounds its own hop strictly INSIDE the handler's budget. The inner bound
-/// firing first is what makes the failure attributable — a provider hop that
-/// times out reports the provider, cleans up its own pending request, and
-/// cancels the work at the engine; the outer handler timeout is only the
-/// backstop for a body wedged somewhere other than a provider hop.
+/// Audit never changes request semantics. In particular, enabling audit cannot
+/// introduce a provider or feature timeout that is absent in normal operation.
 pub async fn run_with_audit<T, F, P>(
     host: &Arc<VerterHost>,
     method: LspMethodTag,
@@ -170,11 +158,8 @@ where
     let budget = timeouts.audit_supersede.for_method(&method);
 
     if !host.config().audit_enabled {
-        // Always-on production request deadline. The audit-supersede `budget` is
-        // only applied when audit is enabled; with audit off (the production
-        // default) every handler body used to run UNBOUNDED, so a hung type
-        // provider wedged the handler (and, via tower-lsp's bounded concurrency,
-        // eventually the whole session) forever.
+        // Production defaults this table to zero. Explicit diagnostic/test
+        // configurations may still install a bound here.
         return run_with_deadline(deadline, body).await;
     }
 
@@ -187,33 +172,27 @@ where
         },
     };
 
-    // Audit on: the effective bound is whichever of the two fires first, and the
-    // ambient deadline must name that same instant so a provider hop is bounded
-    // inside the bound that actually applies.
-    let effective = match (budget.is_zero(), deadline.is_zero()) {
-        (true, true) => None,
-        (true, false) => Some(deadline),
-        (false, true) => Some(budget),
-        (false, false) => Some(budget.min(deadline)),
-    };
-    let outcome = match effective {
-        None => Some(body.await),
-        Some(bound) => {
-            verter_type_runtime::deadline::with_deadline(bound, tokio::time::timeout(bound, body))
-                .await
-                .ok()
-        }
-    };
+    let started = std::time::Instant::now();
+    let outcome = run_with_deadline(deadline, body).await;
+    let elapsed = started.elapsed();
+    if !budget.is_zero() && elapsed > budget {
+        tracing::warn!(
+            ?method,
+            ?elapsed,
+            ?budget,
+            "audited LSP request exceeded its observational SLO"
+        );
+    }
 
     match outcome {
-        Some(Ok(value)) => {
+        Ok(value) => {
             populate(&mut base_payload, &value);
             if let Some(record) = session.finalize_ok(base_payload) {
                 drain_to_trace_out(&record);
             }
             Ok(value)
         }
-        Some(Err(rpc_err)) => {
+        Err(rpc_err) => {
             // Surface RPC errors verbatim, but still finalise with
             // the populated payload (no result to populate, but the
             // method/position are already set). The leak guard
@@ -223,17 +202,6 @@ where
                 drain_to_trace_out(&record);
             }
             Err(rpc_err)
-        }
-        None => {
-            // Timeout — emit cancellation marker per the LSP
-            // cancellation contract and surface a soft `Ok(None)`
-            // equivalent. The handler types vary, so callers fold
-            // the timeout outcome themselves; here we publish the
-            // marker only.
-            if let Some(record) = session.finalize_cancelled() {
-                drain_to_trace_out(&record);
-            }
-            Err(tower_lsp_server::jsonrpc::Error::request_cancelled())
         }
     }
 }

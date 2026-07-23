@@ -13,7 +13,6 @@
 //! their first argument and access struct fields directly because
 //! they live in a private child module of `server/mod.rs`.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;
@@ -118,6 +117,18 @@ pub(super) async fn handle_initialize(
         if opts.get("lint").is_some() {
             *server.init_lint_options.lock().await = Some(opts.clone());
         }
+        let native_semantic_enabled = crate::config::parse_native_semantic_options(opts).enabled;
+        server
+            .documents
+            .set_semantic_analysis_enabled(native_semantic_enabled);
+        tracing::info!(
+            "native semantic enrichment: {}",
+            if native_semantic_enabled {
+                "enabled (isolated background lane)"
+            } else {
+                "disabled"
+            }
+        );
         // Read viteConfig settings
         {
             let mut vite_opts = server.vite_config_options.lock().await;
@@ -154,9 +165,21 @@ pub(super) async fn handle_initialize(
         }
         // hover.provenance is opt-in.
         let hover_opts = crate::config::parse_hover_init_options(opts);
+        server.hover_native_semantics_enabled.store(
+            hover_opts.native_semantics,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         server
             .hover_provenance_enabled
             .store(hover_opts.provenance, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "native hover semantics: {}",
+            if hover_opts.native_semantics {
+                "enabled"
+            } else {
+                "disabled (default)"
+            }
+        );
         tracing::info!(
             "hover provenance: {}",
             if hover_opts.provenance {
@@ -505,6 +528,21 @@ pub(super) async fn handle_did_open(
         server.touch_mru(canonical_id);
         if carrier_language_for(canonical_id).is_some() {
             server.refresh_carrier_dependency_tracking(canonical_id);
+            // Workspace discovery has already published most carrier snapshots.
+            // Promote that immutable IDE projection immediately on open instead
+            // of coupling tsserver readiness to the much richer semantic/typeinfo
+            // refresh queued below.
+            if let Some(coordinator) = &server.carrier_publish_coordinator {
+                match coordinator.activate_published_source(canonical_id).await {
+                    Ok(true) => tracing::debug!(
+                        "did_open: activated published carrier without semantic resync: {canonical_id}"
+                    ),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        "did_open: published carrier activation failed for {canonical_id}: {error}"
+                    ),
+                }
+            }
         }
     }
     if result.diagnostics.has_errors {
@@ -514,6 +552,7 @@ pub(super) async fn handle_did_open(
             uri.as_str(),
         );
     }
+    server.documents.schedule_semantic_analysis(uri);
     let startup_policy = did_open_startup_policy(server.type_provider_kind);
     let prewarm_imported_carrier_apis = startup_policy.sync_imported_carrier_apis
         && matches!(
@@ -523,41 +562,11 @@ pub(super) async fn handle_did_open(
         // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
         // `handle_rename`'s own sync-before-query is the sole sync of the child API.
         && !server.suppress_imported_carrier_prewarm;
-    let imported_carrier_priority_ids = server
-        .documents
-        .get_analysis(uri)
-        .map(|analysis| {
-            // Primary: analysis.imports already has resolved_canonical_id from host
-            // (works even before background_init builds the resolver snapshot)
-            let mut ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
-                &analysis.imports,
-                current_canonical_id.as_deref(),
-                |parent, specifier| server.resolve_import_specifier(parent, specifier),
-            );
-
-            // Supplement: module_references for dynamic import()/require() cases
-            // that aren't in analysis.imports (needs resolver, may return empty pre-init)
-            if let Some(canonical_id) = current_canonical_id.as_ref() {
-                let snapshot = server.published_resolver();
-                let reader = LspProjectResolverReader::new(&server.documents);
-                let dynamic_ids =
-                    collect_priority_carrier_public_api_targets_from_module_references(
-                        snapshot.as_ref(),
-                        &reader,
-                        canonical_id,
-                        &analysis.module_references,
-                    );
-                // Dedup: add only IDs not already in the primary set
-                let seen: HashSet<String> = ids.iter().cloned().collect();
-                for id in dynamic_ids {
-                    if !seen.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-            }
-            ids
-        })
-        .unwrap_or_default();
+    let imported_carrier_priority_ids = collect_imported_carrier_priority_ids_from_specifiers(
+        &result.import_specifiers,
+        current_canonical_id.as_deref(),
+        |parent, specifier| server.resolve_import_specifier(parent, specifier),
+    );
     // Signal the background scanner to prioritize this file's directory
     if let Some(scanner) = server.workspace_scanner.lock().await.as_ref() {
         if let Some(canonical_id) = current_canonical_id.as_ref() {
@@ -708,16 +717,26 @@ pub(super) async fn handle_did_change(
         std::thread::current().id()
     );
     let upsert_start = std::time::Instant::now();
+    // Capture the exact dependency-completeness facts before committing the
+    // edit. A local/style edit whose dependency-root signature is unchanged can
+    // safely promote an already-delivered receipt when this edit is also the only
+    // workspace generation change; changing an import or racing a disk update
+    // leaves the receipt cold and the background publisher rebuilds it. This
+    // avoids making immediate local rename wait on unrelated dependency work
+    // without weakening cross-file completeness.
+    let import_receipt_before = (!is_virtual)
+        .then(|| server.documents.get_canonical_id(&uri))
+        .flatten()
+        .map(|canonical_id| {
+            let freshness_key = server.import_sync_freshness_key();
+            let frontier = server.dependency_frontier_signature(&canonical_id);
+            (canonical_id, freshness_key, frontier)
+        });
     let update_result = block_in_place_if_available(|| {
         server
             .documents
             .did_change_incremental(&uri, version, params.content_changes)
     });
-    // Assign provider turns in the same total order as committed document
-    // versions, but do not wait for the predecessor while holding the commit
-    // fence. Later edits can therefore commit and serve native features even
-    // when an earlier provider update is suspended.
-    let provider_update_turn = (!is_virtual).then(|| server.enqueue_did_change_provider_update());
     tracing::info!(
         "did_change UPSERT_DONE v{version} elapsed={:?} thread={:?}",
         upsert_start.elapsed(),
@@ -731,17 +750,46 @@ pub(super) async fn handle_did_change(
         return;
     }
 
-    let provider_update_turn =
-        provider_update_turn.expect("non-virtual did_change has a provider update turn");
-    provider_update_turn.wait().await;
+    server.documents.schedule_semantic_analysis(&uri);
 
     let style_only = update_result.changed && update_result.slice_changes.is_style_only();
+
+    let canonical_id = server.documents.get_canonical_id(&uri);
+    if !style_only {
+        if let Some(canonical_id) = canonical_id.as_ref() {
+            if carrier_language_for(canonical_id).is_some() {
+                server.refresh_carrier_dependency_tracking(canonical_id);
+            }
+        }
+    }
+    if let (Some((before_id, Some(before_key), before_frontier)), Some(canonical_id)) =
+        (import_receipt_before, canonical_id.as_ref())
+    {
+        let after_frontier = server.dependency_frontier_signature(canonical_id);
+        if before_id == *canonical_id {
+            if let Some(after_key) = server.import_sync_freshness_key() {
+                // The current edit must be the ONLY workspace-content mutation
+                // between the captures. A concurrent disk/scanner change advances
+                // by more than one and keeps the receipt cold.
+                let only_current_edit_changed =
+                    after_key.0 == before_key.0.saturating_add(1) && after_key.1 == before_key.1;
+                if only_current_edit_changed || after_key == before_key {
+                    server.import_sync.promote_after_isolated_edit(
+                        canonical_id,
+                        before_key,
+                        after_key,
+                        before_frontier == after_frontier,
+                    );
+                }
+            }
+        }
+    }
 
     // Debounced type provider sync via SyncCoordinator.
     // All keystrokes reset the coordinator's timer → exactly 1 sync fires
     // after 300ms of silence. No concurrent spawned tasks.
     if !style_only {
-        if let Some(canonical_id) = server.documents.get_canonical_id(&uri) {
+        if let Some(canonical_id) = canonical_id {
             // Invalidate the hover provenance cache for this file.
             // Transitive deps are NOT invalidated (codified limitation;
             // see
@@ -750,9 +798,6 @@ pub(super) async fn handle_did_change(
                 .hover_provenance_cache
                 .invalidate_canonical(&canonical_id);
 
-            if carrier_language_for(&canonical_id).is_some() {
-                server.refresh_carrier_dependency_tracking(&canonical_id);
-            }
             server.needs_ide_sync.insert(canonical_id.clone());
             server.needs_deferred_sync.insert(canonical_id.clone());
             server
@@ -768,54 +813,13 @@ pub(super) async fn handle_did_change(
                 super::import_publication::PublicationUrgency::EditDebounced,
             );
 
-            // Eager carrier refresh — make the freshly-edited carrier content
-            // visible to the type provider immediately, so the next interactive
-            // request (completion, hover, definition) sees it without per-handler
-            // inline sync.
-            //
-            // tsserver: the carrier is a configured-project MEMBER served from the
-            // publish store, so a fresh edit must RE-PUBLISH the companions (and
-            // fire the change notification) — NOT open the synthetic TSX as a
-            // second content authority (the eager `sync_tsx` is a no-op for
-            // tsserver). The publish is fail-closed (a no-owner carrier publishes
-            // nothing). tsgo keeps the eager `sync_tsx` content open.
-            if matches!(
-                server.type_provider_kind,
-                crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::EditorTsserver
-            ) {
-                if carrier_language_for(&canonical_id).is_some() {
-                    server.publish_carrier_to_external_ts(&canonical_id).await;
-                }
-            } else if let Some(sync) = &server.project_sync {
-                if let Some(ide) = server.documents.get_ide(&uri) {
-                    if let Some(ide_path) = server.eager_syncable_ide_path_for_uri(&uri) {
-                        if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
-                            tracing::warn!("did_change: eager tsx sync failed: {e}");
-                        } else {
-                            // Record a fresh generation pinning the EXACT IDE bytes
-                            // just synced (interactive queries capture this surface).
-                            server.record_carrier_ide_snapshot(
-                                &canonical_id,
-                                &ide_path,
-                                &ide.code,
-                                ide.source_map.as_deref(),
-                            );
-                        }
-                    }
-                }
-            }
-
-            // A self-file document (rune module or plain TS-family script) is
-            // NOT a carrier — the eager TSX path above never fires for it, and
-            // the coordinator's diagnostics route through carrier IDE state.
-            // Re-sync its OWN-path provider buffer here so an editor edit
-            // refreshes the provider content AND refines the rewrite-aware
-            // projection (keeping `provider_projection_context`'s content and
-            // mapper consistent — no stale own-buffer content, no lost rewrite
-            // columns).
-            if self_file_language_for(&canonical_id).is_some() {
-                server.sync_self_file_shadow_unresolved(&uri).await;
-            }
+            // Provider propagation is intentionally absent from this notification
+            // handler. The coordinator coalesces rapid edits and publishes only the
+            // latest committed document after the quiet window. Interactive
+            // requests that arrive first use `ensure_current_file_synced` to repair
+            // that same latest snapshot. This is the editor-style updateOpen/geterr
+            // split: no provider I/O, project loading, or diagnostics can retain a
+            // `didChange` handler or build an unbounded per-keystroke queue.
         }
     }
 

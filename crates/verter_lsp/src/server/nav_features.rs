@@ -34,33 +34,9 @@ use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
-fn transport_child_hover_result(
-    canonical_id: &str,
-    result: std::result::Result<Option<Hover>, verter_session::PublicApiProjectionError>,
-) -> Result<Option<Hover>> {
-    result.map_err(|error| crate::public_api_projection_jsonrpc_error("hover", canonical_id, error))
-}
-
-/// Whether the completion position sits inside a style `v-bind(|)` context.
-fn is_style_v_bind_context(server: &VerterLanguageServer, uri: &Uri, position: &Position) -> bool {
-    (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let offset = doc.line_index.position_to_offset(position)?;
-        Some(matches!(
-            classify_cursor_context_for_language(
-                offset,
-                &doc.source,
-                &blocks,
-                analysis.as_ref(),
-                CarrierTemplateLanguage::from_uri(uri.as_str()),
-            ),
-            CursorContext::Style(crate::features::cursor_context::StyleCursorContext::VBind)
-        ))
-    })()
-    .unwrap_or(false)
-}
+#[path = "nav_features_support.rs"]
+mod nav_features_support;
+use nav_features_support::*;
 
 /// Attach provider-typed `detail` to `v-bind(|)` completion items: for each
 /// offered binding (bounded), a quickinfo at its DECLARATION position supplies
@@ -177,46 +153,63 @@ pub(super) async fn handle_hover(
             .map(|cid| server.is_ssr_context(cid))
             .unwrap_or(false)
     };
+    // The reserved Svelte facade label can surface while hovering either a
+    // Svelte carrier or a plain TS/JS importer (including a barrel import).
+    // Capture the authored token for every document kind; the display rewrite
+    // still activates only when QuickInfo contains Verter's exact reserved
+    // facade name, so ordinary user hovers are untouched.
+    let authored_identifier = server.documents.get(uri).and_then(|doc| {
+        let offset = doc.line_index.position_to_offset(position)?;
+        crate::utils::word_at_offset(&doc.source, offset as usize)
+    });
 
-    let verter_full = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let native = hover_at_position(
-            position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-            ssr_context,
-        );
-        // D6 Svelte: directive-KEYWORD doc hovers are verter-owned — the
-        // provider can never describe the `use:`/`transition:` keyword through
-        // the mapped projection (its local name stays provider-answered).
-        native.or_else(|| {
-            let canonical_id = server.documents.get_canonical_id(uri)?;
-            if !crate::server::carrier_language_for(&canonical_id)
-                .is_some_and(|language| language.is_svelte())
-            {
-                return None;
-            }
-            let offset = doc.line_index.position_to_offset(position)?;
-            crate::features::hover_directive_names::svelte_directive_keyword_hover(
-                offset,
-                analysis.as_ref()?,
-            )
+    let native_hover_enabled = server
+        .hover_native_semantics_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let verter_full = native_hover_enabled
+        .then(|| {
+            let doc = server.documents.get(uri)?;
+            let analysis = server.documents.get_analysis(uri);
+            let blocks = scan_sfc_blocks(&doc.source);
+            let native = hover_at_position(
+                position,
+                &doc.source,
+                &blocks,
+                analysis.as_ref(),
+                &doc.line_index,
+                ssr_context,
+            );
+            // D6 Svelte: directive-KEYWORD doc hovers are verter-owned — the
+            // provider can never describe the `use:`/`transition:` keyword through
+            // the mapped projection (its local name stays provider-answered).
+            native.or_else(|| {
+                let canonical_id = server.documents.get_canonical_id(uri)?;
+                if !crate::server::carrier_language_for(&canonical_id)
+                    .is_some_and(|language| language.is_svelte())
+                {
+                    return None;
+                }
+                let offset = doc.line_index.position_to_offset(position)?;
+                crate::features::hover_directive_names::svelte_directive_keyword_hover(
+                    offset,
+                    analysis.as_ref()?,
+                )
+            })
         })
-    })();
+        .flatten();
     let vue_kind_label = verter_full.as_ref().and_then(|r| r.vue_kind_label.clone());
     let source_token = verter_full.as_ref().and_then(|r| r.source_token.clone());
     let verter_result = verter_full.map(|r| r.hover);
 
-    let child_hover_target = (|| {
-        let analysis = server.documents.get_analysis(uri)?;
-        let doc = server.documents.get(uri)?;
-        let carrier_offset = doc.line_index.position_to_offset(position)?;
-        hover::child_hover_target_at_offset(carrier_offset, &doc.source, &analysis)
-    })();
+    let child_hover_target = native_hover_enabled
+        .then(|| {
+            let analysis = server.documents.get_analysis(uri)?;
+            let doc = server.documents.get(uri)?;
+            let carrier_offset = doc.line_index.position_to_offset(position)?;
+            hover::child_hover_target_at_offset(carrier_offset, &doc.source, &analysis)
+        })
+        .flatten();
     if let Some(target) = child_hover_target.as_ref() {
         if let Some(child_hover) = transport_child_hover_result(
             &crate::documents::uri_to_canonical_id(uri),
@@ -236,14 +229,16 @@ pub(super) async fn handle_hover(
     // (style blocks are removed from the generated surface), so the provider
     // is queried at the root binding's DECLARATION position and the result is
     // presented on the v-bind token. Fail-closed to the native v-bind hover.
-    let vbind_target = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri)?;
-        let offset = doc.line_index.position_to_offset(position)?;
-        let (expr, decl_span) = crate::css::v_bind_decl_target_at(offset, &analysis)?;
-        let decl_pos = doc.line_index.offset_to_position(decl_span.start)?;
-        Some((expr, decl_pos))
-    })();
+    let vbind_target = native_hover_enabled
+        .then(|| {
+            let doc = server.documents.get(uri)?;
+            let analysis = server.documents.get_analysis(uri)?;
+            let offset = doc.line_index.position_to_offset(position)?;
+            let (expr, decl_span) = crate::css::v_bind_decl_target_at(offset, &analysis)?;
+            let decl_pos = doc.line_index.offset_to_position(decl_span.start)?;
+            Some((expr, decl_pos))
+        })
+        .flatten();
     if let Some((expr, decl_pos)) = vbind_target {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
@@ -410,7 +405,15 @@ pub(super) async fn handle_hover(
             // Post-await validation: a hover produced against a surface that no
             // longer matches must be DROPPED (fail closed), never mapped through
             // a superseded context.
-            let type_hover = type_hover.filter(|_| server.provider_context_still_valid(uri, &ctx));
+            let type_hover = type_hover
+                .map(|mut hover| {
+                    merge::rewrite_svelte_public_component_label(
+                        &mut hover,
+                        authored_identifier.as_deref(),
+                    );
+                    hover
+                })
+                .filter(|_| server.provider_context_still_valid(uri, &ctx));
 
             // If TSGO returned a result, merge and return.
             if type_hover.is_some() {
@@ -429,44 +432,47 @@ pub(super) async fn handle_hover(
             // `class`/`style` attribute that was merged with a dynamic binding,
             // the static attribute's source position maps to removed TSX content.
             // Retry at the dynamic directive's position instead.
-            if let Some(analysis) = server.documents.get_analysis(uri) {
-                let carrier_offset = ctx.carrier_line_index.position_to_offset(position);
-                if let Some(carrier_offset) = carrier_offset {
-                    if let Some(redirect_offset) =
-                        hover::merged_attribute_redirect_offset(carrier_offset, &analysis)
-                    {
-                        // Convert the redirect SFC offset to a Vue line:col position
-                        if let Some(redirect_pos) =
-                            ctx.carrier_line_index.offset_to_position(redirect_offset)
+            if native_hover_enabled {
+                if let Some(analysis) = server.documents.get_analysis(uri) {
+                    let carrier_offset = ctx.carrier_line_index.position_to_offset(position);
+                    if let Some(carrier_offset) = carrier_offset {
+                        if let Some(redirect_offset) =
+                            hover::merged_attribute_redirect_offset(carrier_offset, &analysis)
                         {
-                            if let Some(redirect_tsx) =
-                                merge::carrier_position_to_tsx_offset_validated(
-                                    &redirect_pos,
-                                    &ctx.carrier_line_index,
-                                    &ctx.mapper,
-                                    &ctx.tsx_line_index,
-                                )
+                            // Convert the redirect SFC offset to a Vue line:col position
+                            if let Some(redirect_pos) =
+                                ctx.carrier_line_index.offset_to_position(redirect_offset)
                             {
-                                tracing::info!(
+                                if let Some(redirect_tsx) =
+                                    merge::carrier_position_to_tsx_offset_validated(
+                                        &redirect_pos,
+                                        &ctx.carrier_line_index,
+                                        &ctx.mapper,
+                                        &ctx.tsx_line_index,
+                                    )
+                                {
+                                    tracing::info!(
                                     "hover: redirecting merged class/style from vue offset {} to {} (tsx offset {})",
                                     carrier_offset, redirect_offset, redirect_tsx
                                 );
-                                if let Ok(redirect_hover) =
-                                    tp.get_hover(&ctx.tsx_path, redirect_tsx).await
-                                {
-                                    // Post-await validation (fail closed): drop the
-                                    // provider hover on a superseded surface.
-                                    let redirect_hover = redirect_hover
-                                        .filter(|_| server.provider_context_still_valid(uri, &ctx));
-                                    return Ok(merge::merge_hover(
-                                        verter_result,
-                                        redirect_hover,
-                                        &ctx.mapper,
-                                        &ctx.tsx_line_index,
-                                        &ctx.carrier_line_index,
-                                        vue_kind_label.as_deref(),
-                                        source_token.as_ref(),
-                                    ));
+                                    if let Ok(redirect_hover) =
+                                        tp.get_hover(&ctx.tsx_path, redirect_tsx).await
+                                    {
+                                        // Post-await validation (fail closed): drop the
+                                        // provider hover on a superseded surface.
+                                        let redirect_hover = redirect_hover.filter(|_| {
+                                            server.provider_context_still_valid(uri, &ctx)
+                                        });
+                                        return Ok(merge::merge_hover(
+                                            verter_result,
+                                            redirect_hover,
+                                            &ctx.mapper,
+                                            &ctx.tsx_line_index,
+                                            &ctx.carrier_line_index,
+                                            vue_kind_label.as_deref(),
+                                            source_token.as_ref(),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -756,91 +762,20 @@ async fn handle_completion_attempt(
 
     let verter_result = native_snapshot.as_ref().and_then(|native| {
         let canonical_id = &native.canonical_id;
+        // Cross-file native enrichment is opt-in and cache-only. The background
+        // workspace/semantic lanes may warm these analyses, but completion never
+        // loads, compiles, or constructs component meta on the request path.
+        // TypeScript remains the authoritative cold-path provider.
+        let native_semantic_enrichment = server.documents.semantic_analysis_enabled();
         let resolve_component = |import_source: &str,
                                  component_name: Option<&str>|
          -> Option<verter_session::FileAnalysisSnapshot> {
             let get_component_analysis =
                 |resolved: &str| -> Option<verter_session::FileAnalysisSnapshot> {
-                    if server.documents.host().get_analysis(resolved).is_none() {
-                        server.documents.host().ensure_loaded(resolved);
-                    }
-                    let mut analysis = server.documents.host().get_analysis(resolved)?;
-                    if carrier_language_for(resolved).is_some_and(|language| language.is_svelte())
-                        && analysis
-                            .template
-                            .as_deref()
-                            .is_none_or(|template| template.prop_definitions.is_empty())
-                    {
-                        // The cache-owned component-meta entry point is the
-                        // cold-building semantic authority for public Svelte
-                        // keys. It preserves aliases, string keys, rest-covered
-                        // members, named interfaces, and whole-object `$props()`
-                        // declarations that local bindings cannot.
-                        let host = server.documents.host();
-                        let mut semantic_props = host
-                            .get_component_meta_with_resolution(resolved)
-                            .map(|(component_meta, _resolution)| {
-                                component_meta
-                                    .props
-                                    .into_iter()
-                                    .map(|prop| {
-                                        let is_boolean =
-                                            prop.raw_type.as_deref() == Some("boolean");
-                                        verter_semantic::analysis::AnalyzedPropDefinition {
-                                            name: prop.name,
-                                            type_annotation: prop.raw_type,
-                                            has_default: prop.has_default,
-                                            is_required: prop.required,
-                                            is_boolean,
-                                            used_in_template: false,
-                                            used_in_script: false,
-                                            span: verter_span::Span::new(0, 0),
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        // Svelte's component-meta request currently cold-builds
-                        // the cache entry while its `analysis.props` lane can be
-                        // empty. The cache-owned public contract is the structured
-                        // Svelte projection of that same entry; consult it only
-                        // after the cold-building request, never by parsing source.
-                        if semantic_props.is_empty() {
-                            semantic_props = host
-                                .get_public_api_projection(resolved)
-                                .ok()
-                                .flatten()
-                                .and_then(|projection| projection.contract)
-                                .map(|contract| {
-                                    contract
-                                        .props
-                                        .into_iter()
-                                        .map(|prop| {
-                                            let is_boolean =
-                                                prop.type_annotation.as_deref() == Some("boolean");
-                                            verter_semantic::analysis::AnalyzedPropDefinition {
-                                                name: prop.name,
-                                                type_annotation: prop.type_annotation,
-                                                has_default: prop.has_default,
-                                                is_required: !prop.optional,
-                                                is_boolean,
-                                                used_in_template: false,
-                                                used_in_script: false,
-                                                span: verter_span::Span::new(0, 0),
-                                            }
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                        }
-                        if !semantic_props.is_empty() {
-                            let mut template =
-                                analysis.template.as_deref().cloned().unwrap_or_default();
-                            template.prop_definitions = semantic_props;
-                            analysis.template = Some(std::sync::Arc::new(template));
-                        }
-                    }
-                    Some(analysis)
+                    server
+                        .documents
+                        .cached_semantic_analysis(resolved)
+                        .or_else(|| server.documents.host().get_analysis(resolved))
                 };
             let try_follow_reexport = |resolved: &str,
                                        comp_name: Option<&str>|
@@ -852,10 +787,6 @@ async fn handle_completion_attempt(
                     // host cache would otherwise leave component-prop completions
                     // empty (D1: the editor then falls back to word suggestions).
                     return get_component_analysis(resolved);
-                }
-                // Ensure the barrel file is loaded so we can inspect its exports
-                if server.documents.host().get_analysis(resolved).is_none() {
-                    server.documents.host().ensure_loaded(resolved);
                 }
                 // For non-.vue files (barrel/index), follow re-export chains if we know the component name
                 if let Some(name) = comp_name {
@@ -918,15 +849,22 @@ async fn handle_completion_attempt(
             // Try 4: Direct lookup (bare specifiers, already-resolved)
             try_follow_reexport(import_source, component_name)
         };
-        // Build workspace component list for auto-import
-        let ws_components = build_workspace_components(&server.documents.host, canonical_id);
+        let ws_components = if native_semantic_enrichment {
+            build_workspace_components(&server.documents.host, canonical_id)
+        } else {
+            Vec::new()
+        };
+        type NativeComponentResolver<'a> =
+            dyn Fn(&str, Option<&str>) -> Option<verter_session::FileAnalysisSnapshot> + 'a;
+        let resolve_component: Option<&NativeComponentResolver<'_>> =
+            native_semantic_enrichment.then_some(&resolve_component);
         completions_at_position(
             position,
             &native.source,
             &native.blocks,
             native.analysis.as_ref(),
             &native.line_index,
-            Some(&resolve_component),
+            resolve_component,
             if ws_components.is_empty() {
                 None
             } else {
@@ -1499,49 +1437,5 @@ pub(super) async fn handle_completion_resolve(
 }
 
 #[cfg(test)]
-mod public_api_projection_hover_transport_tests {
-    use std::sync::Arc;
-
-    use super::*;
-    use verter_session::{FileLanguage, HostConfig, PublicApiMode, UpsertRequest, VerterHost};
-
-    #[test]
-    fn child_hover_preserves_projection_failure_on_jsonrpc_transport() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let _update = host
-            .upsert(UpsertRequest {
-                canonical_id: Some("/src/UnsafeEnum.vue".to_string()),
-                input_id: "/src/UnsafeEnum.vue".to_string(),
-                source: Arc::from(
-                    r#"<script setup lang="ts">
-enum Unsafe { Value = Math.random() }
-defineProps<{ value: Unsafe }>()
-</script>"#,
-                ),
-                file_language: FileLanguage::vue(),
-                aliases: Vec::new(),
-            })
-            .expect("upsert unsafe enum");
-        let projection_error = host
-            .get_public_api_with_mode("/src/UnsafeEnum.vue", PublicApiMode::Declaration, None)
-            .expect_err("unsafe enum projection");
-
-        let error = transport_child_hover_result("/src/UnsafeEnum.vue", Err(projection_error))
-            .expect_err("hover must preserve projection failure");
-
-        assert_eq!(error.message, "hover: public API projection failed");
-        assert_eq!(
-            error.data,
-            Some(serde_json::json!({
-                "code": "tsc-generation",
-                "detailCode": "unsupported-declaration-shape",
-                "subject": { "kind": "macro", "syntaxIndex": 0 },
-                "declarationShapeReason": "unsupported-enum-shape",
-                "memberOrdinal": null,
-                "outcomeKind": null,
-                "outcomeReason": null,
-                "outcomeDiagnostic": null,
-            }))
-        );
-    }
-}
+#[path = "nav_features_tests.rs"]
+mod public_api_projection_hover_transport_tests;

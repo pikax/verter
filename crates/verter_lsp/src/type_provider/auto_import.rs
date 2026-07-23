@@ -19,7 +19,13 @@
 //! unmapped edit cannot be re-anchored, the whole resolve is rejected rather than silently
 //! dropping it.
 
-use tower_lsp_server::ls_types::{Range, TextEdit};
+use oxc_allocator::Allocator;
+use oxc_ast::ast::Statement;
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+use tower_lsp_server::ls_types::{Position, Range, TextEdit};
+use verter_semantic::analysis::AnalyzedImport;
+use verter_span::TsPosition;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
@@ -39,6 +45,42 @@ pub struct ProviderImportEdit {
     pub end: u32,
     /// The replacement / inserted text (for a new import, a full `import … from '…'` line).
     pub new_text: String,
+}
+
+/// Immutable facts needed to structurally translate an edit that extends an
+/// existing authored import after that declaration has been moved into the
+/// provider projection.
+///
+/// The generated punctuation around a moved import is intentionally not a
+/// source-map authority: a zero-width edit immediately before a mapped binding
+/// can otherwise inherit the following synthetic run and land in unrelated
+/// carrier code. The parsed generated declaration and the semantic import facts
+/// let us use an actual mapped binding as the witness instead.
+#[derive(Clone, Copy)]
+pub struct ExistingImportEditContext<'a> {
+    pub provider_source: &'a str,
+    pub analyzed_imports: &'a [AnalyzedImport],
+}
+
+/// Authorities required to translate a completion-resolve import edit from a
+/// generated provider surface back to authored carrier source.
+pub struct CompletionImportTranslationContext<'a> {
+    pub anchor: Option<&'a ScriptImportInsertionAnchor>,
+    pub provider_line_index: &'a LineIndex,
+    pub mapper: &'a ProviderPositionMapper,
+    pub carrier_line_index: &'a LineIndex,
+    pub edit_target_path: &'a str,
+    pub carrier_source_exists: &'a dyn Fn(&str) -> bool,
+    pub existing_import: Option<ExistingImportEditContext<'a>>,
+}
+
+#[derive(Debug)]
+struct MappedImportSpecifier {
+    provider_start: u32,
+    provider_end: u32,
+    carrier_start: u32,
+    carrier_end: u32,
+    import_index: usize,
 }
 
 /// Where a new import should be inserted into the **Vue source** (never the generated TSX).
@@ -427,6 +469,179 @@ pub(crate) fn reanchor_preamble_import_edits(
     }
 }
 
+struct ImportSpecifierMappingContext<'a> {
+    provider_line_index: &'a LineIndex,
+    mapper: &'a ProviderPositionMapper,
+    carrier_line_index: &'a LineIndex,
+    analyzed_imports: &'a [AnalyzedImport],
+}
+
+fn mapped_import_specifier(
+    provider_start: u32,
+    provider_end: u32,
+    local_name: &str,
+    import_source: &str,
+    context: &ImportSpecifierMappingContext<'_>,
+) -> Option<MappedImportSpecifier> {
+    let provider_pos = context
+        .provider_line_index
+        .offset_to_position(provider_start)?;
+    let mapped = context
+        .mapper
+        .tsx_to_carrier(TsPosition::new(provider_pos.line, provider_pos.character))?;
+    let mapped_position = Position {
+        line: mapped.pos.line,
+        character: mapped.pos.character,
+    };
+    let carrier_offset = context
+        .carrier_line_index
+        .position_to_offset(&mapped_position)?;
+
+    let mut matches = context
+        .analyzed_imports
+        .iter()
+        .enumerate()
+        .filter(|(_, import)| {
+            import.source == import_source
+                && import.span.start <= carrier_offset
+                && carrier_offset <= import.span.end
+        })
+        .flat_map(|(import_index, import)| {
+            import
+                .bindings
+                .iter()
+                .filter(move |binding| {
+                    binding.name == local_name
+                        && binding.span.start <= carrier_offset
+                        && carrier_offset <= binding.span.end
+                })
+                .map(move |binding| (import_index, binding.span.start, binding.span.end))
+        });
+    let (import_index, carrier_start, carrier_end) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    Some(MappedImportSpecifier {
+        provider_start,
+        provider_end,
+        carrier_start,
+        carrier_end,
+        import_index,
+    })
+}
+
+/// Map a zero-width edit inside an existing generated import through a mapped
+/// binding witness instead of through the import's generated punctuation.
+///
+/// Codegen is allowed to move authored imports ahead of synthetic helpers. The
+/// identifiers retain exact source-map runs, while commas/braces and the empty
+/// boundary immediately before an identifier do not. TypeScript commonly adds
+/// a named import at precisely that empty boundary (`"computed, "` before
+/// `ref`), so strict zero-width mapping can select an adjacent synthetic run.
+/// Parsing the generated declaration gives us the neighboring binding; mapping
+/// that binding identifies one exact [`AnalyzedImport`] and therefore the safe
+/// authored insertion offset.
+fn structurally_map_existing_import_edit(
+    edit: &ProviderImportEdit,
+    context: ExistingImportEditContext<'_>,
+    tsx_li: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_li: &LineIndex,
+) -> Result<Option<TextEdit>, AutoImportEditMappingError> {
+    if edit.start != edit.end {
+        return Ok(None);
+    }
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, context.provider_source, SourceType::tsx()).parse();
+    let mapping_context = ImportSpecifierMappingContext {
+        provider_line_index: tsx_li,
+        mapper,
+        carrier_line_index: carrier_li,
+        analyzed_imports: context.analyzed_imports,
+    };
+    for statement in &parsed.program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        // Existing-import additions are inside the declaration's binding run,
+        // before its module string. An edit in/after the source literal is not
+        // an import-list insertion and stays on the generic strict path.
+        if edit.start < declaration.span.start
+            || edit.end > declaration.source.span.start
+            || edit.start > declaration.source.span.start
+        {
+            continue;
+        }
+        let Some(specifiers) = declaration.specifiers.as_ref() else {
+            continue;
+        };
+        let import_source = declaration.source.value.as_str();
+        let mut mapped_specifiers: Vec<MappedImportSpecifier> = specifiers
+            .iter()
+            .filter_map(|specifier| {
+                let local = specifier.local();
+                mapped_import_specifier(
+                    local.span.start,
+                    local.span.end,
+                    local.name.as_str(),
+                    import_source,
+                    &mapping_context,
+                )
+            })
+            .collect();
+
+        if mapped_specifiers.is_empty() {
+            // This parsed import is synthetic or cannot be proven to correspond
+            // to one authored declaration. Do not manufacture an authority.
+            return Ok(None);
+        }
+        mapped_specifiers.sort_by_key(|specifier| specifier.provider_start);
+        let import_index = mapped_specifiers[0].import_index;
+        if mapped_specifiers
+            .iter()
+            .any(|specifier| specifier.import_index != import_index)
+        {
+            return Err(AutoImportEditMappingError::UnmappableEdit {
+                start: edit.start,
+                end: edit.end,
+            });
+        }
+
+        let carrier_offset = mapped_specifiers
+            .iter()
+            .find(|specifier| edit.start <= specifier.provider_start)
+            .map(|specifier| specifier.carrier_start)
+            .or_else(|| {
+                mapped_specifiers
+                    .iter()
+                    .rev()
+                    .find(|specifier| specifier.provider_end <= edit.start)
+                    .map(|specifier| specifier.carrier_end)
+            })
+            .ok_or(AutoImportEditMappingError::UnmappableEdit {
+                start: edit.start,
+                end: edit.end,
+            })?;
+        let position = carrier_li.offset_to_position(carrier_offset).ok_or(
+            AutoImportEditMappingError::UnmappableEdit {
+                start: edit.start,
+                end: edit.end,
+            },
+        )?;
+        return Ok(Some(TextEdit {
+            range: Range {
+                start: position,
+                end: position,
+            },
+            new_text: edit.new_text.clone(),
+        }));
+    }
+
+    Ok(None)
+}
+
 /// Translate a TypeProvider's completion-resolve `additionalTextEdits` (generated-TSX byte
 /// offsets) into carrier-source [`TextEdit`]s, with no silent drops.
 ///
@@ -469,6 +684,36 @@ pub fn translate_completion_import_edits(
     edit_target_path: &str,
     carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<TextEdit>, AutoImportEditMappingError> {
+    translate_completion_import_edits_with_context(
+        edits,
+        CompletionImportTranslationContext {
+            anchor,
+            provider_line_index: tsx_li,
+            mapper,
+            carrier_line_index: carrier_li,
+            edit_target_path,
+            carrier_source_exists,
+            existing_import: None,
+        },
+    )
+}
+
+/// Context-aware form of [`translate_completion_import_edits`]. Production
+/// completion resolve supplies `existing_import_context`; the context-free
+/// entry point remains useful for code-action geometry and hermetic fixtures.
+pub fn translate_completion_import_edits_with_context(
+    edits: &[ProviderImportEdit],
+    context: CompletionImportTranslationContext<'_>,
+) -> Result<Vec<TextEdit>, AutoImportEditMappingError> {
+    let CompletionImportTranslationContext {
+        anchor,
+        provider_line_index: tsx_li,
+        mapper,
+        carrier_line_index: carrier_li,
+        edit_target_path,
+        carrier_source_exists,
+        existing_import: existing_import_context,
+    } = context;
     // Rewrite any carrier-COMPANION (or bare-`./Comp`) import specifier in the
     // inserted text back to the bare `.vue`/`.svelte` specifier BEFORE
     // mapping/anchoring, through the SHARED specifier-rewrite layer. The TS engine
@@ -511,6 +756,18 @@ pub fn translate_completion_import_edits(
     let mut missed: Vec<BorrowedImportEdit<'_>> = Vec::new();
 
     for edit in edits {
+        // Authored imports may be moved ahead of the synthetic helper preamble.
+        // Give their mapped binding witnesses first refusal: the generated
+        // offset alone would classify the whole prefix as synthetic even when
+        // this edit is extending a real user import.
+        if let Some(context) = existing_import_context {
+            if let Some(mapped) =
+                structurally_map_existing_import_edit(edit, context, tsx_li, mapper, carrier_li)?
+            {
+                result.push(mapped);
+                continue;
+            }
+        }
         // CLASSIFY BEFORE STRICT-ACCEPT (symmetric to the current-file code-action guard in
         // `merge::feature_merges::merge_code_actions`): a preamble import insertion can STRICT-MAP to
         // the carrier `(0,0)` file top (ABOVE `<script setup>`, an invalid import location), so it

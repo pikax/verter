@@ -37,6 +37,7 @@ pub use feature_merges::{
 };
 
 pub use hover::merge_hover;
+pub(crate) use hover::rewrite_svelte_public_component_label;
 
 pub(crate) use position::carrier_completion_member_boundary_offset;
 pub use position::{

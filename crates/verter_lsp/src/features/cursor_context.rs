@@ -349,6 +349,16 @@ fn classify_root_or_template_context(
         if render_head {
             return CursorContext::Template(TemplateCursorContext::SvelteRenderCallee);
         }
+        // Edit-time syntax is newer than the optional semantic snapshot. A
+        // freshly typed `prop={expr}` must therefore be classified from the
+        // current document bytes before consulting analysis that may still
+        // describe the preceding shorthand attribute. This bounded lexer is
+        // deliberately Svelte-specific and recognizes only braced expressions
+        // inside the currently open tag; block/interpolation braces in element
+        // content never enter this path.
+        if let Some(ctx) = svelte_braced_attribute_expression_from_source(offset, source) {
+            return CursorContext::Template(ctx);
+        }
     }
     let semantic_position_is_owned = match language {
         Some(CarrierTemplateLanguage::Vue) => inside_explicit_template,
@@ -380,6 +390,208 @@ fn classify_root_or_template_context(
             CursorContext::RootLevel
         }
     }
+}
+
+/// Recognize a Svelte `{...}` attribute expression in the current source.
+///
+/// Semantic analysis is asynchronous, so the template snapshot can lag one or
+/// more editor revisions. The source remains authoritative for the small piece
+/// of syntax needed to route an interactive completion. The scan is bounded to
+/// recent source and tracks quotes plus nested braces, which keeps
+/// static quoted values and object/template expressions from being confused
+/// with tag boundaries.
+fn svelte_braced_attribute_expression_from_source(
+    offset: u32,
+    source: &str,
+) -> Option<TemplateCursorContext> {
+    let cursor = offset as usize;
+    if cursor > source.len() || !source.is_char_boundary(cursor) {
+        return None;
+    }
+
+    // Search candidates from oldest to newest. The first candidate whose tag
+    // remains open and owns an unmatched attribute brace is the structural tag
+    // start. A nearest-`<` search is incorrect because comparisons, regexes,
+    // strings, and comments inside the expression may all contain `<`.
+    const MAX_SOURCE_LOOKBACK: usize = 64 * 1024;
+    let before_cursor = source.get(..cursor)?;
+    let raw_boundary = ["</script>", "</style>"]
+        .into_iter()
+        .filter_map(|delimiter| {
+            before_cursor
+                .rfind(delimiter)
+                .map(|at| at + delimiter.len())
+        })
+        .max()
+        .unwrap_or(0);
+    let mut scan_start = raw_boundary.max(cursor.saturating_sub(MAX_SOURCE_LOOKBACK));
+    while scan_start < cursor && !source.is_char_boundary(scan_start) {
+        scan_start += 1;
+    }
+    for (relative, _) in source.get(scan_start..cursor)?.match_indices('<') {
+        if let Some(context) =
+            svelte_braced_attribute_from_tag_candidate(scan_start + relative, cursor, source)
+        {
+            return Some(context);
+        }
+    }
+    None
+}
+
+fn svelte_braced_attribute_from_tag_candidate(
+    tag_open: usize,
+    cursor: usize,
+    source: &str,
+) -> Option<TemplateCursorContext> {
+    let bytes = source.as_bytes();
+    let tag_start = tag_open + 1;
+    if matches!(bytes.get(tag_start), None | Some(b'/' | b'!' | b'?')) {
+        return None;
+    }
+
+    let mut tag_end = tag_start;
+    while tag_end < cursor
+        && bytes
+            .get(tag_end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+    {
+        tag_end += 1;
+    }
+    if tag_end == tag_start {
+        return None;
+    }
+
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+    let mut regex = false;
+    let mut regex_character_class = false;
+    let mut regex_can_start = true;
+    let mut brace_stack = Vec::new();
+    let mut index = tag_end;
+    while index < cursor {
+        let byte = bytes[index];
+        if line_comment {
+            if byte == b'\n' || byte == b'\r' {
+                line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if block_comment {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if regex {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'[' {
+                regex_character_class = true;
+            } else if byte == b']' {
+                regex_character_class = false;
+            } else if byte == b'/' && !regex_character_class {
+                regex = false;
+                regex_can_start = false;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+                regex_can_start = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if !brace_stack.is_empty() && byte == b'/' {
+            match bytes.get(index + 1) {
+                Some(b'/') => {
+                    line_comment = true;
+                    index += 2;
+                    continue;
+                }
+                Some(b'*') => {
+                    block_comment = true;
+                    index += 2;
+                    continue;
+                }
+                _ if regex_can_start => {
+                    regex = true;
+                    regex_character_class = false;
+                    escaped = false;
+                    index += 1;
+                    continue;
+                }
+                _ => {
+                    regex_can_start = true;
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        match byte {
+            b'\'' | b'"' | b'`' => quote = Some(byte),
+            b'{' => {
+                brace_stack.push(index);
+                regex_can_start = true;
+            }
+            b'}' => {
+                brace_stack.pop();
+                regex_can_start = false;
+            }
+            b'>' if brace_stack.is_empty() => return None,
+            byte if !brace_stack.is_empty() && byte.is_ascii_whitespace() => {}
+            byte if !brace_stack.is_empty()
+                && (byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b')' | b']')) =>
+            {
+                regex_can_start = false;
+            }
+            _ if !brace_stack.is_empty() => regex_can_start = true,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    // The outermost unmatched brace belongs to the attribute. Later unmatched
+    // braces may be object literals or template interpolation owned by that
+    // expression and must not replace the prop anchor.
+    let expression_open = *brace_stack.first()?;
+    let before_expression = source.get(tag_end..expression_open)?.trim_end();
+    let prop_name = before_expression
+        .strip_suffix('=')
+        .map(str::trim_end)
+        .and_then(|before_equals| {
+            let start = before_equals
+                .rfind(|character: char| {
+                    !(character.is_ascii_alphanumeric()
+                        || matches!(character, '_' | '-' | ':' | '$'))
+                })
+                .map(|at| at + 1)
+                .unwrap_or(0);
+            before_equals.get(start..)
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default()
+        .to_string();
+
+    Some(TemplateCursorContext::Expression {
+        kind: ExpressionKind::Prop { prop_name },
+    })
 }
 
 /// Backwards source scan for the nearest enclosing component open tag before
@@ -1058,7 +1270,7 @@ fn classify_from_ast(program: &oxc_ast::ast::Program<'_>, offset: usize) -> Expr
 
     // Walk statements to find the expression
     for stmt in &program.body {
-        let span = get_stmt_span(stmt);
+        let span = stmt.span();
         if offset < span.start as usize || offset > span.end as usize {
             continue;
         }
@@ -1278,18 +1490,6 @@ fn classify_expression(expr: &oxc_ast::ast::Expression<'_>, offset: usize) -> Ex
     }
 
     ExpressionContext::IdentifierExpected
-}
-
-fn get_stmt_span(stmt: &oxc_ast::ast::Statement<'_>) -> oxc_span::Span {
-    use oxc_ast::ast::Statement;
-    match stmt {
-        Statement::ExpressionStatement(s) => s.span,
-        Statement::BlockStatement(s) => s.span,
-        Statement::VariableDeclaration(s) => s.span,
-        Statement::ReturnStatement(s) => s.span,
-        Statement::IfStatement(s) => s.span,
-        _ => oxc_span::Span::new(0, 0),
-    }
 }
 
 #[cfg(test)]

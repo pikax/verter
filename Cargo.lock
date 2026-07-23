@@ -4014,6 +4014,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower-lsp-server",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "verter-editor-client",

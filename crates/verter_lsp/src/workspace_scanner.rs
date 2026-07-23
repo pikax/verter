@@ -3,15 +3,19 @@
 //! Instead of synchronously scanning all files during `initialized()` (which
 //! blocks the LSP handler for seconds), this module spawns a background task that:
 //!
-//! 1. Walks the filesystem for `.vue` and non-carrier source files (`.ts`, `.tsx`, `.js`, `.jsx`)
+//! 1. Walks the filesystem for registered carrier and plain source files
+//!    (`.ts`, `.tsx`, `.js`, `.jsx`)
 //! 2. Classifies them into priority tiers (project source vs. other)
-//! 3. Processes files in two phases: Vue first, then non-carrier source files
-//! 4. Follows node_modules dependencies transitively via import resolution
+//! 3. Publishes workspace carrier projections through an engine-specific route:
+//!    TSGO receives explicit project inputs; tsserver receives source-identity
+//!    metadata in the plugin store and one coalesced project refresh.
+//! 4. Materializes plain source and node_modules dependencies only for TSGO;
+//!    tsserver reads them from disk
 //! 5. Accepts priority signals from `did_open` to dynamically reorder the queue
 //!
-//! Vue files are processed first because they produce the provider-side Vue
-//! artifacts (`.vue.tsx` for IDE analysis and `.vue.ts` for public API) that
-//! cross-file resolution depends on.
+//! Carrier files are processed first because their projections provide closed-
+//! file cross-file rename/reference coverage. The scanner yields to interactive
+//! handlers before every carrier and never opens generated files into tsserver.
 //!
 //! This makes `initialized()` return in <1s instead of blocking for the full scan.
 
@@ -69,7 +73,8 @@ pub struct WorkspaceScannerConfig {
     pub root_paths: Vec<PathBuf>,
     /// Shared host for upserting and compiling files.
     pub host: Arc<VerterHost>,
-    /// Optional project sync for sending files to the type provider.
+    /// Optional project sync. TSGO uses it for explicit workspace inputs;
+    /// tsserver uses it only for interactive/open source synchronization.
     pub project_sync: Option<ProjectSync>,
     /// VFS workspace for published resolver snapshot.
     pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
@@ -338,6 +343,13 @@ fn parent_dir(path: &str) -> String {
 
 /// How many files to process before yielding to the tokio runtime.
 const BATCH_SIZE: usize = 10;
+/// Under continuous editor traffic, admit one carrier warmup unit occasionally
+/// so project-wide rename/reference coverage still converges. This bounds only
+/// background deferral; it never bounds or cancels an LSP/provider request.
+const BACKGROUND_MAX_DEFER: std::time::Duration = std::time::Duration::from_secs(1);
+/// A filesystem walk cannot be preempted once handed to the blocking pool. Give
+/// editor startup/open traffic a stable lead before beginning that coarse unit.
+const DISCOVERY_IDLE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Spawn the background workspace scanner task.
 ///
@@ -365,6 +377,7 @@ async fn scanner_loop(
     let vfs_workspace = config.vfs_workspace.clone();
 
     // Step 1: FS walk all roots (blocking) — collect both Vue and non-carrier files
+    crate::server::wait_for_handlers_quiet(DISCOVERY_IDLE_GRACE).await;
     let (carrier_paths, source_paths) = tokio::task::spawn_blocking(move || {
         let mut carrier = Vec::new();
         let mut src = Vec::new();
@@ -411,6 +424,22 @@ async fn scanner_loop(
         .filter(|(_, t)| *t == Tier::ProjectSource)
         .count();
 
+    // Real TS/JS remains filesystem-owned for tsserver, but framework sources
+    // need project-wide membership for closed-file references and rename. Build
+    // carrier snapshots on this low-priority scanner lane, publish them into the
+    // store, then perform ONE coalesced project refresh below. No generated file
+    // is opened over the tsserver protocol and no per-carrier refresh is sent.
+    if !background_publish_workspace_carriers(
+        config.is_tsgo,
+        config.carrier_publish_coordinator.is_some(),
+    ) {
+        tracing::info!("workspace_scanner: discovery complete — no carrier publication route");
+        if let Some(tx) = config.done_tx {
+            let _ = tx.send(());
+        }
+        return;
+    }
+
     // Initial sort (no priority dirs yet)
     priority_sort(&mut carrier_classified, &[]);
     priority_sort(&mut source_classified, &[]);
@@ -429,6 +458,7 @@ async fn scanner_loop(
     let mut batch_count: usize = 0;
 
     // ── All carrier files (produce carrier public API artifacts for barrel re-exports) ──
+    let mut published_companions = Vec::new();
     let mut idx = 0;
     while idx < carrier_classified.len() {
         drain_priority_signals(&mut rx, &mut priority_dirs, &mut carrier_classified[idx..]);
@@ -439,6 +469,16 @@ async fn scanner_loop(
         if !processed.insert(path.clone()) {
             continue;
         }
+
+        // Background warmup must never monopolize the host CPU lane while an
+        // editor request is waiting. Re-check before every carrier so a newly
+        // arriving request competes with at most the one compile already in
+        // progress, then owns the lane until its handler finishes.
+        let _ = tokio::time::timeout(
+            BACKGROUND_MAX_DEFER,
+            crate::server::wait_for_handlers_idle(),
+        )
+        .await;
 
         // Upsert + compile (blocking)
         let path_clone = path.clone();
@@ -476,6 +516,7 @@ async fn scanner_loop(
                 config.carrier_publish_coordinator.as_ref(),
                 &config.carrier_transaction_coordinator,
                 Some(&config.pending_snapshot_provider_sync),
+                Some(&mut published_companions),
             )
             .await;
         }
@@ -491,6 +532,20 @@ async fn scanner_loop(
         batch_count,
     );
 
+    if !published_companions.is_empty() {
+        if let Some(coordinator) = &config.carrier_publish_coordinator {
+            if let Err(error) = coordinator
+                .refresh_published_companions(&published_companions)
+                .await
+            {
+                tracing::warn!(
+                    "workspace_scanner: batched carrier refresh failed for {} companions: {error}",
+                    published_companions.len()
+                );
+            }
+        }
+    }
+
     // ── All non-carrier source files (.ts/.tsx/.js/.jsx) ──
     // Also follows node_modules dependencies transitively.
     let mut node_modules_synced: HashSet<String> = HashSet::new();
@@ -505,7 +560,14 @@ async fn scanner_loop(
             continue;
         }
 
-        if let Some(sync) = &config.project_sync {
+        // tsserver owns real TS/JS and node_modules through its filesystem host.
+        // Re-opening those files over the protocol duplicates disk state and
+        // starves interactive work. TSGO's explicit project API still requires
+        // this materialization path.
+        if eager_sync_real_sources(config.is_tsgo) {
+            let Some(sync) = &config.project_sync else {
+                continue;
+            };
             let deps = sync_non_carrier_file_to_provider(
                 path,
                 &config.host,
@@ -547,6 +609,21 @@ async fn scanner_loop(
     if let Some(tx) = config.done_tx {
         let _ = tx.send(());
     }
+}
+
+/// Whether a provider needs workspace TS/JS bytes pushed over its protocol.
+/// tsserver and its plugin intentionally fall through to the filesystem host;
+/// only TSGO's explicit project API needs eager materialization.
+fn eager_sync_real_sources(is_tsgo: bool) -> bool {
+    is_tsgo
+}
+
+/// Whether filesystem discovery must also materialize every carrier projection.
+/// TSGO needs explicit project inputs. Workspace tsserver needs store-backed
+/// source-identity membership for closed-file references and rename; a route
+/// without either mechanism remains lazy/active-set only.
+fn background_publish_workspace_carriers(is_tsgo: bool, has_publish_store: bool) -> bool {
+    is_tsgo || has_publish_store
 }
 
 /// Drain priority signals from the channel and re-sort remaining unprocessed files.
@@ -822,6 +899,7 @@ async fn sync_file_to_provider(
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
     requeue: Option<&DashSet<String>>,
+    deferred_refresh: Option<&mut Vec<String>>,
 ) {
     // Capture the published resolver snapshot AND the filesystem-workspace handle in
     // one read (the gateway's membership reconcile resolves ownership against the
@@ -862,6 +940,7 @@ async fn sync_file_to_provider(
             } else {
                 crate::external_ts::CarrierProviderDelivery::StoreBacked
             },
+            activate_provider_member: false,
         });
     let decision =
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
@@ -879,7 +958,11 @@ async fn sync_file_to_provider(
             ide: ide.as_ref(),
             membership,
             admission: carrier_coordinator,
-            reason: crate::external_ts::ReconcileReason::SourceSynced,
+            reason: if deferred_refresh.is_some() {
+                crate::external_ts::ReconcileReason::WorkspaceScan
+            } else {
+                crate::external_ts::ReconcileReason::SourceSynced
+            },
         })
         .await;
 
@@ -888,6 +971,14 @@ async fn sync_file_to_provider(
             committed_state,
             receipt,
         } => {
+            if let Some(paths) = deferred_refresh {
+                if let Some(path) = &committed_state.api_path {
+                    paths.push(path.clone());
+                }
+                if let Some(path) = &committed_state.ide_path {
+                    paths.push(path.clone());
+                }
+            }
             // tsserver: the plugin serves the companions as configured-project
             // members; commit the store-resident state through the receipt gate. A
             // `Superseded` commit (a newer transaction reclaimed the source, or an owner-loss
@@ -1112,6 +1203,19 @@ mod tests {
     use crate::ProjectSyncMode;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn tsserver_leaves_real_sources_and_node_modules_disk_resolved() {
+        assert!(!eager_sync_real_sources(false));
+        assert!(eager_sync_real_sources(true));
+    }
+
+    #[test]
+    fn carrier_background_publication_requires_an_engine_route() {
+        assert!(!background_publish_workspace_carriers(false, false));
+        assert!(background_publish_workspace_carriers(false, true));
+        assert!(background_publish_workspace_carriers(true, false));
+    }
 
     fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default())
@@ -1462,6 +1566,7 @@ mod tests {
             None,
             &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
+            None,
         )
         .await;
 
@@ -1537,6 +1642,7 @@ mod tests {
             &sync_states,
             None,
             &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
             None,
         )
         .await;
@@ -1645,6 +1751,7 @@ mod tests {
             None,
             &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
+            None,
         )
         .await;
 
@@ -1727,6 +1834,7 @@ defineProps<{ msg: string }>()
             &sync_states,
             None,
             &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
             None,
         )
         .await;
@@ -2126,6 +2234,7 @@ defineProps<{ msg: string }>()
             None,
             &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
+            None,
         )
         .await;
 
@@ -2294,6 +2403,7 @@ defineProps<{ msg: string }>()
             Some(&coordinator),
             &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
+            None,
         )
         .await;
 
@@ -2326,6 +2436,7 @@ defineProps<{ msg: string }>()
             &sync_states,
             Some(&coordinator),
             &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
             None,
         )
         .await;
@@ -2391,6 +2502,7 @@ defineProps<{ msg: string }>()
             Some(&coordinator),
             &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
+            None,
         )
         .await;
 
@@ -2452,6 +2564,7 @@ defineProps<{ msg: string }>()
             &sync_states,
             None,
             &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
             None,
         )
         .await;

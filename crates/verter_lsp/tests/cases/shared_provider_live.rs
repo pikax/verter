@@ -710,7 +710,7 @@ async fn shared_provider_serves_real_vue_macro_carrier() {
     // macro into the carrier via the shared resolver.
     let (ide_code, source_map, companion) = compile_vue_ide(WIDGET_VUE);
     assert!(
-        ide_code.contains("defineProps<") && ide_code.contains("Widget.vue.verter.ts"),
+        ide_code.contains("defineProps<") && ide_code.contains("Widget.vue.verter.js"),
         "the injected carrier is the real IDE codegen (defineProps + companion re-export)"
     );
 
@@ -819,7 +819,7 @@ async fn shared_provider_serves_dual_claimant_carrier_with_real_types() {
     // into the carrier via the shared resolver.
     let (ide_code, source_map, companion) = compile_vue_ide(WIDGET_VUE);
     assert!(
-        ide_code.contains("defineProps<") && ide_code.contains("Widget.vue.verter.ts"),
+        ide_code.contains("defineProps<") && ide_code.contains("Widget.vue.verter.js"),
         "the injected carrier is the real IDE codegen (defineProps + companion re-export)"
     );
 

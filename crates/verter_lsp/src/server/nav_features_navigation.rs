@@ -78,19 +78,14 @@ pub(super) async fn handle_goto_definition(
         position.character
     );
 
-    // Readiness protocol (never a starter): capture the DependencyReady
-    // receipt for the live revision, JOIN an in-flight background publication,
-    // or enqueue one and answer without the provider. The handler must never
-    // run the import-set/barrel walk inline — a request cancelled at its
-    // deadline would kill the walk and un-mint the receipt (the cancel loop).
-    let dependency_readiness = server.dependency_readiness_join(uri).await;
+    // Capture-only readiness: a miss enqueues/coalesces background dependency
+    // publication, but definition never joins it and still queries the provider
+    // immediately against the project state already available. The handler must
+    // never run the import-set/barrel walk inline.
+    let _ = server.dependency_readiness_capture(uri);
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
-    if let Some(tp) = server
-        .type_provider
-        .as_ref()
-        .filter(|_| dependency_readiness.is_ready())
-    {
+    if let Some(tp) = server.type_provider.as_ref() {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
@@ -272,17 +267,12 @@ pub(super) async fn handle_goto_definition(
     // try_component_contract_definition. The old separate resolve_component_event_definition
     // and resolve_component_prop_definition calls are subsumed by it.
 
-    // Enhance with TypeProvider for cross-file definitions — only under a
-    // committed (or joined) DependencyReady receipt: querying over a missing
-    // import closure returns wrong/empty cross-file answers, and the honest
-    // disposition for a not-ready revision is the native result (VS Code
-    // re-queries once background publication mints the receipt).
+    // Enhance with the TypeProvider immediately. Dependency readiness above is
+    // a background-healing signal, not an admission gate for non-destructive
+    // navigation; a partial provider answer during project loading is preferable
+    // to blocking the request behind publication.
     // Extract all context synchronously — no DashMap guard held across await.
-    if let Some(tp) = server
-        .type_provider
-        .as_ref()
-        .filter(|_| dependency_readiness.is_ready())
-    {
+    if let Some(tp) = server.type_provider.as_ref() {
         if let Some(ctx) = server.type_provider_context(uri) {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
@@ -300,6 +290,10 @@ pub(super) async fn handle_goto_definition(
                 // returned foreign location maps through the generation the
                 // request began against (never the merge-time current one).
                 let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                let foreign_api_set = server
+                    .documents
+                    .provider_surfaces()
+                    .capture_current_carrier_api_set();
                 match tp.get_definition(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_defs) => {
                         // Post-await validation: a response produced against a
@@ -323,6 +317,13 @@ pub(super) async fn handle_goto_definition(
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
                         let negotiated_encoding = server.position_encoding.read().clone();
+                        let api_resolver = |api_path: &str| {
+                            crate::provider_surface_store::classify_captured_api_surface(
+                                &foreign_api_set,
+                                api_path,
+                                negotiated_encoding.clone(),
+                            )
+                        };
                         let provider_had_defs = !type_defs.is_empty();
                         // GlobalComponents fallback-const NAV PROBE offsets for
                         // any same-file synthetic targets, located through the
@@ -350,6 +351,7 @@ pub(super) async fn handle_goto_definition(
                             Some(&|ide_path: &str| {
                                 server.foreign_ide_context(&foreign_ide_set, ide_path)
                             }),
+                            Some(&api_resolver),
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
@@ -450,10 +452,11 @@ pub(super) async fn handle_goto_definition(
                             Some(&|ide_path: &str| {
                                 server.foreign_ide_context(&foreign_ide_set, ide_path)
                             }),
+                            Some(&api_resolver),
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
-                            negotiated_encoding,
+                            negotiated_encoding.clone(),
                             &|p: &str| {
                                 block_in_place_if_available(|| {
                                     server.documents.host().workspace_read().read_file(p)
@@ -517,14 +520,10 @@ pub(super) async fn handle_goto_type_definition(
     // Readiness protocol (never a starter): capture / join / enqueue — the
     // handler must never run the import-set walk inline (see
     // `handle_goto_definition`).
-    let dependency_readiness = server.dependency_readiness_join(uri).await;
+    let _ = server.dependency_readiness_capture(uri);
 
     // Virtual file: route directly through type provider (position is already in TSX coordinates)
-    if let Some(tp) = server
-        .type_provider
-        .as_ref()
-        .filter(|_| dependency_readiness.is_ready())
-    {
+    if let Some(tp) = server.type_provider.as_ref() {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
@@ -590,14 +589,10 @@ pub(super) async fn handle_goto_type_definition(
         }
     }
 
-    // Type definition is purely a type provider operation — no verter analysis
-    // phase. Query only under a committed (or joined) DependencyReady receipt;
-    // a not-ready revision answers empty and background publication heals.
-    if let Some(tp) = server
-        .type_provider
-        .as_ref()
-        .filter(|_| dependency_readiness.is_ready())
-    {
+    // Type definition is purely a type provider operation — no Verter analysis
+    // phase. Capture-only readiness above heals missing dependencies in the
+    // background; it never delays this provider query.
+    if let Some(tp) = server.type_provider.as_ref() {
         if let Some(ctx) = server.type_provider_context(uri) {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
@@ -612,6 +607,10 @@ pub(super) async fn handle_goto_type_definition(
                 // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
                 // handle_goto_definition).
                 let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                let foreign_api_set = server
+                    .documents
+                    .provider_surfaces()
+                    .capture_current_carrier_api_set();
                 match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_defs) => {
                         // Post-await validation: a response produced against a
@@ -635,6 +634,13 @@ pub(super) async fn handle_goto_type_definition(
                                 server.resolve_barrel_type_provider_location(path, start, end)
                             };
                         let negotiated_encoding = server.position_encoding.read().clone();
+                        let api_resolver = |api_path: &str| {
+                            crate::provider_surface_store::classify_captured_api_surface(
+                                &foreign_api_set,
+                                api_path,
+                                negotiated_encoding.clone(),
+                            )
+                        };
                         return Ok(merge::merge_definitions_with_barrel_resolver(
                             None,
                             type_defs,
@@ -645,10 +651,11 @@ pub(super) async fn handle_goto_type_definition(
                             Some(&|ide_path: &str| {
                                 server.foreign_ide_context(&foreign_ide_set, ide_path)
                             }),
+                            Some(&api_resolver),
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
-                            negotiated_encoding,
+                            negotiated_encoding.clone(),
                             &|p: &str| {
                                 block_in_place_if_available(|| {
                                     server.documents.host().workspace_read().read_file(p)
@@ -1019,16 +1026,22 @@ pub(super) async fn handle_rename(
         return Err(multi_claimant_rename_unavailable_error());
     }
 
+    // `didChange` never performs provider I/O. A rename is an interactive
+    // consistency boundary, so repair the current authored buffer here before
+    // capturing its provider surface. The per-document repair lane coalesces a
+    // request storm onto one latest-snapshot sync; there is no feature timeout,
+    // and no intermediate editor revision is published.
+    server.ensure_current_file_synced(uri).await;
+
     // Readiness protocol (never a starter): the cross-file rename declaration
     // surfaces via the imported component's `{carrier}.ts` PUBLIC-API surface,
     // which background publication delivers and receipts as DependencyReady.
-    // The handler may capture the receipt or JOIN an in-flight publication
-    // (bounded by the rename deadline); on a miss it enqueues background
-    // publication and proceeds WITHOUT the provider leg — the same fail-closed
-    // shape as a provider error, with the child-prop completeness gate below
-    // still refusing partial cross-file edits. Runs BEFORE the fence so a
-    // joined publication's provider commands are written first.
-    let dependency_readiness = server.dependency_readiness_join(uri).await;
+    // The handler only captures a committed receipt. On a miss it enqueues
+    // background publication and proceeds WITHOUT the provider leg — the same
+    // fail-closed shape as a provider error, with the child-prop completeness
+    // gate below still refusing partial cross-file edits. It never joins the
+    // background lane or blocks the interactive request.
+    let dependency_readiness = server.dependency_readiness_capture(uri);
 
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
@@ -1453,59 +1466,9 @@ fn workspace_edit_satisfies_child_prop_rename(
         && has_edit_at(expected_parent_uri, expected_parent_range)
 }
 
-/// Apply the MERGED-EDIT COMPLETENESS GATE to a cross-file rename result.
-///
-/// - [`ChildPropRenameClass::Confirmed`]: the merged `WorkspaceEdit` MUST satisfy
-///   [`workspace_edit_satisfies_child_prop_rename`] (edits BOTH the prop
-///   declaration AND the parent `.vue` usage at their EXACT full ranges). If it does
-///   not — including a [`ChildPropDeclarationProof::Unknown`] declaration (no
-///   resolved target to prove) — the whole rename fails closed → `None`. This is
-///   the fix for the usage-only-partial gap: a confirmed child-prop rename whose
-///   merged edit lacks the declaration (e.g. tsgo, synthesis leg could not be
-///   produced; or an unresolvable imported type) returns NO edit rather than a
-///   usage-only partial. Provider-AGNOSTIC: a result whose declaration leg already
-///   lands (a tsserver native leg, or a provider's imported-member edit) passes even
-///   when Verter's own synthesis could not locate it (no `is_tsgo`/`is_tsserver`
-///   branch).
-/// - [`ChildPropRenameClass::NotChildProp`]: do NOT gate. The provider's own merged
-///   result is returned untouched — not a confirmed cross-file child-prop rename, so
-///   Verter must not suppress an otherwise-valid provider result.
-///
-/// Inspects ONLY the merged source `WorkspaceEdit`, so it is a pure function of
-/// `(merged, class, new_name)` — unit-testable without a live provider.
-fn gate_cross_file_child_prop_rename(
-    merged: Option<WorkspaceEdit>,
-    rename_class: &ChildPropRenameClass,
-    new_name: &str,
-) -> Option<WorkspaceEdit> {
-    let ChildPropRenameClass::Confirmed(target) = rename_class else {
-        return merged;
-    };
-    // The resolved declaration target's URI + range — `Unknown` yields no URI/range
-    // (a `None` range fails the per-leg proof, so the whole gate fails closed).
-    let (expected_decl_uri, expected_decl_range) = match &target.declaration {
-        ChildPropDeclarationProof::Known { uri, range, .. } => (Some(uri), *range),
-        ChildPropDeclarationProof::Unknown => (None, None),
-    };
-    let satisfied = merged
-        .as_ref()
-        .zip(expected_decl_uri)
-        .is_some_and(|(edit, decl_uri)| {
-            workspace_edit_satisfies_child_prop_rename(
-                edit,
-                decl_uri,
-                expected_decl_range,
-                &target.usage.parent_uri,
-                target.expected_parent_usage_range,
-                new_name,
-            )
-        });
-    if satisfied {
-        merged
-    } else {
-        None
-    }
-}
+#[path = "nav_features_navigation_rename_gate.rs"]
+mod nav_features_navigation_rename_gate;
+use nav_features_navigation_rename_gate::gate_cross_file_child_prop_rename;
 
 #[cfg(test)]
 #[path = "nav_features_navigation_tests.rs"]

@@ -321,16 +321,10 @@ impl TestSessionBuilder {
             Arc::new(verter_workspace::FilesystemWorkspace::new(
                 verter_workspace::FilesystemOptions::default(),
             ));
-        // The production request deadlines are human-scaled to a single healthy
-        // provider (hover 1.5s, definition 2.5s, ...). This harness deliberately
-        // spawns real providers, and the suite runs dozens of them concurrently
-        // under nextest — a pathological CPU-starvation environment where a
-        // normally-3ms tsserver hover can be scheduled out past a second. That is
-        // the canonical "slow machine" the deadlines are configurable for: raise
-        // every kind to the long batch backstop so these tests validate provider
-        // CORRECTNESS rather than measuring latency under contention. The wedge /
-        // fail-closed repros do not use this harness — they build their config
-        // directly and set their own tight deadline.
+        // Production has no feature latency deadlines. This correctness harness
+        // retains an explicit test-only backstop because it deliberately spawns
+        // many real providers concurrently under nextest; a broken fixture must
+        // fail the test instead of parking the suite. The bound is not shipped.
         let config = HostConfig {
             lsp_method_timeouts: verter_session::LspMethodTimeoutsConfig {
                 request_deadlines: verter_session::LspMethodBudgets {
@@ -388,6 +382,12 @@ impl TestSessionBuilder {
         });
 
         let server = service.inner();
+        // The real-provider corpus predates the production default-off policy and
+        // intentionally asserts native component/directive/slot hover enrichment
+        // alongside TypeScript answers. Opt this test fixture in explicitly;
+        // default-off initialization is covered by the configuration and extension
+        // tests, while provider-only behavior remains observable in dedicated tests.
+        server.enable_native_hover_semantics_for_tests();
 
         // Build a project registry from the workspace root so verter-internal
         // definition handlers can resolve path aliases (e.g. "@/*" → "./src/*").
@@ -767,6 +767,12 @@ impl RealProviderTestSession {
         self.server().test_ensure_synced(uri).await;
     }
 
+    /// Join the background import-publication pass in test setup so a
+    /// capture-only cross-file request begins with a committed readiness receipt.
+    pub(crate) async fn settle_import_dependencies(&self, uri: &Uri) {
+        self.server().test_settle_import_dependencies(uri).await;
+    }
+
     /// Get completion labels at a position.
     pub(crate) async fn completion_labels(
         &self,
@@ -900,6 +906,31 @@ impl RealProviderTestSession {
                 .collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Query the real provider at the generated offset for a carrier position,
+    /// bypassing LSP result mapping. This lets integration tests distinguish a
+    /// provider-resolution failure from a generated-target remapping failure.
+    pub(crate) async fn raw_provider_definitions(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Vec<verter_type_runtime::TypeLocation> {
+        let Some(ctx) = self.server().test_type_provider_context(uri) else {
+            return Vec::new();
+        };
+        let Some(offset) = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+        ) else {
+            return Vec::new();
+        };
+        self.provider
+            .get_definition(&ctx.tsx_path, offset)
+            .await
+            .unwrap_or_default()
     }
 
     /// Get references at a position (includes declaration).
@@ -1452,31 +1483,9 @@ macro_rules! real_provider_test {
 
 pub(crate) use real_provider_test;
 
-/// Canary assertion for known provider/harness limitations.
-///
-/// Asserts that the **known-broken behavior still holds**. When the limitation is fixed
-/// (the condition becomes false), the canary panics — signaling the fix should be
-/// promoted to a real `assert!`.
-///
-/// Usage: `canary_assert_known_limitation!(broken_condition, "description of limitation");`
-///
-/// - If `broken_condition` is true → the limitation still exists → test passes (logs a note)
-/// - If `broken_condition` is false → the limitation was fixed → test **fails** with a
-///   message to promote the canary to a real assertion
-macro_rules! canary_assert_known_limitation {
-    ($broken_cond:expr, $($arg:tt)+) => {
-        if $broken_cond {
-            eprintln!("  CANARY (known limitation still present): {}", format_args!($($arg)+));
-        } else {
-            panic!(
-                "CANARY RESOLVED — limitation no longer present, promote to real assert!: {}",
-                format_args!($($arg)+)
-            );
-        }
-    };
-}
-
-pub(crate) use canary_assert_known_limitation;
+#[path = "test_harness_macros.rs"]
+mod test_harness_macros;
+pub(crate) use test_harness_macros::canary_assert_known_limitation;
 
 #[cfg(test)]
 #[path = "test_harness_tests.rs"]

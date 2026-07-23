@@ -10,6 +10,16 @@ use super::*;
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
 #[test]
+fn lsp_projection_host_uses_only_bounded_codegen_facts() {
+    let config = lsp_projection_host_config();
+    assert_eq!(
+        config.effective_scope(),
+        verter_semantic::analysis::AnalysisScope::BUILD,
+        "editor ingress needs bounded compiler facts but not full template/style/cross-file analysis"
+    );
+}
+
+#[test]
 fn cli_pairs_editor_tsserver_receipt_with_its_nonce() {
     let args = CliArgs::parse_from([
         "--type-provider=auto".to_string(),

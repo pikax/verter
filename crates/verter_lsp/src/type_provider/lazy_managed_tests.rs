@@ -646,8 +646,8 @@ async fn failed_activation_replays_real_vue_and_svelte_carriers_before_typed_que
 
 /// A CANCELLED activation must still arm the retry cooldown.
 ///
-/// The production request deadline (and every `tokio::time::timeout` around a
-/// handler) DROPS the handler body, so an activation cancelled while the factory
+/// Client cancellation (and every `tokio::time::timeout` around a test handler)
+/// DROPS the handler body, so an activation cancelled while the factory
 /// is still running never reaches its terminal outcome arm. Without a drop
 /// record, `last_activation_failure` stays unset, the cooldown never arms, the
 /// `OnceCell` stays unset — and the very next request spawns ANOTHER managed

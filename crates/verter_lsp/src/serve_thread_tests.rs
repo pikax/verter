@@ -78,11 +78,9 @@ fn serve_thread_stack_admits_a_handler_sized_frame() {
 #[test]
 fn serve_thread_stack_clears_the_measured_debug_peak() {
     const MEASURED_DEBUG_PEAK_BYTES: usize = 1857 * 1024;
-    assert!(
-        SERVE_THREAD_STACK_BYTES >= 4 * MEASURED_DEBUG_PEAK_BYTES,
-        "serve-thread stack ({SERVE_THREAD_STACK_BYTES}) must keep at least 4x headroom \
-         over the measured debug peak for a single request ({MEASURED_DEBUG_PEAK_BYTES})"
-    );
+    const {
+        assert!(SERVE_THREAD_STACK_BYTES >= 4 * MEASURED_DEBUG_PEAK_BYTES);
+    }
 }
 
 /// Control: `run_on_serve_thread` returns its body's value and propagates a

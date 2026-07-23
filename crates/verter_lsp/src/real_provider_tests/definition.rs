@@ -1,6 +1,7 @@
 //! Go-to-definition tests ported from E2E suite.
 
 use crate::test_harness::{real_provider_test, RealProviderTestSession};
+use tower_lsp_server::ls_types::Position;
 
 // ---------------------------------------------------------------------------
 // Same-file definitions (script bindings used in template)
@@ -59,6 +60,68 @@ real_provider_test!(
         let def_path = RealProviderTestSession::uri_to_path(&locs[0].uri);
         assert_eq!(def_path, uri_path, "formatted def should be same file");
         assert!(!def_path.ends_with(".tsx"), "formatted def should NOT be in .tsx");
+    }
+);
+
+real_provider_test!(
+    definition_svelte_bind_value_lands_on_authored_state_binding,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        let uri = session.open_fixture_file("src/features/BindValue.svelte").await;
+        let use_position = session.find_nth_position(&uri, "name", 1, 1);
+        let declaration = session.find_nth_position(&uri, "name", 0, 0);
+
+        let mut definitions = Vec::new();
+        for _ in 0..16 {
+            definitions = session.definition_locations(&uri, use_position).await;
+            if definitions.iter().any(|location| {
+                location.uri == uri && location.range.start == declaration
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(
+            definitions.iter().any(|location| {
+                location.uri == uri && location.range.start == declaration
+            }),
+            "bind:value must navigate from the authored bound expression to the authored state binding; expected={declaration:?}, got={definitions:?}"
+        );
+        assert!(
+            definitions.iter().all(|location| {
+                !location.uri.as_str().ends_with(".tsx")
+            }),
+            "same-file Svelte binding navigation must never leak the IDE carrier: {definitions:?}"
+        );
+    }
+);
+
+real_provider_test!(
+    definition_svelte_component_shorthand_lands_on_authored_local,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/ide/IdeSurfaceParent.svelte")
+            .await;
+        let use_position = session.find_position(&uri, "{label}", 1);
+        let declaration = session.find_nth_position(&uri, "label", 0, 0);
+
+        let mut definitions = Vec::new();
+        for _ in 0..16 {
+            definitions = session.definition_locations(&uri, use_position).await;
+            if definitions.iter().any(|location| {
+                location.uri == uri && location.range.start == declaration
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(
+            definitions.iter().any(|location| {
+                location.uri == uri && location.range.start == declaration
+            }),
+            "Svelte component shorthand must navigate to its authored local binding; expected={declaration:?}, got={definitions:?}"
+        );
     }
 );
 
@@ -251,5 +314,103 @@ real_provider_test!(
         assert!(!locs.is_empty(), "MyComp import should have definitions");
         let def_path = RealProviderTestSession::uri_to_path(&locs[0].uri);
         assert!(def_path.contains("MyComp.vue"), "MyComp import should go to MyComp.vue, got: {def_path}");
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Svelte public-prop definitions
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    definition_svelte_component_prop_lands_on_authored_props_type_member,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        let parent = session
+            .open_fixture_file("src/components/PropParent.svelte")
+            .await;
+        // Keep the imported child closed: this is the production first-open
+        // shape. did_open/background publication must make its public surface
+        // queryable without a test-only readiness join or an editor open.
+        let child = session.workspace_uri("src/components/PropChild.svelte");
+        let parent_path = RealProviderTestSession::uri_to_path(&parent);
+        let resolved_child = session
+            .server()
+            .test_documents()
+            .host()
+            .resolve_import_via_workspace(&parent_path, "./PropChild.svelte");
+        assert_eq!(
+            resolved_child.as_deref(),
+            Some(RealProviderTestSession::uri_to_path(&child).as_str()),
+            "the published workspace must resolve the direct Svelte carrier import"
+        );
+
+        // An explicit component-prop NAME navigates to the child's authored
+        // `$props` member. The shorthand `{contractProp}` token is a value
+        // expression and is asserted separately below against its parent-local
+        // binding.
+        let use_position = session.find_position(&parent, "optionalFlag={true}", 1);
+        let declaration = Position::new(6, 4);
+        let mut raw_definitions = Vec::new();
+        for _ in 0..48 {
+            raw_definitions = session
+                .raw_provider_definitions(&parent, use_position)
+                .await;
+            if raw_definitions.iter().any(|definition| {
+                definition.path.contains("PropChild.svelte")
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(
+            raw_definitions.iter().any(|definition| {
+                definition.path.contains("PropChild.svelte")
+            }),
+            "the real provider must resolve the generated component-prop use to the closed child carrier before LSP remapping; got={raw_definitions:?}"
+        );
+        let mut definitions = Vec::new();
+        for _ in 0..16 {
+            definitions = session.definition_locations(&parent, use_position).await;
+            if definitions.iter().any(|location| {
+                location.uri == child && location.range.start == declaration
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(
+            definitions.iter().any(|location| {
+                location.uri == child && location.range.start == declaration
+            }),
+            "Svelte component prop definition must map the provider's public projection back to the authored `$props` type member; expected={declaration:?}, child_state={:?}, raw={raw_definitions:?}, got={definitions:?}",
+            session.server().test_provider_sync_state_for_canonical(
+                &RealProviderTestSession::uri_to_path(&child)
+            )
+        );
+        assert!(
+            definitions
+                .iter()
+                .all(|location| !location.uri.as_str().ends_with(".tsx")),
+            "public prop definition must never leak the IDE carrier: {definitions:?}"
+        );
+
+        let shorthand_position = session.find_position(&parent, "{contractProp}", 2);
+        let shorthand_declaration = Position::new(2, 6);
+        let shorthand_definitions = session
+            .definition_locations(&parent, shorthand_position)
+            .await;
+        assert!(
+            shorthand_definitions.iter().any(|location| {
+                location.uri == parent && location.range.start == shorthand_declaration
+            }),
+            "a Svelte component shorthand value must navigate to its authored local binding; \
+             expected={shorthand_declaration:?}, got={shorthand_definitions:?}"
+        );
+        assert!(
+            shorthand_definitions
+                .iter()
+                .all(|location| !location.uri.as_str().ends_with(".tsx")),
+            "shorthand definition must never leak the IDE carrier: {shorthand_definitions:?}"
+        );
     }
 );

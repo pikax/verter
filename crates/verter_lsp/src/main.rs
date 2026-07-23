@@ -59,10 +59,7 @@ async fn serve() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        analysis_level: verter_session::AnalysisLevel::Full,
-        ..HostConfig::default()
-    }));
+    let host = Arc::new(VerterHost::new_standalone(lsp_projection_host_config()));
 
     // Parse CLI arguments
     let args = CliArgs::parse();
@@ -182,6 +179,19 @@ async fn serve() {
         .concurrency_level(verter_lsp::LSP_MAX_CONCURRENCY)
         .serve(service)
         .await;
+}
+
+/// Host policy for the editor-critical projection lane.
+///
+/// IDE projection codegen needs the compiler's bounded build facts (bindings,
+/// macros, exports, and lightweight style metadata) as well as import ingress.
+/// Full template/style/cross-file semantic enrichment and typeinfo remain a
+/// separate optional background concern and are never reconstructed by handlers.
+fn lsp_projection_host_config() -> HostConfig {
+    HostConfig {
+        analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+        ..HostConfig::default()
+    }
 }
 
 /// Parsed CLI arguments.

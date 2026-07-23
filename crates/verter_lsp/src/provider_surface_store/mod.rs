@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use verter_span::path::InjectedPathKey;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -817,7 +818,7 @@ impl ProviderSurfaceStore {
     fn capture_current_set_of_kind(&self, kind: ProviderSurfaceKind) -> ProviderQuerySnapshot {
         // ONE read guard for the ENTIRE capture (atomicity, condition a).
         let lifecycle = self.inner.lifecycle.read();
-        let mut by_path: HashMap<Arc<str>, CapturedPathState> =
+        let mut by_path: HashMap<InjectedPathKey, CapturedPathState> =
             HashMap::with_capacity(lifecycle.paths.len());
         for (path, state) in lifecycle.paths.iter() {
             let captured = match state {
@@ -839,7 +840,7 @@ impl ProviderSurfaceStore {
                     }
                 }
             };
-            by_path.insert(Arc::clone(path), captured);
+            by_path.insert(InjectedPathKey::new(path), captured);
         }
         ProviderQuerySnapshot { by_path }
     }
@@ -904,7 +905,7 @@ pub enum CapturedPathState {
 /// offsets were produced against.
 #[derive(Default)]
 pub struct ProviderQuerySnapshot {
-    by_path: HashMap<Arc<str>, CapturedPathState>,
+    by_path: HashMap<InjectedPathKey, CapturedPathState>,
 }
 
 impl ProviderQuerySnapshot {
@@ -913,7 +914,7 @@ impl ProviderQuerySnapshot {
     /// capture → a genuinely real file). This is the lookup classify routes on.
     #[must_use]
     pub fn captured_state_for(&self, provider_path: &str) -> Option<&CapturedPathState> {
-        self.by_path.get(provider_path)
+        self.by_path.get(&InjectedPathKey::new(provider_path))
     }
 
     /// The captured MAPPABLE snapshot for `provider_path`, if it was a `Current`
@@ -923,7 +924,7 @@ impl ProviderQuerySnapshot {
     /// `.vue` edit.
     #[must_use]
     pub fn snapshot_for(&self, provider_path: &str) -> Option<&Arc<ProviderSurfaceSnapshot>> {
-        match self.by_path.get(provider_path) {
+        match self.by_path.get(&InjectedPathKey::new(provider_path)) {
             Some(CapturedPathState::Current(snapshot)) => Some(snapshot),
             _ => None,
         }

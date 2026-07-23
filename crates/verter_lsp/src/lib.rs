@@ -8,9 +8,10 @@
 /// of slow semantic handlers then occupy every slot, the framed-stdin forwarder
 /// stalls, and the server stops reading client stdin entirely — so provider-free
 /// control requests (`$/verter/getStatistics`, `$/cancelRequest`) are STARVED and
-/// no client-side rescue can land. The always-on per-request deadline stops a
-/// handler occupying a slot forever; this generous cap additionally guarantees
-/// control requests get a slot immediately alongside a burst of semantic work.
+/// no client-side rescue can land. Provider lifecycle watchdogs recover dead
+/// engines without turning valid cold-project work into empty results; this
+/// generous cap guarantees cancellation and control requests still get a slot
+/// immediately alongside a burst of semantic work.
 pub const LSP_MAX_CONCURRENCY: usize = 64;
 
 /// Stack size for the thread that runs the tokio runtime and therefore polls
@@ -359,6 +360,18 @@ pub enum TypeProviderKind {
     EditorTsserver,
     /// No type provider — verter-only mode.
     None,
+}
+
+impl TypeProviderKind {
+    /// Whether this engine requires Verter to materialize an explicit rewritten
+    /// TypeScript source graph. TSGO's project API consumes those buffers
+    /// directly. Both tsserver topologies retain authored TS/JS bytes and let the
+    /// TypeScript plugin resolve framework carriers, matching the editor's native
+    /// project lifecycle and preserving exact cursor coordinates.
+    #[must_use]
+    pub(crate) const fn requires_explicit_source_graph(self) -> bool {
+        matches!(self, Self::Tsgo)
+    }
 }
 
 impl std::fmt::Display for TypeProviderKind {

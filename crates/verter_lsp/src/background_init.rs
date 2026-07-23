@@ -215,8 +215,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     },
                 ));
                 new_ws.set_project_graph(verter_workspace::ProjectGraph::new());
-                let ws_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = new_ws.clone();
-                host.set_workspace(ws_dyn);
+                documents.set_workspace(Arc::clone(&new_ws));
                 *vfs_workspace.write() = Some(Arc::clone(&new_ws));
                 // The memo keys embed the previous workspace's content generation,
                 // which this fresh workspace restarts low.
@@ -515,6 +514,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     Ok(u) => u,
                     Err(_) => continue,
                 };
+                let Some(snapshot) = documents.snapshot_identity(&uri) else {
+                    continue;
+                };
 
                 let verter_diags = {
                     let vfs_ws = vfs_workspace.read();
@@ -542,7 +544,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     verter_diags
                 };
 
-                client.publish_diagnostics(uri, diagnostics, None).await;
+                if documents.snapshot_identity_is_current(&uri, &snapshot) {
+                    client
+                        .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
+                        .await;
+                }
             }
 
             client
@@ -569,6 +575,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             let uri: Uri = match uri_str.parse() {
                 Ok(u) => u,
                 Err(_) => continue,
+            };
+            let Some(snapshot) = documents.snapshot_identity(&uri) else {
+                continue;
             };
 
             let verter_diags = {
@@ -597,7 +606,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 verter_diags
             };
 
-            client.publish_diagnostics(uri, diagnostics, None).await;
+            if documents.snapshot_identity_is_current(&uri, &snapshot) {
+                client
+                    .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
+                    .await;
+            }
         }
     }
 

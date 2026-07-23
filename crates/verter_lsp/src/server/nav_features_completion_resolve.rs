@@ -17,7 +17,8 @@ use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::type_provider::auto_import::{
-    resolve_script_import_anchor, translate_completion_import_edits, ProviderImportEdit,
+    resolve_script_import_anchor, translate_completion_import_edits_with_context,
+    CompletionImportTranslationContext, ExistingImportEditContext, ProviderImportEdit,
 };
 
 use super::VerterLanguageServer;
@@ -118,9 +119,9 @@ pub(super) fn resolve_provider_auto_import_edits(
     let tsx_li = LineIndex::new(&snapshot.provider_content, server.documents.encoding());
     // `AnalyzedImport.span` is SFC-absolute; pass the spans straight through. The anchor authority
     // consumes them in that coordinate space and filters to the selected `<script setup>` block.
-    let user_import_spans: Vec<(u32, u32)> = server
-        .documents
-        .get_analysis(&carrier_uri)
+    let analysis = server.documents.get_analysis(&carrier_uri);
+    let user_import_spans: Vec<(u32, u32)> = analysis
+        .as_ref()
         .map(|a| {
             a.imports
                 .iter()
@@ -137,14 +138,21 @@ pub(super) fn resolve_provider_auto_import_edits(
     let carrier_source_path = crate::documents::uri_to_canonical_id(&carrier_uri);
     let host = server.documents.host();
     let carrier_source_exists = |p: &str| host.get_source(p).is_some();
-    let edits = translate_completion_import_edits(
+    let existing_import_context = analysis.as_ref().map(|analysis| ExistingImportEditContext {
+        provider_source: &snapshot.provider_content,
+        analyzed_imports: &analysis.imports,
+    });
+    let edits = translate_completion_import_edits_with_context(
         provider_edits,
-        Some(&anchor),
-        &tsx_li,
-        &mapper,
-        &doc.line_index,
-        &carrier_source_path,
-        &carrier_source_exists,
+        CompletionImportTranslationContext {
+            anchor: Some(&anchor),
+            provider_line_index: &tsx_li,
+            mapper: &mapper,
+            carrier_line_index: &doc.line_index,
+            edit_target_path: &carrier_source_path,
+            carrier_source_exists: &carrier_source_exists,
+            existing_import: existing_import_context,
+        },
     )
     .map_err(|e| e.to_string())?;
 

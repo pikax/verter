@@ -1,20 +1,17 @@
-//! Discriminating test for the LSP cancellation contract.
+//! Discriminating tests for audit transparency and explicit cancellation.
 //!
-//! Drives a hover-style audited request whose body deadlines past
-//! the per-method budget. Asserts that:
+//! Drives a hover-style audited request whose body runs past the observational
+//! audit SLO. Asserts that:
 //!
-//! * the record published to the records store carries
-//!   `LspRequestPayload { error: Some("cancelled".to_string()), .. }`,
+//! * the successful result is still delivered,
+//! * the record published to the records store carries no error,
 //! * the active-request registry no longer contains the request id
 //!   (the registration was finalised, not leaked),
-//! * the harness surfaces an LSP `request_cancelled` JSON-RPC error
-//!   to the caller.
+//! * explicit cancellation can still finalize a registration with the marker.
 //!
 //! Every audited LSP handler enters
-//! [`verter_lsp::audit_harness::run_with_audit`], which wraps the
-//! handler body in `tokio::time::timeout(per_method_budget, ...)`
-//! and finalises the registration with the cancellation marker on
-//! timeout.
+//! [`verter_lsp::audit_harness::run_with_audit`]. Audit collection must never
+//! introduce a timeout that normal request execution does not have.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +22,8 @@ use verter_lsp::audit_harness;
 use verter_session::{HostConfig, LspMethodTimeoutsConfig, VerterHost};
 
 #[tokio::test]
-async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker() {
-    // Tight hover budget so the first request blows past it.
+async fn audit_slo_does_not_cancel_a_slow_successful_request() {
+    // Tight hover SLO so the request exceeds it deterministically.
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         audit_enabled: true,
         lsp_method_timeouts: LspMethodTimeoutsConfig {
@@ -50,18 +47,16 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
     assert_eq!(pre.active_request_count, 0);
     assert_eq!(pre.records_store_size, 0);
 
-    // Drive a body whose latency exceeds the hover budget. The
-    // harness must finalise with the cancellation marker.
+    // Drive a body whose latency exceeds the hover audit SLO. The harness must
+    // remain transparent and finalize the successful response normally.
     let result = audit_harness::run_with_audit::<u8, _, _>(
         &host,
         LspMethodTag::Hover,
         canonical.clone(),
         Some(position),
         async move {
-            // The body sleeps past the budget; the timeout in
-            // `run_with_audit` wins the race.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            Ok(0u8)
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(7u8)
         },
         |payload, value| {
             payload.response_size_bytes = u32::from(*value);
@@ -69,13 +64,7 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
     )
     .await;
 
-    // The harness surfaces a `request_cancelled` JSON-RPC error.
-    let err = result.expect_err("timeout must surface as a request-cancelled error");
-    assert_eq!(
-        err.code,
-        tower_lsp_server::jsonrpc::ErrorCode::RequestCancelled,
-        "harness must propagate `request_cancelled` to the LSP client"
-    );
+    assert_eq!(result.expect("audit must not cancel the request"), 7);
 
     // The cancellation marker must be observable in the records
     // store. The active-request registry MUST be drained (the
@@ -83,11 +72,11 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
     let post = host.host_audit_runtime().snapshot();
     assert_eq!(
         post.active_request_count, 0,
-        "the registration must NOT linger in the active-request registry after the supersede"
+        "the registration must not linger after the successful request"
     );
     assert_eq!(
         post.records_store_size, 1,
-        "the cancellation marker record must be published"
+        "the successful audit record must be published"
     );
 
     // Drain the (single) record and verify the marker.
@@ -106,7 +95,7 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
             break;
         }
     }
-    let record = record.expect("the cancellation marker record must exist in the store");
+    let record = record.expect("the successful audit record must exist in the store");
     assert!(matches!(
         record.kind,
         RequestKind::Lsp {
@@ -117,15 +106,9 @@ async fn supersede_via_timeout_finalizes_first_request_with_cancellation_marker(
         RequestKindPayload::Lsp(p) => p,
         other => panic!("expected RequestKindPayload::Lsp, got {other:?}"),
     };
-    assert_eq!(
-        payload.error.as_deref(),
-        Some("cancelled"),
-        "the cancellation marker must be `Some(\"cancelled\")`"
-    );
+    assert_eq!(payload.error, None);
+    assert_eq!(payload.response_size_bytes, 7);
     assert_eq!(payload.method, LspMethodTag::Hover);
-    // The cancellation-marker payload retains the method discriminant
-    // but does NOT need to populate position info — the marker
-    // captures the supersede outcome, not the partial response.
 }
 
 /// Discriminator: `contains_active_request(id)` flips from `true`

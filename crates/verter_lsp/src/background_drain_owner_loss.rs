@@ -93,6 +93,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
             provider_delivery: carrier_publish
                 .expect("coordinator came from the publish context")
                 .provider_delivery,
+            activate_provider_member: false,
         });
     let decision =
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {

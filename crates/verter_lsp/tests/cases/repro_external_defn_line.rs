@@ -213,6 +213,7 @@ fn external_dts_type_definition_keeps_the_real_line_not_zero() {
         &mapper,
         &vue_li,
         no_external,
+        None,
         &doc_uri,
         &carrier_source_exists,
         no_barrel,

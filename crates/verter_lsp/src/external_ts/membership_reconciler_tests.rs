@@ -203,7 +203,7 @@ async fn advertise(
     companions: Vec<CarrierCompanion>,
 ) {
     // The `#[must_use]` outcome is intentionally discarded by this test helper.
-    let _ = reconciler
+    let _outcome = reconciler
         .reconcile_source_membership(
             source,
             bound(project),
@@ -215,6 +215,148 @@ async fn advertise(
 }
 
 // ── Owned ───────────────────────────────────────────────────────────────────
+
+/// The workspace scanner publishes many carrier companions into one durable
+/// store generation. It records each companion as addressable metadata, but must
+/// not activate it as a project root or refresh per companion.
+#[tokio::test]
+async fn workspace_scan_defers_per_carrier_provider_refresh() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let (reconciler, _ledger) = reconciler_with(mock.clone());
+    let source = CanonicalSource::from("/proj/src/Comp.vue");
+
+    let _ = reconciler
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![
+                companion(
+                    "/proj/src/Comp.vue.verter.ts",
+                    SnapshotRole::CarrierApi,
+                    ScriptKind::Ts,
+                ),
+                ide("/proj/src/Comp.vue.tsx"),
+            ],
+            ReconcileReason::WorkspaceScan,
+        )
+        .await
+        .expect("workspace scan publication succeeds before its batch refresh");
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::RegisterCarrierMetadata { .. }))
+            .count(),
+        2,
+        "both companions must retain routing metadata without becoming active roots"
+    );
+    assert!(calls
+        .iter()
+        .all(|call| !matches!(call, MockCall::RegisterCarrierMember { .. })));
+    assert!(
+        calls
+            .iter()
+            .all(|call| !matches!(call, MockCall::NotifyCarrierChanged { .. })),
+        "workspace scan publication defers all per-companion refreshes: {calls:?}"
+    );
+}
+
+/// Publishing a carrier because another source imported it must not promote the
+/// carrier into tsserver's configured-project roots. `SourceSynced` describes why
+/// the immutable store snapshot changed; editor-open activation is a separate
+/// lifecycle fact.
+#[tokio::test]
+async fn source_sync_publication_records_metadata_without_activating_a_root() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let (reconciler, _ledger) = reconciler_with(mock.clone());
+    let source = CanonicalSource::from("/proj/src/Imported.svelte");
+
+    let _ = reconciler
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![
+                companion(
+                    "/proj/src/Imported.svelte.verter.ts",
+                    SnapshotRole::CarrierApi,
+                    ScriptKind::Ts,
+                ),
+                ide("/proj/src/Imported.svelte.tsx"),
+            ],
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("import publication should commit its store metadata");
+
+    let calls = mock.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, MockCall::RegisterCarrierMetadata { .. }))
+            .count(),
+        2,
+        "both projections remain addressable without becoming TypeScript roots"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !matches!(call, MockCall::RegisterCarrierMember { .. })),
+        "publication reason must not be mistaken for editor-open activation: {calls:?}"
+    );
+}
+
+/// Opening a carrier after workspace discovery must promote the already-published
+/// IDE projection immediately. It must not wait for a fresh compile or activate
+/// the typeinfo-oriented API projection.
+#[tokio::test]
+async fn published_carrier_activation_promotes_only_the_ide_projection() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let (reconciler, _ledger) = reconciler_with(mock.clone());
+    let source = CanonicalSource::from("/proj/src/Comp.vue");
+
+    let _ = reconciler
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![
+                companion(
+                    "/proj/src/Comp.vue.verter.ts",
+                    SnapshotRole::CarrierApi,
+                    ScriptKind::Ts,
+                ),
+                ide("/proj/src/Comp.vue.tsx"),
+            ],
+            ReconcileReason::WorkspaceScan,
+        )
+        .await
+        .expect("workspace metadata publication succeeds");
+    mock.clear_calls();
+
+    assert!(
+        reconciler
+            .activate_published_source(&source)
+            .await
+            .expect("published activation succeeds"),
+        "a current advertised record should be promotable"
+    );
+
+    let calls = mock.calls();
+    assert!(
+        matches!(
+            calls.as_slice(),
+            [MockCall::ActivateCarrierMember {
+                source_path,
+                companion_path,
+                project_file_name,
+                script_kind: verter_type_runtime::CarrierScriptKind::Tsx,
+            }] if source_path == "/proj/src/Comp.vue"
+                && companion_path == "/proj/src/Comp.vue.tsx"
+                && project_file_name == "/proj/tsconfig.json"
+        ),
+        "activation is one metadata-free control-plane operation for the IDE view: {calls:?}"
+    );
+}
 
 #[tokio::test]
 async fn extension_flip_closes_stale_companion_before_registering_the_new_one() {
@@ -237,6 +379,10 @@ async fn extension_flip_closes_stale_companion_before_registering_the_new_one() 
         vec![ide("/proj/src/Comp.vue.tsx")],
     )
     .await;
+    assert!(reconciler
+        .activate_published_source(&source)
+        .await
+        .expect("initial IDE projection should activate"));
     mock.clear_calls();
 
     // The carrier's script kind is corrected to JS: the IDE companion flips
@@ -262,8 +408,8 @@ async fn extension_flip_closes_stale_companion_before_registering_the_new_one() 
         .expect("the stale .tsx must be closed");
     let register_pos = calls
         .iter()
-        .position(|call| matches!(call, MockCall::RegisterCarrierMember { companion_path, .. } if companion_path == "/proj/src/Comp.vue.jsx"))
-        .expect("the new .jsx must be registered");
+        .position(|call| matches!(call, MockCall::RegisterCarrierMetadata { companion_path, .. } if companion_path == "/proj/src/Comp.vue.jsx"))
+        .expect("the new .jsx metadata must be registered");
     assert!(
         close_pos < register_pos,
         "the stale .tsx must close BEFORE the .jsx registers (tsserver output-file exclusion): {calls:?}"
@@ -286,6 +432,10 @@ async fn owner_change_registers_new_companion_before_closing_the_old_one() {
         vec![ide("/proj/src/Comp.vue.tsx")],
     )
     .await;
+    assert!(reconciler
+        .activate_published_source(&source)
+        .await
+        .expect("initial IDE projection should activate"));
     mock.clear_calls();
 
     advertise(
@@ -299,8 +449,8 @@ async fn owner_change_registers_new_companion_before_closing_the_old_one() {
     let calls = mock.calls();
     let register_pos = calls
         .iter()
-        .position(|call| matches!(call, MockCall::RegisterCarrierMember { companion_path, project_file_name, .. } if companion_path == "/proj/src/Comp.vue.tsx" && project_file_name == "/other/tsconfig.json"))
-        .expect("the companion must re-register under the new project");
+        .position(|call| matches!(call, MockCall::RegisterCarrierMetadata { companion_path, project_file_name, .. } if companion_path == "/proj/src/Comp.vue.tsx" && project_file_name == "/other/tsconfig.json"))
+        .expect("the companion metadata must re-register under the new project");
     // No close of the companion may precede that re-registration.
     assert!(
         !calls[..register_pos].iter().any(
@@ -358,10 +508,9 @@ async fn owned_advertises_exactly_its_companions_under_project() {
         vec![source.clone()]
     );
 
-    // The provider-buffer transition went through the actor command API:
-    // `register_carrier_member` for each companion, with the owning project as the
-    // `project_file_name`.
-    let registered: Vec<(String, String)> = mock
+    // Publication and activation are distinct. Both views remain addressable
+    // metadata until editor open explicitly promotes the IDE projection.
+    let active: Vec<(String, String)> = mock
         .calls()
         .into_iter()
         .filter_map(|call| match call {
@@ -373,14 +522,50 @@ async fn owned_advertises_exactly_its_companions_under_project() {
             _ => None,
         })
         .collect();
-    assert_eq!(registered.len(), 2, "both companions registered");
-    assert!(registered.iter().all(|(_, proj)| proj == project));
-    assert!(registered
-        .iter()
-        .any(|(p, _)| p == "/proj/src/Comp.vue.tsx"));
-    assert!(registered
-        .iter()
-        .any(|(p, _)| p == "/proj/src/Comp.vue.verter.ts"));
+    assert!(
+        active.is_empty(),
+        "publication must not activate roots: {active:?}"
+    );
+
+    let metadata: Vec<(String, String)> = mock
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            MockCall::RegisterCarrierMetadata {
+                companion_path,
+                project_file_name,
+                ..
+            } => Some((companion_path, project_file_name)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        metadata,
+        [
+            ("/proj/src/Comp.vue.tsx".to_string(), project.to_string()),
+            (
+                "/proj/src/Comp.vue.verter.ts".to_string(),
+                project.to_string()
+            ),
+        ],
+        "both projections are published without joining the active working set"
+    );
+    mock.clear_calls();
+    assert!(reconciler
+        .activate_published_source(&source)
+        .await
+        .expect("published IDE projection should activate"));
+    assert!(matches!(
+        mock.calls().as_slice(),
+        [MockCall::ActivateCarrierMember { companion_path, .. }]
+            if companion_path == "/proj/src/Comp.vue.tsx"
+    ));
+    assert!(
+        mock.calls()
+            .iter()
+            .all(|call| !matches!(call, MockCall::NotifyCarrierChanged { .. })),
+        "active registration owns its single ordered invalidation"
+    );
 }
 
 #[tokio::test]
