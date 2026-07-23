@@ -49,14 +49,11 @@ const BASE_TYPESCRIPT_LANGUAGE_IDS: &[&str] = &[
     "typescriptreact",
 ];
 
-/// The base TS/JS language ids the LSP DOCUMENT SELECTOR attaches to — the
-/// plain `javascript` / `typescript` surfaces only. The React dialects are
-/// intentionally EXCLUDED from the LSP selector (they activate the extension +
-/// configure the built-in TS plugin, but the Verter LSP itself only selects the
-/// plain TS/JS + framework-carrier documents). This split preserves the exact
-/// pre-manifest Vue document-selector surface (`vue` + `javascript` +
-/// `typescript`); the React dialects were never in the LSP selector.
-const DOCUMENT_SELECTOR_BASE_LANGUAGE_IDS: &[&str] = &["javascript", "typescript"];
+/// The base language ids the client LSP DOCUMENT SELECTOR attaches to.
+/// Empty because the host owns TS/JS editor features. Those languages still
+/// activate the integration and configure its TypeScript plugin; only
+/// framework carriers register Verter LSP features.
+const DOCUMENT_SELECTOR_BASE_LANGUAGE_IDS: &[&str] = &[];
 
 /// Render the canonical TypeScript client framework manifest module from the
 /// descriptor registry + language extension table. The output is deterministic
@@ -93,9 +90,8 @@ pub fn render_client_framework_manifest_ts() -> String {
         BASE_TYPESCRIPT_LANGUAGE_IDS.iter().copied(),
     );
     out.push_str(
-        "\n// The base TS/JS language ids the LSP document selector attaches to (plain\n\
-         // js/ts only — the React dialects are activation/plugin-configure surfaces,\n\
-         // never LSP-selector ones). Preserves the pre-manifest Vue selector surface.\n",
+        "\n// The base language ids the client LSP document selector attaches to.\n\
+         // Empty because the host owns TS/JS editor features.\n",
     );
     render_multiline_str_array(
         &mut out,
@@ -131,10 +127,7 @@ pub fn render_client_framework_manifest_ts() -> String {
         "CLIENT_ACTIVATION_LANGUAGE_IDS",
         activation_ids.into_iter(),
     );
-    out.push_str(
-        "\n// The LSP DOCUMENT SELECTOR language ids: the plain js/ts base plus every\n\
-         // registered framework's client language ids (no React dialects).\n",
-    );
+    out.push_str("\n// The client LSP DOCUMENT SELECTOR language ids: framework carriers only.\n");
     render_multiline_str_array(
         &mut out,
         "CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS",
@@ -420,18 +413,14 @@ mod tests {
         assert!(a.contains("ide: [\".jsx\", \".tsx\"]"));
         // Vue has no adapter-module extensions.
         assert!(a.contains("adapterModuleExtensions: []"));
-        // The base TS/JS surface is recorded (multi-line, oxfmt-stable). The
-        // activation/plugin-configure base carries the React dialects; the LSP
-        // document-selector base is plain js/ts only (Vue selector preserved).
+        // The base TS/JS surface is recorded for activation/plugin
+        // configuration. The client LSP selector base is empty.
         assert!(a.contains("BASE_TYPESCRIPT_LANGUAGE_IDS: readonly string[] = [\n"));
         assert!(a.contains("  \"typescript\",\n"));
         assert!(a.contains("  \"javascript\",\n"));
         assert!(a.contains("  \"typescriptreact\",\n"));
         assert!(a.contains("  \"javascriptreact\",\n"));
-        // The LSP document-selector base EXCLUDES the React dialects — it is
-        // exactly the plain js/ts pair (preserving the pre-manifest Vue
-        // selector surface). Slice out its rendered block and assert the
-        // membership precisely.
+        // Slice out the selector base and assert it is empty.
         let sel_block = {
             let start = a
                 .find("export const DOCUMENT_SELECTOR_BASE_LANGUAGE_IDS")
@@ -440,16 +429,16 @@ mod tests {
             let end = rest.find("];").expect("selector base array closes") + 2;
             &rest[..end]
         };
-        assert!(sel_block.contains("\"javascript\""));
-        assert!(sel_block.contains("\"typescript\""));
         assert!(
-            !sel_block.contains("react"),
-            "the LSP document-selector base must not carry the React dialects: {sel_block}"
+            sel_block.ends_with("[];"),
+            "the client LSP document-selector base must be empty: {sel_block}"
         );
         // The derived flattened lists are emitted as LITERAL arrays (no runtime
         // `flatMap` — ES6-safe, no ES2019 lib dependency).
         assert!(a.contains("CLIENT_ACTIVATION_LANGUAGE_IDS: readonly string[] = [\n"));
-        assert!(a.contains("CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS: readonly string[] = [\n"));
+        assert!(a.contains(
+            "CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS: readonly string[] = [\"vue\", \"svelte\"];"
+        ));
         // The framework-language-id list is short enough to render inline.
         assert!(
             a.contains("CLIENT_FRAMEWORK_LANGUAGE_IDS: readonly string[] = [\"vue\", \"svelte\"];")

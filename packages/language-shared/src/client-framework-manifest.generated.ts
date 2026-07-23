@@ -81,10 +81,9 @@ export const BASE_TYPESCRIPT_LANGUAGE_IDS: readonly string[] = [
   "typescriptreact",
 ];
 
-// The base TS/JS language ids the LSP document selector attaches to (plain
-// js/ts only — the React dialects are activation/plugin-configure surfaces,
-// never LSP-selector ones). Preserves the pre-manifest Vue selector surface.
-export const DOCUMENT_SELECTOR_BASE_LANGUAGE_IDS: readonly string[] = ["javascript", "typescript"];
+// The base language ids the client LSP document selector attaches to.
+// Empty because the host owns TS/JS editor features.
+export const DOCUMENT_SELECTOR_BASE_LANGUAGE_IDS: readonly string[] = [];
 
 // Every language id the extension ACTIVATES for: the base TS/JS surface
 // (incl. React dialects) plus every registered framework's client language ids.
@@ -97,14 +96,8 @@ export const CLIENT_ACTIVATION_LANGUAGE_IDS: readonly string[] = [
   "svelte",
 ];
 
-// The LSP DOCUMENT SELECTOR language ids: the plain js/ts base plus every
-// registered framework's client language ids (no React dialects).
-export const CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS: readonly string[] = [
-  "javascript",
-  "typescript",
-  "vue",
-  "svelte",
-];
+// The client LSP DOCUMENT SELECTOR language ids: framework carriers only.
+export const CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS: readonly string[] = ["vue", "svelte"];
 
 // The framework client language ids whose documents START the LSP (carriers).
 export const CLIENT_FRAMEWORK_LANGUAGE_IDS: readonly string[] = ["vue", "svelte"];

@@ -93,12 +93,10 @@ export function shouldConfigureTypeScriptPluginForLanguageId(
 }
 
 /**
- * The LSP document selector — one `{ scheme: "file", language }` filter per
- * document-selector language id the manifest declares (the plain js/ts base
- * plus every registered framework's client language ids; NO React dialects —
- * those are activation/plugin-configure surfaces only, preserving the
- * pre-manifest Vue selector surface). The caller appends any extra non-framework
- * schemes (e.g. the virtual-file content scheme).
+ * The client LSP document selector — one `{ scheme: "file", language }`
+ * filter per framework carrier. Plain TS/JS remains an activation and
+ * TypeScript-plugin surface, but the host owns its editor features. The caller
+ * appends extra non-framework schemes (e.g. the virtual-file content scheme).
  */
 export function frameworkDocumentSelector(): FileLanguageFilter[] {
   return CLIENT_DOCUMENT_SELECTOR_LANGUAGE_IDS.map((language) => ({ scheme: "file", language }));
