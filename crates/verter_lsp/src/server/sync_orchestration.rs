@@ -967,6 +967,21 @@ impl VerterLanguageServer {
             return;
         }
 
+        // Self-file projections (`*.svelte.ts` / `*.svelte.js`, and the plain
+        // script shadow route) use their authored path as the provider buffer.
+        // They still share this document-generation singleflight: after an
+        // edit, flush the latest shadow before any interactive feature captures
+        // a request surface. The debounced coordinator remains the steady-state
+        // background path, but is never a correctness prerequisite.
+        if self.is_self_file_projection(uri) {
+            if self.capture_provider_request_surface(uri).is_some() {
+                return;
+            }
+            self.needs_ide_sync.remove(&canonical_id);
+            let _ = self.sync_self_file_shadow_unresolved(uri).await;
+            return;
+        }
+
         let current_state = self.provider_sync_state_for_source(&canonical_id);
         let has_committed_state = current_state.is_some();
         let ide_already_synced = current_state
@@ -1445,7 +1460,7 @@ impl VerterLanguageServer {
             return false;
         };
         if projection.is_self_file() {
-            return false;
+            return self.capture_provider_request_surface(uri).is_none();
         }
 
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {

@@ -286,6 +286,52 @@ fn parse_extends_inherits_options() {
 }
 
 #[test]
+fn parse_allow_importing_ts_extensions_inherits_and_explicit_false_overrides() {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.base.json"),
+        r#"{ "compilerOptions": { "allowImportingTsExtensions": true } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.inherit.json"),
+        r#"{ "extends": "./tsconfig.base.json" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.override.json"),
+        r#"{
+            "extends": "./tsconfig.base.json",
+            "compilerOptions": { "allowImportingTsExtensions": false }
+        }"#,
+    )
+    .unwrap();
+
+    let inherit_path = tmp
+        .path()
+        .join("tsconfig.inherit.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let override_path = tmp
+        .path()
+        .join("tsconfig.override.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    assert!(
+        load_compiler_options(&ws, &inherit_path).allow_importing_ts_extensions,
+        "the effective option should inherit through extends"
+    );
+    assert!(
+        !load_compiler_options(&ws, &override_path).allow_importing_ts_extensions,
+        "an explicit false must override inherited true"
+    );
+}
+
+#[test]
 fn parse_extends_override() {
     let ws = crate::filesystem::FilesystemWorkspace::new(
         crate::filesystem::FilesystemOptions::default(),

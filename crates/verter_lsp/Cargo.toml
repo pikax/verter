@@ -26,6 +26,7 @@ verter_type_runtime = { path = "../verter_type_runtime" }
 verter_ffi = { path = "../verter_ffi" }
 verter_protocol = { path = "../verter_protocol" }
 verter_tsgo_api = { path = "../verter_tsgo_api" }
+verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
@@ -75,7 +76,6 @@ tower-service = "0.3.3"
 # (including the LAST column) maps into the generated TSX.
 verter_compiler = { path = "../verter_compiler" }
 verter_macro_dto = { path = "../verter_macro_dto" }
-verter_type_expr = { workspace = true }
 # The wire-equivalence integration test byte-compares the ACTUAL NAPI
 # protocol encoding of the LSP route's envelope.
 verter_protocol = { path = "../verter_protocol" }

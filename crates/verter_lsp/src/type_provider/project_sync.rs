@@ -61,6 +61,9 @@ pub struct ProjectSync {
     /// Shared across clones because server/background producers must record the
     /// same immutable provider surface that the engine actually received.
     synced_tsx_contents: Arc<DashMap<String, Arc<str>>>,
+    /// Published workspace policy used to project generated carrier imports.
+    /// Absent in isolated unit tests; production binds the server's atomic VFS.
+    workspace: Option<Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>>,
 }
 
 impl ProjectSync {
@@ -81,6 +84,7 @@ impl ProjectSync {
             // store-publish suppression is opt-in via `new_with_kind`.
             kind: TypeProviderKind::Tsgo,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            workspace: None,
         }
     }
 
@@ -97,6 +101,24 @@ impl ProjectSync {
             mode,
             kind,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            workspace: None,
+        }
+    }
+
+    /// Build a production sync bound to the same atomic workspace snapshot
+    /// used by ownership and import resolution.
+    pub fn new_with_kind_and_workspace(
+        provider: Arc<dyn TypeProvider>,
+        mode: ProjectSyncMode,
+        kind: TypeProviderKind,
+        workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    ) -> Self {
+        Self {
+            provider,
+            mode,
+            kind,
+            synced_tsx_contents: Arc::new(DashMap::new()),
+            workspace: Some(workspace),
         }
     }
 
@@ -154,30 +176,53 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &'a str,
     ) -> Result<Cow<'a, str>, TypeProviderError> {
-        if !matches!(self.kind, TypeProviderKind::Tsgo) {
-            return Ok(Cow::Borrowed(tsx_content));
+        let specialized = if matches!(self.kind, TypeProviderKind::Tsgo) {
+            if let Some(prepared) =
+                crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
+                    .map_err(|error| {
+                        TypeProviderError::new(format!(
+                            "failed to prepare Svelte JSX provider assets for {tsx_path}: {error}"
+                        ))
+                    })?
+            {
+                Cow::Owned(prepared.content)
+            } else {
+                crate::vue_assets::prepare_managed_tsgo_vue_carrier(tsx_path, tsx_content)
+                    .map(|prepared| {
+                        prepared.map_or(Cow::Borrowed(tsx_content), |prepared| {
+                            Cow::Owned(prepared.content)
+                        })
+                    })
+                    .map_err(|error| {
+                        TypeProviderError::new(format!(
+                            "failed to prepare Vue JSX provider assets for {tsx_path}: {error}"
+                        ))
+                    })?
+            }
+        } else {
+            Cow::Borrowed(tsx_content)
+        };
+
+        let Some(companion) =
+            verter_session::framework::descriptor::classify_carrier_companion(tsx_path)
+        else {
+            return Ok(specialized);
+        };
+        let workspace = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.read().clone());
+        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            workspace.as_deref(),
+            &companion.source,
+            specialized.as_ref(),
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        );
+        if prepared.content.as_ref() == specialized.as_ref() {
+            Ok(specialized)
+        } else {
+            Ok(Cow::Owned(prepared.content.to_string()))
         }
-        if let Some(prepared) =
-            crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
-                .map_err(|error| {
-                    TypeProviderError::new(format!(
-                        "failed to prepare Svelte JSX provider assets for {tsx_path}: {error}"
-                    ))
-                })?
-        {
-            return Ok(Cow::Owned(prepared.content));
-        }
-        crate::vue_assets::prepare_managed_tsgo_vue_carrier(tsx_path, tsx_content)
-            .map(|prepared| {
-                prepared.map_or(Cow::Borrowed(tsx_content), |prepared| {
-                    Cow::Owned(prepared.content)
-                })
-            })
-            .map_err(|error| {
-                TypeProviderError::new(format!(
-                    "failed to prepare Vue JSX provider assets for {tsx_path}: {error}"
-                ))
-            })
     }
 
     /// Load a Vue file's TSX into the type provider for import resolution only.
@@ -653,6 +698,7 @@ mod tests {
             mode,
             kind: TypeProviderKind::Tsgo,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            workspace: None,
         }
     }
 

@@ -75,6 +75,7 @@ pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;
 pub mod carrier_cache;
+mod carrier_provider_projection;
 pub mod carrier_registry;
 pub mod config;
 pub mod css;

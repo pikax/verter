@@ -22,7 +22,6 @@ use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
-pub(super) use super::rename_prepare::handle_prepare_rename;
 use super::rename_prepare::multi_claimant_rename_unavailable_error;
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
@@ -840,7 +839,7 @@ pub(super) async fn handle_references(
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
-                if !server.prepare_tsserver_workspace_symbol_frontier(uri).await {
+                if !server.prepare_workspace_symbol_frontier(uri).await {
                     tracing::debug!(
                         "references: configured-project carrier frontier is not complete"
                     );
@@ -1081,7 +1080,7 @@ pub(super) async fn handle_rename(
                     // mid-capture. The declaration `get_definition` (imported case)
                     // runs inside this same fence — no blocking guard is held across
                     // its await.
-                    if !server.prepare_tsserver_workspace_symbol_frontier(uri).await {
+                    if !server.prepare_workspace_symbol_frontier(uri).await {
                         tracing::debug!(
                             "rename: configured-project carrier frontier is not complete"
                         );

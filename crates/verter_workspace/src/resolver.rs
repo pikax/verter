@@ -37,6 +37,11 @@ pub struct IdeProjectCompilerOptions {
     /// (TypeScript treats `checkJs` as turning on JS type-checking, which
     /// requires the JS files to be project members).
     pub check_js: bool,
+    /// `compilerOptions.allowImportingTsExtensions` — when explicitly true,
+    /// tsserver barrel publication preserves authored `.vue`/`.svelte`
+    /// specifiers. Missing/false projects receive the `.verter.ts`
+    /// compatibility rewrite.
+    pub allow_importing_ts_extensions: bool,
     /// `compilerOptions.disableSolutionSearching` — when a solution config sets
     /// it, default-project selection does NOT climb from that solution to its
     /// ancestor solution (mirrors tsgo `DisableSolutionSearching`). Default

@@ -572,7 +572,13 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                 return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
             }
         };
-        let companions = build_carrier_companions(&transition.next, req.ide, api.as_ref());
+        let companions = build_carrier_companions(
+            &transition.next,
+            req.ide,
+            api.as_ref(),
+            req.vfs,
+            req.canonical_id,
+        );
         // The source revision is the carrier source's AUTHORITATIVE per-canonical content
         // freshness rail (the workspace's `last_content_transition_generation`), captured
         // at OPEN time — a content edit advances it, so a prepare-then-open transaction
@@ -628,7 +634,13 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     };
     let ide = req.ide.or(fetched_ide.as_ref());
 
-    let mut companions = build_carrier_companions(&committed_state, ide, api.as_ref());
+    let mut companions = build_carrier_companions(
+        &committed_state,
+        ide,
+        api.as_ref(),
+        req.vfs,
+        req.canonical_id,
+    );
     if companions.is_empty() {
         // The owned source produced NO companion content this pass — a genuine
         // compile-to-nothing (ownership is AUTHORITATIVE here, since `Bound` only comes
@@ -772,6 +784,8 @@ fn build_carrier_companions(
     next_state: &ProviderSyncState,
     ide: Option<&IdeResponse>,
     api: Option<&verter_session::TscResponse>,
+    workspace: Option<&FilesystemWorkspace>,
+    canonical_id: &str,
 ) -> Vec<CarrierCompanion> {
     let mut companions: Vec<CarrierCompanion> = Vec::new();
     if let (Some(api), Some(dts_path)) = (api, next_state.api_path.as_ref()) {
@@ -785,9 +799,15 @@ fn build_carrier_companions(
         });
     }
     if let (Some(ide), Some(ide_path)) = (ide, next_state.ide_path.as_ref()) {
+        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            workspace,
+            canonical_id,
+            &ide.code,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        );
         companions.push(CarrierCompanion {
             provider_uri: Arc::from(ide_path.as_str()),
-            content: Arc::clone(&ide.code),
+            content: prepared.content,
             map_json: ide.source_map.clone(),
             role: SnapshotRole::CarrierIde,
             script_kind: if ide.is_jsx {
