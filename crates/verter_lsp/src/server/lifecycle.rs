@@ -32,6 +32,15 @@ pub(super) async fn handle_initialize(
     server: &VerterLanguageServer,
     params: InitializeParams,
 ) -> Result<InitializeResult> {
+    if let Err(error) = verter_tsgo_api::process::bind_lsp_client_process(params.process_id) {
+        return Err(tower_lsp_server::jsonrpc::Error {
+            code: tower_lsp_server::jsonrpc::ErrorCode::InvalidParams,
+            message: std::borrow::Cow::Owned(format!(
+                "invalid LSP client process witness: {error}"
+            )),
+            data: None,
+        });
+    }
     tracing::info!("verter-lsp initializing");
     tracing::info!(
         "type provider: {} ({})",

@@ -82,6 +82,7 @@ import {
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
 import { createTypeScriptPluginRefreshScheduler } from "./typescriptPluginRefreshScheduler";
+import { clientProcessLifetimeArg } from "./clientProcessLifetime";
 import { addShowRecentAuditRecordsCommand } from "./audit";
 import {
   buildRelayEditorEnv,
@@ -1616,6 +1617,7 @@ function buildServerOptions(
   const mcpLintPreset = verterConfig.get<string>("mcp.lintPreset", "recommended");
 
   const args: string[] = [];
+  args.push(clientProcessLifetimeArg(process.pid));
   args.push(`--type-provider=${typeProvider}`);
   args.push(`--tsdk=${tsdk}`);
   args.push(`--plugin-path=${join(extensionPath, "node_modules")}`);

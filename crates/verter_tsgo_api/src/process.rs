@@ -19,6 +19,9 @@
 //! kill targets the process GROUP whose id is the child's pid, which is only
 //! meaningful when the child leads its own group.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::error::{TsgoApiError, TsgoApiResult};
@@ -26,6 +29,55 @@ use crate::error::{TsgoApiError, TsgoApiResult};
 /// The bound on the reap wait after a tree kill (SIGKILL / `TerminateJobObject`
 /// is prompt; this only bounds an already-dead system's bookkeeping).
 pub const REAP_BOUND: Duration = Duration::from_secs(2);
+
+static ACTIVE_ENGINE_TREES: OnceLock<Mutex<HashMap<u64, u32>>> = OnceLock::new();
+static NEXT_ENGINE_TREE_REGISTRATION: AtomicU64 = AtomicU64::new(1);
+
+fn active_engine_trees() -> &'static Mutex<HashMap<u64, u32>> {
+    ACTIVE_ENGINE_TREES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_engine_tree(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let registration = NEXT_ENGINE_TREE_REGISTRATION.fetch_add(1, Ordering::Relaxed);
+    active_engine_trees()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(registration, pid);
+    Some(registration)
+}
+
+fn unregister_engine_tree(registration: Option<u64>) {
+    let Some(registration) = registration else {
+        return;
+    };
+    active_engine_trees()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&registration);
+}
+
+/// Kill every engine process group currently owned by this process.
+///
+/// Normal provider teardown uses the individual [`TreeKill`] handles. The
+/// process-lifetime monitor calls this first when the LSP client dies, while the
+/// LSP runtime is still alive, so Unix descendants are killed before the LSP is
+/// forcibly terminated and cannot outlive their direct engine parent.
+pub fn terminate_registered_engine_trees() {
+    let mut pids: Vec<u32> = active_engine_trees()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .copied()
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in pids {
+        kill_tree_by_pid(pid);
+    }
+}
 
 /// Prepare a tokio command so the spawned child leads its own process group
 /// (Unix) — the precondition for [`TreeKill`]'s group kill. On Windows this is
@@ -35,6 +87,25 @@ pub fn configure_tree_spawn(command: &mut tokio::process::Command) -> &mut tokio
     #[cfg(unix)]
     {
         command.process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent_pid = std::process::id() as libc::pid_t;
+        // SAFETY: the pre-exec closure calls only async-signal-safe libc
+        // functions. The child arms its own parent-death signal before exec and
+        // verifies that the spawning LSP did not die in the fork→prctl window.
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    libc::_exit(127);
+                }
+                Ok(())
+            });
+        }
     }
     command
 }
@@ -50,11 +121,339 @@ pub fn configure_tree_spawn_std(command: &mut std::process::Command) -> &mut std
     command
 }
 
+/// Process-lifetime containment for an LSP launched by an editor client.
+///
+/// The standard LSP `InitializeParams.processId` is the authoritative witness
+/// for every editor. A launcher may additionally pass `--client-pid` as an early
+/// bootstrap witness; initialization replaces that monitor atomically. No OS
+/// parent inference is used: a shell or short-lived launcher is not necessarily
+/// the LSP client named by the protocol.
+///
+/// On Windows the guard also assigns the LSP itself to a kill-on-close Job
+/// Object before providers may spawn. On Unix, active provider process groups
+/// are registered by [`TreeKill`] and killed before the client-death monitor
+/// terminates the LSP, so pipe-holding descendants cannot survive the engine.
+#[derive(Debug)]
+pub struct ClientProcessGuard {
+    monitor: Arc<ClientMonitorState>,
+    #[cfg(windows)]
+    _job: JobHandle,
+}
+
+#[derive(Debug, Default)]
+struct ClientMonitorState {
+    generation: AtomicU64,
+    client_pid: AtomicU32,
+    bind_lock: Mutex<()>,
+}
+
+static CLIENT_MONITOR: OnceLock<Arc<ClientMonitorState>> = OnceLock::new();
+
+impl ClientProcessGuard {
+    /// Install process-wide containment and optionally bind an early launcher
+    /// witness. `None` is valid: ordinary editors bind through the standard LSP
+    /// initialize request instead of a Verter-specific command-line contract.
+    pub fn arm(bootstrap_client_pid: Option<u32>) -> Result<Self, String> {
+        let monitor = Arc::new(ClientMonitorState::default());
+        CLIENT_MONITOR
+            .set(Arc::clone(&monitor))
+            .map_err(|_| "LSP client-process containment was already installed".to_string())?;
+
+        #[cfg(windows)]
+        let job = JobHandle::create_and_assign_current().ok_or_else(|| {
+            format!(
+                "failed to assign verter-lsp to a kill-on-close Job Object: {}",
+                std::io::Error::last_os_error()
+            )
+        })?;
+
+        let guard = Self {
+            monitor,
+            #[cfg(windows)]
+            _job: job,
+        };
+        if let Some(client_pid) = bootstrap_client_pid {
+            guard.bind_client(client_pid)?;
+        }
+        Ok(guard)
+    }
+
+    /// Replace the current witness with one stable OS-backed monitor.
+    pub fn bind_client(&self, client_pid: u32) -> Result<(), String> {
+        bind_client_monitor(&self.monitor, client_pid)
+    }
+
+    #[must_use]
+    pub fn client_pid(&self) -> Option<u32> {
+        match self.monitor.client_pid.load(Ordering::Acquire) {
+            0 => None,
+            pid => Some(pid),
+        }
+    }
+}
+
+/// Bind the standard LSP client-process witness after `initialize` is received.
+///
+/// Library embedders that did not install [`ClientProcessGuard`] are unaffected.
+/// A `None` process id follows the LSP specification and leaves any explicit
+/// bootstrap witness in place; otherwise stdio EOF remains the lifecycle rail.
+pub fn bind_lsp_client_process(client_pid: Option<u32>) -> Result<(), String> {
+    let Some(client_pid) = client_pid else {
+        return Ok(());
+    };
+    let Some(monitor) = CLIENT_MONITOR.get() else {
+        return Ok(());
+    };
+    bind_client_monitor(monitor, client_pid)
+}
+
+fn validate_client_pid(client_pid: u32) -> Result<(), String> {
+    if client_pid == 0 || client_pid == std::process::id() {
+        return Err(format!("invalid LSP client pid {client_pid}"));
+    }
+    #[cfg(unix)]
+    if client_pid > libc::pid_t::MAX as u32 {
+        return Err(format!(
+            "LSP client pid {client_pid} is outside the positive pid_t range"
+        ));
+    }
+    Ok(())
+}
+
+fn bind_client_monitor(state: &Arc<ClientMonitorState>, client_pid: u32) -> Result<(), String> {
+    validate_client_pid(client_pid)?;
+    let _bind = state
+        .bind_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let generation = state.generation.load(Ordering::Acquire).wrapping_add(1);
+    spawn_client_monitor(client_pid, Arc::clone(state), generation)?;
+    state.client_pid.store(client_pid, Ordering::Release);
+    state.generation.store(generation, Ordering::Release);
+    Ok(())
+}
+
+fn wait_until_monitor_is_current(state: &ClientMonitorState, generation: u64) -> bool {
+    loop {
+        match state.generation.load(Ordering::Acquire).cmp(&generation) {
+            std::cmp::Ordering::Less => std::thread::yield_now(),
+            std::cmp::Ordering::Equal => return true,
+            std::cmp::Ordering::Greater => return false,
+        }
+    }
+}
+
+fn terminate_lsp_after_client_death(state: &ClientMonitorState, generation: u64) {
+    if state.generation.load(Ordering::Acquire) != generation {
+        return;
+    }
+    terminate_registered_engine_trees();
+    #[cfg(windows)]
+    unsafe {
+        // ExitProcess closes the outer Job Object handle; KILL_ON_JOB_CLOSE
+        // terminates every descendant even if the async runtime is wedged.
+        windows_sys::Win32::System::Threading::ExitProcess(0);
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(std::process::id() as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(not(any(unix, windows)))]
+    std::process::exit(0);
+}
+
+#[cfg(windows)]
+fn spawn_client_monitor(
+    client_pid: u32,
+    state: Arc<ClientMonitorState>,
+    generation: u64,
+) -> Result<(), String> {
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, client_pid) };
+    if handle.is_null() {
+        return Err(format!(
+            "could not open LSP client process {client_pid}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let handle_value = handle as usize;
+    std::thread::Builder::new()
+        .name("verter-client-lifetime".into())
+        .spawn(move || unsafe {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+
+            let handle = handle_value as windows_sys::Win32::Foundation::HANDLE;
+            if wait_until_monitor_is_current(&state, generation) {
+                WaitForSingleObject(handle, INFINITE);
+            }
+            CloseHandle(handle);
+            terminate_lsp_after_client_death(&state, generation);
+        })
+        .map_err(|error| {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            format!("spawn LSP client-lifetime monitor: {error}")
+        })?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_client_monitor(
+    client_pid: u32,
+    state: Arc<ClientMonitorState>,
+    generation: u64,
+) -> Result<(), String> {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, client_pid as libc::pid_t, 0) as i32 };
+    if pidfd < 0 {
+        return Err(format!(
+            "could not open stable pidfd for LSP client {client_pid}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    std::thread::Builder::new()
+        .name("verter-client-lifetime".into())
+        .spawn(move || unsafe {
+            if wait_until_monitor_is_current(&state, generation) {
+                let mut pollfd = libc::pollfd {
+                    fd: pidfd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                loop {
+                    let result = libc::poll(&mut pollfd, 1, -1);
+                    if result >= 0
+                        || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                    {
+                        break;
+                    }
+                }
+            }
+            libc::close(pidfd);
+            terminate_lsp_after_client_death(&state, generation);
+        })
+        .map_err(|error| {
+            unsafe {
+                libc::close(pidfd);
+            }
+            format!("spawn LSP client-lifetime monitor: {error}")
+        })?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_client_monitor(
+    client_pid: u32,
+    state: Arc<ClientMonitorState>,
+    generation: u64,
+) -> Result<(), String> {
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return Err(format!(
+            "could not create kqueue for LSP client {client_pid}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let change = libc::kevent {
+        ident: client_pid as libc::uintptr_t,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    unsafe {
+        if libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) != 0 {
+            let error = std::io::Error::last_os_error();
+            libc::close(queue);
+            return Err(format!(
+                "could not register stable kqueue witness for LSP client {client_pid}: {error}"
+            ));
+        }
+    }
+    std::thread::Builder::new()
+        .name("verter-client-lifetime".into())
+        .spawn(move || unsafe {
+            if wait_until_monitor_is_current(&state, generation) {
+                let mut event = std::mem::zeroed::<libc::kevent>();
+                loop {
+                    let result =
+                        libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null());
+                    if result >= 0
+                        || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                    {
+                        break;
+                    }
+                }
+            }
+            libc::close(queue);
+            terminate_lsp_after_client_death(&state, generation);
+        })
+        .map_err(|error| {
+            unsafe {
+                libc::close(queue);
+            }
+            format!("spawn LSP client-lifetime monitor: {error}")
+        })?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn spawn_client_monitor(
+    client_pid: u32,
+    state: Arc<ClientMonitorState>,
+    generation: u64,
+) -> Result<(), String> {
+    if !process_alive(client_pid) {
+        return Err(format!("LSP client process {client_pid} is not alive"));
+    }
+    std::thread::Builder::new()
+        .name("verter-client-lifetime".into())
+        .spawn(move || {
+            if !wait_until_monitor_is_current(&state, generation) {
+                return;
+            }
+            while process_alive(client_pid) {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            terminate_lsp_after_client_death(&state, generation);
+        })
+        .map_err(|error| format!("spawn LSP client-lifetime monitor: {error}"))?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_client_monitor(
+    client_pid: u32,
+    state: Arc<ClientMonitorState>,
+    generation: u64,
+) -> Result<(), String> {
+    if !process_alive(client_pid) {
+        return Err(format!("LSP client process {client_pid} is not alive"));
+    }
+    std::thread::Builder::new()
+        .name("verter-client-lifetime".into())
+        .spawn(move || {
+            if !wait_until_monitor_is_current(&state, generation) {
+                return;
+            }
+            while process_alive(client_pid) {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            terminate_lsp_after_client_death(&state, generation);
+        })
+        .map_err(|error| format!("spawn LSP client-lifetime monitor: {error}"))?;
+    Ok(())
+}
+
 /// A process-tree kill handle armed against a spawned child's pid. Cheap and
 /// idempotent: killing an already-exited tree is a no-op.
 #[derive(Debug)]
 pub struct TreeKill {
     pid: u32,
+    registration: Option<u64>,
     #[cfg(windows)]
     job: Option<JobHandle>,
 }
@@ -71,10 +470,12 @@ impl TreeKill {
     /// to read (e.g. an already-reaped child, whose `Child::id()` is `None`)
     /// must never become a self-kill.
     pub fn arm(pid: u32) -> Self {
+        let registration = register_engine_tree(pid);
         #[cfg(windows)]
         {
             Self {
                 pid,
+                registration,
                 job: if pid == 0 {
                     None
                 } else {
@@ -84,7 +485,7 @@ impl TreeKill {
         }
         #[cfg(not(windows))]
         {
-            Self { pid }
+            Self { pid, registration }
         }
     }
 
@@ -120,6 +521,25 @@ impl TreeKill {
             terminate_process(self.pid);
         }
     }
+}
+
+impl Drop for TreeKill {
+    fn drop(&mut self) {
+        self.kill_tree();
+        unregister_engine_tree(self.registration);
+    }
+}
+
+fn kill_tree_by_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    terminate_process(pid);
 }
 
 /// Reap a tokio child after a kill, bounded: never hang on a stuck reaper.
@@ -211,15 +631,20 @@ struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 impl JobHandle {
-    fn create_and_assign(pid: u32) -> Option<Self> {
+    fn create_and_assign_current() -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let job = Self::create()?;
+        let assigned = unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) };
+        (assigned != 0).then_some(job)
+    }
+
+    fn create() -> Option<Self> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
 
         unsafe {
@@ -239,18 +664,29 @@ impl JobHandle {
                 CloseHandle(job);
                 return None;
             }
+            Some(Self(job))
+        }
+    }
+
+    fn create_and_assign(pid: u32) -> Option<Self> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        unsafe {
+            let job = Self::create()?;
             let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
             if process.is_null() {
-                CloseHandle(job);
                 return None;
             }
-            let assigned = AssignProcessToJobObject(job, process);
+            let assigned = AssignProcessToJobObject(job.0, process);
             CloseHandle(process);
             if assigned == 0 {
-                CloseHandle(job);
                 return None;
             }
-            Some(Self(job))
+            Some(job)
         }
     }
 
@@ -342,6 +778,85 @@ mod tests {
             read.is_ok(),
             "the pipes must drain to EOF once the tree is dead"
         );
+    }
+
+    // @ai-generated - Client-death cleanup must use the active registry before
+    // terminating the LSP, not rely on provider Drop running afterward.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_registry_kills_engine_groups_before_lsp_exit() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("sleep 600 & wait")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        configure_tree_spawn(&mut command);
+        let mut child = command.spawn().expect("spawn registered engine tree");
+        let tree = TreeKill::arm(child.id().expect("engine pid"));
+
+        terminate_registered_engine_trees();
+        assert!(
+            reap_child_bounded(&mut child, REAP_BOUND).await,
+            "the registered engine group must die before the LSP exits"
+        );
+        drop(tree);
+    }
+
+    // @ai-generated - A provider Job Object must be armed while the direct
+    // process is live so descendants created afterward join it automatically.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_tree_handle_kills_a_late_spawned_descendant() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut command = tokio::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Milliseconds 500; $child = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru; [Console]::Out.WriteLine($child.Id); [Console]::Out.Flush(); Wait-Process -Id $child.Id",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        configure_tree_spawn(&mut command);
+        let mut child = command.spawn().expect("spawn provider parent");
+        let tree = TreeKill::arm(child.id().expect("provider pid"));
+        let mut descendant_pid = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            BufReader::new(child.stdout.take().expect("provider stdout"))
+                .read_line(&mut descendant_pid),
+        )
+        .await
+        .expect("descendant pid timeout")
+        .expect("read descendant pid");
+        let descendant_pid = descendant_pid
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+
+        tree.kill_tree();
+        assert!(reap_child_bounded(&mut child, REAP_BOUND).await);
+        for _ in 0..80 {
+            if !process_alive(descendant_pid) {
+                drop(tree);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("provider descendant {descendant_pid} survived its armed Job Object");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_pid_must_fit_positive_pid_t() {
+        assert!(validate_client_pid(i32::MAX as u32).is_ok());
+        assert!(validate_client_pid(i32::MAX as u32 + 1).is_err());
     }
 
     // ── the liveness probe agrees with a real spawn/kill round-trip ──────────

@@ -56,13 +56,37 @@ async fn serve() {
         env!("VERTER_BUILD_DATE"),
     );
 
+    // Parse and arm process-tree containment BEFORE any provider process is
+    // spawned. The standard LSP initialize `processId` is authoritative across
+    // editors; `--client-pid` is only an optional early bootstrap witness.
+    let args = match CliArgs::parse() {
+        Ok(args) => args,
+        Err(error) => {
+            tracing::error!("invalid verter-lsp command line: {error}");
+            return;
+        }
+    };
+    let _client_process_guard =
+        match verter_tsgo_api::process::ClientProcessGuard::arm(args.client_pid) {
+            Ok(guard) => {
+                tracing::info!(
+                    client_pid = ?guard.client_pid(),
+                    "armed LSP process-tree containment"
+                );
+                guard
+            }
+            Err(error) => {
+                tracing::error!(
+                    "refusing to spawn provider processes without client containment: {error}"
+                );
+                return;
+            }
+        };
+
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let host = Arc::new(VerterHost::new_standalone(lsp_projection_host_config()));
-
-    // Parse CLI arguments
-    let args = CliArgs::parse();
 
     // The LSP binary no longer hosts the MCP HTTP server in-process.
     // `verter_lsp` and `verter_mcp` ship as independent products; IDEs
@@ -224,10 +248,13 @@ struct CliArgs {
     editor_tsserver_receipt: Option<String>,
     /// Current-session challenge nonce paired with `editor_tsserver_receipt`.
     editor_tsserver_nonce: Option<String>,
+    /// Optional early client-process witness. The standard LSP initialize
+    /// `processId` replaces it and is the editor-neutral authority.
+    client_pid: Option<u32>,
 }
 
 impl CliArgs {
-    fn parse() -> Self {
+    fn parse() -> Result<Self, String> {
         Self::parse_with_defaults(
             std::env::args().skip(1),
             std::env::var("VERTER_SHARED_CONTROL_DIR").ok(),
@@ -239,6 +266,11 @@ impl CliArgs {
 
     #[cfg(test)]
     fn parse_from(args: impl IntoIterator<Item = String>) -> Self {
+        Self::try_parse_from(args).expect("test CLI must parse")
+    }
+
+    #[cfg(test)]
+    fn try_parse_from(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         Self::parse_with_defaults(args, None, None, None, None)
     }
 
@@ -248,12 +280,13 @@ impl CliArgs {
         mut shared_session_key: Option<String>,
         mut editor_tsserver_receipt: Option<String>,
         mut editor_tsserver_nonce: Option<String>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let mut type_provider = "auto".to_string();
         let mut tsdk = None;
         let mut plugin_path = None;
         let mut workspace_root = None;
         let mut mcp_port = None;
+        let mut client_pid = None;
         // The SHARED editor-attach rendezvous is opt-in via CLI flag or env — the
         // editor extension supplies it when it spawns a `verter-relay-shim` as its
         // `tsgo`. Absent both, SHARED is never attempted (fail-closed OWNED baseline).
@@ -274,6 +307,10 @@ impl CliArgs {
                 editor_tsserver_nonce = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--mcp-port=") {
                 mcp_port = val.parse().ok();
+            } else if let Some(val) = arg.strip_prefix("--client-pid=") {
+                client_pid = Some(val.parse::<u32>().map_err(|error| {
+                    format!("--client-pid requires a positive integer, got `{val}`: {error}")
+                })?);
             } else if arg.starts_with("--mcp-lint-preset=") {
                 // Accepted for syntactic compatibility with IDE
                 // configurations that previously bundled MCP into the
@@ -286,7 +323,7 @@ impl CliArgs {
             }
         }
 
-        Self {
+        Ok(Self {
             type_provider,
             tsdk,
             plugin_path,
@@ -296,7 +333,8 @@ impl CliArgs {
             shared_session_key,
             editor_tsserver_receipt,
             editor_tsserver_nonce,
-        }
+            client_pid,
+        })
     }
 
     /// The SHARED editor-attach rendezvous `(control_dir, session_key)`, when BOTH
