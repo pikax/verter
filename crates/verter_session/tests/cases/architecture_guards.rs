@@ -14393,7 +14393,7 @@ mod typed_ir_resolver_guards {
     //   * W4.5 — host_manage.rs (2) + meta_resolve/graph_predicates.rs
     //
     // Permanent exception entries (per the rule-scope clauses above):
-    //   * `verter_lsp/src/server_utils.rs:22` — exception class (2):
+    //   * `verter_lsp/src/server_utils.rs:17` — exception class (2):
     //     filesystem-event handler running below the workspace
     //     registry. The LSP `did_change_watched_files` gate.
     //
@@ -14410,7 +14410,7 @@ mod typed_ir_resolver_guards {
     // -----------------------------------------------------------------------
     const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[(
         "crates/verter_lsp/src/server_utils.rs",
-        22,
+        17,
         r#".contains("/node_modules/")"#,
     )];
 
