@@ -482,9 +482,9 @@ impl TestSessionBuilder {
             session.open_virtual(relative_path, content).await;
         }
 
-        // This harness deliberately bypasses `initialized()`, so it has no
-        // background WorkspaceScanner. Reproduce the scanner's complete
-        // tsserver carrier-publication phase before workspace-wide references/
+        // This harness bypasses `initialized()` and has no WorkspaceScanner.
+        // Reproduce the scanner's complete tsserver carrier-publication phase
+        // before workspace-wide references/
         // rename tests run; ordinary feature requests still exercise the exact
         // production demand-activation path.
         if matches!(self.kind, TestProviderKind::Tsserver) {
