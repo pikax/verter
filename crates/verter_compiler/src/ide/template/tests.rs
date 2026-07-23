@@ -5868,6 +5868,21 @@ fn partial_v_slot_param_stays_bare_for_completion() {
 }
 
 #[test]
+fn incomplete_v_slot_member_keeps_local_receiver_and_completion_boundary() {
+    let result = gen_tsx_template(
+        r#"<template><MyComp v-slot="{ title }"><span>{{ title. }}</span></MyComp></template>"#,
+    );
+    assert!(
+        result.contains("title.valueOf"),
+        "the authored member dot should remain the mapped completion boundary and receive only an unmapped member-hole placeholder, got: {result}"
+    );
+    assert!(
+        !result.contains("___VERTER___instance.title"),
+        "an incomplete scoped-slot member receiver must remain a lexical local, got: {result}"
+    );
+}
+
+#[test]
 fn v_slot_with_v_for() {
     // v-for wraps element, slot wraps children — both should work
     let result = gen_tsx_template_with_bindings(
@@ -6238,6 +6253,24 @@ const x = 1
     assert!(
         code.contains("ExtractLeafElement"),
         "should import ExtractLeafElement type: {code}"
+    );
+}
+
+#[test]
+fn script_setup_local_directive_uses_the_local_binding() {
+    let source = r#"<script setup lang="ts">
+import type { Directive } from 'vue'
+const vColor: Directive<HTMLElement, string> = () => {}
+</script>
+<template><div v-color="'red'" /></template>"#;
+    let code = compile_full_sfc_tsx(source, "Test.vue");
+    assert!(
+        code.contains(",vColor)(___VERTER___directiveElement"),
+        "a setup-local directive must retain its authored binding type: {code}"
+    );
+    assert!(
+        !code.contains("directiveAccessor[\"vColor\"]"),
+        "a setup-local directive must not be looked up on the component instance: {code}"
     );
 }
 

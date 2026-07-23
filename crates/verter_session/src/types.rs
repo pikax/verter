@@ -933,10 +933,10 @@ pub struct EvictionPolicyConfig {
 /// One duration per LSP method, addressable by
 /// [`verter_audit::payloads::tags::LspMethodTag`].
 ///
-/// Used twice by [`LspMethodTimeoutsConfig`], for the two independent bounds a
-/// handler runs under: the audit-supersede SLO and the always-on production
-/// request deadline. One type, so a new method kind gains both bounds at once
-/// and neither table can silently drift out of the other's coverage.
+/// Used twice by [`LspMethodTimeoutsConfig`]: for the opt-in audit-supersede SLO
+/// and for explicit diagnostic/test request bounds. Production defaults leave
+/// the latter disabled; provider requests end through response, client
+/// cancellation, or provider lifecycle recovery rather than a latency budget.
 ///
 /// `Duration::ZERO` disables the bound for that method (the handler runs to
 /// completion).
@@ -997,30 +997,25 @@ impl LspMethodBudgets {
 
 /// The two bounds every audited LSP handler runs under.
 ///
-/// [`Self::audit_supersede`] is the tight observability SLO applied only when
-/// `audit_enabled = true`: on expiry the handler finalises the audit
-/// registration with the cancellation marker
-/// `LspRequestPayload { error: Some("cancelled".to_string()), .. }`, so
-/// superseded LSP requests are observable in the records store rather than
-/// leaking entries in the active-request registry.
+/// [`Self::audit_supersede`] is the observational latency SLO applied only when
+/// `audit_enabled = true`. Exceeding it is recorded but never cancels or changes
+/// a request; audit instrumentation must be semantically transparent.
 ///
-/// [`Self::request_deadlines`] is the always-on production bound applied when
-/// `audit_enabled = false` (the production default). Without it, production ran
-/// every handler with ZERO timeout and a hung provider wedged the handler
-/// forever.
+/// [`Self::request_deadlines`] is an explicit override table. Its production
+/// default is all-zero: slow valid project work must not be converted into an
+/// empty IDE result. Transport cancellation and provider lifecycle recovery own
+/// abandonment and wedge handling instead.
 #[derive(Debug, Clone)]
 pub struct LspMethodTimeoutsConfig {
-    /// Audit-supersede SLO. Consulted only when `audit_enabled = true`.
+    /// Observational audit latency SLO. Never used as a request deadline.
     pub audit_supersede: LspMethodBudgets,
-    /// Always-on production request deadlines — see
-    /// [`LspMethodBudgets::interactive_defaults`] for how each value is derived.
+    /// Optional request deadlines. All entries are disabled by default.
     pub request_deadlines: LspMethodBudgets,
 }
 
 impl LspMethodBudgets {
-    /// The audit-supersede SLO defaults — tight, because typing-driven
-    /// supersede dominates the audited workload and the point is to observe the
-    /// supersede, not to serve the request.
+    /// The audit latency SLO defaults. These thresholds flag slow requests in
+    /// traces without affecting the result delivered to the editor.
     pub fn audit_supersede_defaults() -> Self {
         Self {
             hover: std::time::Duration::from_millis(500),
@@ -1037,49 +1032,23 @@ impl LspMethodBudgets {
         }
     }
 
-    /// The production request-deadline defaults.
-    ///
-    /// A deadline here is a last-resort fail-closed, NOT a latency target: a
-    /// request that routinely reaches one is an unfixed defect, not a tuned
-    /// parameter. Each value is therefore set from the MEASURED healthy p95 on
-    /// the real 731-SFC corpus (managed-tsgo route) with enough headroom that a
-    /// working request never reaches it, while staying inside the span a human
-    /// will wait for a keystroke-driven answer:
-    ///
-    /// | method             | measured healthy p95 | budget | headroom |
-    /// |--------------------|----------------------|--------|----------|
-    /// | hover              | 318ms                | 1.5s   | 4.7x     |
-    /// | goto definition    | 769ms                | 2.5s   | 3.3x     |
-    /// | references         | 661ms                | 3s     | 4.5x     |
-    /// | completion         | 2843ms               | 6s     | 2.1x     |
-    ///
-    /// Completion is the outlier and is deliberately NOT cut to the same human
-    /// scale as the rest: its measured p95 is already 2.8s, so a 3-4s budget
-    /// would fail-close roughly one in twenty completions that were working.
-    /// The 2.8s p95 is itself the defect; shortening the deadline would hide it
-    /// behind a cancellation rather than fix it.
-    ///
-    /// The unmeasured kinds take the budget of the measured kind they share a
-    /// cost structure with: document symbols and code action with definition
-    /// (single-file, position-bound), semantic tokens and inlay hints with
-    /// references (whole-file enumeration), rename above references (same
-    /// workspace-wide search plus the edit assembly).
-    ///
-    /// [`Self::other`] keeps the previous flat 15s: unenumerated kinds are
-    /// batch/non-interactive, where a long absolute backstop is correct.
+    /// Production request defaults: no method-level timeout. A zero entry means
+    /// the handler awaits the selected provider and remains cancellable by the
+    /// LSP client. This avoids turning cold configured-project work into a false
+    /// empty hover/navigation/rename result.
     pub fn interactive_defaults() -> Self {
         Self {
-            hover: std::time::Duration::from_millis(1500),
-            goto_definition: std::time::Duration::from_millis(2500),
-            completion: std::time::Duration::from_secs(6),
-            references: std::time::Duration::from_secs(3),
-            diagnostics: std::time::Duration::from_secs(5),
-            document_symbols: std::time::Duration::from_millis(2500),
-            semantic_tokens: std::time::Duration::from_secs(3),
-            inlay_hints: std::time::Duration::from_secs(3),
-            code_action: std::time::Duration::from_millis(2500),
-            rename: std::time::Duration::from_secs(5),
-            other: std::time::Duration::from_secs(15),
+            hover: std::time::Duration::ZERO,
+            goto_definition: std::time::Duration::ZERO,
+            completion: std::time::Duration::ZERO,
+            references: std::time::Duration::ZERO,
+            diagnostics: std::time::Duration::ZERO,
+            document_symbols: std::time::Duration::ZERO,
+            semantic_tokens: std::time::Duration::ZERO,
+            inlay_hints: std::time::Duration::ZERO,
+            code_action: std::time::Duration::ZERO,
+            rename: std::time::Duration::ZERO,
+            other: std::time::Duration::ZERO,
         }
     }
 }
@@ -1535,6 +1504,17 @@ pub struct ScriptModuleReference {
     pub span: verter_span::Span,
     /// Span of the specifier expression.
     pub expr_span: verter_span::Span,
+}
+
+/// Syntax facts retained by the editor/provider ingress lane.
+///
+/// Unlike [`FileAnalysisSnapshot`], reading this snapshot never computes omitted
+/// semantic, template, style, or cross-file analysis. It is a direct immutable
+/// view of source-stage parse products and is therefore safe on LSP hot paths.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptIngressSnapshot {
+    pub imports: Arc<Vec<verter_semantic::analysis::AnalyzedImport>>,
+    pub module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
 }
 
 impl From<&verter_semantic::analysis::AnalyzedModuleReference> for ScriptModuleReference {

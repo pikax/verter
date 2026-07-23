@@ -388,7 +388,13 @@ fn find_namespace_option(source: &str, el: &SvelteElement) -> Option<String> {
 /// invalid TSX). Tightening to bail on any recoverable error would only degrade
 /// otherwise-resolvable self-contracts to permissive — strictly less precision
 /// for no validity gain.
-pub(super) fn extract_props_annotation(script: &str) -> Option<String> {
+#[derive(Clone, Debug)]
+pub(super) struct PropsAnnotation {
+    pub text: String,
+    pub span: Span,
+}
+
+pub(super) fn extract_props_annotation(script: &str) -> Option<PropsAnnotation> {
     if !script.contains("$props") {
         return None;
     }
@@ -416,7 +422,7 @@ fn is_props_rune_callee(expr: &Expression) -> bool {
 struct PropsRuneCollector<'s> {
     source: &'s str,
     comments: &'s [Comment],
-    annotation: Option<String>,
+    annotation: Option<PropsAnnotation>,
 }
 
 impl<'a> Visit<'a> for PropsRuneCollector<'_> {
@@ -431,9 +437,10 @@ impl<'a> Visit<'a> for PropsRuneCollector<'_> {
                 if let Some(targs) = &call.type_arguments {
                     if let Some(first) = targs.params.first() {
                         let span = first.span();
-                        let text = self.source[span.start as usize..span.end as usize].trim();
-                        if !text.is_empty() {
-                            self.annotation = Some(text.to_string());
+                        if let Some(annotation) =
+                            props_annotation_from_span(self.source, span.into())
+                        {
+                            self.annotation = Some(annotation);
                             return;
                         }
                     }
@@ -442,9 +449,8 @@ impl<'a> Visit<'a> for PropsRuneCollector<'_> {
                 // type annotation is the contract type.
                 if let Some(ann) = &decl.type_annotation {
                     let span = ann.type_annotation.span();
-                    let text = self.source[span.start as usize..span.end as usize].trim();
-                    if !text.is_empty() {
-                        self.annotation = Some(text.to_string());
+                    if let Some(annotation) = props_annotation_from_span(self.source, span.into()) {
+                        self.annotation = Some(annotation);
                         return;
                     }
                 }
@@ -464,13 +470,29 @@ impl<'a> Visit<'a> for PropsRuneCollector<'_> {
     }
 }
 
+fn props_annotation_from_span(source: &str, span: Span) -> Option<PropsAnnotation> {
+    let raw = source.get(span.start as usize..span.end as usize)?;
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let leading = raw.len() - raw.trim_start().len();
+    Some(PropsAnnotation {
+        text: text.to_string(),
+        span: Span::new(
+            span.start + leading as u32,
+            span.start + leading as u32 + text.len() as u32,
+        ),
+    })
+}
+
 /// The balanced `{T}` payload of a leading JSDoc `@type` block governing the
 /// variable declarator at `target_start`.
 fn leading_jsdoc_type_payload(
     comments: &[Comment],
     target_start: u32,
     source: &str,
-) -> Option<String> {
+) -> Option<PropsAnnotation> {
     let comment = comments.iter().rev().find(|comment| {
         if comment.span.end > target_start
             || !comment.is_block()
@@ -506,8 +528,18 @@ fn leading_jsdoc_type_payload(
         match ch {
             '{' => depth += 1,
             '}' if depth == 0 => {
-                let text = payload[..offset].trim();
-                return (!text.is_empty()).then(|| text.to_string());
+                let raw_text = &payload[..offset];
+                let text = raw_text.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                let payload_start = raw.len() - payload.len();
+                let leading = raw_text.len() - raw_text.trim_start().len();
+                let start = comment.span.start + (payload_start + leading) as u32;
+                return Some(PropsAnnotation {
+                    text: text.to_string(),
+                    span: Span::new(start, start + text.len() as u32),
+                });
             }
             '}' => depth -= 1,
             _ => {}

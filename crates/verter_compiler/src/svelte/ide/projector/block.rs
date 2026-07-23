@@ -375,11 +375,14 @@ impl TemplateProjector<'_, '_> {
             }
         }
         if let Some(s) = self.find_str_before(block.span.end, "{/await}") {
-            let close = match self.dialect {
-                super::SvelteIdeDialect::TypeScript => "</>); })(null as any)}",
-                super::SvelteIdeDialect::JavaScript => "</>); })(/** @type {any} */ (null))}",
-            };
-            self.ct.overwrite(s, block.span.end, close);
+            // Move the authored head into the IIFE argument. Passing an `any`
+            // placeholder here erased `Awaited<typeof head>` and made every
+            // `{:then value}` local `any`. A move keeps the head's exact source
+            // identity for hover/navigation and composes with store rewrites
+            // already recorded on that span.
+            self.ct
+                .move_wrapped(head.start, head.end, block.span.end, "</>); })(", ")}");
+            self.ct.remove(s, block.span.end);
         }
     }
 

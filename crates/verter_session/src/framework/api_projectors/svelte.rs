@@ -231,8 +231,14 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let resolved_props =
             resolver_ctx.and_then(|ctx| resolve_public_props_text(host, ctx, resolved_canonical));
         let resolved_props_text = resolved_props.as_ref().map(|props| props.text.clone());
-        let props_text = captured_props_text
-            .or_else(|| resolved_props_text.clone())
+        // The resolved contract is the public surface authority when available:
+        // besides normalizing aliases/default optionality, it carries the typed
+        // declaration origins required to map each generated property name back
+        // to its authored member. The captured display remains the shallow,
+        // provider-free fallback when semantic resolution is unavailable.
+        let props_text = resolved_props_text
+            .clone()
+            .or(captured_props_text)
             .unwrap_or(shallow_props_text);
         let component_props_text = object_type_text(&props_text)
             .map(str::to_string)
@@ -256,10 +262,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let component_props_text =
             render_native_component_props(&component_props_text, dispatcher_text.as_deref());
         // Prop NAME-token map anchors apply ONLY when the props fragment that
-        // ships IS the resolved render byte-for-byte — the captured authored
-        // display takes rendering precedence and may differ in formatting, in
-        // which case anchors recorded against the resolved render would index
-        // the wrong bytes. The legacy dispatcher wrapper re-renders the
+        // ships IS the resolved render byte-for-byte. A fallback captured
+        // authored display may differ in formatting, in which case anchors
+        // recorded against the resolved render would index the wrong bytes.
+        // The legacy dispatcher wrapper re-renders the
         // fragment one byte in (`({props}) & …`). Any other shape ships NO
         // prop mappings — unmapped is honest (the consumer remaps fail
         // closed).

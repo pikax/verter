@@ -150,6 +150,7 @@ fn two_prop_oxc(
             has_errors: false,
             dynamism: Dynamism::Dynamic,
         }),
+        ide_recovery_scope: Vec::new(),
         dynamism: Dynamism::Dynamic,
     }
 }

@@ -365,6 +365,10 @@ fn build_script_analysis_inner(
     owners: &TopLevelOwnerTable,
     parse_errors: bool,
 ) -> ScriptAnalysisSnapshot {
+    if scope == AnalysisScope::IMPORTS {
+        return build_script_ingress_only(content, source_type, program, owners);
+    }
+
     // â”€â”€ Single-pass collection â”€â”€
     // Imports always precede declarations in valid ESM, so the import list is
     // complete when we encounter variable/function/class declarations.
@@ -788,6 +792,132 @@ fn build_script_analysis_inner(
         // Filled by the session-side style cross-reference
         // (`mark_bindings_used_in_style`) when style blocks are analyzed.
         style_vbind_roots: Vec::new(),
+    }
+}
+
+/// Minimal source-ingress walk used by latency-sensitive editor/provider paths.
+/// It preserves the import and module-reference facts of the normal shallow pass
+/// while constructing none of the binding, macro, Vue API, declaration, usage, or
+/// type-oriented products that `AnalysisScope::IMPORTS` did not request.
+fn build_script_ingress_only(
+    content: &str,
+    source_type: SourceType,
+    program: &Program<'_>,
+    owners: &TopLevelOwnerTable,
+) -> ScriptAnalysisSnapshot {
+    let mut imports = Vec::new();
+    let mut module_references = Vec::new();
+    let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
+
+    for (statement_index, statement) in program.body.iter().enumerate() {
+        let owner = owners.statement(statement_index).owner;
+        match statement {
+            Statement::ImportDeclaration(declaration) => {
+                imports.push(analyze_import_declaration(declaration, owner));
+                module_references.push(build_static_module_reference(
+                    ModuleReferenceSyntax::StaticImport,
+                    ModuleReferenceSemantics::Import,
+                    declaration.import_kind.is_type(),
+                    declaration.span.into(),
+                    declaration.source.span.into(),
+                    content,
+                    declaration.source.value.as_str(),
+                ));
+            }
+            Statement::ExportNamedDeclaration(declaration) => {
+                if let Some(source) = &declaration.source {
+                    module_references.push(build_static_module_reference(
+                        ModuleReferenceSyntax::ExportFrom,
+                        ModuleReferenceSemantics::Import,
+                        declaration.export_kind.is_type(),
+                        declaration.span.into(),
+                        source.span.into(),
+                        content,
+                        source.value.as_str(),
+                    ));
+                }
+                if let Some(Declaration::VariableDeclaration(variable)) = &declaration.declaration {
+                    collect_ingress_variable_initializers(
+                        variable,
+                        content,
+                        &mut const_string_values,
+                        &mut module_references,
+                    );
+                }
+            }
+            Statement::ExportAllDeclaration(declaration) => {
+                module_references.push(build_static_module_reference(
+                    ModuleReferenceSyntax::ExportFrom,
+                    ModuleReferenceSemantics::Import,
+                    false,
+                    declaration.span.into(),
+                    declaration.source.span.into(),
+                    content,
+                    declaration.source.value.as_str(),
+                ));
+            }
+            Statement::ExpressionStatement(statement) => {
+                collect_module_references_from_expression(
+                    &statement.expression,
+                    content,
+                    &const_string_values,
+                    &mut module_references,
+                );
+            }
+            Statement::VariableDeclaration(declaration) => {
+                collect_ingress_variable_initializers(
+                    declaration,
+                    content,
+                    &mut const_string_values,
+                    &mut module_references,
+                );
+            }
+            Statement::ExportDefaultDeclaration(declaration) => {
+                if let Some(expression) = declaration.declaration.as_expression() {
+                    collect_module_references_from_expression(
+                        expression,
+                        content,
+                        &const_string_values,
+                        &mut module_references,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ScriptAnalysisSnapshot {
+        imports,
+        module_references,
+        is_typescript: source_type.is_typescript(),
+        ..ScriptAnalysisSnapshot::default()
+    }
+}
+
+fn collect_ingress_variable_initializers(
+    declaration: &VariableDeclaration<'_>,
+    content: &str,
+    const_string_values: &mut FxHashMap<String, Vec<String>>,
+    module_references: &mut Vec<AnalyzedModuleReference>,
+) {
+    for declarator in &declaration.declarations {
+        if let Some(initializer) = &declarator.init {
+            collect_module_references_from_expression(
+                initializer,
+                content,
+                const_string_values,
+                module_references,
+            );
+            if declaration.kind == VariableDeclarationKind::Const {
+                if let BindingPattern::BindingIdentifier(identifier) = &declarator.id {
+                    if let Some(values) =
+                        evaluate_string_candidates(initializer, const_string_values)
+                    {
+                        const_string_values.insert(identifier.name.to_string(), values);
+                    }
+                }
+            }
+        }
     }
 }
 

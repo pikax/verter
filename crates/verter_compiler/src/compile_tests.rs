@@ -15245,8 +15245,8 @@ const count = ref(0)
 
     // Positive: should have typed InstanceType declaration
     assert!(
-        tsx.code.contains("InstanceType<import("),
-        "TS SFC instance declaration should use InstanceType<import(...)>, got:\n{}",
+        tsx.code.contains("InstanceType<typeof import("),
+        "TS SFC instance declaration should use InstanceType<typeof import(...)>, got:\n{}",
         tsx.code
     );
     assert!(
@@ -15285,8 +15285,8 @@ const count = ref(0)
 
     // Negative: must NOT have TS-style InstanceType
     assert!(
-        !tsx.code.contains("InstanceType<import("),
-        "JS SFC must NOT use InstanceType<import(...)>, got:\n{}",
+        !tsx.code.contains("InstanceType<typeof import("),
+        "JS SFC must NOT use a TypeScript InstanceType self-import, got:\n{}",
         tsx.code
     );
     assert!(
@@ -15344,8 +15344,8 @@ export default {
         tsx.code
     );
     assert!(
-        tsx.code.contains("InstanceType<import("),
-        "TS Options API should use InstanceType<import(...)>, got:\n{}",
+        tsx.code.contains("InstanceType<typeof import("),
+        "TS Options API should use InstanceType<typeof import(...)>, got:\n{}",
         tsx.code
     );
 
@@ -15427,8 +15427,8 @@ fn tsx_instance_declaration_template_only_uses_instance_type() {
 
     // Positive: should have typed instance
     assert!(
-        tsx.code.contains("InstanceType<import("),
-        "Template-only SFC should use InstanceType<import(...)>, got:\n{}",
+        tsx.code.contains("InstanceType<typeof import("),
+        "Template-only SFC should use InstanceType<typeof import(...)>, got:\n{}",
         tsx.code
     );
 
@@ -17474,8 +17474,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 
 const msg = 'hi'
 
-// @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<typeof import('./App.vue.verter.js')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -17511,7 +17510,7 @@ void (___VERTER___instance).valueOf;
 return {};
 } // close templateBindingFN
 
-export { default } from './App.vue.verter.ts';
+export { default } from './App.vue.verter.js';
 
 type ___VERTER___attributes = {};
 "#
@@ -17575,11 +17574,11 @@ fn template_expression_overlay_pins_absolute_output_bytes() {
     // `.d.vue.ts` declaration carrier; the self-import that types
     // `___VERTER___instance` targets the API carrier, NOT the IDE output.
     assert!(
-        tsx.contains("export { default } from './App.vue.verter.ts';"),
+        tsx.contains("export { default } from './App.vue.verter.js';"),
         "IDE carrier must re-export the public default from the API carrier:\n{tsx}"
     );
     assert!(
-        tsx.contains("import('./App.vue.verter.ts')"),
+        tsx.contains("import('./App.vue.verter.js')"),
         "instance self-import must target the .verter.ts API carrier:\n{tsx}"
     );
     // Template internals stay LOCAL (non-exported): the binding fn is a plain

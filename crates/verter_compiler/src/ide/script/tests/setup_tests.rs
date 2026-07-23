@@ -88,7 +88,7 @@ const x = 1
     // surface (that is the cross-package redirect target, never the in-project
     // bare-import target).
     assert!(
-        !code.contains("./MyComp.vue.verter.ts"),
+        !code.contains("./MyComp.vue.verter"),
         "in-project .vue import must NOT target the .verter.ts API carrier: {code}"
     );
 
@@ -204,13 +204,13 @@ const count = ref(0)
         code
     );
     assert!(
-        code.contains("InstanceType<import("),
+        code.contains("InstanceType<typeof import("),
         "Should use InstanceType import. Got: {}",
         code
     );
     assert!(
-        code.contains("import('./App.vue.verter.ts')"),
-        "Should self-import the component's own PUBLIC-API carrier (.vue.verter.ts). Got: {}",
+        code.contains("import('./App.vue.verter.js')"),
+        "Should use TypeScript's .js-to-.ts substitution for the component's own PUBLIC-API carrier. Got: {}",
         code
     );
     assert!(
@@ -235,7 +235,7 @@ const count = ref(0)
 <template><div>{{ count }}</div></template>"#,
     );
     assert!(
-        code.contains("export { default } from './App.vue.verter.ts';"),
+        code.contains("export { default } from './App.vue.verter.js';"),
         "script-setup IDE carrier must re-export the public default from the API carrier. Got: {code}"
     );
     // Template internals stay LOCAL — the binding fn is a helper, never the
@@ -260,7 +260,7 @@ fn facade_reexport_and_self_import_use_basename_not_full_canonical_path() {
 
     let reexport = public_facade_reexport(full_path);
     assert!(
-        reexport.contains("export { default } from './Comp.vue.verter.ts';"),
+        reexport.contains("export { default } from './Comp.vue.verter.js';"),
         "re-export must use the basename-relative API specifier. Got: {reexport}"
     );
     assert!(
@@ -268,9 +268,9 @@ fn facade_reexport_and_self_import_use_basename_not_full_canonical_path() {
         "re-export must NOT embed the absolute canonical path. Got: {reexport}"
     );
 
-    let self_import = instance_declaration(full_path, false, false);
+    let self_import = instance_declaration(full_path, false, false, "");
     assert!(
-        self_import.contains("import('./Comp.vue.verter.ts')"),
+        self_import.contains("InstanceType<typeof import('./Comp.vue.verter.js')"),
         "self-import must use the basename-relative API specifier. Got: {self_import}"
     );
     assert!(
@@ -354,7 +354,7 @@ export default {
         code
     );
     assert!(
-        code.contains("InstanceType<import("),
+        code.contains("InstanceType<typeof import("),
         "Options API should use InstanceType import. Got: {}",
         code
     );

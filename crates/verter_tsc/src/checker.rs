@@ -1467,7 +1467,8 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
 ///   the strip to genuine carrier companions (a plain `./Widget.tsx` is left
 ///   untouched because `Widget` is not a carrier).
 const CARRIER_VIRTUAL_IMPORT_SUFFIXES: &[&str] = &[
-    verter_workspace::CARRIER_API_VIRTUAL_SUFFIX, // ".verter.ts"
+    verter_workspace::CARRIER_API_MODULE_SPECIFIER_SUFFIX, // ".verter.js"
+    verter_workspace::CARRIER_API_VIRTUAL_SUFFIX,          // ".verter.ts"
     ".tsx",
     ".jsx",
 ];
@@ -3430,6 +3431,28 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         assert!(
             !result.contains("D:/project/src/components/Foo.vue.verter.ts"),
             "original Foo carrier-API path should be replaced: {result}"
+        );
+    }
+
+    #[test]
+    fn lower_tsc_validation_carrier_specifiers_accepts_js_alias_for_ts_api_carrier() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/src/components/Foo.vue".to_string(),
+            PathBuf::from("C:/tmp/Foo_abc.vue.ts"),
+        );
+
+        let code = r#"import('D:/project/src/components/Foo.vue.verter.js')['default']
+export { default } from 'D:/project/src/components/Bar.vue.verter.js'"#;
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
+
+        assert!(
+            result.contains("'C:/tmp/Foo_abc.vue.ts'"),
+            "the generated .js alias must resolve to the known TypeScript API stub: {result}"
+        );
+        assert!(
+            result.contains("'D:/project/src/components/Bar.vue'"),
+            "an unknown .js alias must fall back to the bare carrier shim: {result}"
         );
     }
 

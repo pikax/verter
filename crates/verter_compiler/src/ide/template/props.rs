@@ -27,8 +27,10 @@ use crate::types::NodeProp;
 
 /// A custom directive collected for `v-directive` emission in TSX output.
 pub struct CollectedDirective {
-    /// CamelCase directive name: `"vFocus"`, `"vClickOutside"`
-    pub camel_name: String,
+    /// Typed directive expression. Setup-local directives use their authored
+    /// binding directly; only unresolved/global directives use the instance
+    /// accessor fallback.
+    pub reference: String,
     /// Resolved value expression, or `"true"` for no-value directives
     pub value: String,
     /// Argument: `"\"foo\""` (quoted static), resolved expression (dynamic), or `"undefined"`
@@ -317,6 +319,11 @@ pub fn process_element_props<'alloc>(
                 } else {
                     // Build CollectedDirective
                     let camel_name = directive_name_to_camel(dir_name);
+                    let reference = if resolver.get(&camel_name).is_some() {
+                        camel_name.clone()
+                    } else {
+                        format!("___VERTER___directiveAccessor[\"{camel_name}\"]")
+                    };
 
                     // Value — the custom-directive expression is relocated into a
                     // synthetic `___VERTER___runCustomDirective(...)` call, so it is
@@ -367,7 +374,7 @@ pub fn process_element_props<'alloc>(
                     };
 
                     collected_directives.push(CollectedDirective {
-                        camel_name,
+                        reference,
                         value,
                         arg,
                         modifiers,

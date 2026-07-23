@@ -57,6 +57,51 @@ fn prelude_opens_the_projection_and_no_script_tag_survives() {
 }
 
 #[test]
+fn component_shorthand_maps_the_authored_identifier_to_the_value_expression() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = "<script lang=\"ts\">let label = $state('x');</script>\n<Child {label} />";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Parent.svelte"), false);
+    let generated_attr = projection
+        .code
+        .find("label={label}")
+        .expect("the shorthand is valid JSX");
+    let generated_value = generated_attr + "label={".len();
+    let authored_value = source.rfind("{label}").unwrap() + 1;
+    let (generated_line, generated_col) =
+        byte_offset_to_line_col(&projection.code, generated_value as u32);
+    let (authored_line, authored_col) = byte_offset_to_line_col(source, authored_value as u32);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let (key_line, key_col) = byte_offset_to_line_col(&projection.code, generated_attr as u32);
+    let key_boundary = map
+        .get_tokens()
+        .find(|token| token.get_dst_line() == key_line && token.get_dst_col() == key_col)
+        .expect("the synthetic shorthand key has an explicit map boundary");
+    assert!(
+        key_boundary.get_source_id().is_none(),
+        "the generated prop key must not steal the authored identifier mapping"
+    );
+    let token = map
+        .get_tokens()
+        .filter(|token| {
+            token.get_dst_line() == generated_line
+                && token.get_dst_col() <= generated_col
+                && token.get_source_id().is_some()
+        })
+        .max_by_key(|token| token.get_dst_col())
+        .expect("the generated shorthand value has an authored mapping");
+    assert_eq!(
+        (
+            token.get_src_line(),
+            token.get_src_col() + generated_col - token.get_dst_col()
+        ),
+        (authored_line, authored_col),
+        "the authored shorthand identifier must map to the JSX value expression"
+    );
+}
+
+#[test]
 fn ide_carrier_exports_public_facade_default_with_typed_props() {
     // The IDE carrier (`Comp.svelte.tsx`) is the self-diagnostics surface; it
     // composes the component's PUBLIC type as a clean `export default` — a
@@ -72,17 +117,13 @@ fn ide_carrier_exports_public_facade_default_with_typed_props() {
         "IDE carrier must export the public component facade as default:\n{code}"
     );
     assert!(
-        code.contains("type __VerterPublicProps = { msg: string };"),
-        "public facade $props must carry the syntactic annotation:\n{code}"
-    );
-    assert!(
         code.contains(
-            "declare const __VerterPublicComponent: import(\"svelte\").Component<__VerterPublicProps"
+            "declare const __VerterPublicComponent: import(\"svelte\").Component<{ msg: string }"
         ),
-        "public facade must use Svelte 5's native callable Component type:\n{code}"
+        "public facade must inline the syntactic props on Svelte 5's native callable Component type:\n{code}"
     );
     let facade = code
-        .split_once("type __VerterPublicProps")
+        .split_once("declare const __VerterPublicComponent")
         .map(|(_, facade)| facade)
         .expect("public facade suffix");
     assert!(
@@ -109,6 +150,45 @@ fn ide_carrier_exports_public_facade_default_with_typed_props() {
 }
 
 #[test]
+fn public_facade_prop_maps_to_the_authored_props_type_member() {
+    use oxc_sourcemap::SourceMap;
+
+    let source = "<script lang=\"ts\">\n\
+                  let { contractProp }: {\n\
+                    contractProp: string;\n\
+                  } = $props();\n\
+                  </script>\n\
+                  <span>{contractProp}</span>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("PropChild.svelte"), false);
+    let facade_start = projection
+        .code
+        .find("declare const __VerterPublicComponent")
+        .expect("public facade");
+    let generated_prop = facade_start
+        + projection.code[facade_start..]
+            .find("contractProp")
+            .expect("facade prop");
+    let authored_prop = source
+        .find("contractProp: string")
+        .expect("authored props type");
+    let (out_line, out_col) = byte_offset_to_line_col(&projection.code, generated_prop as u32);
+    let (src_line, src_col) = byte_offset_to_line_col(source, authored_prop as u32);
+    let map = SourceMap::from_json_string(&projection.source_map).expect("decode map");
+    let token = map
+        .get_tokens()
+        .filter(|token| token.get_dst_line() == out_line && token.get_dst_col() <= out_col)
+        .max_by_key(|token| token.get_dst_col())
+        .expect("a source-map token must cover the public facade prop");
+    let delta = out_col - token.get_dst_col();
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col() + delta),
+        (src_line, src_col),
+        "the public facade property is the authored `$props` type member"
+    );
+}
+
+#[test]
 fn ide_carrier_facade_preserves_quoted_hyphenated_prop_keys_verbatim() {
     // PARITY pin for the Vue quoted-prop carrier fix: Svelte's public facade
     // copies the `$props()` annotation VERBATIM (no per-member re-render), so
@@ -120,12 +200,12 @@ fn ide_carrier_facade_preserves_quoted_hyphenated_prop_keys_verbatim() {
         "<script lang=\"ts\">let { \"data-x\": dx, plain }: { \"data-x\"?: string; plain: boolean } = $props();</script>\n<div>{plain}</div>",
     );
     assert!(
-        code.contains("type __VerterPublicProps = { \"data-x\"?: string; plain: boolean };"),
+        code.contains("Component<{ \"data-x\"?: string; plain: boolean }, {}, \"\">"),
         "the quoted key must survive verbatim in the public facade:\n{code}"
     );
     // NEGATIVE: the key never renders bare (invalid TS member syntax).
     let facade = code
-        .split_once("type __VerterPublicProps")
+        .split_once("declare const __VerterPublicComponent")
         .map(|(_, facade)| facade)
         .expect("public facade suffix");
     assert!(
@@ -140,7 +220,7 @@ fn ide_carrier_facade_degrades_untyped_props_to_permissive_record() {
     // `$props` to a permissive `Record<string, unknown>` (LOCAL — no resolver).
     let code = project("<div>{x}</div>");
     assert!(
-        code.contains("type __VerterPublicProps = Record<string, unknown>;"),
+        code.contains("Component<Record<string, unknown>, {}, \"\">"),
         "untyped/absent $props must degrade to a permissive Record:\n{code}"
     );
     assert!(
@@ -1108,6 +1188,16 @@ fn await_block_projects_with_no_residue_and_no_await_expression_diagnostic() {
     assert!(!projection.code.contains("{#await"), "no #await residue");
     assert!(!projection.code.contains("{:then"), "no :then residue");
     assert!(!projection.code.contains("{/await}"), "no /await residue");
+    assert!(
+        projection.code.contains("})(p)}"),
+        "the await IIFE must receive the authored promise expression so its then binding is Awaited<typeof p>: {}",
+        projection.code
+    );
+    assert!(
+        !projection.code.contains("})(null as any)}"),
+        "the await IIFE must never erase the promise type with an any argument: {}",
+        projection.code
+    );
     assert!(
         !projection
             .diagnostics

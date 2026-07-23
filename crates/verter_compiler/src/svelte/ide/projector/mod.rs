@@ -67,7 +67,7 @@ mod event_inference;
 mod template_mode;
 
 use event_inference::apply_event_handler_param_inference;
-use facade::svelte_public_facade;
+use facade::append_svelte_public_facade;
 use ident::{
     is_bare_tag_identifier, is_type_query_safe_lvalue, is_valid_binding_identifier,
     is_valid_component_reference, skip_string_literal,
@@ -229,13 +229,19 @@ pub fn project_svelte_ide(
     let region = first_template.map(|first| (first, source.len() as u32));
     // The LOCAL self-props contract (F8 `<svelte:self>`) — derived SYNTACTICALLY
     // from the instance script's `$props()` annotation (no resolver).
-    let self_props_type = parsed
-        .instance_content()
-        .map(|c| &source[c.start as usize..c.end as usize])
-        .and_then(extract_props_annotation);
+    let facade_props = parsed.instance_content().and_then(|content| {
+        let script = &source[content.start as usize..content.end as usize];
+        extract_props_annotation(script).map(|mut annotation| {
+            annotation.span.start += content.start;
+            annotation.span.end += content.start;
+            annotation
+        })
+    });
+    let self_props_type = facade_props
+        .as_ref()
+        .map(|annotation| annotation.text.clone());
     // Keep a copy for the PUBLIC-FACADE default export (the projector consumes
     // `self_props_type` for the `<svelte:self>` local contract).
-    let facade_props_type = self_props_type.clone();
     let mut projector = TemplateProjector {
         ct: &mut ct,
         source,
@@ -260,10 +266,18 @@ pub fn project_svelte_ide(
     // Emit the component's PUBLIC-FACADE default export onto the IDE carrier
     // (the self-diagnostics surface; the bare-import target is the declaration
     // carrier, §2.2/§2.9). See [`svelte_public_facade`]
-    // for the shape; it REPLACES the bare `export {};` marker. Appended through
-    // `CodeTransform::append` (output-only, unmapped) so it perturbs no mapped
-    // span — keeping CodeTransform the single source of truth for carrier text.
-    ct.append(&svelte_public_facade(facade_props_type.as_deref(), dialect));
+    // for the shape; it REPLACES the bare `export {};` marker. Segmented
+    // CodeTransform insertions keep facade scaffolding unmapped while each line
+    // of the byte-identical authored `$props` annotation maps to its source span,
+    // leaving CodeTransform as the single text and mapping authority.
+    append_svelte_public_facade(
+        &mut ct,
+        source.len() as u32,
+        facade_props
+            .as_ref()
+            .map(|annotation| (annotation.text.as_str(), annotation.span)),
+        dialect,
+    );
 
     // Experimental await-EXPRESSIONS (F6) — instance/module SCRIPT positions.
     // An `await` at instance-script top level OR inside a `$derived(...)` /
@@ -517,8 +531,10 @@ impl TemplateProjector<'_, '_> {
             // No template — emit an empty render function. The file is made a
             // valid module by the PUBLIC-FACADE `export default` appended after
             // the projector runs (no separate `export {};` marker needed).
-            self.ct
-                .append("\n;function __verter_render() { return (<></>); }\n");
+            self.ct.append_left(
+                self.source.len() as u32,
+                "\n;function __verter_render() { return (<></>); }\n",
+            );
             return;
         };
 

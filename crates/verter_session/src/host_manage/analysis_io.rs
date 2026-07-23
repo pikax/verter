@@ -335,6 +335,23 @@ impl VerterHost {
             .install_raw_template_analysis(template, admission);
     }
 
+    /// Return source-stage import/re-export facts without triggering analysis
+    /// completion or any lazy semantic/template/style work.
+    pub fn get_script_ingress(&self, canonical_or_alias: &str) -> Option<ScriptIngressSnapshot> {
+        use crate::host_executor::HostSourceData;
+
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        if self.is_canonical_evicted(&canonical) {
+            return None;
+        }
+        let source = self.scheduler.try_get_source(&canonical)?;
+        let data = source.downcast_data::<HostSourceData>()?;
+        Some(ScriptIngressSnapshot {
+            imports: Arc::new(data.parse.script_analysis.imports.clone()),
+            module_references: Arc::new(data.parse.script_analysis.module_references.clone()),
+        })
+    }
+
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
         // Route through the view-aware entry point with a `HostViewRef`
         // so the single resolver-tier surface stays view-shaped (R17 / R18).

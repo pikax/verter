@@ -90,6 +90,7 @@ mod tests {
             expression: None,
             errors: None,
             bindings: None,
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Dynamic,
         };
 
@@ -120,6 +121,7 @@ mod tests {
             expression: None,
             errors: None,
             bindings: None,
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Dynamic,
         };
 
@@ -155,6 +157,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Dynamic,
         };
 
@@ -189,6 +192,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Dynamic,
         };
 
@@ -211,6 +215,7 @@ mod tests {
             expression: None,
             errors: None,
             bindings: None, // No bindings extracted
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Static,
         };
 
@@ -236,6 +241,7 @@ mod tests {
             expression: None,
             errors: None,
             bindings: None,
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Dynamic,
         };
 
