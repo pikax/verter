@@ -210,6 +210,13 @@ async fn silence_watchdog_restarts_without_timing_out_the_request() {
         std::time::Duration::from_millis(5),
         std::time::Duration::from_millis(20),
     ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
+            .await
+            .is_err(),
+        "a fresh request after a long idle must receive a fresh silence allowance"
+    );
+    let waiter = notify.notified();
     tokio::time::timeout(std::time::Duration::from_millis(200), waiter)
         .await
         .expect("silent provider must trigger lifecycle recovery");

@@ -184,6 +184,20 @@ impl CarrierPublishCoordinator {
             .await
     }
 
+    /// Promote a demand-discovered carrier frontier with one managed-provider
+    /// project refresh. Missing/stale advertisements are skipped; the returned
+    /// count is the number of current-session sources proven activatable.
+    pub(crate) async fn activate_published_sources(
+        &self,
+        source_canonicals: &[String],
+    ) -> Result<usize, verter_type_runtime::protocol::TypeProviderError> {
+        let sources: Vec<CanonicalSource> = source_canonicals
+            .iter()
+            .map(|source| CanonicalSource::new(source.clone()))
+            .collect();
+        self.reconciler().activate_published_sources(&sources).await
+    }
+
     /// The SINGLE membership-transition entry every production decision point routes
     /// through: resolve ownership ONCE (synchronously; the borrowing resolver is
     /// dropped before any await) and run the authoritative transition through the

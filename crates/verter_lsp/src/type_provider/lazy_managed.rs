@@ -875,6 +875,30 @@ impl TypeProvider for LazyManagedTypeProvider {
         })
     }
 
+    fn activate_carrier_members<'a>(
+        &'a self,
+        members: &'a [verter_type_runtime::CarrierActivation],
+    ) -> ProviderFuture<'a, ()> {
+        let members = members.to_vec();
+        Box::pin(async move {
+            let _activation = self.activation.lock().await;
+            {
+                let mut desired = self.desired.lock().unwrap();
+                for member in &members {
+                    if let Some(carrier) = desired.carriers.get_mut(&member.companion_path) {
+                        carrier.source_path = member.source_path.clone();
+                        carrier.project_file_name = member.project_file_name.clone();
+                        carrier.active = true;
+                    }
+                }
+            }
+            let Some(provider) = self.current() else {
+                return Ok(());
+            };
+            provider.activate_carrier_members(&members).await
+        })
+    }
+
     fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
         Box::pin(async move {
             let _activation = self.activation.lock().await;

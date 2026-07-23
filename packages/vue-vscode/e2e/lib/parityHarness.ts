@@ -191,7 +191,7 @@ export async function assertDefinitionTargetsToken(
     if (path.normalize(location.uri.fsPath) !== absoluteFile(target.file)) return false;
     const start = targetDoc.offsetAt(location.range.start);
     const end = targetDoc.offsetAt(location.range.end);
-    return start <= expected && expected <= Math.max(start, end);
+    return start === end ? expected === start : start <= expected && expected < end;
   };
   // Capture-only navigation may first expose a native same-file fallback while
   // the provider finishes its nonblocking project warm-up. Wait for the exact

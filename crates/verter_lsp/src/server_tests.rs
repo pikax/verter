@@ -1663,7 +1663,7 @@ async fn make_definition_test_server(
 /// Build a filesystem-backed definition/sync test server bound to `kind`. The
 /// barrel-sync BFS tests route through `Tsgo` so the terminal-carrier sync is an
 /// observable `open_file` (under tsserver the carrier-companion verbs are
-/// publish-only); the resolution-graph walk they characterize is engine-agnostic.
+/// plugin/store-owned and no barrel walk runs).
 async fn make_definition_test_server_with_kind(
     files: &[(&str, &str, &str)],
     kind: crate::TypeProviderKind,
@@ -1787,6 +1787,9 @@ async fn make_definition_test_server_with_kind_and_deadlines(
             .await
             .expect("optional semantic fixture must finish")
             .expect("optional semantic fixture signal must remain open");
+    }
+    if matches!(kind, crate::TypeProviderKind::Tsserver) {
+        server.test_settle_workspace_carriers().await;
     }
 
     (temp, service, drain_handle, provider, workspace_id)
@@ -8974,7 +8977,7 @@ import MyComp from './MyComp.vue'
 #[tokio::test]
 async fn hover_recovers_with_resync_and_retry_after_transient_provider_error() {
     for (kind, scripted_failures, expected_calls) in [
-        (crate::TypeProviderKind::Tsserver, 2, 3),
+        (crate::TypeProviderKind::Tsserver, 1, 2),
         (crate::TypeProviderKind::Tsgo, 1, 2),
     ] {
         let provider = Arc::new(MockTypeProvider::new());
@@ -9035,7 +9038,7 @@ const recoveredHoverTarget: string = "ok"
 #[tokio::test]
 async fn hover_fails_closed_after_bounded_retry_when_provider_keeps_failing() {
     for (kind, expected_calls) in [
-        (crate::TypeProviderKind::Tsserver, 3),
+        (crate::TypeProviderKind::Tsserver, 2),
         (crate::TypeProviderKind::Tsgo, 2),
     ] {
         let provider = Arc::new(MockTypeProvider::new());
@@ -14327,13 +14330,12 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
+async fn tsgo_barrel_eager_sync_follows_the_complete_reexport_closure() {
     // Usage.vue -> `./components` (export *) -> `./Foo` (export {default as Foo} from './Foo.vue').
-    // Built on a Tsserver server: the single-hop body early-returns for non-Tsgo (the provider
-    // gate) AND only string-classifies the FIRST barrel's literal specifiers, so the nested
-    // re-export carrier never reaches the provider. A recursive, provider-neutral BFS that
-    // classifies by RESOLVED-target carrier-ness must sync `Foo.vue`'s surface. Discriminating
-    // on BOTH the dropped gate and the recursive hop.
+    // TSGO needs explicit rewritten buffers. A recursive BFS that classifies by
+    // RESOLVED-target carrier-ness must sync `Foo.vue`'s surface through every
+    // re-export hop; cycles terminate through the visited set rather than an
+    // arbitrary depth/node cap.
     let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean; bar?: string }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
     let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
     let top_barrel = "export * from './Foo'\n";
@@ -14370,7 +14372,7 @@ async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
 
     assert!(
         opened.iter().any(|p| p.contains("Foo.vue")),
-        "recursive provider-neutral barrel sync must sync the nested re-export carrier Foo.vue surface; opened={opened:?}"
+        "recursive tsgo barrel sync must sync the nested re-export carrier Foo.vue surface; opened={opened:?}"
     );
 
     drain_handle.abort();
@@ -14378,10 +14380,63 @@ async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tsserver_barrel_publication_registers_carriers_without_pushing_scripts() {
+async fn tsgo_barrel_receipt_does_not_truncate_a_deep_reexport_chain() {
+    const HOPS: usize = 12;
+    let mut owned_files = Vec::<(String, String, String)>::new();
+    owned_files.push((
+        "src/Terminal.vue".into(),
+        "vue".into(),
+        "<script setup lang=\"ts\">\ndefineProps<{ value: string }>()\n</script>\n".into(),
+    ));
+    for hop in 0..HOPS {
+        let target = if hop + 1 == HOPS {
+            "./Terminal.vue".to_string()
+        } else {
+            format!("./barrel{}", hop + 1)
+        };
+        owned_files.push((
+            format!("src/barrel{hop}.ts"),
+            "typescript".into(),
+            format!("export {{ default as Terminal }} from '{target}'\n"),
+        ));
+    }
+    owned_files.push((
+        "src/Usage.vue".into(),
+        "vue".into(),
+        "<script setup lang=\"ts\">\nimport { Terminal } from './barrel0'\n</script>\n<template><Terminal /></template>\n".into(),
+    ));
+    let borrowed_files: Vec<(&str, &str, &str)> = owned_files
+        .iter()
+        .map(|(path, language, source)| (path.as_str(), language.as_str(), source.as_str()))
+        .collect();
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(&borrowed_files, crate::TypeProviderKind::Tsgo).await;
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+    provider.clear_calls();
+
+    service
+        .inner()
+        .ensure_barrel_imports_synced_for_test(&usage_uri)
+        .await;
+
+    assert!(
+        provider.file_sync_calls().iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } if path.replace('\\', "/").ends_with("/src/Terminal.vue.tsx")
+                || path.replace('\\', "/").ends_with("/src/Terminal.vue")
+        )),
+        "the terminal carrier beyond the former depth cap must be delivered before readiness"
+    );
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tsserver_barrel_resolution_is_fully_plugin_and_disk_owned() {
     // Official tsserver framework plugins keep ordinary TS/JS modules under
-    // TypeScript's disk authority. Verter only publishes the terminal framework
-    // carrier metadata/content that the plugin cannot obtain from disk itself.
+    // TypeScript's disk authority and resolve framework carriers through their
+    // already-published store membership. The import-publication lane therefore
+    // performs no barrel walk and sends no per-file provider operations.
     let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean }>()\n</script>\n";
     let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
     let top_barrel = "export * from './Foo'\n";
@@ -14408,23 +14463,8 @@ async fn tsserver_barrel_publication_registers_carriers_without_pushing_scripts(
 
     let calls = provider.calls();
     assert!(
-        calls.iter().any(|call| matches!(
-            call,
-            MockCall::RegisterCarrierMetadata { source_path, .. }
-                if source_path.replace('\\', "/").ends_with("/src/components/Foo/Foo.vue")
-        )),
-        "tsserver must publish the terminal framework carrier reached through the barrel; calls={calls:?}"
-    );
-    assert!(
-        calls.iter().all(|call| !matches!(
-            call,
-            MockCall::OpenFile { path, .. }
-                | MockCall::OpenFileBackground { path, .. }
-                | MockCall::LoadFile { path, .. }
-                | MockCall::UpdateFile { path, .. }
-                if path.replace('\\', "/").ends_with(".ts")
-        )),
-        "tsserver must resolve ordinary barrel scripts from disk instead of receiving rewritten copies; calls={calls:?}"
+        calls.is_empty(),
+        "tsserver barrel resolution must not publish or push per-file buffers; calls={calls:?}"
     );
 
     drain_handle.abort();

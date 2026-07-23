@@ -226,18 +226,6 @@ impl Drop for TsserverBackgroundRequest {
     }
 }
 
-/// Retention window for a written cancellation file.
-///
-/// A cancellation can only still matter while its request is queued at the
-/// engine. Requests are bounded by a deadline of seconds, and three consecutive
-/// unanswered hops restart the process outright, so a file this old is
-/// unreachable — nothing can still be waiting to observe it.
-const CANCEL_FILE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Hard cap on retained cancellation files, so the directory stays bounded even
-/// if the clock is adjusted underneath the TTL.
-const CANCEL_FILE_RETAIN_CAP: usize = 512;
-
 /// tsserver's per-request cancellation channel.
 ///
 /// tsserver has no in-band cancel message. What it has is
@@ -261,9 +249,9 @@ struct TsserverCancellation {
     /// The exact string tsserver concatenates the request id onto. Built once so
     /// the path this side writes is byte-identical to the one tsserver stats.
     prefix: String,
-    /// Files written but not yet reaped. tsserver clears its per-request name
-    /// without unlinking, so the writer owns cleanup.
-    written: StdMutex<std::collections::VecDeque<(std::path::PathBuf, std::time::Instant)>>,
+    /// Files written but not yet acknowledged by the exact request sequence.
+    /// tsserver does not unlink them, so the writer owns cleanup.
+    written: StdMutex<HashMap<i64, std::path::PathBuf>>,
 }
 
 impl TsserverCancellation {
@@ -291,7 +279,7 @@ impl TsserverCancellation {
         Some(Self {
             dir,
             prefix,
-            written: StdMutex::new(std::collections::VecDeque::new()),
+            written: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -300,24 +288,23 @@ impl TsserverCancellation {
         format!("{}*", self.prefix)
     }
 
-    /// Tell tsserver to stop working on `seq`, and reap cancellations that can
-    /// no longer be observed.
+    /// Tell tsserver to stop working on `seq`. Retention lasts until the exact
+    /// response/requestCompleted acknowledgement or session teardown.
     fn cancel(&self, seq: i64) {
         let path = std::path::PathBuf::from(format!("{}{seq}", self.prefix));
         if std::fs::File::create(&path).is_err() {
             return;
         }
         let mut written = self.written.lock().unwrap();
-        written.push_back((path, std::time::Instant::now()));
-        while written.len() > CANCEL_FILE_RETAIN_CAP
-            || written
-                .front()
-                .is_some_and(|(_, at)| at.elapsed() > CANCEL_FILE_TTL)
-        {
-            let Some((stale, _)) = written.pop_front() else {
-                break;
-            };
-            let _ = std::fs::remove_file(stale);
+        written.insert(seq, path);
+    }
+
+    /// Remove cancellation evidence only after the engine acknowledges the
+    /// exact sequence. Requests are unbounded, so age/count are not proof that
+    /// a frame has left tsserver's stdin queue.
+    fn acknowledge(&self, seq: i64) {
+        if let Some(path) = self.written.lock().unwrap().remove(&seq) {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -492,10 +479,7 @@ const BACKGROUND_IDLE_GRACE: std::time::Duration = std::time::Duration::from_mil
 const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
 impl TsserverTransport {
-    fn begin_interactive_request(&self) -> TsserverInteractiveRequest {
-        self.pending
-            .interactive_in_flight
-            .fetch_add(1, Ordering::AcqRel);
+    fn preempt_background_request(&self) {
         self.pending
             .background_preemption_epoch
             .fetch_add(1, Ordering::AcqRel);
@@ -515,6 +499,13 @@ impl TsserverTransport {
                 }));
             }
         }
+    }
+
+    fn begin_interactive_request(&self) -> TsserverInteractiveRequest {
+        self.pending
+            .interactive_in_flight
+            .fetch_add(1, Ordering::AcqRel);
+        self.preempt_background_request();
 
         TsserverInteractiveRequest {
             pending: Arc::clone(&self.pending),
@@ -718,6 +709,23 @@ impl TsserverTransport {
         &self,
         requests: &[(&str, serde_json::Value)],
     ) -> Result<Vec<Result<serde_json::Value, TypeProviderError>>, TypeProviderError> {
+        self.request_background_batch_results_with_preemption(requests, true)
+            .await
+    }
+
+    async fn request_background_batch_results_once(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+    ) -> Result<Vec<Result<serde_json::Value, TypeProviderError>>, TypeProviderError> {
+        self.request_background_batch_results_with_preemption(requests, false)
+            .await
+    }
+
+    async fn request_background_batch_results_with_preemption(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+        retry_after_preemption: bool,
+    ) -> Result<Vec<Result<serde_json::Value, TypeProviderError>>, TypeProviderError> {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -768,10 +776,30 @@ impl TsserverTransport {
                 }
             }
             if preempted {
-                continue;
+                if retry_after_preemption {
+                    continue;
+                }
+                return Err(TypeProviderError::new(
+                    "tsserver background transaction preempted",
+                ));
             }
             return Ok(responses);
         }
+    }
+
+    async fn request_interactive_batch(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+    ) -> Result<Vec<serde_json::Value>, TypeProviderError> {
+        let _interactive = self.begin_interactive_request();
+        let mut responses = Vec::with_capacity(requests.len());
+        for (command, arguments) in requests {
+            responses.push(
+                self.request_inner(command, arguments.clone(), None, None)
+                    .await?,
+            );
+        }
+        Ok(responses)
     }
 
     /// Send a tsserver request with a custom configured response timeout. Split
@@ -1165,6 +1193,7 @@ impl TsserverTransport {
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
     pending: Arc<TsserverPendingRequests>,
+    cancellation: Arc<TsserverCancellation>,
     crash_notify: Option<Arc<Notify>>,
     last_message_at: Arc<StdMutex<std::time::Instant>>,
 ) {
@@ -1220,7 +1249,7 @@ async fn read_loop(
                             return;
                         }
                         if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) {
-                            handle_message(&msg, &pending);
+                            handle_message(&msg, &pending, Some(&cancellation));
                         }
                     }
                     continue;
@@ -1228,7 +1257,7 @@ async fn read_loop(
 
                 // Try to parse as JSON directly (newline-delimited mode)
                 if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    handle_message(&msg, &pending);
+                    handle_message(&msg, &pending, Some(&cancellation));
                 }
             }
             Err(_) => {
@@ -1243,12 +1272,19 @@ async fn read_loop(
 }
 
 /// Handle a parsed tsserver message (response or event).
-fn handle_message(msg: &serde_json::Value, pending: &TsserverPendingRequests) {
+fn handle_message(
+    msg: &serde_json::Value,
+    pending: &TsserverPendingRequests,
+    cancellation: Option<&TsserverCancellation>,
+) {
     let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
         "response" => {
             if let Some(request_seq) = msg.get("request_seq").and_then(|v| v.as_i64()) {
+                if let Some(cancellation) = cancellation {
+                    cancellation.acknowledge(request_seq);
+                }
                 if let Some(tx) = pending.take(request_seq) {
                     let _ = tx.send(msg.clone());
                 }
@@ -1256,6 +1292,15 @@ fn handle_message(msg: &serde_json::Value, pending: &TsserverPendingRequests) {
         }
         "event" => {
             let event_name = msg.get("event").and_then(|v| v.as_str()).unwrap_or("");
+            if event_name == "requestCompleted" {
+                let request_seq = msg
+                    .get("body")
+                    .and_then(|body| body.get("request_seq").or_else(|| body.get("requestSeq")))
+                    .and_then(|value| value.as_i64());
+                if let (Some(cancellation), Some(request_seq)) = (cancellation, request_seq) {
+                    cancellation.acknowledge(request_seq);
+                }
+            }
             if event_name == "projectLoadingStart" {
                 pending
                     .project_loads_in_flight
@@ -1749,10 +1794,17 @@ pub struct TsserverTypeProvider {
 #[derive(Default)]
 struct TsserverCarrierRefresh {
     requested_generation: AtomicU64,
+    urgent_generation: AtomicU64,
     applied_generation: AtomicU64,
     running: AtomicBool,
     completion: Notify,
     failure: StdMutex<Option<(u64, TypeProviderError)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CarrierRefreshPriority {
+    Background,
+    Interactive,
 }
 
 impl Drop for TsserverTypeProvider {
@@ -1965,7 +2017,7 @@ impl TsserverTypeProvider {
             last_message_at: Arc::clone(&last_message_at),
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
-            cancellation: Some(cancellation),
+            cancellation: Some(Arc::clone(&cancellation)),
         });
         if let Some(notify) = crash_notify.as_ref() {
             tokio::spawn(watch_tsserver_silence(
@@ -1983,7 +2035,13 @@ impl TsserverTypeProvider {
             Arc::new(Mutex::new(HashMap::new()));
 
         // Start the read loop
-        tokio::spawn(read_loop(stdout, pending, crash_notify, last_message_at));
+        tokio::spawn(read_loop(
+            stdout,
+            pending,
+            cancellation,
+            crash_notify,
+            last_message_at,
+        ));
 
         // Log stderr
         if let Some(stderr) = stderr {
@@ -2109,6 +2167,7 @@ async fn notify_carriers_changed_inner(
     files: Vec<String>,
     refresh_generation: u64,
     active_carrier_sources: Vec<String>,
+    priority: CarrierRefreshPriority,
 ) -> Result<(), TypeProviderError> {
     let Some(fence_file) = files.first().cloned() else {
         return Ok(());
@@ -2132,21 +2191,31 @@ async fn notify_carriers_changed_inner(
     // fence: the plugin's `setImmediate` graph reconciliation runs between the
     // two input turns, so a following diagnostic/hover cannot observe the new
     // store manifest with the old configured-project roots.
-    transport
-        .request_background_batch(&[
-            (
-                "configurePlugin",
-                serde_json::json!({
-                    "pluginName": "@verter/typescript-plugin",
-                    "configuration": {
-                        "carrierStoreRefreshToken": refresh_generation,
-                        "activeCarrierSources": active_carrier_sources,
-                    }
-                }),
-            ),
-            ("configure", serde_json::json!({})),
-        ])
-        .await?;
+    let requests = [
+        (
+            "configurePlugin",
+            serde_json::json!({
+                "pluginName": "@verter/typescript-plugin",
+                "configuration": {
+                    "carrierStoreRefreshToken": refresh_generation,
+                    "activeCarrierSources": active_carrier_sources,
+                }
+            }),
+        ),
+        ("configure", serde_json::json!({})),
+    ];
+    match priority {
+        CarrierRefreshPriority::Background => {
+            transport
+                .request_background_batch_results_once(&requests)
+                .await?
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        CarrierRefreshPriority::Interactive => {
+            transport.request_interactive_batch(&requests).await?;
+        }
+    }
     Ok(())
 }
 
@@ -2156,10 +2225,17 @@ fn schedule_carrier_refresh(
     refresh: Arc<TsserverCarrierRefresh>,
     generation: u64,
     changed_file: String,
+    priority: CarrierRefreshPriority,
 ) {
     refresh
         .requested_generation
         .fetch_max(generation, Ordering::AcqRel);
+    if priority == CarrierRefreshPriority::Interactive {
+        refresh
+            .urgent_generation
+            .fetch_max(generation, Ordering::AcqRel);
+        transport.preempt_background_request();
+    }
     if refresh
         .running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -2171,15 +2247,29 @@ fn schedule_carrier_refresh(
     tokio::spawn(async move {
         loop {
             let target = refresh.requested_generation.load(Ordering::Acquire);
+            let priority = if refresh.urgent_generation.load(Ordering::Acquire)
+                > refresh.applied_generation.load(Ordering::Acquire)
+            {
+                CarrierRefreshPriority::Interactive
+            } else {
+                CarrierRefreshPriority::Background
+            };
             let active = active_sources.read().iter().cloned().collect();
             if let Err(error) = notify_carriers_changed_inner(
                 Arc::clone(&transport),
                 vec![changed_file.clone()],
                 target,
                 active,
+                priority,
             )
             .await
             {
+                if error.message.contains("background transaction preempted")
+                    && refresh.urgent_generation.load(Ordering::Acquire)
+                        > refresh.applied_generation.load(Ordering::Acquire)
+                {
+                    continue;
+                }
                 tracing::warn!(
                     "failed to refresh tsserver carrier source membership: {}",
                     error.message
@@ -2201,6 +2291,13 @@ fn schedule_carrier_refresh(
                 return;
             }
             refresh.applied_generation.store(target, Ordering::Release);
+            if priority == CarrierRefreshPriority::Interactive {
+                let _ = refresh.urgent_generation.fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |generation| (generation <= target).then_some(0),
+                );
+            }
             {
                 let mut failure = refresh
                     .failure
@@ -2257,9 +2354,10 @@ async fn wait_for_carrier_refresh(
 }
 
 /// Activate one already-published IDE carrier without recompiling it. Workspace-
-/// scan carriers remain closed store-backed roots. The one editor-active source
-/// is opened contentlessly so tsserver retains its ordinary project lifecycle;
-/// the plugin supplies its generated snapshot lazily from the carrier store.
+/// scan carriers remain closed store-backed roots. An editor-active source is
+/// opened contentlessly; a demand-discovered project frontier opens only its one
+/// configured-project bootstrap and lets the plugin own all remaining roots.
+/// Generated snapshots stay lazy in the carrier store on both paths.
 struct PublishedCarrierActivation {
     transport: Arc<TsserverTransport>,
     opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
@@ -2274,6 +2372,7 @@ async fn activate_published_carrier_inner(
     companion: String,
     project_file_name: String,
     script_kind_name: &'static str,
+    keep_source_open: bool,
 ) -> Result<bool, TypeProviderError> {
     activation
         .carrier_projects
@@ -2303,6 +2402,14 @@ async fn activate_published_carrier_inner(
         .rsplit_once('/')
         .map(|(dir, _)| dir.to_string())
         .unwrap_or_else(|| project_file_name.clone());
+    // A demand-discovered workspace-symbol frontier needs the source only as a
+    // plugin external root. Once one source has bootstrapped the configured
+    // project, every other member is admitted by the batched plugin config and
+    // must not emit a protocol `open`. An actual editor activation keeps its
+    // authored source contentlessly open.
+    if !reserved_bootstrap && !keep_source_open {
+        return Ok(newly_active);
+    }
     if reserved_bootstrap {
         // The global plugin is instantiated as part of configured-project
         // creation. A transient generated-path root creates that project without
@@ -2722,6 +2829,7 @@ impl TypeProvider for TsserverTypeProvider {
                             Arc::clone(&carrier_refresh),
                             refresh_generation,
                             source.clone(),
+                            CarrierRefreshPriority::Interactive,
                         );
                     }
                     forget_content(&contents_cache, &content_generations, &file).await;
@@ -2760,6 +2868,7 @@ impl TypeProvider for TsserverTypeProvider {
             Arc::clone(&self.carrier_refresh),
             refresh_generation,
             file,
+            CarrierRefreshPriority::Background,
         );
         let refresh = Arc::clone(&self.carrier_refresh);
         Box::pin(async move { wait_for_carrier_refresh(&refresh, refresh_generation).await })
@@ -2786,6 +2895,7 @@ impl TypeProvider for TsserverTypeProvider {
                 Arc::clone(&self.carrier_refresh),
                 refresh_generation,
                 file,
+                CarrierRefreshPriority::Background,
             );
             let refresh = Arc::clone(&self.carrier_refresh);
             return Box::pin(async move {
@@ -2873,6 +2983,7 @@ impl TypeProvider for TsserverTypeProvider {
                 file.clone(),
                 project_file_name,
                 script_kind_name,
+                true,
             )
             .await?;
 
@@ -2882,6 +2993,7 @@ impl TypeProvider for TsserverTypeProvider {
                 Arc::clone(&carrier_refresh),
                 refresh_generation,
                 file,
+                CarrierRefreshPriority::Interactive,
             );
             wait_for_carrier_refresh(&carrier_refresh, refresh_generation).await?;
 
@@ -2919,6 +3031,7 @@ impl TypeProvider for TsserverTypeProvider {
                 companion.clone(),
                 project_file_name,
                 script_kind.tsserver_name(),
+                true,
             )
             .await?;
             if newly_active {
@@ -2929,8 +3042,86 @@ impl TypeProvider for TsserverTypeProvider {
                     Arc::clone(&refresh),
                     generation,
                     companion,
+                    CarrierRefreshPriority::Interactive,
                 );
                 wait_for_carrier_refresh(&refresh, generation).await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn activate_carrier_members<'a>(
+        &'a self,
+        members: &'a [crate::traits::CarrierActivation],
+    ) -> ProviderFuture<'a, ()> {
+        let mut members = members.to_vec();
+        members.sort_unstable_by(|left, right| {
+            left.source_path
+                .cmp(&right.source_path)
+                .then_with(|| left.companion_path.cmp(&right.companion_path))
+        });
+        members.dedup_by(|left, right| {
+            left.source_path == right.source_path && left.companion_path == right.companion_path
+        });
+        let transport = Arc::clone(&self.transport);
+        let opened_files = Arc::clone(&self.opened_files);
+        let carrier_projects = Arc::clone(&self.carrier_projects);
+        let active_sources = Arc::clone(&self.active_carrier_sources);
+        let project_bootstraps = Arc::clone(&self.project_bootstraps);
+        let refresh = Arc::clone(&self.carrier_refresh);
+        let refresh_generation = &self.carrier_store_refresh_generation;
+        Box::pin(async move {
+            let mut changed_file = None;
+            let mut activation_error = None;
+            for member in members {
+                let source = Self::normalize_path(&member.source_path);
+                let companion = Self::normalize_path(&member.companion_path);
+                let project_file_name = Self::normalize_path(&member.project_file_name);
+                match activate_published_carrier_inner(
+                    PublishedCarrierActivation {
+                        transport: Arc::clone(&transport),
+                        opened_files: Arc::clone(&opened_files),
+                        carrier_projects: Arc::clone(&carrier_projects),
+                        active_sources: Arc::clone(&active_sources),
+                        project_bootstraps: Arc::clone(&project_bootstraps),
+                    },
+                    source,
+                    companion.clone(),
+                    project_file_name,
+                    member.script_kind.tsserver_name(),
+                    false,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        changed_file.get_or_insert(companion);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        activation_error = Some(error);
+                        break;
+                    }
+                }
+            }
+
+            // Admit the complete successfully-opened frontier with one plugin
+            // configuration transaction. Even when a later activation failed,
+            // publish the earlier durable working-set changes before returning
+            // that error so provider and desired state cannot diverge.
+            if let Some(changed_file) = changed_file {
+                let generation = refresh_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                schedule_carrier_refresh(
+                    transport,
+                    active_sources,
+                    Arc::clone(&refresh),
+                    generation,
+                    changed_file,
+                    CarrierRefreshPriority::Interactive,
+                );
+                wait_for_carrier_refresh(&refresh, generation).await?;
+            }
+            if let Some(error) = activation_error {
+                return Err(error);
             }
             Ok(())
         })
@@ -2984,6 +3175,7 @@ impl TypeProvider for TsserverTypeProvider {
                     Arc::clone(&refresh),
                     generation,
                     file,
+                    CarrierRefreshPriority::Interactive,
                 );
                 wait_for_carrier_refresh(&refresh, generation).await?;
             }

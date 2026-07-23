@@ -667,32 +667,12 @@ suite(`IDE navigation + completion [${FIXTURE_NAME}]`, function () {
       // tsserver completion request may still be resolving the selected item
       // after the list-readiness probe above, so use the shared real-accept
       // driver with a settle budget that does not race the suggestion widget.
-      let acceptError: unknown;
-      try {
-        await acceptCompletionInEditor(editor, 750);
-      } catch (error) {
-        acceptError = error;
-      }
+      await acceptCompletionInEditor(editor, 750);
       const importAfter = scriptBlockText(editor.document);
       if (!/import\s*\{[^}]*\bcomputed\b/.test(importAfter)) {
-        const list = await vscode.commands.executeCommand<vscode.CompletionList>(
-          "vscode.executeCompletionItemProvider",
-          doc.uri,
-          pos,
-          undefined,
-          100,
+        throw new Error(
+          `accepted computed completion did not insert its import; script=${JSON.stringify(importAfter)}`,
         );
-        const item = (list?.items ?? []).find((i) => {
-          const label = typeof i.label === "string" ? i.label : i.label.label;
-          return label === "computed";
-        });
-        if (!item) throw new Error("computed completion item not found after accept attempt");
-        // additionalTextEdits path still counts as auto-import capability
-        if (!(item.additionalTextEdits && item.additionalTextEdits.length > 0)) {
-          throw new Error(
-            `accept did not insert import for computed; acceptError=${String(acceptError)}; script=${JSON.stringify(importAfter)}`,
-          );
-        }
       }
     } catch (err) {
       failParityGap(

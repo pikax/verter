@@ -17,7 +17,7 @@ use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
-use crate::features::rename::{prepare_rename, rename_at_position};
+use crate::features::rename::{is_css_rename_position, prepare_rename, rename_at_position};
 use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
@@ -273,7 +273,7 @@ pub(super) async fn handle_goto_definition(
     // to blocking the request behind publication.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(ctx) = server.type_provider_context(uri) {
+        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
@@ -593,7 +593,7 @@ pub(super) async fn handle_goto_type_definition(
     // phase. Capture-only readiness above heals missing dependencies in the
     // background; it never delays this provider query.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(ctx) = server.type_provider_context(uri) {
+        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
                 &ctx.carrier_line_index,
@@ -831,13 +831,19 @@ pub(super) async fn handle_references(
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
-        if let Some(ctx) = server.type_provider_context(uri) {
+        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
             if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
                 &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             ) {
+                if !server.prepare_tsserver_workspace_symbol_frontier(uri).await {
+                    tracing::debug!(
+                        "references: configured-project carrier frontier is not complete"
+                    );
+                    return Ok(None);
+                }
                 tracing::debug!("references: querying tp at tsx offset {}", tsx_offset);
                 // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
                 // handle_goto_definition).
@@ -1037,10 +1043,11 @@ pub(super) async fn handle_rename(
     // surfaces via the imported component's `{carrier}.ts` PUBLIC-API surface,
     // which background publication delivers and receipts as DependencyReady.
     // The handler only captures a committed receipt. On a miss it enqueues
-    // background publication and proceeds WITHOUT the provider leg — the same
-    // fail-closed shape as a provider error, with the child-prop completeness
-    // gate below still refusing partial cross-file edits. It never joins the
-    // background lane or blocks the interactive request.
+    // background publication but may still query the provider for symbols whose
+    // project graph is already complete (notably local/script bindings). A
+    // cross-carrier child-prop edit still has to pass the exact declaration +
+    // usage completeness gate below, so missing API publication cannot leak a
+    // partial edit. The request never joins the background lane.
     let dependency_readiness = server.dependency_readiness_capture(uri);
 
     let verter_result = (|| {
@@ -1066,6 +1073,19 @@ pub(super) async fn handle_rename(
 
         Some(edit)
     })();
+    let native_rename_is_css = server
+        .documents
+        .get(uri)
+        .and_then(|doc| {
+            let analysis = server.documents.get_analysis(uri)?;
+            Some(is_css_rename_position(
+                position,
+                &doc.source,
+                &analysis,
+                &doc.line_index,
+            ))
+        })
+        .unwrap_or(false);
 
     // Classify the cursor with respect to the cross-file `<Child prop=…>` rename
     // ONCE, up front — so the MERGED-EDIT COMPLETENESS GATE applies on EVERY return
@@ -1093,9 +1113,17 @@ pub(super) async fn handle_rename(
     // ONCE at the end over `rename_class`, so a confirmed child-prop rename cannot
     // escape the gate on any branch.
     let mut result = verter_result.clone();
-    if !server.is_self_file_projection(uri) && dependency_readiness.is_ready() {
+    let mut provider_rename_complete = server.type_provider.is_none()
+        || server.is_self_file_projection(uri)
+        || native_rename_is_css;
+    if !server.is_self_file_projection(uri) {
+        if !dependency_readiness.is_ready() {
+            tracing::debug!(
+                "rename: dependency API publication is not ready; provider query may proceed, but cross-carrier completeness remains fail-closed"
+            );
+        }
         if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.type_provider_context(uri) {
+            if let Some(ctx) = server.repaired_type_provider_context(uri).await {
                 if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                     position,
                     &ctx.carrier_line_index,
@@ -1110,6 +1138,12 @@ pub(super) async fn handle_rename(
                     // mid-capture. The declaration `get_definition` (imported case)
                     // runs inside this same fence — no blocking guard is held across
                     // its await.
+                    if !server.prepare_tsserver_workspace_symbol_frontier(uri).await {
+                        tracing::debug!(
+                            "rename: configured-project carrier frontier is not complete"
+                        );
+                        return Ok(None);
+                    }
                     let _fence = server.rename_provider_fence.lock().await;
 
                     // Capture the immutable carrier-API snapshot set BEFORE the
@@ -1149,6 +1183,7 @@ pub(super) async fn handle_rename(
                         // locations are consumed ONLY while the captured surface is
                         // still honored and the open document still matches it.
                         Ok(mut type_locs) if server.provider_context_still_valid(uri, &ctx) => {
+                            provider_rename_complete = true;
                             // PROVIDER-AGNOSTIC inline child-declaration synthesis. A
                             // cross-file `<Child prop=…>` rename must edit BOTH the
                             // parent usage AND the prop declaration. For an INLINE
@@ -1298,6 +1333,13 @@ pub(super) async fn handle_rename(
                 }
             }
         }
+    }
+
+    if !provider_rename_complete {
+        tracing::warn!(
+            "rename: refusing native-only partial edit without provider/dependency completeness"
+        );
+        return Ok(None);
     }
 
     // MERGED-EDIT COMPLETENESS GATE (fail-closed) — applied ONCE over the final

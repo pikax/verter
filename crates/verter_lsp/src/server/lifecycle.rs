@@ -774,11 +774,15 @@ pub(super) async fn handle_did_change(
                 let only_current_edit_changed =
                     after_key.0 == before_key.0.saturating_add(1) && after_key.1 == before_key.1;
                 if only_current_edit_changed || after_key == before_key {
+                    let frontier_unchanged = matches!(
+                        (&before_frontier, &after_frontier),
+                        (Some(before), Some(after)) if before == after
+                    );
                     server.import_sync.promote_after_isolated_edit(
                         canonical_id,
                         before_key,
                         after_key,
-                        before_frontier == after_frontier,
+                        frontier_unchanged,
                     );
                 }
             }

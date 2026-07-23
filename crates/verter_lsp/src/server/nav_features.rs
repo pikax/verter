@@ -51,7 +51,7 @@ async fn enrich_v_bind_completion_details(
     let Some(tp) = &server.type_provider else {
         return items;
     };
-    let Some(ctx) = server.type_provider_context(uri) else {
+    let Some(ctx) = server.repaired_type_provider_context(uri).await else {
         return items;
     };
     // Declaration position per offered binding name (sync snapshot reads).
@@ -241,7 +241,7 @@ pub(super) async fn handle_hover(
         .flatten();
     if let Some((expr, decl_pos)) = vbind_target {
         if let Some(tp) = &server.type_provider {
-            if let Some(ctx) = server.type_provider_context(uri) {
+            if let Some(ctx) = server.repaired_type_provider_context(uri).await {
                 if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
                     &decl_pos,
                     &ctx.carrier_line_index,
@@ -285,15 +285,7 @@ pub(super) async fn handle_hover(
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
-        let repaired_current_file = server.current_file_needs_inline_type_provider_sync(uri);
-        if repaired_current_file {
-            tracing::debug!(
-                "hover: repairing current-file provider sync for {}",
-                uri.as_str()
-            );
-            server.ensure_current_file_synced(uri).await;
-        }
-        if let Some(captured_ctx) = server.type_provider_context(uri) {
+        if let Some(captured_ctx) = server.repaired_type_provider_context(uri).await {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
             let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
@@ -317,18 +309,6 @@ pub(super) async fn handle_hover(
                         before.replace('\n', "↵"),
                         after.replace('\n', "↵"),
                     );
-                }
-                // The store-backed tsserver plugin applies a publication-token
-                // refresh on the next Node event-loop turn to avoid re-entrant
-                // configured-project mutation inside `configurePlugin`. When this
-                // request just repaired a stale current-file surface, the first
-                // ordered quickinfo response is the synchronization probe that lets
-                // that turn run; discard it and issue the user-visible query against
-                // the refreshed ScriptInfo. Warm hovers and tsgo pay no duplicate.
-                if repaired_current_file
-                    && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
-                {
-                    let _ = tp.get_hover(&captured_ctx.tsx_path, tsx_offset).await;
                 }
                 match tp.get_hover(&captured_ctx.tsx_path, tsx_offset).await {
                     Ok(hover) => {
@@ -986,20 +966,11 @@ async fn handle_completion_attempt(
     // Enhance with TypeProvider if available.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = &server.type_provider {
-        if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
-            && server.current_file_needs_inline_type_provider_sync(uri)
-        {
-            tracing::debug!(
-                "completion: repairing current-file tsserver sync for {}",
-                uri.as_str()
-            );
-            server.ensure_current_file_synced(uri).await;
-        }
         // Capture-only dependency readiness: completion NEVER awaits the
         // imported-carrier delivery (a partial member list beats a stalled
         // one mid-typing); a receipt miss enqueues background publication.
         let _ = server.dependency_readiness_capture(uri);
-        let ctx = server.type_provider_context(uri);
+        let ctx = server.repaired_type_provider_context(uri).await;
         if ctx.is_none() {
             tracing::debug!("completion: no ide_context for {}", uri.as_str());
         }

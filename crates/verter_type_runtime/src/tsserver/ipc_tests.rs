@@ -1303,7 +1303,14 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
         .collect();
     let request_transport = Arc::clone(&transport);
     let refresh = tokio::spawn(async move {
-        notify_carriers_changed_inner(request_transport, files, 1, Vec::new()).await
+        notify_carriers_changed_inner(
+            request_transport,
+            files,
+            1,
+            Vec::new(),
+            CarrierRefreshPriority::Background,
+        )
+        .await
     });
     for _ in 0..2 {
         loop {
@@ -1371,6 +1378,7 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
         Arc::clone(&refresh),
         7,
         "/proj/src/App.vue.tsx".to_string(),
+        CarrierRefreshPriority::Background,
     );
 
     let receipt = {
@@ -1441,6 +1449,7 @@ async fn carrier_refresh_pair_pays_one_background_idle_grace() {
                 vec!["/proj/src/App.vue.tsx".to_string()],
                 1,
                 vec!["/proj/src/App.vue".to_string()],
+                CarrierRefreshPriority::Background,
             )
             .await
         })
@@ -1527,41 +1536,39 @@ async fn diagnostic_triplet_pays_one_background_idle_grace() {
 }
 
 #[tokio::test]
-async fn interactive_arrival_between_refresh_frames_restarts_the_batch() {
+async fn active_carrier_refresh_preempts_a_running_background_refresh() {
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
     let transport = Arc::new(test_transport(stdin_tx));
-    let refresh = {
-        let transport = Arc::clone(&transport);
-        tokio::spawn(async move {
-            notify_carriers_changed_inner(
-                transport,
-                vec!["/proj/src/App.vue.tsx".to_string()],
-                1,
-                vec!["/proj/src/App.vue".to_string()],
-            )
-            .await
-        })
-    };
+    let active_sources = Arc::new(parking_lot::RwLock::new(BTreeSet::from([
+        "/proj/src/App.vue".to_string(),
+    ])));
+    let refresh = Arc::new(TsserverCarrierRefresh::default());
+    schedule_carrier_refresh(
+        Arc::clone(&transport),
+        Arc::clone(&active_sources),
+        Arc::clone(&refresh),
+        1,
+        "/proj/src/App.vue.tsx".to_string(),
+        CarrierRefreshPriority::Background,
+    );
 
     let first = receive_tsserver_request(&mut stdin_rx).await;
     assert_eq!(first["command"], "configurePlugin");
-    let interactive = transport.begin_interactive_request();
-    send_success_response(
-        &transport.pending,
-        first["seq"].as_i64().expect("first configurePlugin seq"),
-        "configurePlugin",
-    )
-    .await;
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(80), stdin_rx.recv())
-            .await
-            .is_err(),
-        "the stale batch must not submit its host-turn fence during interactive work"
+    schedule_carrier_refresh(
+        Arc::clone(&transport),
+        active_sources,
+        Arc::clone(&refresh),
+        2,
+        "/proj/src/App.vue.tsx".to_string(),
+        CarrierRefreshPriority::Interactive,
     );
-    drop(interactive);
 
     let retry = receive_tsserver_request(&mut stdin_rx).await;
     assert_eq!(retry["command"], "configurePlugin");
+    assert_eq!(
+        retry["arguments"]["configuration"]["carrierStoreRefreshToken"], 2,
+        "the active-source transaction must supersede the stale background generation"
+    );
     send_success_response(
         &transport.pending,
         retry["seq"].as_i64().expect("retry configurePlugin seq"),
@@ -1576,10 +1583,75 @@ async fn interactive_arrival_between_refresh_frames_restarts_the_batch() {
         "configure",
     )
     .await;
-    refresh
+    wait_for_carrier_refresh(&refresh, 2)
         .await
-        .expect("refresh task must not panic")
-        .expect("refresh batch must complete after interactive traffic");
+        .expect("the active refresh fence must complete");
+}
+
+/// Project-wide references/rename admit every framework source through the
+/// plugin's external-file set, but only one authored source per configured
+/// project may be protocol-opened as the project bootstrap. Opening every Vue/
+/// Svelte source would recreate the sequential flood the store architecture
+/// removes.
+#[tokio::test]
+async fn workspace_symbol_frontier_opens_only_one_bootstrap_per_project() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(test_transport(stdin_tx));
+    let opened_files = Arc::new(Mutex::new(HashMap::new()));
+    let carrier_projects = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    let active_sources = Arc::new(parking_lot::RwLock::new(BTreeSet::new()));
+    let project_bootstraps = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+
+    for (source, companion, kind) in [
+        ("/proj/src/App.vue", "/proj/src/App.vue.tsx", "TSX"),
+        (
+            "/proj/src/Widget.svelte",
+            "/proj/src/Widget.svelte.jsx",
+            "JSX",
+        ),
+    ] {
+        assert!(activate_published_carrier_inner(
+            PublishedCarrierActivation {
+                transport: Arc::clone(&transport),
+                opened_files: Arc::clone(&opened_files),
+                carrier_projects: Arc::clone(&carrier_projects),
+                active_sources: Arc::clone(&active_sources),
+                project_bootstraps: Arc::clone(&project_bootstraps),
+            },
+            source.into(),
+            companion.into(),
+            "/proj/tsconfig.json".into(),
+            kind,
+            false,
+        )
+        .await
+        .expect("frontier activation succeeds"));
+    }
+
+    let mut frames = Vec::new();
+    while let Ok(message) = stdin_rx.try_recv() {
+        let TsserverStdinMessage::Frame(bytes) = message else {
+            panic!("unexpected shutdown frame");
+        };
+        frames.push(serde_json::from_slice::<serde_json::Value>(&bytes).expect("valid frame"));
+    }
+    let opened: Vec<&str> = frames
+        .iter()
+        .filter(|frame| frame["command"] == "open")
+        .filter_map(|frame| frame["arguments"]["file"].as_str())
+        .collect();
+    assert_eq!(
+        opened,
+        ["/proj/src/App.vue.tsx", "/proj/src/App.vue"],
+        "one transient companion + one durable source bootstrap is sufficient; frames={frames:?}"
+    );
+    assert_eq!(
+        active_sources.read().iter().cloned().collect::<Vec<_>>(),
+        [
+            "/proj/src/App.vue".to_string(),
+            "/proj/src/Widget.svelte".to_string(),
+        ]
+    );
 }
 
 /// Bulk workspace publication advances the plugin under one constant-cost pair:
@@ -1924,6 +1996,7 @@ async fn carrier_activation_rolls_back_when_transient_bootstrap_cannot_be_sent()
         "/project/src/App.vue.__verter.tsx".to_string(),
         "/project/tsconfig.json".to_string(),
         "TSX",
+        true,
     )
     .await;
 
@@ -1977,6 +2050,7 @@ async fn duplicate_carrier_activation_is_a_control_plane_noop() {
         "/project/src/App.svelte.__verter.tsx".to_string(),
         "/project/tsconfig.json".to_string(),
         "TSX",
+        true,
     )
     .await;
 
@@ -2051,6 +2125,7 @@ async fn carrier_activation_bootstraps_then_retains_the_authored_source() {
         companion.clone(),
         "/project/tsconfig.json".to_string(),
         "TSX",
+        true,
     )
     .await
     .expect("source activation must succeed");
@@ -3452,6 +3527,7 @@ impl RealReloadHarness {
                 .iter()
                 .map(|carrier| carrier.source_path.clone())
                 .collect(),
+            CarrierRefreshPriority::Background,
         )
         .await
         .expect("the plugin publication refresh must complete");
@@ -4346,27 +4422,27 @@ async fn an_answered_tsserver_request_returns_its_result_and_emits_no_cancellati
     );
 }
 
-/// Cancellation files are reaped once they can no longer be observed, so a long
-/// session cannot fill its temp directory one file per abandoned request.
+/// Cancellation evidence remains until the exact request is acknowledged. An
+/// unbounded request frame may remain queued for an arbitrary time, so neither
+/// age nor count makes its cancellation safe to delete.
 #[test]
-fn cancellation_files_are_reaped_once_they_can_no_longer_be_observed() {
+fn cancellation_files_are_retained_until_exact_engine_acknowledgement() {
     let cancellation =
         TsserverCancellation::create().expect("a cancellation directory must be creatable");
 
-    for seq in 0..(CANCEL_FILE_RETAIN_CAP as i64 + 64) {
+    for seq in 0..576 {
         cancellation.cancel(seq);
     }
 
     let live = std::fs::read_dir(&cancellation.dir)
         .expect("the cancellation directory exists")
         .count();
+    assert_eq!(live, 576, "no live cancellation evidence may be capped");
+    cancellation.acknowledge(0);
+    assert!(!std::path::Path::new(&format!("{}0", cancellation.prefix)).exists());
     assert!(
-        live <= CANCEL_FILE_RETAIN_CAP,
-        "retained cancellations must stay bounded, found {live}"
-    );
-    assert!(
-        !std::path::Path::new(&format!("{}0", cancellation.prefix)).exists(),
-        "the oldest cancellation must be reaped first"
+        std::path::Path::new(&format!("{}1", cancellation.prefix)).exists(),
+        "acknowledging one sequence must not reap another"
     );
 
     let dir = cancellation.dir.clone();
@@ -4434,11 +4510,11 @@ async fn project_loading_events_track_in_flight_loads_and_saturate_at_zero() {
         "body": { "projectName": "tsconfig.app.json" }
     });
 
-    handle_message(&start, &pending);
+    handle_message(&start, &pending, None);
     assert_eq!(pending.project_loads_in_flight.load(Ordering::Relaxed), 1);
-    handle_message(&finish, &pending);
+    handle_message(&finish, &pending, None);
     assert_eq!(pending.project_loads_in_flight.load(Ordering::Relaxed), 0);
-    handle_message(&finish, &pending);
+    handle_message(&finish, &pending, None);
     assert_eq!(
         pending.project_loads_in_flight.load(Ordering::Relaxed),
         0,
@@ -4474,7 +4550,7 @@ async fn handle_message_does_not_cache_unversioned_diagnostic_events() {
 
     // The handler has no diagnostics-cache/content capability by construction;
     // accepting this event can only update lifecycle health state.
-    handle_message(&event, &pending);
+    handle_message(&event, &pending, None);
 
     assert_eq!(
         pending.project_loads_in_flight.load(Ordering::Relaxed),

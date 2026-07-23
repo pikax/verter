@@ -170,6 +170,121 @@ impl VerterLanguageServer {
         })
     }
 
+    /// Capture a current interactive provider surface, repairing the authored
+    /// file first when `didChange` has advanced beyond the committed snapshot.
+    /// Every provider-backed interactive feature uses this entry point so tsgo
+    /// and tsserver have identical immediate-post-edit behavior.
+    pub(super) async fn repaired_type_provider_context(
+        &self,
+        uri: &Uri,
+    ) -> Option<TypeProviderContext> {
+        if self.type_provider.is_some() && self.current_file_needs_inline_type_provider_sync(uri) {
+            self.ensure_current_file_synced(uri).await;
+        }
+        self.type_provider_context(uri)
+    }
+
+    /// Make a tsserver workspace-symbol query complete without paying the
+    /// all-carrier cost during startup or ordinary hover/completion. TypeScript
+    /// references/rename can only prove a project-wide answer when every
+    /// framework source in the owning configured project is a Program root.
+    /// The official framework-plugin model keeps that full set external; Verter
+    /// admits the same set lazily on the first workspace-symbol request and the
+    /// provider batches it behind one plugin refresh.
+    ///
+    /// Returns `false` instead of waiting for background compilation when the
+    /// resolver snapshot or any carrier advertisement is not ready. Callers then
+    /// fail closed (rename must never emit a partial edit; references must never
+    /// claim a partial workspace result). Vue and Svelte share the descriptor-
+    /// owned `path_is_carrier` classification.
+    pub(super) async fn prepare_tsserver_workspace_symbol_frontier(&self, uri: &Uri) -> bool {
+        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+            return true;
+        }
+        let Some(coordinator) = &self.carrier_publish_coordinator else {
+            // Embedders/tests may inject a tsserver-shaped provider without the
+            // managed store topology. There is no Verter-owned frontier to
+            // prepare on that route; delegate completeness to that provider.
+            return true;
+        };
+        let canonical = crate::documents::uri_to_canonical_id(uri);
+        let expected_sources = {
+            // The server-side workspace is the publication authority used by
+            // the scanner and membership reconciler. Test embedders may install
+            // that handle without repointing the semantic host, while production
+            // keeps both handles identical. Prefer it and retain the host only
+            // as a compatibility fallback for embedders without a scanner VFS.
+            let published = self
+                .vfs_workspace
+                .read()
+                .as_ref()
+                .and_then(|workspace| workspace.load_published())
+                .or_else(|| self.documents.host().workspace_read().published_root());
+            let Some(published) = published else {
+                return false;
+            };
+            if !published.ownership_ready {
+                return false;
+            }
+            let snapshot = &published.snapshot;
+            let verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(owner) =
+                snapshot.configured_owner_resolution_for_file(&canonical)
+            else {
+                return false;
+            };
+            let Some(project) = snapshot.projects.get(owner.0 as usize) else {
+                return false;
+            };
+            let verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                membership, ..
+            } = &project.payload
+            else {
+                return false;
+            };
+            let mut sources: Vec<String> = membership
+                .materialized_files
+                .iter()
+                .map(|path| path.as_str().to_string())
+                .filter(|path| verter_workspace::resolver::path_is_carrier(path))
+                .collect();
+            if verter_workspace::resolver::path_is_carrier(&canonical) {
+                sources.push(canonical.clone());
+            }
+            sources.sort_unstable();
+            sources.dedup();
+            sources
+        };
+
+        if expected_sources.is_empty() {
+            return true;
+        }
+        match coordinator
+            .activate_published_sources(&expected_sources)
+            .await
+        {
+            Ok(activated) if activated == expected_sources.len() => true,
+            Ok(activated) => {
+                tracing::debug!(
+                    "workspace-symbol frontier not ready: activated {activated}/{} carriers",
+                    expected_sources.len()
+                );
+                // The scanner is already running; priority signals make the
+                // missing owning-project carriers its next work without making
+                // this interactive request join background compilation.
+                if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+                    for source in expected_sources {
+                        scanner.signal_priority(source);
+                    }
+                }
+                false
+            }
+            Err(error) => {
+                tracing::warn!("workspace-symbol frontier activation failed: {error}");
+                false
+            }
+        }
+    }
+
     /// Whether `uri` projects through a SELF-FILE rune-module own buffer.
     ///
     /// Features whose workspace-EDIT positions are not mapped through the
