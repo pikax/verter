@@ -268,7 +268,7 @@ fn facade_reexport_and_self_import_use_basename_not_full_canonical_path() {
         "re-export must NOT embed the absolute canonical path. Got: {reexport}"
     );
 
-    let self_import = instance_declaration(full_path, false, false, "");
+    let self_import = instance_declaration(full_path, false, false);
     assert!(
         self_import.contains("InstanceType<typeof import('./Comp.vue.verter.js')"),
         "self-import must use the basename-relative API specifier. Got: {self_import}"
