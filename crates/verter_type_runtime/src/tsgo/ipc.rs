@@ -68,6 +68,9 @@ fn summarize_lsp_params(params: &serde_json::Value) -> String {
 struct PendingRequestState {
     map: HashMap<i64, oneshot::Sender<serde_json::Value>>,
     closed: bool,
+    /// Start of the current non-empty interval. A provider that was idle for a
+    /// long time must receive the full silence allowance when new work arrives.
+    pending_since: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
@@ -88,24 +91,30 @@ impl PendingRequests {
         if state.closed {
             return false;
         }
+        if state.map.is_empty() {
+            state.pending_since = Some(std::time::Instant::now());
+        }
         state.map.insert(id, tx);
         true
     }
 
     fn take(&self, id: i64) -> Option<oneshot::Sender<serde_json::Value>> {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .map
-            .remove(&id)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = state.map.remove(&id);
+        if state.map.is_empty() {
+            state.pending_since = None;
+        }
+        sender
     }
 
-    fn is_empty(&self) -> bool {
+    fn pending_since(&self) -> Option<std::time::Instant> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .map
-            .is_empty()
+            .pending_since
     }
 
     /// How many requests are in flight. The leak surface: a request abandoned
@@ -129,6 +138,7 @@ impl PendingRequests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.closed = true;
+            state.pending_since = None;
             state.map.drain().collect()
         };
         for (_id, tx) in drained {
@@ -549,13 +559,16 @@ async fn watch_tsgo_silence(
         let Some(pending) = pending.upgrade() else {
             return;
         };
-        if teardown_intent.load(Ordering::SeqCst) || pending.is_empty() {
+        if teardown_intent.load(Ordering::SeqCst) {
             continue;
         }
-        let silent_for = last_message_at
+        let Some(pending_since) = pending.pending_since() else {
+            continue;
+        };
+        let last_message = *last_message_at
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .elapsed();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let silent_for = std::cmp::max(last_message, pending_since).elapsed();
         if silent_for < silence_cap {
             continue;
         }

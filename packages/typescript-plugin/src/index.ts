@@ -50,7 +50,11 @@ const processBoundProjects = new Set<string>();
 const processStoreDirByProject = new Map<string, string | undefined>();
 const processEditorOwnsCarrierMembershipByProject = new Map<string, boolean>();
 const processActiveCarrierSourcesByProject = new Map<string, readonly string[]>();
-const processUpdateProjectConfig = new Map<string, (config: Record<string, unknown>) => void>();
+interface ProcessProjectConfigUpdater {
+  readonly update: (config: Record<string, unknown>) => void;
+  readonly isClosed: () => boolean;
+}
+const processUpdateProjectConfig = new Map<string, ProcessProjectConfigUpdater>();
 interface ProcessEditorProjectRuntime {
   readonly projectKey: string;
   readonly projectService: tsModule.server.ProjectService;
@@ -619,7 +623,13 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     const pendingScriptInfoReloads = new Set<string>();
     let pendingResolutionCacheClear = false;
     let refreshScheduled = false;
-    processUpdateProjectConfig.set(projectKey, (config) => {
+    const updateProjectConfig = (config: Record<string, unknown>) => {
+      if (info.project.isClosed()) {
+        const registered = processUpdateProjectConfig.get(projectKey);
+        if (registered?.update === updateProjectConfig)
+          processUpdateProjectConfig.delete(projectKey);
+        return;
+      }
       const nextStoreDir = resolveCarrierStoreDir(config);
       const nextResponseRemap = resolveResponseRemap(config);
       const nextEditorOwnsMembership = editorOwnsCarrierMembership(config);
@@ -697,6 +707,13 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         refreshScheduled = true;
         setImmediate(() => {
           refreshScheduled = false;
+          if (info.project.isClosed()) {
+            const registered = processUpdateProjectConfig.get(projectKey);
+            if (registered?.update === updateProjectConfig) {
+              processUpdateProjectConfig.delete(projectKey);
+            }
+            return;
+          }
           // Dynamic carrier membership belongs to this configured project, not
           // to the tsserver protocol's open-file set. Internal hosts reconcile
           // authored source identities; editor-owned hosts reconcile distinct
@@ -823,6 +840,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           }
         });
       }
+    };
+    processUpdateProjectConfig.set(projectKey, {
+      update: updateProjectConfig,
+      isClosed: () => info.project.isClosed(),
     });
     if (store.isAvailable()) {
       logger.info(`[Verter] carrier store: ${storeDir}`);
@@ -3349,7 +3370,15 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     onConfigurationChanged(config: Record<string, unknown>) {
       processCurrentConfig = config;
       writeEditorTsserverAttestation(processCurrentConfig, processBoundProjects);
-      for (const update of processUpdateProjectConfig.values()) update(config);
+      for (const [projectKey, updater] of processUpdateProjectConfig) {
+        if (updater.isClosed()) {
+          if (processUpdateProjectConfig.get(projectKey) === updater) {
+            processUpdateProjectConfig.delete(projectKey);
+          }
+          continue;
+        }
+        updater.update(config);
+      }
     },
   };
 };

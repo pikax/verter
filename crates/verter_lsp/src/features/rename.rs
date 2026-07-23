@@ -55,6 +55,28 @@ pub fn prepare_rename(
     Some(Range { start, end })
 }
 
+/// Whether the target is a CSS class/id owned by Verter's native workspace
+/// index. This surface is complete without a TypeScript provider.
+pub fn is_css_rename_position(
+    position: &Position,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    line_index: &LineIndex,
+) -> bool {
+    let Some(offset) = line_index
+        .position_to_offset(position)
+        .map(|value| value as usize)
+    else {
+        return false;
+    };
+    analysis
+        .template
+        .as_ref()
+        .and_then(|template| find_css_target_in_template_refs(offset, source, template))
+        .or_else(|| find_css_target_in_style_refs(offset, source, analysis))
+        .is_some()
+}
+
 /// Check if a CSS class/ID name can be renamed.
 fn prepare_rename_css(
     offset: usize,

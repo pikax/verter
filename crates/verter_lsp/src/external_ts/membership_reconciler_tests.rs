@@ -345,17 +345,76 @@ async fn published_carrier_activation_promotes_only_the_ide_projection() {
     assert!(
         matches!(
             calls.as_slice(),
-            [MockCall::ActivateCarrierMember {
-                source_path,
-                companion_path,
-                project_file_name,
-                script_kind: verter_type_runtime::CarrierScriptKind::Tsx,
-            }] if source_path == "/proj/src/Comp.vue"
-                && companion_path == "/proj/src/Comp.vue.tsx"
-                && project_file_name == "/proj/tsconfig.json"
+            [MockCall::ActivateCarrierMembers { members }]
+                if matches!(members.as_slice(), [verter_type_runtime::CarrierActivation {
+                    source_path,
+                    companion_path,
+                    project_file_name,
+                    script_kind: verter_type_runtime::CarrierScriptKind::Tsx,
+                }] if source_path == "/proj/src/Comp.vue"
+                    && companion_path == "/proj/src/Comp.vue.tsx"
+                    && project_file_name == "/proj/tsconfig.json")
         ),
         "activation is one metadata-free control-plane operation for the IDE view: {calls:?}"
     );
+}
+
+/// A workspace-symbol request promotes its whole configured-project frontier in
+/// one provider transaction. This is the demand-driven counterpart of the
+/// official framework plugins' complete external-file set: Vue and Svelte are
+/// treated identically, API/typeinfo companions are excluded, and a missing
+/// advertisement is reported through the activated count rather than silently
+/// pretending the frontier is complete.
+#[tokio::test]
+async fn published_frontier_activation_is_one_framework_neutral_batch() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let (reconciler, _ledger) = reconciler_with(mock.clone());
+    let vue = CanonicalSource::from("/proj/src/Comp.vue");
+    let svelte = CanonicalSource::from("/proj/src/Widget.svelte");
+    let missing = CanonicalSource::from("/proj/src/Missing.vue");
+    advertise(
+        &reconciler,
+        &vue,
+        "/proj/tsconfig.json",
+        vec![
+            ide("/proj/src/Comp.vue.tsx"),
+            companion(
+                "/proj/src/Comp.vue.verter.ts",
+                SnapshotRole::CarrierApi,
+                ScriptKind::Ts,
+            ),
+        ],
+    )
+    .await;
+    advertise(
+        &reconciler,
+        &svelte,
+        "/proj/tsconfig.json",
+        vec![companion(
+            "/proj/src/Widget.svelte.jsx",
+            SnapshotRole::CarrierIde,
+            ScriptKind::Jsx,
+        )],
+    )
+    .await;
+    mock.clear_calls();
+
+    let activated = reconciler
+        .activate_published_sources(&[missing, svelte, vue])
+        .await
+        .expect("frontier activation succeeds for advertised members");
+    assert_eq!(activated, 2, "the missing advertisement stays incomplete");
+
+    let calls = mock.calls();
+    let [MockCall::ActivateCarrierMembers { members }] = calls.as_slice() else {
+        panic!("the whole frontier must use one provider batch: {calls:?}");
+    };
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].source_path, "/proj/src/Comp.vue");
+    assert_eq!(members[1].source_path, "/proj/src/Widget.svelte");
+    assert!(members
+        .iter()
+        .all(|member| !member.companion_path.ends_with(".verter.ts")));
 }
 
 #[tokio::test]
@@ -557,8 +616,9 @@ async fn owned_advertises_exactly_its_companions_under_project() {
         .expect("published IDE projection should activate"));
     assert!(matches!(
         mock.calls().as_slice(),
-        [MockCall::ActivateCarrierMember { companion_path, .. }]
-            if companion_path == "/proj/src/Comp.vue.tsx"
+        [MockCall::ActivateCarrierMembers { members }]
+            if matches!(members.as_slice(), [verter_type_runtime::CarrierActivation { companion_path, .. }]
+                if companion_path == "/proj/src/Comp.vue.tsx")
     ));
     assert!(
         mock.calls()

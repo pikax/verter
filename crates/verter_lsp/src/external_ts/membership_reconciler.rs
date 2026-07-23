@@ -65,6 +65,17 @@ use super::membership_ledger::{
 use super::publish_coordinator::{CarrierCompanion, CarrierPublishError};
 use crate::type_provider::traits::TypeProvider;
 
+fn carrier_script_kind(
+    kind: verter_session::external_ts::ScriptKind,
+) -> verter_type_runtime::CarrierScriptKind {
+    match kind {
+        verter_session::external_ts::ScriptKind::Ts => verter_type_runtime::CarrierScriptKind::Ts,
+        verter_session::external_ts::ScriptKind::Tsx => verter_type_runtime::CarrierScriptKind::Tsx,
+        verter_session::external_ts::ScriptKind::Js => verter_type_runtime::CarrierScriptKind::Js,
+        verter_session::external_ts::ScriptKind::Jsx => verter_type_runtime::CarrierScriptKind::Jsx,
+    }
+}
+
 /// The opaque provider-generation epoch stamped onto a [`ProviderReadyReceipt`] at
 /// mint. It carries the producing engine's identity label (`tsserver` / `tsgo`) plus
 /// the resolved binding's ownership generation. The shape is deliberately opaque so
@@ -701,54 +712,75 @@ impl MembershipReconciler {
         &self,
         source: &CanonicalSource,
     ) -> Result<bool, verter_type_runtime::protocol::TypeProviderError> {
-        let gate = self.source_gate(source.as_str());
-        let _guard = gate.lock().await;
+        Ok(self
+            .activate_published_sources(std::slice::from_ref(source))
+            .await?
+            != 0)
+    }
+
+    /// Promote a symbol-relevant carrier frontier with one provider admission
+    /// transaction. Sources are locked in canonical order so their ledger
+    /// advertisements cannot be replaced/retracted between snapshot and
+    /// activation, while concurrent disjoint membership work remains free to
+    /// proceed. The provider receives every IDE member at once and can refresh
+    /// its configured project only once.
+    pub async fn activate_published_sources(
+        &self,
+        sources: &[CanonicalSource],
+    ) -> Result<usize, verter_type_runtime::protocol::TypeProviderError> {
+        let mut sources = sources.to_vec();
+        sources.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+        sources.dedup_by(|left, right| left.as_str() == right.as_str());
+
+        // `lock_owned` lets the guards retain their gate Arcs in this vector.
+        // Canonical ordering makes overlapping batch activations deadlock-free.
+        let mut guards = Vec::with_capacity(sources.len());
+        for source in &sources {
+            guards.push(self.source_gate(source.as_str()).lock_owned().await);
+        }
+
         let current_session = self.ledger.current_session();
-        let Some(MembershipRecord::Advertised {
-            project,
-            companions,
-            lease,
-        }) = self.ledger.record_snapshot(source)
-        else {
-            return Ok(false);
-        };
-        if lease != current_session {
-            return Ok(false);
+        let mut advertised_sources = 0usize;
+        let mut members = Vec::new();
+        for source in &sources {
+            let Some(MembershipRecord::Advertised {
+                project,
+                companions,
+                lease,
+            }) = self.ledger.record_snapshot(source)
+            else {
+                continue;
+            };
+            if lease != current_session {
+                continue;
+            }
+            let ide_members: Vec<_> = companions
+                .iter()
+                .filter(|companion| companion.role == SnapshotRole::CarrierIde)
+                .map(|companion| verter_type_runtime::CarrierActivation {
+                    source_path: source.as_str().to_string(),
+                    companion_path: companion.provider_uri.to_string(),
+                    project_file_name: project.as_str().to_string(),
+                    script_kind: carrier_script_kind(companion.script_kind),
+                })
+                .collect();
+            if ide_members.is_empty() {
+                continue;
+            }
+            advertised_sources += 1;
+            members.extend(ide_members);
         }
 
         let Some(provider) = &self.provider else {
             // Editor-owned tsserver activates through the editor's own open-file
             // lifecycle; the durable advertisement is already sufficient there.
-            return Ok(true);
+            return Ok(advertised_sources);
         };
-        for companion in companions
-            .iter()
-            .filter(|companion| companion.role == SnapshotRole::CarrierIde)
-        {
-            let script_kind = match companion.script_kind {
-                verter_session::external_ts::ScriptKind::Ts => {
-                    verter_type_runtime::CarrierScriptKind::Ts
-                }
-                verter_session::external_ts::ScriptKind::Tsx => {
-                    verter_type_runtime::CarrierScriptKind::Tsx
-                }
-                verter_session::external_ts::ScriptKind::Js => {
-                    verter_type_runtime::CarrierScriptKind::Js
-                }
-                verter_session::external_ts::ScriptKind::Jsx => {
-                    verter_type_runtime::CarrierScriptKind::Jsx
-                }
-            };
-            provider
-                .activate_carrier_member(
-                    source.as_str(),
-                    &companion.provider_uri,
-                    project.as_str(),
-                    script_kind,
-                )
-                .await?;
+        if !members.is_empty() {
+            provider.activate_carrier_members(&members).await?;
         }
-        Ok(true)
+        drop(guards);
+        Ok(advertised_sources)
     }
 
     /// Reconcile a source's membership to the ONE captured carrier-ownership

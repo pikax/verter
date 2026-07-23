@@ -87,12 +87,10 @@ real_provider_test!(
             return;
         }
 
-        // Pin the torn window open: the edit lands in the DOCUMENT REGISTRY
-        // ONLY (live source, artifacts, and mapper all advance) while the
-        // provider still holds the previously-synced surface — no re-sync is
-        // driven. Inserting ABOVE the probe position shifts every mapping
-        // below it, so a provider response computed against the stale surface
-        // could only be anchored WRONGLY through the fresh state.
+        // Create the stale-provider window directly: the edit lands in the
+        // document registry only, so source, artifacts, and mapper advance
+        // while the provider still holds the previous surface. Inserting above
+        // the probe shifts every mapping below it.
         let server = session.server();
         let edited = {
             let doc = server
@@ -117,32 +115,10 @@ real_provider_test!(
             .map(|i| i.label.as_str())
             .collect();
         assert!(
-            provider_labels.is_empty(),
-            "a completion issued while the edit is un-synced must NOT serve \
-             provider-derived items (the provider still holds the previous surface; \
-             mapping its response through the fresh state would be torn), got \
-             provider items: {provider_labels:?}"
-        );
-
-        // Recovery (the gate is not over-eager): drive the sync, then the SAME
-        // position serves provider-derived items again.
-        session.ensure_synced(&uri).await;
-        let mut recovered = false;
-        for attempt in 0..5 {
-            let items = completion_items(session, &uri, pos_after_edit).await;
-            if items.iter().any(is_provider_item) {
-                recovered = true;
-                break;
-            }
-            if attempt < 4 {
-                session.ensure_synced(&uri).await;
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            }
-        }
-        assert!(
-            recovered,
-            "after the sync lands, provider-derived completions must be served again \
-             (the fail-closed gate must not drop healthy results)"
+            !provider_labels.is_empty(),
+            "completion must synchronously repair the current carrier surface before \
+             querying the provider, then serve provider-derived items from that exact \
+             generation; got no provider items"
         );
     }
 );

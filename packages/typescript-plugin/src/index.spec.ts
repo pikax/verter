@@ -3464,6 +3464,31 @@ describe("editor-owned routing never uses a CLOSED tsserver project", () => {
     return info;
   }
 
+  it("drops configuration work before touching a project closed after create", async () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const info = createInfo(
+      dir,
+      { diskFiles: { [sourcePath]: sourceText } },
+      "d:/ws/tsconfig.json",
+    );
+    info.config = { carrierStoreDir: dir, activeCarrierSources: [] };
+    const plugin = init({ typescript: ts } as any);
+    plugin.create(info);
+
+    let closedProjectTouches = 0;
+    info.project.isClosed = () => true;
+    info.project.markAsDirty = () => {
+      closedProjectTouches += 1;
+    };
+    plugin.onConfigurationChanged!({
+      carrierStoreDir: dir,
+      activeCarrierSources: [sourcePath],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(closedProjectTouches).toBe(0);
+  });
+
   it("fails closed instead of throwing when the only owner runtime is closed", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
     closedConfiguredOwner(dir);

@@ -200,6 +200,9 @@ enum DesiredMutation {
         project_file_name: String,
         script_kind: crate::traits::CarrierScriptKind,
     },
+    ActivateCarriers {
+        members: Vec<crate::traits::CarrierActivation>,
+    },
 }
 
 /// Commands the single-writer actor serialises.
@@ -510,14 +513,18 @@ where
             DesiredMutation::Open { path, .. }
             | DesiredMutation::Load { path, .. }
             | DesiredMutation::Update { path, .. }
-            | DesiredMutation::Close { path } => Some(path.clone()),
+            | DesiredMutation::Close { path } => vec![path.clone()],
             DesiredMutation::RegisterCarrier { companion_path, .. }
             | DesiredMutation::RegisterCarrierMetadata { companion_path, .. }
             | DesiredMutation::ActivateCarrier { companion_path, .. } => {
-                Some(companion_path.clone())
+                vec![companion_path.clone()]
             }
+            DesiredMutation::ActivateCarriers { members } => members
+                .iter()
+                .map(|member| member.companion_path.clone())
+                .collect(),
             DesiredMutation::ConfigurePaths { .. }
-            | DesiredMutation::UpdateWorkspaceFolders { .. } => None,
+            | DesiredMutation::UpdateWorkspaceFolders { .. } => Vec::new(),
         };
         let (ack, ack_rx) = oneshot::channel();
         self.state
@@ -532,7 +539,7 @@ where
             .await
             .map_err(|_| TypeProviderError::new(self.state.backend.restarting_error()))?;
         if result.is_ok() {
-            if let Some(path) = quarantine_clear {
+            for path in quarantine_clear {
                 self.state
                     .query_watch
                     .lock()
@@ -729,6 +736,17 @@ impl DesiredState {
                     carrier.source_path = source_path.clone();
                     carrier.project_file_name = project_file_name.clone();
                     carrier.active = true;
+                }
+            }
+            DesiredMutation::ActivateCarriers { members } => {
+                for member in members {
+                    if let Some(carrier) =
+                        self.carrier_registrations.get_mut(&member.companion_path)
+                    {
+                        carrier.source_path = member.source_path.clone();
+                        carrier.project_file_name = member.project_file_name.clone();
+                        carrier.active = true;
+                    }
                 }
             }
         }
@@ -941,6 +959,9 @@ async fn forward<P: TypeProvider>(
                     *script_kind,
                 )
                 .await
+        }
+        DesiredMutation::ActivateCarriers { members } => {
+            provider.activate_carrier_members(members).await
         }
     }
 }

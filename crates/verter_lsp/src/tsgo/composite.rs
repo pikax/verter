@@ -1310,6 +1310,13 @@ impl TypeProvider for TsgoCompositeProvider {
         )
     }
 
+    fn activate_carrier_members<'a>(
+        &'a self,
+        members: &'a [verter_type_runtime::CarrierActivation],
+    ) -> ProviderFuture<'a, ()> {
+        self.managed.activate_carrier_members(members)
+    }
+
     fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
         self.managed.resync_open_files()
     }

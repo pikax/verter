@@ -242,10 +242,11 @@ impl VerterLanguageServer {
             return DependencyReadiness::Ready;
         };
         let Some(key) = self.import_sync_freshness_key() else {
-            // Bootstrap: no receipt dimension yet — same disposition as the
-            // joining variant (enqueue best-effort delivery, do not deny).
+            // Bootstrap: no receipt dimension yet. Enqueue best-effort
+            // delivery and report the honest not-ready state; rename fails
+            // closed while navigation still queries its current provider view.
             self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
-            return DependencyReadiness::Ready;
+            return DependencyReadiness::NotReady;
         };
         if self.import_sync.is_fresh_at(&canonical_id, key) {
             return DependencyReadiness::Ready;
@@ -389,7 +390,7 @@ impl VerterLanguageServer {
     /// possibly across several `export *` / `export { … } from` hops, `ensure_imported_carrier_apis_synced`
     /// misses both the intermediate `.ts` barrels and the terminal carrier (`.vue` / `.svelte`)
     /// re-export targets. This walks only the `export ... from` graph reachable from the
-    /// template's component usages (a bounded level-BFS), classifies each hop by its RESOLVED
+    /// template's component usages (a cycle-terminated level-BFS), classifies each hop by its RESOLVED
     /// target's carrier-ness
     /// (never by the specifier string, so aliased `@/…` and `export *` re-exports are followed,
     /// and the terminal carrier is reached at any depth), syncs the discovered carrier
@@ -400,6 +401,13 @@ impl VerterLanguageServer {
         let Some(sync) = &self.project_sync else {
             return ImportSyncOutcome::Complete;
         };
+        // The tsserver plugin resolves carrier imports from the durable store
+        // through the configured project's normal module resolver. Walking or
+        // rewriting barrels here adds no membership and recreates the original
+        // per-file publication flood.
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+            return ImportSyncOutcome::Complete;
+        }
         let Some(snapshot) = self.published_resolver() else {
             return ImportSyncOutcome::Complete;
         };
@@ -416,22 +424,11 @@ impl VerterLanguageServer {
         let mut seen_barrels = HashSet::new();
         let mut seen_barrel_carrier = HashSet::new();
 
-        // Bounds (defensive): a pathological or cyclic re-export graph must never stall
-        // the background pass. Truncate (with a trace) rather than spin.
-        const MAX_BFS_DEPTH: usize = 8;
-        const MAX_NON_CARRIER_NODES: usize = 128;
-        const MAX_RESOLVED_REFS: usize = 1024;
-        const MAX_CARRIER_TARGETS: usize = 512;
-        let mut resolved_refs_remaining: usize = MAX_RESOLVED_REFS;
-        // Trace each size cap at most once — the first time a genuinely-new node is
-        // dropped because the cap is full — so the truncation the comment promises is
-        // observable. Cheap: one trace per cap, never per skipped item.
-        let mut non_carrier_cap_traced = false;
-        let mut carrier_cap_traced = false;
-
+        // Cycles terminate through `seen_barrels`. A completeness receipt requires
+        // the full finite closure, so the pass yields rather than truncating it.
         // Seed from the active document's direct syntax imports. This may include a
-        // few non-component barrels, but avoids requiring template semantic analysis
-        // and remains bounded. Direct carriers are already handled by carrier sync.
+        // few non-component barrels, but avoids requiring template semantic analysis.
+        // Direct carriers are already handled by carrier sync.
         let mut frontier: Vec<String> = Vec::new();
         for import in ingress.imports.iter() {
             let Some(resolved) = self.resolve_import_specifier(&canonical_id, &import.source)
@@ -442,16 +439,8 @@ impl VerterLanguageServer {
                 continue;
             }
             if seen_barrels.insert(resolved.clone()) {
-                if barrel_ids.len() < MAX_NON_CARRIER_NODES {
-                    frontier.push(resolved.clone());
-                    barrel_ids.push(resolved);
-                } else if !non_carrier_cap_traced {
-                    non_carrier_cap_traced = true;
-                    tracing::debug!(
-                        "barrel sync: non-carrier node cap ({MAX_NON_CARRIER_NODES}) reached; \
-                         truncating remaining barrel modules"
-                    );
-                }
+                frontier.push(resolved.clone());
+                barrel_ids.push(resolved);
             }
         }
 
@@ -459,8 +448,8 @@ impl VerterLanguageServer {
         // (alias-aware) workspace resolver and classified by its RESOLVED target's carrier-ness
         // — never by the specifier string — so `export * from './x'` and aliased (`@/…`)
         // re-exports are followed, and the terminal carrier is reached at any depth.
-        let mut depth = 0usize;
-        while !frontier.is_empty() && depth < MAX_BFS_DEPTH {
+        let mut visited_since_yield = 0usize;
+        while !frontier.is_empty() {
             let mut next: Vec<String> = Vec::new();
             for barrel_id in &frontier {
                 // Order this node's host load with its document lifecycle (see
@@ -484,49 +473,25 @@ impl VerterLanguageServer {
                     let Some(specifier) = module_ref.literal_specifier.as_deref() else {
                         continue;
                     };
-                    if resolved_refs_remaining == 0 {
-                        tracing::debug!(
-                            "barrel sync: resolved-ref budget exhausted; truncating re-export walk"
-                        );
-                        break;
-                    }
-                    resolved_refs_remaining -= 1;
                     let Some(target) = self.resolve_import_specifier(barrel_id, specifier) else {
                         continue;
                     };
                     if verter_workspace::path_is_carrier(&target) {
                         if seen_barrel_carrier.insert(target.clone()) {
-                            if barrel_carrier_deps.len() < MAX_CARRIER_TARGETS {
-                                barrel_carrier_deps.push(target);
-                            } else if !carrier_cap_traced {
-                                carrier_cap_traced = true;
-                                tracing::debug!(
-                                    "barrel sync: carrier-target cap ({MAX_CARRIER_TARGETS}) reached; \
-                                     truncating remaining carrier re-export targets"
-                                );
-                            }
+                            barrel_carrier_deps.push(target);
                         }
                     } else if seen_barrels.insert(target.clone()) {
-                        if barrel_ids.len() < MAX_NON_CARRIER_NODES {
-                            next.push(target.clone());
-                            barrel_ids.push(target);
-                        } else if !non_carrier_cap_traced {
-                            non_carrier_cap_traced = true;
-                            tracing::debug!(
-                                "barrel sync: non-carrier node cap ({MAX_NON_CARRIER_NODES}) reached; \
-                                 truncating remaining barrel modules"
-                            );
-                        }
+                        next.push(target.clone());
+                        barrel_ids.push(target);
                     }
+                }
+                visited_since_yield += 1;
+                if visited_since_yield >= 64 {
+                    visited_since_yield = 0;
+                    tokio::task::yield_now().await;
                 }
             }
             frontier = next;
-            depth += 1;
-        }
-        if !frontier.is_empty() {
-            tracing::debug!(
-                "barrel sync: BFS depth/size bound reached; truncating remaining re-export hops"
-            );
         }
 
         let mut outcome = ImportSyncOutcome::Complete;
@@ -547,10 +512,6 @@ impl VerterLanguageServer {
         // create duplicate script identities and force configured-project
         // rebuilds. tsgo has no host plugin, so it retains the rewritten-file
         // publication path below.
-        if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
-            return outcome;
-        }
-
         // Publish only barrel files whose export-from specifiers need a provider
         // rewrite (or whose framework self-file projection changes their bytes).
         // Unchanged non-carrier modules remain disk-resolved by the provider;

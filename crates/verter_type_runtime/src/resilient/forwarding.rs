@@ -162,6 +162,20 @@ where
         })
     }
 
+    fn activate_carrier_members<'a>(
+        &'a self,
+        members: &'a [crate::traits::CarrierActivation],
+    ) -> ProviderFuture<'a, ()> {
+        let members = members.to_vec();
+        Box::pin(async move {
+            self.submit_mutation(
+                DesiredMutation::ActivateCarriers { members },
+                Lane::Foreground,
+            )
+            .await
+        })
+    }
+
     fn get_completions(
         &self,
         path: &str,

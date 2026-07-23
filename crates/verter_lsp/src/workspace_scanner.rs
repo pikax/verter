@@ -887,7 +887,7 @@ async fn follow_node_modules_deps(
     clippy::too_many_arguments,
     reason = "carrier file sync threads the provider-surface store alongside its compile/sync inputs"
 )]
-async fn sync_file_to_provider(
+pub(crate) async fn sync_file_to_provider(
     canonical_id: &str,
     host: &VerterHost,
     profile: &CompileProfile,

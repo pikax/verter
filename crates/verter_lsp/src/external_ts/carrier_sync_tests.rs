@@ -1367,14 +1367,10 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
     assert!(
         provider_calls.iter().any(|call| matches!(
             call,
-            MockCall::ActivateCarrierMember {
-                source_path,
-                companion_path,
-                project_file_name,
-                ..
-            } if source_path == &source
-                && companion_path.ends_with("Comp.vue.tsx")
-                && project_file_name == &expected_owner
+            MockCall::ActivateCarrierMembers { members }
+                if members.iter().any(|member| member.source_path == source
+                    && member.companion_path.ends_with("Comp.vue.tsx")
+                    && member.project_file_name == expected_owner)
         )),
         "an open authored carrier must be promoted only after its metadata publication: \
          {provider_calls:?}"

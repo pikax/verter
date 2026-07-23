@@ -35,6 +35,17 @@ pub enum CarrierScriptKind {
     Jsx,
 }
 
+/// One already-published framework source to promote into a provider's
+/// interactive/project working set. The descriptor contains control-plane
+/// identities only; generated carrier bytes remain store-owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarrierActivation {
+    pub source_path: String,
+    pub companion_path: String,
+    pub project_file_name: String,
+    pub script_kind: CarrierScriptKind,
+}
+
 impl CarrierScriptKind {
     #[must_use]
     pub const fn tsserver_name(self) -> &'static str {
@@ -303,6 +314,29 @@ pub trait TypeProvider: Send + Sync {
         _script_kind: CarrierScriptKind,
     ) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
+    }
+
+    /// Promote a demand-discovered carrier frontier atomically from the
+    /// provider's point of view. Store-backed providers override this to admit
+    /// every source before issuing one project refresh; the default preserves
+    /// compatibility for providers whose single-member activation is already a
+    /// no-op or constant-cost operation.
+    fn activate_carrier_members<'a>(
+        &'a self,
+        members: &'a [CarrierActivation],
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            for member in members {
+                self.activate_carrier_member(
+                    &member.source_path,
+                    &member.companion_path,
+                    &member.project_file_name,
+                    member.script_kind,
+                )
+                .await?;
+            }
+            Ok(())
+        })
     }
 
     /// Close and re-open all files to refresh project associations.

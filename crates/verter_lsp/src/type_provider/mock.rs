@@ -137,6 +137,9 @@ mod inner {
             project_file_name: String,
             script_kind: verter_type_runtime::CarrierScriptKind,
         },
+        ActivateCarrierMembers {
+            members: Vec<verter_type_runtime::CarrierActivation>,
+        },
     }
 
     /// Shared state for the mock provider.
@@ -1003,6 +1006,20 @@ mod inner {
                     companion_path: companion_path.to_string(),
                     project_file_name: project_file_name.to_string(),
                     script_kind,
+                });
+            Box::pin(async { Ok(()) })
+        }
+
+        fn activate_carrier_members<'a>(
+            &'a self,
+            members: &'a [verter_type_runtime::CarrierActivation],
+        ) -> ProviderFuture<'a, ()> {
+            self.state
+                .lock()
+                .unwrap()
+                .calls
+                .push(MockCall::ActivateCarrierMembers {
+                    members: members.to_vec(),
                 });
             Box::pin(async { Ok(()) })
         }
