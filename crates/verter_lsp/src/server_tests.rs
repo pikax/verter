@@ -13118,8 +13118,8 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
     // FAILED reconciliation must leave the previous open path alive. The drain
     // must sync the NEW owner's paths first and only close the stale paths
     // AFTER a successful sync — never close-then-sync. Here every provider
-    // file-op fails, so nothing must be closed and the prior state must be
-    // retained unchanged.
+    // replacement carrier operation fails, so only the newly-created dependency
+    // overlay may be rollback-closed and the prior state is retained unchanged.
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
@@ -13162,8 +13162,10 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
     let pending_snapshot_provider_sync = DashSet::new();
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
 
-    // Every provider file-op records its call AND fails.
-    provider.set_fail_file_ops(true);
+    // The dependency overlay must publish successfully so the injected failure
+    // reaches the replacement IDE carrier itself.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    provider.set_fail_sync_path("/workspace/src/App.vue.verter.ts");
 
     drain_pending_snapshot_provider_sync(
         Some(&sync),
@@ -13193,6 +13195,24 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         )),
         "failed owner transition must REACH the sync and attempt the new `.tsx`, calls={calls:?}"
     );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "failed owner transition must REACH the sync and attempt the new `.verter.ts`, calls={calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx.__verter_types.d.ts"
+        )),
+        "the dependency overlay must publish before the exact carrier failure, calls={calls:?}"
+    );
     // Negative: the stale `.jsx` IDE path must NOT be closed, because the
     // replacement `.tsx` sync FAILED. (Pre-fix the drain closed stale paths
     // BEFORE syncing, so a CloseFile for the stale path was recorded.)
@@ -13203,22 +13223,29 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         )),
         "failed owner transition must NOT close the prior IDE path, calls={calls:?}"
     );
-    // Negative: nothing at all should be closed on a fully-failed transition.
     assert!(
-        !calls
-            .iter()
-            .any(|call| matches!(call, MockCall::CloseFile { .. })),
-        "a fully-failed owner transition must not close any provider path, calls={calls:?}"
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "failed owner transition must NOT close the prior API path, calls={calls:?}"
     );
-
-    // Positive: the prior state is retained UNCHANGED (not committed/removed).
+    assert!(
+        calls.iter().all(|call| !matches!(
+            call,
+            MockCall::CloseFile { path }
+                if path != "/workspace/src/App.vue.tsx.__verter_types.d.ts"
+        )),
+        "only the newly-created dependency overlay may be rollback-closed, calls={calls:?}"
+    );
+    // Positive: total replacement failure retains the complete prior state.
     let state = provider_sync_states
         .get("/workspace/src/App.vue")
         .map(|entry| entry.clone())
         .expect("a failed owner transition must retain the prior provider state");
     assert_eq!(
         state, prior_state,
-        "failed owner transition must leave the prior state byte-for-byte unchanged, got {state:?}"
+        "failed owner transition must leave the prior state byte-for-byte unchanged"
     );
 
     // Positive: stays queued for a future (successful) reconciliation.
@@ -24482,15 +24509,18 @@ async fn successful_direct_ide_sync_records_carrier_ide_surface() {
         crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
         "the recorded surface must carry the CarrierIde role"
     );
-    let ide = server
-        .documents
-        .get_ide(&uri)
-        .expect("IDE output should exist");
+    let delivered = server
+        .project_sync
+        .as_ref()
+        .and_then(|sync| sync.synced_tsx_content(&ide_path))
+        .expect("the direct sync records the projected provider bytes");
     assert_eq!(
         snapshot.provider_content.as_ref(),
-        ide.code.as_ref(),
+        delivered.as_ref(),
         "the recorded surface must pin the EXACT bytes synced to the provider"
     );
+    assert!(delivered.contains("from \"./App.vue.tsx.__verter_types\""));
+    assert!(!delivered.contains("from \"@verter/types\""));
     let doc = server.documents.get(&uri).expect("document is open");
     assert_eq!(
         snapshot.carrier_source.as_ref(),
@@ -24870,15 +24900,18 @@ async fn bootstrap_drained_carrier_records_surface_and_serves_provider_hover() {
         crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
         "the drain-recorded surface must carry the CarrierIde role"
     );
-    let ide = server
-        .documents
-        .get_ide(&uri)
-        .expect("IDE output should exist");
+    let delivered = server
+        .project_sync
+        .as_ref()
+        .and_then(|sync| sync.synced_tsx_content(&ide_path))
+        .expect("the drain records the projected provider bytes");
     assert_eq!(
         snapshot.provider_content.as_ref(),
-        ide.code.as_ref(),
+        delivered.as_ref(),
         "the drain-recorded surface must pin the EXACT bytes delivered to the provider"
     );
+    assert!(delivered.contains("from \"./App.vue.tsx.__verter_types\""));
+    assert!(!delivered.contains("from \"@verter/types\""));
 
     // End-to-end: hover captures the drain-recorded surface and serves the
     // provider contribution (no silent drop before the next did_change).
@@ -24962,9 +24995,16 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
     );
     assert_eq!(
         snapshot.provider_content.as_ref(),
-        ide.code.as_ref(),
+        sync.synced_tsx_content(&ide_path)
+            .expect("the unresolved sync records the projected provider bytes")
+            .as_ref(),
         "the recorded surface must pin the EXACT bytes delivered to the provider"
     );
+    let delivered = sync
+        .synced_tsx_content(&ide_path)
+        .expect("the unresolved sync records the projected provider bytes");
+    assert!(delivered.contains("from \"./App.vue.tsx.__verter_types\""));
+    assert!(!delivered.contains("from \"@verter/types\""));
 
     // A FAILED open-unresolved IDE sync records NOTHING (fail closed).
     let other_uri: Uri = "file:///workspace/src/Other.vue".parse().unwrap();

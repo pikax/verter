@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { defineConfig, resolveConfig } from "vite";
+import { transform as transformJs } from "esbuild";
 import unplugin, { unpluginFactory, Verter, VerterSvelte, VerterVue } from "./index";
 import { loadHost, resetHost } from "./core/compiler";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
@@ -581,10 +582,8 @@ const unused = 'type-only'
     expect(code).toMatch(/return.*count/);
   });
 
-  // @ai-generated — Document actual forceJs behavior per framework.
-  // These tests capture the CURRENT behavior of Verter's type stripping (forceJs=true).
-  // Key finding: forceJs=true strips `import type` statements but does NOT strip
-  // inline type annotations like `: Ref<number>` or `ref<number>()`.
+  // @ai-generated — Verify forceJs output across non-Vite frameworks.
+  // forceJs emits JavaScript for bundlers that do not retain TypeScript syntax.
 
   const TS_SFC = `<script setup lang="ts">
 import { ref } from 'vue'
@@ -596,7 +595,7 @@ const msg: string = 'hello'
 `;
 
   for (const framework of ["rollup", "webpack", "rspack", "rolldown"] as const) {
-    it(`${framework} framework: forceJs=true strips import type but NOT inline annotations`, async () => {
+    it(`${framework} framework: forceJs=true emits valid JavaScript`, async () => {
       const plugin = unpluginFactory(undefined, {
         framework,
         versions: { unplugin: "0.0.0", [framework]: "0.0.0" },
@@ -605,14 +604,10 @@ const msg: string = 'hello'
       expect(result).toBeDefined();
       const code = result!.code;
 
-      // forceJs=true for non-Vite: strips `import type` statements
       expect(code).not.toContain("import type");
-
-      // BUG: forceJs=true does NOT strip inline type annotations
-      // This means non-Vite bundlers still receive TS syntax in the output.
-      // These assertions document the ACTUAL (buggy) behavior:
-      expect(code).toContain("ref<number>"); // NOT stripped
-      expect(code).toContain(": string"); // NOT stripped
+      expect(code).not.toContain("ref<number>");
+      expect(code).not.toContain(": string");
+      await expect(transformJs(code, { loader: "js" })).resolves.toBeDefined();
     });
   }
 
@@ -633,10 +628,9 @@ const x: Ref<number> = ref(0)
     expect(result).toBeDefined();
     const code = result!.code;
 
-    // `import type` is stripped by forceJs=true
     expect(code).not.toContain("import type");
-    // BUG: inline type annotation `: Ref<number>` is NOT stripped
-    expect(code).toContain("Ref<number>");
+    expect(code).not.toContain("Ref<number>");
+    await expect(transformJs(code, { loader: "js" })).resolves.toBeDefined();
   });
 
   // @ai-generated - Mixed import `import { Ref, ref }` — Ref is type-only but
