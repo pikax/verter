@@ -1338,8 +1338,9 @@ export {};
 
 /// Make the `external-ts-dx` fixture self-sufficient for the §2.9 plain-`.ts`-
 /// imports-`.vue`/`.svelte` enhanced-DX contract: provide a flat dependency-free
-/// `vue` type stub and materialise `@verter/types` from the bundled standalone
-/// declaration (the same artifact the production server writes).
+/// `vue` type stub and materialise an explicit installed `@verter/types` package
+/// from the bundled standalone declaration. This exercises installed-package
+/// precedence; production fallback is virtual and does not write `node_modules`.
 ///
 /// `node_modules` is gitignored repo-wide, so these deps cannot be committed and
 /// must be materialised at test time (the same fixture-setup category as

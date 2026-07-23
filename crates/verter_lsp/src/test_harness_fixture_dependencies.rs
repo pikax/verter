@@ -13,21 +13,23 @@ pub(crate) fn fixture_workspace_root(name: &str) -> String {
 /// Materialize the type-only dependencies declared by parity fixtures without
 /// relying on incidental ancestor `node_modules` resolution.
 pub(super) fn materialize_real_provider_framework_types(fixture: &str) {
+    static MATERIALIZE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = MATERIALIZE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let fixture_root = std::path::PathBuf::from(fixture_workspace_root(fixture));
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let node_modules = fixture_root.join("node_modules");
 
     match fixture {
-        "vue-parity" => {
-            copy_type_package_atomically(
+        "single-project" | "vue-parity" => {
+            copy_type_package_with_dependencies(
                 &repo_root.join("packages/types/node_modules/vue"),
-                &node_modules.join("vue"),
+                &node_modules,
             );
-            write_type_package_atomically(
-                &node_modules.join("@verter/types"),
-                verter_session::VERTER_TYPES_STANDALONE_DTS,
-            );
-            write_react_jsx_ambient_atomically(&node_modules.join("@types/react"));
+            if fixture == "vue-parity" {
+                write_react_jsx_ambient_atomically(&node_modules.join("@types/react"));
+            }
         }
         "svelte-parity" => {
             copy_type_package_atomically(
@@ -41,6 +43,82 @@ pub(super) fn materialize_real_provider_framework_types(fixture: &str) {
         }
         _ => {}
     }
+}
+
+fn copy_type_package_with_dependencies(source: &std::path::Path, node_modules: &std::path::Path) {
+    fn visit(
+        source: &std::path::Path,
+        node_modules: &std::path::Path,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        let manifest_path = source.join("package.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap_or_else(|error| {
+                panic!(
+                    "read real-provider fixture dependency manifest {}: {error}",
+                    manifest_path.display()
+                )
+            }))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "parse real-provider fixture dependency manifest {}: {error}",
+                    manifest_path.display()
+                )
+            });
+        let name = manifest["name"].as_str().unwrap_or_else(|| {
+            panic!(
+                "real-provider fixture dependency has no package name: {}",
+                manifest_path.display()
+            )
+        });
+        if !visited.insert(name.to_string()) {
+            return;
+        }
+
+        copy_type_package_atomically(source, &node_modules.join(name));
+        let Some(dependencies) = manifest["dependencies"].as_object() else {
+            return;
+        };
+        for dependency in dependencies.keys() {
+            let dependency_source = resolve_dependency_source(source, dependency)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "real-provider fixture transitive dependency `{dependency}` must resolve from {}",
+                        source.display()
+                    )
+                });
+            visit(&dependency_source, node_modules, visited);
+        }
+    }
+
+    let source = std::fs::canonicalize(source).unwrap_or_else(|error| {
+        panic!(
+            "canonicalize real-provider fixture dependency {}: {error}",
+            source.display()
+        )
+    });
+    visit(&source, node_modules, &mut std::collections::HashSet::new());
+}
+
+fn resolve_dependency_source(
+    package_root: &std::path::Path,
+    dependency: &str,
+) -> Option<std::path::PathBuf> {
+    let mut current = Some(package_root);
+    while let Some(directory) = current {
+        let candidate = directory.join("node_modules").join(dependency);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        let pnpm_hoist = directory
+            .join("node_modules/.pnpm/node_modules")
+            .join(dependency);
+        if pnpm_hoist.is_dir() {
+            return Some(pnpm_hoist);
+        }
+        current = directory.parent();
+    }
+    None
 }
 
 fn copy_type_package_atomically(source: &std::path::Path, destination: &std::path::Path) {
@@ -100,6 +178,9 @@ fn copy_type_package_directory(
 fn copy_file_atomically(source: &std::path::Path, destination: &std::path::Path) {
     let bytes = std::fs::read(source)
         .unwrap_or_else(|error| panic!("read fixture dependency {}: {error}", source.display()));
+    if std::fs::read(destination).is_ok_and(|existing| existing == bytes) {
+        return;
+    }
     write_file_atomically(destination, &bytes);
 }
 
@@ -125,14 +206,6 @@ fn write_file_atomically(destination: &std::path::Path, bytes: &[u8]) {
             destination.display()
         )
     });
-}
-
-fn write_type_package_atomically(package_root: &std::path::Path, declarations: &str) {
-    write_file_atomically(&package_root.join("index.d.ts"), declarations.as_bytes());
-    write_file_atomically(
-        &package_root.join("package.json"),
-        br#"{"name":"@verter/types","types":"index.d.ts"}"#,
-    );
 }
 
 fn write_react_jsx_ambient_atomically(package_root: &std::path::Path) {

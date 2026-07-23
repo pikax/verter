@@ -11,7 +11,7 @@ use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 use verter_semantic::analysis::{build_script_analysis_with_scope, AnalysisScope};
 use verter_workspace::workspace_snapshot::{ConfiguredOwnerResolution, ProjectPayload};
-use verter_workspace::{FilesystemWorkspace, CARRIER_API_VIRTUAL_SUFFIX};
+use verter_workspace::{FilesystemWorkspace, WorkspaceRead, CARRIER_API_VIRTUAL_SUFFIX};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::GeneratedRewriteMapper;
@@ -21,6 +21,104 @@ use crate::project_resolver::{ResolvePhase, ResolveRequest, ResolveRequestKind};
 pub(crate) struct PreparedCarrierProviderContent {
     pub(crate) content: Arc<str>,
     pub(crate) rewrites: GeneratedRewriteMapper,
+}
+
+pub(crate) struct PreparedVerterTypesVirtualContent {
+    pub(crate) content: Arc<str>,
+    pub(crate) virtual_path: String,
+}
+
+fn owner_resolves_verter_types(
+    workspace: Option<&FilesystemWorkspace>,
+    canonical_id: &str,
+) -> bool {
+    let resolved = workspace
+        .and_then(FilesystemWorkspace::load_published)
+        .and_then(|published| {
+            let workspace = workspace?;
+            published.snapshot.resolver.resolve_with_reader(
+                workspace,
+                &ResolveRequest {
+                    importer_id: canonical_id.to_string(),
+                    specifier: "@verter/types".to_string(),
+                    kind: ResolveRequestKind::TypeImport,
+                    phase: ResolvePhase::ProviderGraph,
+                },
+            )
+        });
+    if resolved.is_some() {
+        return true;
+    }
+
+    let mut current = std::path::Path::new(canonical_id).parent();
+    while let Some(directory) = current {
+        let manifest = directory.join("node_modules/@verter/types/package.json");
+        let exists = workspace.map_or_else(
+            || manifest.is_file(),
+            |workspace| workspace.file_exists(&manifest.to_string_lossy().replace('\\', "/")),
+        );
+        if exists {
+            return true;
+        }
+        current = directory.parent();
+    }
+    false
+}
+
+/// Project a missing `@verter/types` package onto an adjacent provider-only
+/// declaration overlay. The relative specifier lets tsgo resolve the off-disk
+/// document through its normal overlay probe without writing into node_modules.
+pub(crate) fn prepare_tsgo_verter_types_virtual(
+    workspace: Option<&FilesystemWorkspace>,
+    canonical_id: &str,
+    provider_path: &str,
+    generated: &str,
+) -> Option<PreparedVerterTypesVirtualContent> {
+    if owner_resolves_verter_types(workspace, canonical_id) {
+        return None;
+    }
+
+    let file_name = std::path::Path::new(provider_path)
+        .file_name()?
+        .to_string_lossy();
+    let provider_specifier = format!("./{file_name}.__verter_types");
+    let virtual_path = format!("{provider_path}.__verter_types.d.ts");
+    let allocator = Allocator::new();
+    let analysis = build_script_analysis_with_scope(
+        generated,
+        SourceType::tsx(),
+        &allocator,
+        AnalysisScope::IMPORTS,
+    );
+    let mut replacements = Vec::new();
+    for reference in analysis.module_references {
+        if reference.analyzability != verter_semantic::analysis::ModuleReferenceAnalyzability::Exact
+            || reference.literal_specifier.as_deref() != Some("@verter/types")
+        {
+            continue;
+        }
+        let start = reference.expr_span.start as usize;
+        let end = reference.expr_span.end as usize;
+        replacements.push((
+            start,
+            end,
+            crate::server::server_utils::quote_wrapped_specifier(
+                &reference.raw_text,
+                &provider_specifier,
+            ),
+        ));
+    }
+    if replacements.is_empty() {
+        return None;
+    }
+    replacements.sort_by_key(|replacement| replacement.0);
+    Some(PreparedVerterTypesVirtualContent {
+        content: Arc::from(crate::server::server_utils::apply_specifier_replacements(
+            generated,
+            &replacements,
+        )),
+        virtual_path,
+    })
 }
 
 /// Whether every exact configured owner explicitly permits authored carrier
@@ -53,14 +151,31 @@ pub(crate) fn prepare_carrier_provider_imports(
     generated: &str,
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
 ) -> PreparedCarrierProviderContent {
+    prepare_carrier_provider_imports_with_verter_types(
+        workspace,
+        canonical_id,
+        generated,
+        encoding,
+        None,
+    )
+}
+
+fn prepare_carrier_provider_imports_with_verter_types(
+    workspace: Option<&FilesystemWorkspace>,
+    canonical_id: &str,
+    generated: &str,
+    encoding: tower_lsp_server::ls_types::PositionEncodingKind,
+    verter_types_specifier: Option<&str>,
+) -> PreparedCarrierProviderContent {
     let published = workspace.and_then(FilesystemWorkspace::load_published);
-    if published.as_ref().is_some_and(|published| {
+    let rewrite_carrier_imports = !published.as_ref().is_some_and(|published| {
         published.ownership_ready
             && configured_owners_allow_authored_carrier_specifiers(
                 &published.snapshot,
                 canonical_id,
             )
-    }) {
+    });
+    if !rewrite_carrier_imports && verter_types_specifier.is_none() {
         return PreparedCarrierProviderContent {
             content: Arc::from(generated),
             rewrites: GeneratedRewriteMapper::new(&[], &LineIndex::new(generated, encoding)),
@@ -83,30 +198,40 @@ pub(crate) fn prepare_carrier_provider_imports(
         let Some(specifier) = reference.literal_specifier.as_deref() else {
             continue;
         };
-        let resolved = published.as_ref().and_then(|published| {
-            let workspace = workspace?;
-            published.snapshot.resolver.resolve_with_reader(
-                workspace,
-                &ResolveRequest {
-                    importer_id: canonical_id.to_string(),
-                    specifier: specifier.to_string(),
-                    kind: if reference.is_type_only {
-                        ResolveRequestKind::TypeImport
-                    } else {
-                        ResolveRequestKind::EsmImport
+        let provider_specifier = if specifier == "@verter/types" {
+            let Some(provider_specifier) = verter_types_specifier else {
+                continue;
+            };
+            provider_specifier.to_owned()
+        } else {
+            if !rewrite_carrier_imports {
+                continue;
+            }
+            let resolved = published.as_ref().and_then(|published| {
+                let workspace = workspace?;
+                published.snapshot.resolver.resolve_with_reader(
+                    workspace,
+                    &ResolveRequest {
+                        importer_id: canonical_id.to_string(),
+                        specifier: specifier.to_string(),
+                        kind: if reference.is_type_only {
+                            ResolveRequestKind::TypeImport
+                        } else {
+                            ResolveRequestKind::EsmImport
+                        },
+                        phase: ResolvePhase::ProviderGraph,
                     },
-                    phase: ResolvePhase::ProviderGraph,
-                },
-            )
-        });
-        let provider_specifier = match resolved {
-            Some(resolved) if verter_workspace::path_is_carrier(&resolved.source_id) => {
-                resolved.provider_specifier
+                )
+            });
+            match resolved {
+                Some(resolved) if verter_workspace::path_is_carrier(&resolved.source_id) => {
+                    resolved.provider_specifier
+                }
+                _ if verter_workspace::path_is_carrier(specifier) => {
+                    format!("{specifier}{CARRIER_API_VIRTUAL_SUFFIX}")
+                }
+                _ => continue,
             }
-            _ if verter_workspace::path_is_carrier(specifier) => {
-                format!("{specifier}{CARRIER_API_VIRTUAL_SUFFIX}")
-            }
-            _ => continue,
         };
         let start = reference.expr_span.start as usize;
         let end = reference.expr_span.end as usize;
@@ -147,16 +272,25 @@ pub(crate) fn infer_carrier_provider_rewrites(
         AnalysisScope::IMPORTS,
     );
     let mut reverse = Vec::new();
+    let mut verter_types_specifier = None;
     for reference in analysis.module_references {
         let Some(specifier) = reference.literal_specifier.as_deref() else {
             continue;
         };
-        let Some(original_specifier) = specifier.strip_suffix(CARRIER_API_VIRTUAL_SUFFIX) else {
-            continue;
-        };
-        if !verter_workspace::path_is_carrier(original_specifier) {
-            continue;
-        }
+        let original_specifier =
+            if specifier.starts_with("./") && specifier.ends_with(".__verter_types") {
+                verter_types_specifier = Some(specifier.to_owned());
+                "@verter/types"
+            } else {
+                let Some(original_specifier) = specifier.strip_suffix(CARRIER_API_VIRTUAL_SUFFIX)
+                else {
+                    continue;
+                };
+                if !verter_workspace::path_is_carrier(original_specifier) {
+                    continue;
+                }
+                original_specifier
+            };
         reverse.push((
             reference.expr_span.start as usize,
             reference.expr_span.end as usize,
@@ -171,7 +305,14 @@ pub(crate) fn infer_carrier_provider_rewrites(
     }
     let original =
         crate::server::server_utils::apply_specifier_replacements(provider_content, &reverse);
-    prepare_carrier_provider_imports(None, "", &original, encoding).rewrites
+    prepare_carrier_provider_imports_with_verter_types(
+        None,
+        "",
+        &original,
+        encoding,
+        verter_types_specifier.as_deref(),
+    )
+    .rewrites
 }
 
 #[cfg(test)]
@@ -210,5 +351,33 @@ mod tests {
             tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
         );
         assert!(!mapper.is_empty());
+    }
+
+    #[test]
+    fn rewrite_inference_recovers_virtual_verter_types_column_mapping() {
+        let original = "import type { X } from '@verter/types'; const value: X = {} as X;\n";
+        let provider =
+            "import type { X } from './App.vue.tsx.__verter_types'; const value: X = {} as X;\n";
+        let mapper = infer_carrier_provider_rewrites(
+            provider,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        );
+        let generated_column = original.find("const value").unwrap() as u32;
+        let provider_column = provider.find("const value").unwrap() as u32;
+
+        assert_eq!(
+            mapper
+                .generated_to_provider(TsPosition::new(0, generated_column))
+                .expect("post-import position maps")
+                .character,
+            provider_column
+        );
+        assert_eq!(
+            mapper
+                .provider_to_generated(TsPosition::new(0, provider_column))
+                .expect("provider position maps back")
+                .character,
+            generated_column
+        );
     }
 }

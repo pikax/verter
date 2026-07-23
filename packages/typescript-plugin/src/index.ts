@@ -856,29 +856,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     process.chdir(directory);
 
-    const verterTypesVirtualPath = normalizePath(
-      path.join(directory, "node_modules", "@verter", "types", "index.d.ts"),
-    );
-    const verterTypesInstalled = info.serverHost.fileExists(
-      path.join(directory, "node_modules", "@verter", "types", "index.d.ts"),
-    );
-    if (!verterTypesInstalled) {
-      logger.info("[Verter] @verter/types not installed, will serve virtual stub");
-    }
-
     const _fileExists = info.serverHost.fileExists.bind(info.serverHost);
     const _readFile = info.serverHost.readFile.bind(info.serverHost);
-    const bundledSvelteJsxPackage = findBundledSvelteJsxPackage();
-    if (bundledSvelteJsxPackage === undefined) {
-      logger.info(
-        "[Verter] bundled @verter/svelte-jsx runtime is unavailable; Svelte JSX resolution fails closed",
-      );
-    }
     const configuredProjectRoot =
       projectKey.endsWith(".json") && !projectKey.startsWith("/dev/null/")
         ? path.dirname(projectKey)
         : directory;
-    const ownerResolutionAnchor = path.join(configuredProjectRoot, "__verter_svelte_owner__.tsx");
     const ownerModuleResolutionHost: tsModule.ModuleResolutionHost = {
       fileExists: _fileExists,
       readFile: _readFile,
@@ -887,6 +870,30 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       realpath: info.serverHost.realpath?.bind(info.serverHost),
       useCaseSensitiveFileNames: info.serverHost.useCaseSensitiveFileNames,
     };
+    const verterTypesVirtualPath = normalizePath(
+      path.join(configuredProjectRoot, "node_modules", "@verter", "types", "index.d.ts"),
+    );
+    const resolveInstalledVerterTypes = (containingFile: string) =>
+      ts.resolveModuleName(
+        "@verter/types",
+        containingFile,
+        info.project.getCompilerOptions(),
+        ownerModuleResolutionHost,
+      ).resolvedModule;
+    const rootVerterTypesInstalled =
+      resolveInstalledVerterTypes(path.join(configuredProjectRoot, "__verter_types_owner__.ts")) !==
+      undefined;
+    if (!rootVerterTypesInstalled) {
+      logger.info("[Verter] @verter/types not installed, will serve virtual stub");
+    }
+
+    const bundledSvelteJsxPackage = findBundledSvelteJsxPackage();
+    if (bundledSvelteJsxPackage === undefined) {
+      logger.info(
+        "[Verter] bundled @verter/svelte-jsx runtime is unavailable; Svelte JSX resolution fails closed",
+      );
+    }
+    const ownerResolutionAnchor = path.join(configuredProjectRoot, "__verter_svelte_owner__.tsx");
 
     const specializeEditorTsserverCarrier = (
       providerPath: string,
@@ -1143,8 +1150,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     };
 
     info.serverHost.readFile = (fileName: string) => {
-      if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
-        return VERTER_TYPES_STUB;
+      if (normalizePath(fileName) === verterTypesVirtualPath) {
+        return _readFile(fileName) ?? VERTER_TYPES_STUB;
       }
       const content = carrierContent(fileName);
       if (content !== undefined) {
@@ -1154,7 +1161,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     };
 
     info.serverHost.fileExists = (fileName: string) => {
-      if (!verterTypesInstalled && normalizePath(fileName) === verterTypesVirtualPath) {
+      if (normalizePath(fileName) === verterTypesVirtualPath) {
         return true;
       }
       if (carrierExists(fileName)) {
@@ -1231,7 +1238,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           if (normalized.endsWith(".js")) return ts.Extension.Js;
           return ts.Extension.Ts;
         };
-        if (moduleName === "@verter/types" && !verterTypesInstalled) {
+        if (moduleName === "@verter/types") {
+          // The project host is authoritative (notably for PnP/custom module
+          // resolution). Only synthesize the fallback after that resolver and
+          // ordinary TypeScript disk resolution both miss.
+          const projectResolution = resolveModule()?.resolvedModule;
+          if (projectResolution) {
+            return projectResolution;
+          }
+          const installedResolution = resolveInstalledVerterTypes(containingFile);
+          if (installedResolution) {
+            return installedResolution;
+          }
           return {
             extension: ts.Extension.Dts,
             isExternalLibraryImport: true,
@@ -2301,7 +2319,10 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     }
 
     function resolveModuleFileName(containingFile: string, moduleName: string): string | undefined {
-      if (moduleName === "@verter/types" && !verterTypesInstalled) {
+      if (
+        moduleName === "@verter/types" &&
+        resolveInstalledVerterTypes(containingFile) === undefined
+      ) {
         return verterTypesVirtualPath;
       }
       if (isRelativeVueTs(moduleName)) {

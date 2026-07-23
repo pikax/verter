@@ -23,32 +23,6 @@
 use super::super::test_harness::real_provider_test;
 use tower_lsp_server::ls_types::*;
 
-/// Materialise `@verter/types` under the single-project fixture's
-/// `node_modules`, exactly as the production server's background init does
-/// (`materialize_verter_types`). The harness does not run background init, and
-/// the fallback consts' `GlobalComponentType` helper must resolve from disk on
-/// BOTH provider surfaces (tsgo's `--api` checker resolves modules only from
-/// the real filesystem).
-fn materialize_fixture_verter_types() {
-    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../packages/vue-vscode/e2e/fixtures/single-project/node_modules/@verter/types",
-        );
-        std::fs::create_dir_all(&root).expect("create fixture @verter/types dir");
-        std::fs::write(
-            root.join("index.d.ts"),
-            verter_session::VERTER_TYPES_STANDALONE_DTS,
-        )
-        .expect("write fixture @verter/types dts");
-        std::fs::write(
-            root.join("package.json"),
-            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-        )
-        .expect("write fixture @verter/types manifest");
-    });
-}
-
 /// Retry hover at a position until it returns content (provider warm-up).
 async fn hover_with_retry(
     session: &crate::test_harness::RealProviderTestSession,
@@ -202,7 +176,6 @@ real_provider_test!(
     global_component_tag_typed_in_setup_arm,
     fixture = "single-project",
     async fn run(session) {
-        materialize_fixture_verter_types();
         let uri = session.open_fixture_file("src/GlobalTagSetup.vue").await;
         let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
         session.ensure_synced(&comp_uri).await;
@@ -227,7 +200,6 @@ real_provider_test!(
     global_component_tag_typed_in_options_arm,
     fixture = "single-project",
     async fn run(session) {
-        materialize_fixture_verter_types();
         let uri = session.open_fixture_file("src/GlobalTagOptions.vue").await;
         let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
         session.ensure_synced(&comp_uri).await;
@@ -263,7 +235,6 @@ real_provider_test!(
     global_component_unknown_tag_fails_closed,
     fixture = "single-project",
     async fn run(session) {
-        materialize_fixture_verter_types();
         let uri = session.open_fixture_file("src/GlobalTagUnknown.vue").await;
         session.ensure_synced(&uri).await;
 
@@ -350,7 +321,6 @@ real_provider_test!(
     custom_element_tag_stays_fail_open,
     fixture = "single-project",
     async fn run(session) {
-        materialize_fixture_verter_types();
         let uri = session.open_fixture_file("src/CustomElementTag.vue").await;
         let comp_uri = session.open_fixture_file("src/GlobalCountComp.vue").await;
         session.ensure_synced(&comp_uri).await;

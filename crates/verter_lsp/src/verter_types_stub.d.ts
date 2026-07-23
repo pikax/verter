@@ -1,5 +1,5 @@
-// Minimal @verter/types stub for TSGO resolution.
-// Synced as a virtual file when the project doesn't have @verter/types installed.
+// Minimal @verter/types fallback for provider resolution.
+// Served virtually when the project doesn't have @verter/types installed.
 // Contains only the exports referenced by generated TSX.
 // Keep in sync with: packages/typescript-plugin/src/helpers/verterTypesStub.ts
 
