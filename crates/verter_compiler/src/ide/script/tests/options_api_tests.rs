@@ -295,14 +295,14 @@ fn companion_script_value_declarations_available() {
     let (code, bindings) = gen_tsx_script(
         r#"<script lang="ts">
 import { computed } from 'vue'
-const doubled = computed(() => count.value * 2)
+export const doubled = computed(() => count.value * 2)
 export default {};
 </script>
 <script setup lang="ts">
 import { ref } from 'vue'
 const count = ref(0)
 </script>
-<template><div/></template>"#,
+<template><div>{{ doubled }}</div></template>"#,
     );
 
     // Both setup and companion imports should be present
@@ -319,6 +319,15 @@ const count = ref(0)
     assert!(
         bindings.contains_key("count"),
         "setup binding should be tracked: {bindings:?}"
+    );
+    assert_eq!(
+        bindings.get("doubled"),
+        Some(&verter_parser::types::BindingType::SetupConst),
+        "a companion module-scope value is directly visible to the template and must retain its inferred type: {bindings:?}"
+    );
+    assert!(
+        code.contains("doubled: doubled as unknown as typeof doubled"),
+        "the IDE binding projection must retain the companion value's inferred type: {code}"
     );
 }
 

@@ -340,6 +340,7 @@ fn resolve_iterable_segments(
             bindings,
             ..Default::default()
         }),
+        ide_recovery_scope: Vec::new(),
         dynamism: Dynamism::Dynamic,
     };
     build_prefixed_expr_segments(iterable, iterable_start, &parsed, resolver, &[])
@@ -809,6 +810,7 @@ mod tests {
                 has_errors: false,
                 dynamism: Dynamism::Dynamic,
             }),
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Dynamic,
         };
         OxcParsedElement {

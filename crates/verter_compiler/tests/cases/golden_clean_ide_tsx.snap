@@ -9,8 +9,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 const count = ref(0)
 
 const __props = props;
-// @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./Index.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<typeof import('./Index.vue.verter.js')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -48,6 +47,6 @@ void (___VERTER___instance).valueOf;
 return {};
 } // close templateBindingFN
 
-export { default } from './Index.vue.verter.ts';
+export { default } from './Index.vue.verter.js';
 
 type ___VERTER___attributes = {};

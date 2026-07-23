@@ -22,19 +22,45 @@
 /// internals stay LOCAL. The `__VerterPublic*`
 /// prefix avoids collision with user bindings or the `__VerterSelf*` contract.
 use super::super::SvelteIdeDialect;
+use crate::code_transform::CodeTransform;
+use verter_span::Span;
 
-pub(super) fn svelte_public_facade(props_type: Option<&str>, dialect: SvelteIdeDialect) -> String {
-    let props_ty = props_type.unwrap_or("Record<string, unknown>");
-    match dialect {
-        SvelteIdeDialect::TypeScript => format!(
-            "\ntype __VerterPublicProps = {props_ty};\n\
-             declare const __VerterPublicComponent: import(\"svelte\").Component<__VerterPublicProps, {{}}, \"\">;\n\
-             export default __VerterPublicComponent;\n",
+pub(super) fn append_svelte_public_facade<'a>(
+    ct: &mut CodeTransform<'a>,
+    at: u32,
+    props: Option<(&str, Span)>,
+    dialect: SvelteIdeDialect,
+) {
+    let (props_ty, source_span) = props
+        .map(|(text, span)| (text, Some(span)))
+        .unwrap_or(("Record<string, unknown>", None));
+    let (prefix, suffix) = match dialect {
+        SvelteIdeDialect::TypeScript => (
+            "\ndeclare const __VerterPublicComponent: import(\"svelte\").Component<",
+            ", {}, \"\">;\nexport default __VerterPublicComponent;\n",
         ),
-        SvelteIdeDialect::JavaScript => format!(
-            "\n/** @typedef {{{props_ty}}} __VerterPublicProps */\n\
-             const __VerterPublicComponent = /** @type {{import(\"svelte\").Component<__VerterPublicProps, {{}}, \"\">}} */ (/** @type {{unknown}} */ (null));\n\
-             export default __VerterPublicComponent;\n",
+        SvelteIdeDialect::JavaScript => (
+            "\nconst __VerterPublicComponent = /** @type {import(\"svelte\").Component<",
+            ", {}, \"\">} */ (/** @type {unknown} */ (null));\nexport default __VerterPublicComponent;\n",
         ),
+    };
+    let props_ty = ct.alloc_str(props_ty);
+    let mut fragments = Vec::with_capacity(props_ty.lines().count() + 2);
+    fragments.push((at, None, prefix));
+    if let Some(span) = source_span {
+        // An InsertedMapped chunk owns one source-map token. Source-map state
+        // does not carry across a generated newline, so a multiline authored
+        // annotation must start a mapped chunk on every line. The copied bytes
+        // are identical to the source span; advancing by each inclusive line's
+        // byte length therefore preserves exact generated/source coordinates.
+        let mut source_offset = 0u32;
+        for line in props_ty.split_inclusive('\n') {
+            fragments.push((at, Some((span.start + source_offset, 0)), line));
+            source_offset += line.len() as u32;
+        }
+    } else {
+        fragments.push((at, None, props_ty));
     }
+    fragments.push((at, None, suffix));
+    ct.batch_prepend_left_with_source_map(&fragments);
 }

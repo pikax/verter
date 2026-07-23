@@ -1506,6 +1506,24 @@ export function useCounter() { return ref(0); }
 }
 
 #[test]
+fn imports_only_scope_does_not_construct_unrequested_semantics() {
+    let code = r#"
+import Child from './Child.vue';
+const suffix = 'Widget';
+const lazy = import(`./${suffix}.vue`);
+defineProps<{ value: string }>();
+"#;
+    let result = analyze_with_scope(code, AnalysisScope::IMPORTS);
+
+    assert_eq!(result.imports.len(), 1);
+    assert!(result.module_references.len() >= 2);
+    assert!(result.bindings.is_empty());
+    assert!(result.macros.is_empty());
+    assert!(result.vue_api_calls.is_empty());
+    assert!(result.declaration_entries.is_empty());
+}
+
+#[test]
 fn export_default_function_analyzed() {
     let code = r#"
 export default function useTheme() {

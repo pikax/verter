@@ -68,56 +68,111 @@ pub fn process_options_statement<'a>(
 
         // Track file-scoped variable declarations
         Statement::VariableDeclaration(var_decl) => {
-            let kind = match var_decl.kind {
-                VariableDeclarationKind::Const => DeclarationKind::Const,
-                VariableDeclarationKind::Let => DeclarationKind::Let,
-                VariableDeclarationKind::Var => DeclarationKind::Var,
-                VariableDeclarationKind::Using => DeclarationKind::Const,
-                VariableDeclarationKind::AwaitUsing => DeclarationKind::Const,
-            };
-
-            for declarator in &var_decl.declarations {
-                collect_declarations_from_pattern(&declarator.id, kind, items);
-            }
+            record_variable_declaration(var_decl, items);
         }
 
         // Track file-scoped function declarations
         Statement::FunctionDeclaration(func) => {
-            if let Some(id) = &func.id {
-                let kind = match (func.r#async, func.generator) {
-                    (true, true) => DeclarationKind::AsyncGeneratorFunction,
-                    (true, false) => DeclarationKind::AsyncFunction,
-                    (false, true) => DeclarationKind::GeneratorFunction,
-                    (false, false) => DeclarationKind::Function,
-                };
-
-                items.push(ScriptItem::Declaration(ScriptDeclaration {
-                    span: Span::from(func.span),
-                    name: Some(id.name.as_str()),
-                    name_span: Some(Span::from(id.span)),
-                    kind,
-                    is_ref_like: false,
-                }));
-            }
+            record_function_declaration(func, items);
         }
 
         // Track file-scoped class declarations
         Statement::ClassDeclaration(class) => {
-            if let Some(id) = &class.id {
-                items.push(ScriptItem::Declaration(ScriptDeclaration {
-                    span: Span::from(class.span),
-                    name: Some(id.name.as_str()),
-                    name_span: Some(Span::from(id.span)),
-                    kind: DeclarationKind::Class,
-                    is_ref_like: false,
-                }));
-            }
+            record_class_declaration(class, items);
         }
 
-        // Named exports - already handled by shared
-        Statement::ExportNamedDeclaration(_) | Statement::ExportAllDeclaration(_) => {}
+        // The shared pass records export metadata. A declaration-bearing named
+        // export also introduces a real module-scope value, so retain the same
+        // declaration fact as its non-exported spelling. Downstream consumers
+        // must not have to infer lexical bindings from export syntax.
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(declaration) = &export.declaration {
+                record_exported_declaration(declaration, items);
+            }
+        }
+        Statement::ExportAllDeclaration(_) => {}
 
         _ => {}
+    }
+}
+
+fn record_exported_declaration<'a>(
+    declaration: &'a Declaration<'a>,
+    items: &mut Vec<ScriptItem<'a>>,
+) {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) => {
+            record_variable_declaration(declaration, items)
+        }
+        Declaration::FunctionDeclaration(declaration) => {
+            record_function_declaration(declaration, items)
+        }
+        Declaration::ClassDeclaration(declaration) => record_class_declaration(declaration, items),
+        // Type-only declarations introduce no lexical runtime value. Enums
+        // remain represented by the export item and the preserved source; the
+        // Options binding inventory intentionally describes value declarations
+        // that template code can reference without a TypeScript lowering step.
+        Declaration::TSTypeAliasDeclaration(_)
+        | Declaration::TSInterfaceDeclaration(_)
+        | Declaration::TSEnumDeclaration(_)
+        | Declaration::TSModuleDeclaration(_)
+        | Declaration::TSImportEqualsDeclaration(_)
+        | Declaration::TSGlobalDeclaration(_) => {}
+    }
+}
+
+fn record_variable_declaration<'a>(
+    declaration: &'a VariableDeclaration<'a>,
+    items: &mut Vec<ScriptItem<'a>>,
+) {
+    if declaration.declare {
+        return;
+    }
+    let kind = match declaration.kind {
+        VariableDeclarationKind::Const => DeclarationKind::Const,
+        VariableDeclarationKind::Let => DeclarationKind::Let,
+        VariableDeclarationKind::Var => DeclarationKind::Var,
+        VariableDeclarationKind::Using => DeclarationKind::Const,
+        VariableDeclarationKind::AwaitUsing => DeclarationKind::Const,
+    };
+    for declarator in &declaration.declarations {
+        collect_declarations_from_pattern(&declarator.id, kind, items);
+    }
+}
+
+fn record_function_declaration<'a>(declaration: &'a Function<'a>, items: &mut Vec<ScriptItem<'a>>) {
+    if declaration.declare {
+        return;
+    }
+    if let Some(id) = &declaration.id {
+        let kind = match (declaration.r#async, declaration.generator) {
+            (true, true) => DeclarationKind::AsyncGeneratorFunction,
+            (true, false) => DeclarationKind::AsyncFunction,
+            (false, true) => DeclarationKind::GeneratorFunction,
+            (false, false) => DeclarationKind::Function,
+        };
+        items.push(ScriptItem::Declaration(ScriptDeclaration {
+            span: Span::from(declaration.span),
+            name: Some(id.name.as_str()),
+            name_span: Some(Span::from(id.span)),
+            kind,
+            is_ref_like: false,
+        }));
+    }
+}
+
+fn record_class_declaration<'a>(declaration: &'a Class<'a>, items: &mut Vec<ScriptItem<'a>>) {
+    if declaration.declare {
+        return;
+    }
+    if let Some(id) = &declaration.id {
+        items.push(ScriptItem::Declaration(ScriptDeclaration {
+            span: Span::from(declaration.span),
+            name: Some(id.name.as_str()),
+            name_span: Some(Span::from(id.span)),
+            kind: DeclarationKind::Class,
+            is_ref_like: false,
+        }));
     }
 }
 

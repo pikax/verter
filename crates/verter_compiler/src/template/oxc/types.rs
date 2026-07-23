@@ -145,6 +145,13 @@ pub struct OxcParsedExpression<'alloc> {
     /// (adjusted via `BindingContext::base_offset`).
     pub bindings: Option<BindingExtractionResult<'alloc>>,
 
+    /// Lexical locals that remain authoritative when an IDE expression does not
+    /// parse (for example, a v-slot receiver while the user has typed `title.`).
+    ///
+    /// This is populated only for the IDE error path. It preserves an existing
+    /// scope fact; it is not inferred from a repaired or synthetic expression.
+    pub ide_recovery_scope: Vec<&'alloc str>,
+
     /// Three-state dynamism classification.
     pub dynamism: Dynamism,
 }
@@ -507,6 +514,7 @@ mod iter_expressions_tests {
             expression: None,
             errors: None,
             bindings: None,
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Static,
         }
     }

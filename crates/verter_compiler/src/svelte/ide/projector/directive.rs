@@ -31,13 +31,19 @@ impl TemplateProjector<'_, '_> {
                 // Attribute-value shorthand `<input {value} />`: the parser
                 // sets name == the inner expression text and the attribute span
                 // opens with `{`. A bare `{value}` is INVALID in a JSX opening
-                // tag — rewrite it to `value={value}` by inserting `name=`
-                // before the `{` (the `{value}` expression stays mapped).
+                // tag — rewrite it to `value={value}` by deleting the opening
+                // `{` and inserting synthetic `value={` punctuation immediately
+                // before the unchanged inner identifier. Separate unmapped and
+                // original chunks keep that identifier as the sole mapped
+                // occurrence, preserving local-expression IDE semantics.
                 if self.source.as_bytes().get(attr.span.start as usize) == Some(&b'{') {
-                    self.ct.prepend_left(attr.span.start, &format!("{name}="));
-                    // A `{$store}` shorthand still rewrites the store-sub interior.
                     if let Some(SvelteAttributeValue::Expression(expr)) = value {
+                        self.ct.overwrite(attr.span.start, expr.start, "");
+                        self.ct.prepend_left(expr.start, &format!("{name}={{"));
+                        // A `{$store}` shorthand still rewrites the store-sub interior.
                         self.rewrite_store_subs_in(*expr);
+                    } else {
+                        self.ct.prepend_left(attr.span.start, &format!("{name}="));
                     }
                     let _ = name_span;
                     return;

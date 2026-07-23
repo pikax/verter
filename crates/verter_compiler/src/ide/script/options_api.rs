@@ -21,7 +21,9 @@ use crate::ide::IdeScriptOptions;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
-use crate::utils::oxc::vue::{parse_script, DefaultExportType, ScriptItem, ScriptMode};
+use crate::utils::oxc::vue::{
+    parse_script, DeclarationKind, DefaultExportType, ScriptItem, ScriptMode,
+};
 
 use super::{
     apply_template_ref_call_inference, collect_binding_names, collect_global_component_fallbacks,
@@ -109,6 +111,31 @@ pub(super) fn process_companion_for_tsx<'alloc>(
             let abs_end = comp_start + td.span.end;
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
         }
+    }
+
+    // A normal companion script and `<script setup>` share module lexical
+    // scope. Preserve its runtime declaration inventory so template TSX uses
+    // the real module binding (and therefore its inferred type), instead of
+    // falling back to the component-instance escape hatch as `any`.
+    for item in &parse_result.items {
+        let ScriptItem::Declaration(declaration) = item else {
+            continue;
+        };
+        let Some(name) = declaration.name else {
+            continue;
+        };
+        let binding_type = match declaration.kind {
+            DeclarationKind::Let | DeclarationKind::Var => BindingType::SetupLet,
+            DeclarationKind::Const
+            | DeclarationKind::Function
+            | DeclarationKind::AsyncFunction
+            | DeclarationKind::GeneratorFunction
+            | DeclarationKind::AsyncGeneratorFunction
+            | DeclarationKind::Class => BindingType::SetupConst,
+        };
+        bindings
+            .entry(alloc.alloc_str(name))
+            .or_insert(binding_type);
     }
 
     // In-project `.vue` re-export and dynamic-import specifiers are emitted

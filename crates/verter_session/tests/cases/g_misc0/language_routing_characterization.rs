@@ -26,8 +26,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 
 const count = ref(1);
 
-// @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<typeof import('./App.vue.verter.js')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -62,7 +61,7 @@ void (___VERTER___instance).valueOf;
 return {};
 } // close templateBindingFN
 
-export { default } from './App.vue.verter.ts';
+export { default } from './App.vue.verter.js';
 
 type ___VERTER___attributes = {};
 "#;

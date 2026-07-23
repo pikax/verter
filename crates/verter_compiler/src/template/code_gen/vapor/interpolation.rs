@@ -114,6 +114,7 @@ mod tests {
             expression: None,
             errors: None,
             bindings: None,
+            ide_recovery_scope: Vec::new(),
             dynamism: Dynamism::Static,
         }
     }

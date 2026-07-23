@@ -45,6 +45,7 @@ fn parse_expression<'alloc>(
             expression: None,
             errors: None,
             bindings: None,
+            ide_recovery_scope: Default::default(),
             dynamism: Dynamism::Static,
         };
     }
@@ -66,6 +67,7 @@ fn parse_expression<'alloc>(
                 errors: None,
                 dynamism: bindings.dynamism,
                 bindings: Some(bindings),
+                ide_recovery_scope: Default::default(),
             }
         }
         Err(mut errors) => {
@@ -75,6 +77,11 @@ fn parse_expression<'alloc>(
                 expression: None,
                 errors: Some(errors),
                 bindings: None,
+                ide_recovery_scope: if ide_completion {
+                    ignored.to_vec()
+                } else {
+                    Default::default()
+                },
                 dynamism: Dynamism::Static,
             }
         }

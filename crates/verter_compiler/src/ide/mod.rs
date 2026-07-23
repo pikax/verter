@@ -65,6 +65,12 @@ pub const VUE_JSX_PRAGMA: &str = "/** @jsxImportSource vue */\n";
 /// `virtual_file_naming_*` guards rather than a shared import.
 pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
 
+/// The ESM-compatible specifier for the TypeScript API carrier. TypeScript
+/// resolves `.js` imports to sibling `.ts` sources by standard extension
+/// substitution, avoiding `allowImportingTsExtensions` and diagnostics
+/// suppressions while preserving the exact `.verter.ts` provider identity.
+pub const CARRIER_API_MODULE_SPECIFIER_SUFFIX: &str = ".verter.js";
+
 /// Options for IDE script generation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -621,6 +627,11 @@ mod tests {
     #[test]
     fn carrier_api_suffix_matches_workspace_naming() {
         assert_eq!(CARRIER_API_VIRTUAL_SUFFIX, ".verter.ts");
+        assert_eq!(CARRIER_API_MODULE_SPECIFIER_SUFFIX, ".verter.js");
+        assert_eq!(
+            CARRIER_API_MODULE_SPECIFIER_SUFFIX.strip_suffix(".js"),
+            CARRIER_API_VIRTUAL_SUFFIX.strip_suffix(".ts")
+        );
         // The reserved `.verter.` infix marks the API surface — the
         // redirect-reached cross-package target, never a bare-import probe
         // target (a bare `./Comp.vue` resolves natively to the `.d.vue.ts`

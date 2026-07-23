@@ -977,6 +977,7 @@ fn element_with_interpolation() {
         expression: None,
         errors: None,
         bindings: None,
+        ide_recovery_scope: Vec::new(),
         dynamism: Dynamism::Static,
     };
 

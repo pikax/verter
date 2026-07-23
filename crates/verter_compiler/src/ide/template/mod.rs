@@ -639,8 +639,8 @@ fn walk_element<'a, 'alloc>(
         for d in &collected_directives {
             write!(
                 directive_prop,
-                "___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor[\"{name}\"])(___VERTER___directiveElement,{value},{arg},{mods});",
-                name = d.camel_name,
+                "___VERTER___runCustomDirective(___VERTER___directiveElement,{reference})(___VERTER___directiveElement,{value},{arg},{mods});",
+                reference = d.reference,
                 value = d.value,
                 arg = d.arg,
                 mods = d.modifiers,
@@ -2177,7 +2177,13 @@ fn visit_interpolation<'alloc>(
     if let Some(expr) = oxc_expr {
         if expr.expression.is_none() && expr.errors.is_some() {
             let raw_expr = &source[interp.inner_start as usize..interp.inner_end as usize];
-            recover_broken_interpolation_expr(raw_expr, interp.inner_start, out, resolver);
+            recover_broken_interpolation_expr(
+                raw_expr,
+                interp.inner_start,
+                out,
+                resolver,
+                &expr.ide_recovery_scope,
+            );
         } else if let Some(ref bindings) = expr.bindings {
             // Apply binding prefixes to expression identifiers for valid expressions.
             resolver.collect_binding_patches(bindings, out);
@@ -2214,6 +2220,7 @@ fn recover_broken_interpolation_expr<'alloc>(
     expr_start: u32,
     out: &mut CodeGenOutput<'alloc>,
     resolver: &BindingResolver<'alloc>,
+    scope_locals: &[&str],
 ) {
     let bytes = raw_expr.as_bytes();
     let mut recovered = Vec::new();
@@ -2230,16 +2237,29 @@ fn recover_broken_interpolation_expr<'alloc>(
                 i += 1;
             }
             let ident = &raw_expr[start..i];
-            let resolved = resolver.resolve_simple_expr(ident);
-            let is_passthrough_keyword_or_global = resolved == ident
+            let is_scoped_local = scope_locals
+                .iter()
+                .any(|local| *local == ident || local.starts_with(ident));
+            let provider_resolved = resolver.resolve_simple_expr(ident);
+            let is_passthrough_keyword_or_global = provider_resolved == ident
                 && (crate::utils::oxc::bindings::keywords::is_keyword(ident.as_bytes())
                     || crate::utils::oxc::bindings::keywords::is_global(ident.as_bytes()));
-            if is_passthrough_keyword_or_global {
-                continue;
-            }
+            let resolved = if is_scoped_local {
+                ident.to_string()
+            } else {
+                provider_resolved
+            };
 
-            let prefix = resolver.resolve_prefix(ident);
-            let suffix = resolver.resolve_suffix(ident);
+            let prefix = if is_scoped_local || is_passthrough_keyword_or_global {
+                ""
+            } else {
+                resolver.resolve_prefix(ident)
+            };
+            let suffix = if is_scoped_local || is_passthrough_keyword_or_global {
+                ""
+            } else {
+                resolver.resolve_suffix(ident)
+            };
             let simple_resolved = format!("{prefix}{ident}{suffix}");
             let patch = if resolved == simple_resolved {
                 RecoveredInterpolationPatch::PrefixSuffix {
@@ -2272,6 +2292,12 @@ fn recover_broken_interpolation_expr<'alloc>(
     for recovered_ident in &recovered {
         sanitized[recovered_ident.start..recovered_ident.end]
             .copy_from_slice(&bytes[recovered_ident.start..recovered_ident.end]);
+    }
+
+    let member_hole = trailing_simple_member_hole(raw_expr);
+    if let Some(member_hole) = member_hole {
+        sanitized[member_hole.start..member_hole.end]
+            .copy_from_slice(&bytes[member_hole.start..member_hole.end]);
     }
 
     for pair in recovered.windows(2) {
@@ -2343,6 +2369,85 @@ fn recover_broken_interpolation_expr<'alloc>(
                     SourceByteOffset(ident_start),
                 );
             }
+        }
+    }
+
+    if let Some(member_hole) = member_hole {
+        // The authored dot remains source-mapped. The synthetic property name is
+        // an unmapped output-only hole that keeps the carrier valid while asking
+        // TypeScript for members at the boundary immediately after the dot.
+        out.prepend_static(expr_start + member_hole.end as u32, "valueOf");
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TrailingSimpleMemberHole {
+    start: usize,
+    end: usize,
+}
+
+/// Recognize a conservative identifier-only member chain ending at an authored
+/// `.` / `?.` completion boundary. The returned range contains only original
+/// source bytes and can therefore stay mapped; the caller inserts the member-hole
+/// identifier separately as generated-only text.
+fn trailing_simple_member_hole(raw_expr: &str) -> Option<TrailingSimpleMemberHole> {
+    let bytes = raw_expr.as_bytes();
+    let end = bytes.iter().rposition(|byte| !byte.is_ascii_whitespace())? + 1;
+    if bytes.get(end.checked_sub(1)?) != Some(&b'.') {
+        return None;
+    }
+
+    let mut start = end;
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if is_ident_continue(byte) || matches!(byte, b'.' | b'?' | b' ' | b'\t') {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+
+    let mut cursor = start;
+    if cursor >= end || !is_ident_start(bytes[cursor]) {
+        return None;
+    }
+    cursor += 1;
+    while cursor < end && is_ident_continue(bytes[cursor]) {
+        cursor += 1;
+    }
+
+    loop {
+        while cursor < end && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= end {
+            return None;
+        }
+        if bytes[cursor] == b'?' {
+            if bytes.get(cursor + 1) != Some(&b'.') {
+                return None;
+            }
+            cursor += 2;
+        } else if bytes[cursor] == b'.' {
+            cursor += 1;
+        } else {
+            return None;
+        }
+        while cursor < end && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor == end {
+            return Some(TrailingSimpleMemberHole { start, end });
+        }
+        if !is_ident_start(bytes[cursor]) {
+            return None;
+        }
+        cursor += 1;
+        while cursor < end && is_ident_continue(bytes[cursor]) {
+            cursor += 1;
         }
     }
 }

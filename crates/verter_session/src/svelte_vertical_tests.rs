@@ -1242,7 +1242,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
     // generated props object must map to the AUTHORED `$props()` type-
     // annotation member — NOT the destructured binding (occurrence 0).
     let host = host();
-    let source = "<script lang=\"ts\">\n  let { contractProp }: { contractProp: string } = $props();\n</script>\n\n<strong>{contractProp}</strong>\n";
+    let source = "<script lang=\"ts\">\n  let { contractProp }: {\n    contractProp: string;\n  } = $props();\n</script>\n\n<strong>{contractProp}</strong>\n";
     upsert_svelte(&host, "/DirectChild.svelte", source);
 
     let api = host
@@ -1278,8 +1278,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
     // is the destructured binding, which must NOT be the mapping target.
     let binding_offset = source.find("contractProp").expect("destructured binding");
     let authored_offset = source
-        .find(": { contractProp: string }")
-        .map(|at| at + ": { ".len())
+        .find("contractProp: string;")
         .expect("the authored annotation member");
     assert_ne!(binding_offset, authored_offset);
 
