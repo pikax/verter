@@ -1718,6 +1718,10 @@ pub struct TsserverTypeProvider {
     transport: Arc<TsserverTransport>,
     /// tsserver child process. Killed on drop.
     child: Child,
+    /// Process-tree handle armed immediately after spawn, before Node can be
+    /// treated as a live provider. It also registers the tree with the LSP
+    /// client-lifetime monitor for abrupt editor death.
+    tree: verter_tsgo_api::process::TreeKill,
     /// Cached file contents for position conversion.
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Files that have been sent to tsserver via `open` command, tagged by
@@ -1809,6 +1813,7 @@ enum CarrierRefreshPriority {
 
 impl Drop for TsserverTypeProvider {
     fn drop(&mut self) {
+        self.tree.kill_tree();
         let _ = self.child.start_kill();
     }
 }
@@ -1981,13 +1986,16 @@ impl TsserverTypeProvider {
             if plugin_response_remap { "1" } else { "0" },
         );
 
-        let mut child = cmd
+        let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        verter_tsgo_api::process::configure_tree_spawn(child);
+        let mut child = child
             .spawn()
             .map_err(|e| TypeProviderError::new(format!("failed to spawn tsserver: {e}")))?;
+        let tree = verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0));
 
         let stdin = child
             .stdin
@@ -2069,6 +2077,7 @@ impl TsserverTypeProvider {
         Ok(Self {
             transport,
             child,
+            tree,
             contents: contents_cache,
             opened_files: Arc::new(Mutex::new(HashMap::new())),
             diagnostics_cache,
@@ -2264,10 +2273,12 @@ fn schedule_carrier_refresh(
             )
             .await
             {
-                if error.message.contains("background transaction preempted")
-                    && refresh.urgent_generation.load(Ordering::Acquire)
-                        > refresh.applied_generation.load(Ordering::Acquire)
-                {
+                if error.message.contains("background transaction preempted") {
+                    // Every background refresh is idempotent and represents a
+                    // still-unapplied requested generation. Ordinary hover or
+                    // completion also preempts this lane, without advancing
+                    // `urgent_generation`; retry after the interactive-idle
+                    // admission instead of permanently dropping membership.
                     continue;
                 }
                 tracing::warn!(

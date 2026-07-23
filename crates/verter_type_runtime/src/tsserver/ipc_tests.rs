@@ -1588,6 +1588,57 @@ async fn active_carrier_refresh_preempts_a_running_background_refresh() {
         .expect("the active refresh fence must complete");
 }
 
+#[tokio::test]
+async fn ordinary_interactive_request_requeues_preempted_carrier_refresh() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(test_transport(stdin_tx));
+    let refresh = Arc::new(TsserverCarrierRefresh::default());
+    schedule_carrier_refresh(
+        Arc::clone(&transport),
+        Arc::new(parking_lot::RwLock::new(BTreeSet::from([
+            "/proj/src/App.vue".to_string(),
+        ]))),
+        Arc::clone(&refresh),
+        1,
+        "/proj/src/App.vue.tsx".to_string(),
+        CarrierRefreshPriority::Background,
+    );
+
+    let first = receive_tsserver_request(&mut stdin_rx).await;
+    assert_eq!(first["command"], "configurePlugin");
+
+    // Hover/completion preempt background work without publishing a newer
+    // carrier generation. The interrupted idempotent refresh must still be
+    // resubmitted once the interactive lane is idle.
+    let interactive = transport.begin_interactive_request();
+    drop(interactive);
+
+    let retry = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        receive_tsserver_request(&mut stdin_rx),
+    )
+    .await
+    .expect("the preempted refresh must be requeued without a new publication");
+    assert_eq!(retry["command"], "configurePlugin");
+    send_success_response(
+        &transport.pending,
+        retry["seq"].as_i64().expect("retry configurePlugin seq"),
+        "configurePlugin",
+    )
+    .await;
+    let host_turn = receive_tsserver_request(&mut stdin_rx).await;
+    assert_eq!(host_turn["command"], "configure");
+    send_success_response(
+        &transport.pending,
+        host_turn["seq"].as_i64().expect("host-turn seq"),
+        "configure",
+    )
+    .await;
+    wait_for_carrier_refresh(&refresh, 1)
+        .await
+        .expect("the requeued background refresh must complete");
+}
+
 /// Project-wide references/rename admit every framework source through the
 /// plugin's external-file set, but only one authored source per configured
 /// project may be protocol-opened as the project bootstrap. Opening every Vue/
