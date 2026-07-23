@@ -37,6 +37,22 @@ fn cli_pairs_editor_tsserver_receipt_with_its_nonce() {
 }
 
 #[test]
+fn cli_captures_the_client_process_lifetime_witness() {
+    let args = CliArgs::parse_from(["--client-pid=4242".to_string(), "C:/workspace".to_string()]);
+
+    assert_eq!(args.client_pid, Some(4242));
+    assert_eq!(args.workspace_root.as_deref(), Some("C:/workspace"));
+}
+
+#[test]
+fn cli_rejects_a_malformed_client_process_witness() {
+    let error = CliArgs::try_parse_from(["--client-pid=not-a-pid".to_string()])
+        .err()
+        .expect("malformed explicit client pid must fail closed");
+    assert!(error.contains("--client-pid"), "unexpected error: {error}");
+}
+
+#[test]
 fn cli_attestation_is_fail_closed_for_partial_or_stale_facts() {
     let partial = CliArgs::parse_from([format!("--editor-tsserver-nonce={NONCE}")]);
     assert!(partial.editor_tsserver_attestation().is_err());

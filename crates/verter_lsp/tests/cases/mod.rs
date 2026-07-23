@@ -4,6 +4,7 @@
 
 mod carrier_routing_no_vue_gate;
 mod carrier_routing_no_vue_named_primitive;
+mod client_lifetime;
 mod closed_carrier_in_autoimport_index;
 mod cross_file_navigation_ranges_fail_closed;
 mod decl_overlay_close_ownership;

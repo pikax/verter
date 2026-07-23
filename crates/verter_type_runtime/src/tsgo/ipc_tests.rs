@@ -2830,6 +2830,9 @@ async fn test_provider_operations_fail_after_process_death() {
 
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
@@ -2916,6 +2919,9 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
     ));
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::clone(&contents_cache),
@@ -3012,6 +3018,9 @@ async fn test_drop_kills_child_process() {
 
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
@@ -3048,6 +3057,9 @@ async fn test_child_pid_returns_id() {
 
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
@@ -3784,6 +3796,9 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
@@ -3859,6 +3874,9 @@ async fn get_completion_details_enriches_full_small_list() {
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
@@ -3941,6 +3959,9 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
+        tree: Some(verter_tsgo_api::process::TreeKill::arm(
+            child.id().unwrap_or(0),
+        )),
         child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
@@ -4525,6 +4546,7 @@ fn ledger_provider(capacity: usize) -> (TsgoTypeProvider, mpsc::Receiver<StdinMe
     let (stdin_tx, stdin_rx) = mpsc::channel(capacity);
     let provider = TsgoTypeProvider {
         transport: Arc::new(test_transport(stdin_tx)),
+        tree: None,
         child: None,
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),

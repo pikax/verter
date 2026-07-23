@@ -2079,6 +2079,10 @@ pub struct TsgoTypeProvider {
     /// initialized, non-owning editor connection; that mode must never kill or
     /// originate shutdown/exit toward the editor's engine.
     child: Option<StdMutex<Option<Child>>>,
+    /// Process-tree handle armed at spawn time for owned engines. `None` for an
+    /// attached editor-owned transport. Registration lets the LSP client-death
+    /// monitor kill descendants before terminating itself.
+    tree: Option<verter_tsgo_api::process::TreeKill>,
     /// Document version counter per path.
     versions: Arc<Mutex<HashMap<String, i32>>>,
     /// Cached file contents for byte-offset → LSP position conversion.
@@ -2098,14 +2102,14 @@ impl Drop for TsgoTypeProvider {
         // kill_on_drop(true) on the Command already handles the direct child,
         // but an explicit Drop makes the tree kill intent clear. A child whose
         // pid can no longer be read (already reaped) is left to kill_on_drop.
+        if let Some(tree) = &self.tree {
+            tree.kill_tree();
+        }
         if let Some(slot) = &mut self.child {
             let child = slot
                 .get_mut()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(child) = child {
-                if let Some(pid) = child.id() {
-                    verter_tsgo_api::process::TreeKill::arm(pid).kill_tree();
-                }
                 let _ = child.start_kill();
             }
         }
@@ -2145,6 +2149,7 @@ impl TsgoTypeProvider {
         let mut child = command
             .spawn()
             .map_err(|e| TypeProviderError::new(format!("failed to spawn tsgo: {e}")))?;
+        let tree = verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0));
 
         let stdin = child
             .stdin
@@ -2156,7 +2161,13 @@ impl TsgoTypeProvider {
             .ok_or_else(|| TypeProviderError::new("no stdout"))?;
         let stderr = child.stderr.take();
 
-        let provider = Self::from_transport_parts(stdout, stdin, Some(child), crash_notify);
+        let provider = Self::from_transport_parts_with_tree(
+            stdout,
+            stdin,
+            Some(child),
+            Some(tree),
+            crash_notify,
+        );
 
         // Log tsgo stderr in a background task so crashes are visible
         if let Some(stderr) = stderr {
@@ -2255,10 +2266,28 @@ impl TsgoTypeProvider {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        Self::from_transport_parts_configured(
+        let tree = child
+            .as_ref()
+            .map(|child| verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0)));
+        Self::from_transport_parts_with_tree(read, write, child, tree, crash_notify)
+    }
+
+    fn from_transport_parts_with_tree<R, W>(
+        read: R,
+        write: W,
+        child: Option<Child>,
+        tree: Option<verter_tsgo_api::process::TreeKill>,
+        crash_notify: Option<Arc<Notify>>,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::from_transport_parts_configured_with_tree(
             read,
             write,
             child,
+            tree,
             crash_notify,
             DEFAULT_LANE_CAPACITY,
             std::time::Duration::from_secs(WRITER_STALL_TIMEOUT_SECS),
@@ -2270,10 +2299,38 @@ impl TsgoTypeProvider {
     /// and [`WRITER_STALL_TIMEOUT_SECS`]; the deadlock-repro tests inject a tiny
     /// capacity and a short watchdog so a full lane / stalled child is reachable
     /// deterministically.
+    #[cfg(test)]
     fn from_transport_parts_configured<R, W>(
         read: R,
         write: W,
         child: Option<Child>,
+        crash_notify: Option<Arc<Notify>>,
+        lane_capacity: usize,
+        writer_stall: std::time::Duration,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let tree = child
+            .as_ref()
+            .map(|child| verter_tsgo_api::process::TreeKill::arm(child.id().unwrap_or(0)));
+        Self::from_transport_parts_configured_with_tree(
+            read,
+            write,
+            child,
+            tree,
+            crash_notify,
+            lane_capacity,
+            writer_stall,
+        )
+    }
+
+    fn from_transport_parts_configured_with_tree<R, W>(
+        read: R,
+        write: W,
+        child: Option<Child>,
+        tree: Option<verter_tsgo_api::process::TreeKill>,
         crash_notify: Option<Arc<Notify>>,
         lane_capacity: usize,
         writer_stall: std::time::Duration,
@@ -2341,6 +2398,7 @@ impl TsgoTypeProvider {
         Self {
             transport,
             child: child.map(|child| StdMutex::new(Some(child))),
+            tree,
             versions: Arc::new(Mutex::new(HashMap::new())),
             contents,
             diagnostics_cache,
