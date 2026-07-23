@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn process_death_closes_pending_registration_atomically() {
+    let pending = TsserverPendingRequests::default();
+    pending.drain_with_crash_error();
+
+    let (tx, _rx) = oneshot::channel();
+    assert!(
+        !pending.insert(1, tx),
+        "a request racing after EOF must be rejected instead of waiting forever"
+    );
+}
+
+#[test]
+fn carrier_response_paths_normalize_authored_program_ids_to_companions() {
+    let companion = verter_span::path::canonicalize_path("D:/workspace/src/Comp.vue.tsx");
+    let source = verter_span::path::canonicalize_path("D:/workspace/src/Comp.vue");
+    let mappings = parking_lot::RwLock::new(HashMap::from([(source.clone(), companion.clone())]));
+
+    assert_eq!(
+        remap_carrier_response_path("D:\\workspace\\src\\Comp.vue", &mappings, true),
+        companion.clone(),
+        "managed tsserver Programs use authored identities, which must normalize back to the private companion coordinates consumed by the LSP mapper"
+    );
+    assert_eq!(
+        remap_carrier_response_path("D:/workspace/src/Comp.vue.tsx", &mappings, true),
+        companion,
+        "a response already expressed in companion coordinates must stay there until the LSP mapper"
+    );
+    assert_eq!(
+        remap_carrier_response_path("D:/workspace/src/plain.ts", &mappings, true),
+        verter_span::path::canonicalize_path("D:/workspace/src/plain.ts"),
+        "ordinary TypeScript paths remain unchanged"
+    );
+    assert_eq!(
+        remap_carrier_response_path("D:/workspace/src/Comp.vue", &mappings, false),
+        source,
+        "the direct plugin surface has already mapped its response and must not be normalized back to a companion"
+    );
+}
+
+#[test]
 fn test_byte_offset_to_tsserver_pos() {
     let content = "line1\nline2\nline3";
     // 'l' at start of line1 → (1, 1)
@@ -1102,10 +1142,12 @@ async fn run_update_file_capture(
     let file = file.to_string();
     let project_root = "/project".to_string();
 
-    // Read old content's line count BEFORE inserting new content
-    let old_line_count = {
+    // Read the exact old UTF-16 end BEFORE inserting new content.
+    let old_end = {
         let cache = contents_cache.lock().await;
-        cache.get(&file).map(|c| c.lines().count() as u32 + 1)
+        cache
+            .get(&file)
+            .map(|c| byte_offset_to_tsserver_pos(c, c.len() as u32))
     };
 
     contents_cache
@@ -1116,7 +1158,7 @@ async fn run_update_file_capture(
     let mut opened = opened_files.lock().await;
     if opened.contains_key(&file) {
         drop(opened);
-        if let Some(end_line) = old_line_count {
+        if let Some((end_line, end_offset)) = old_end {
             let _ = transport
                 .command_no_response(
                     "updateOpen",
@@ -1125,7 +1167,7 @@ async fn run_update_file_capture(
                             "fileName": file,
                             "textChanges": [{
                                 "start": { "line": 1, "offset": 1 },
-                                "end": { "line": end_line, "offset": 1 },
+                                "end": { "line": end_line, "offset": end_offset },
                                 "newText": content,
                             }]
                         }]
@@ -1197,20 +1239,17 @@ async fn run_update_file_capture(
 }
 
 #[tokio::test]
-async fn test_update_file_end_line_matches_old_content() {
+async fn test_update_file_end_position_matches_old_content_without_trailing_newline() {
     let old = "line1\nline2\nline3"; // 3 lines
     let new = "line1\nline2\nline3\nline4\nline5"; // 5 lines
     let frames = run_update_file_capture(Some(old), new, "/project/src/App.vue.tsx").await;
 
     assert_eq!(frames.len(), 1, "should send exactly one command");
     let args = &frames[0]["arguments"];
-    let end_line = args["changedFiles"][0]["textChanges"][0]["end"]["line"]
-        .as_u64()
-        .unwrap();
+    let end = &args["changedFiles"][0]["textChanges"][0]["end"];
 
-    // Old content has 3 lines → end line should be 4 (lines().count() + 1)
-    assert_eq!(end_line, 4, "end line should be old content line count + 1");
-    assert_ne!(end_line, 1_000_000, "must NOT use hardcoded 1_000_000");
+    assert_eq!(end["line"], 3, "the final unterminated line is line 3");
+    assert_eq!(end["offset"], 6, "line3 contains five UTF-16 code units");
 }
 
 #[tokio::test]
@@ -1219,18 +1258,30 @@ async fn test_update_file_single_line_content() {
     let new = "const x = 1;\nconst y = 2;";
     let frames = run_update_file_capture(Some(old), new, "/project/src/App.vue.tsx").await;
 
-    let end_line = frames[0]["arguments"]["changedFiles"][0]["textChanges"][0]["end"]["line"]
-        .as_u64()
-        .unwrap();
-    assert_eq!(end_line, 2, "single-line content: lines().count()=1, +1=2");
-    assert_ne!(end_line, 1_000_000, "must NOT use hardcoded 1_000_000");
+    let end = &frames[0]["arguments"]["changedFiles"][0]["textChanges"][0]["end"];
+    assert_eq!(end["line"], 1);
+    assert_eq!(end["offset"], 13);
+}
+
+#[tokio::test]
+async fn test_update_file_trailing_newline_ends_at_next_line_start() {
+    let frames = run_update_file_capture(
+        Some("line1\nline2\n"),
+        "replacement",
+        "/project/src/App.vue.tsx",
+    )
+    .await;
+
+    let end = &frames[0]["arguments"]["changedFiles"][0]["textChanges"][0]["end"];
+    assert_eq!(end["line"], 3);
+    assert_eq!(end["offset"], 1);
 }
 
 /// Capture the wire frames the `notify_carrier_changed` body produces for a
-/// companion path: a plugin publication-token advance for warm ScriptInfo refresh,
-/// the `updateOpen { changedFiles }` cold-resolution eviction, then a response
-/// round-trip that fences later provider queries onto a subsequent host turn.
-async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::Value> {
+/// companion path: one plugin configuration plus one no-op host-turn fence.
+/// Project construction stays lazy until the real interactive query instead of
+/// being forced through `projectInfo` per carrier.
+async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_json::Value> {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
@@ -1243,53 +1294,31 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
         last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
         crash_notify: None,
         membership_recovery: Mutex::new(None),
-        cancellation: None,
+        cancellation: TsserverCancellation::create().map(Arc::new),
     });
 
-    // The exact command sequence of `TsserverTypeProvider::notify_carrier_changed`.
-    let file = TsserverTypeProvider::normalize_path(companion);
-    let _ = transport
-        .command_no_response(
-            "configurePlugin",
-            serde_json::json!({
-                "pluginName": "@verter/typescript-plugin",
-                "configuration": { "carrierStoreRefreshToken": 1 }
-            }),
-        )
-        .await;
-    let _ = transport
-        .command_no_response(
-            "updateOpen",
-            serde_json::json!({
-                "changedFiles": [{ "fileName": file, "textChanges": [] }]
-            }),
-        )
-        .await;
+    let files: Vec<String> = companions
+        .iter()
+        .map(|companion| TsserverTypeProvider::normalize_path(companion))
+        .collect();
     let request_transport = Arc::clone(&transport);
-    let fence_file = file.clone();
-    let fence = tokio::spawn(async move {
-        request_transport
-            .request(
-                "projectInfo",
-                serde_json::json!({
-                    "file": fence_file,
-                    "needFileNameList": false,
-                }),
-            )
-            .await
+    let refresh = tokio::spawn(async move {
+        notify_carriers_changed_inner(request_transport, files, 1, Vec::new()).await
     });
-    loop {
-        let response = transport.pending.take_any();
-        if let Some(response) = response {
-            let _ = response.send(serde_json::json!({}));
-            break;
+    for _ in 0..2 {
+        loop {
+            let response = transport.pending.take_any();
+            if let Some(response) = response {
+                let _ = response.send(serde_json::json!({}));
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
     }
-    fence
+    refresh
         .await
-        .expect("fence request task must not panic")
-        .expect("fence response must complete the request");
+        .expect("carrier refresh task must not panic")
+        .expect("carrier refresh fence must complete");
 
     let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1315,20 +1344,285 @@ async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::
     frames
 }
 
-/// C10 eviction discriminator: `notify_carrier_changed` advances the plugin's
-/// carrier-store publication token (warm ScriptInfo replacement) and then fires an
-/// `updateOpen` `changedFiles` frame for the COMPANION path (cold negative-cache
-/// eviction). The final response-bearing request orders subsequent queries after
-/// the plugin's deferred graph refresh. Omitting any step leaves a stale state or
-/// permits a query to overtake the refresh.
+async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::Value> {
+    run_notify_carriers_changed_capture(&[companion]).await
+}
+
+#[tokio::test]
+async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx,
+        pending: Arc::new(TsserverPendingRequests::default()),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
+        cancellation: TsserverCancellation::create().map(Arc::new),
+    });
+    let refresh = Arc::new(TsserverCarrierRefresh::default());
+    schedule_carrier_refresh(
+        Arc::clone(&transport),
+        Arc::new(parking_lot::RwLock::new(BTreeSet::from([
+            "/proj/src/App.vue".to_string(),
+        ]))),
+        Arc::clone(&refresh),
+        7,
+        "/proj/src/App.vue.tsx".to_string(),
+    );
+
+    let receipt = {
+        let refresh = Arc::clone(&refresh);
+        tokio::spawn(async move { wait_for_carrier_refresh(&refresh, 7).await })
+    };
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), stdin_rx.recv())
+        .await
+        .expect("configure fence should be submitted")
+        .expect("transport remains open");
+    let TsserverStdinMessage::Frame(frame) = request else {
+        panic!("unexpected transport shutdown");
+    };
+    let request: serde_json::Value = serde_json::from_slice(&frame).expect("request JSON");
+    assert_eq!(request["command"], "configurePlugin");
+    assert!(
+        !receipt.is_finished(),
+        "publication must not claim readiness before tsserver accepts the plugin version"
+    );
+
+    transport
+        .pending
+        .take_any()
+        .expect("configure request remains pending")
+        .send(serde_json::json!({ "success": true, "body": {} }))
+        .expect("refresh still awaits its response");
+
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), stdin_rx.recv())
+        .await
+        .expect("host-turn fence should be submitted")
+        .expect("transport remains open");
+    let TsserverStdinMessage::Frame(frame) = request else {
+        panic!("unexpected transport shutdown");
+    };
+    let request: serde_json::Value = serde_json::from_slice(&frame).expect("request JSON");
+    assert_eq!(request["command"], "configure");
+    assert!(
+        !receipt.is_finished(),
+        "publication must not claim readiness before the plugin's deferred graph update gets a host turn"
+    );
+    transport
+        .pending
+        .take_any()
+        .expect("host-turn fence remains pending")
+        .send(serde_json::json!({ "success": true, "body": {} }))
+        .expect("refresh still awaits the host-turn response");
+    receipt
+        .await
+        .expect("receipt task should not panic")
+        .expect("configure fence should complete");
+    assert_eq!(refresh.applied_generation.load(Ordering::Acquire), 7);
+}
+
+/// The refresh and its host-turn fence are one background transaction. Paying
+/// the editor-idle quiet window between the two frames adds fixed latency to
+/// every open/change without improving preemption: interactive traffic can
+/// already cancel either in-flight frame and restart the idempotent batch.
+#[tokio::test(start_paused = true)]
+async fn carrier_refresh_pair_pays_one_background_idle_grace() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(test_transport(stdin_tx));
+    let started = tokio::time::Instant::now();
+    let refresh = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            notify_carriers_changed_inner(
+                transport,
+                vec!["/proj/src/App.vue.tsx".to_string()],
+                1,
+                vec!["/proj/src/App.vue".to_string()],
+            )
+            .await
+        })
+    };
+
+    let configure_plugin = receive_tsserver_request(&mut stdin_rx).await;
+    let configure_plugin_seq = configure_plugin["seq"]
+        .as_i64()
+        .expect("configurePlugin seq");
+    assert_eq!(configure_plugin["command"], "configurePlugin");
+    send_success_response(&transport.pending, configure_plugin_seq, "configurePlugin").await;
+
+    let host_turn = receive_tsserver_request(&mut stdin_rx).await;
+    let host_turn_seq = host_turn["seq"].as_i64().expect("configure seq");
+    assert_eq!(host_turn["command"], "configure");
+    assert_eq!(
+        tokio::time::Instant::now().duration_since(started),
+        BACKGROUND_IDLE_GRACE,
+        "the host-turn fence must reuse the batch's background admission"
+    );
+    send_success_response(&transport.pending, host_turn_seq, "configure").await;
+    refresh
+        .await
+        .expect("refresh task must not panic")
+        .expect("refresh batch must complete");
+}
+
+/// The native TypeScript experience pulls semantic, syntactic, and suggestion
+/// diagnostics as one idle transaction. Paying the 150 ms quiet window per
+/// command adds fixed latency and creates three separate starvation points.
+#[tokio::test(start_paused = true)]
+async fn diagnostic_triplet_pays_one_background_idle_grace() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(test_transport(stdin_tx));
+    let started = tokio::time::Instant::now();
+    let pull = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            transport
+                .request_background_batch_results(&[
+                    (
+                        "semanticDiagnosticsSync",
+                        serde_json::json!({ "file": "/proj/src/App.vue.tsx" }),
+                    ),
+                    (
+                        "syntacticDiagnosticsSync",
+                        serde_json::json!({ "file": "/proj/src/App.vue.tsx" }),
+                    ),
+                    (
+                        "suggestionDiagnosticsSync",
+                        serde_json::json!({ "file": "/proj/src/App.vue.tsx" }),
+                    ),
+                ])
+                .await
+        })
+    };
+
+    for expected in [
+        "semanticDiagnosticsSync",
+        "syntacticDiagnosticsSync",
+        "suggestionDiagnosticsSync",
+    ] {
+        let request = receive_tsserver_request(&mut stdin_rx).await;
+        assert_eq!(request["command"], expected);
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            BACKGROUND_IDLE_GRACE,
+            "every diagnostic frame must reuse the transaction's one admission"
+        );
+        send_success_response(
+            &transport.pending,
+            request["seq"].as_i64().expect("diagnostic seq"),
+            expected,
+        )
+        .await;
+    }
+
+    let results = pull
+        .await
+        .expect("diagnostic task must not panic")
+        .expect("diagnostic transaction must complete");
+    assert_eq!(results.len(), 3);
+    assert!(results.into_iter().all(|result| result.is_ok()));
+}
+
+#[tokio::test]
+async fn interactive_arrival_between_refresh_frames_restarts_the_batch() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(8);
+    let transport = Arc::new(test_transport(stdin_tx));
+    let refresh = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            notify_carriers_changed_inner(
+                transport,
+                vec!["/proj/src/App.vue.tsx".to_string()],
+                1,
+                vec!["/proj/src/App.vue".to_string()],
+            )
+            .await
+        })
+    };
+
+    let first = receive_tsserver_request(&mut stdin_rx).await;
+    assert_eq!(first["command"], "configurePlugin");
+    let interactive = transport.begin_interactive_request();
+    send_success_response(
+        &transport.pending,
+        first["seq"].as_i64().expect("first configurePlugin seq"),
+        "configurePlugin",
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(80), stdin_rx.recv())
+            .await
+            .is_err(),
+        "the stale batch must not submit its host-turn fence during interactive work"
+    );
+    drop(interactive);
+
+    let retry = receive_tsserver_request(&mut stdin_rx).await;
+    assert_eq!(retry["command"], "configurePlugin");
+    send_success_response(
+        &transport.pending,
+        retry["seq"].as_i64().expect("retry configurePlugin seq"),
+        "configurePlugin",
+    )
+    .await;
+    let host_turn = receive_tsserver_request(&mut stdin_rx).await;
+    assert_eq!(host_turn["command"], "configure");
+    send_success_response(
+        &transport.pending,
+        host_turn["seq"].as_i64().expect("host-turn seq"),
+        "configure",
+    )
+    .await;
+    refresh
+        .await
+        .expect("refresh task must not panic")
+        .expect("refresh batch must complete after interactive traffic");
+}
+
+/// Bulk workspace publication advances the plugin under one constant-cost pair:
+/// configure the plugin, then yield one tsserver host turn. The plugin compares
+/// the manifest itself and reloads only changed roots; neither content frames nor
+/// project-building probes are sent.
+#[tokio::test]
+async fn tsserver_batches_carrier_refresh_under_one_constant_cost_fence() {
+    let frames = run_notify_carriers_changed_capture(&[
+        "/proj/src/A.vue.verter.ts",
+        "/proj/src/A.vue.tsx",
+        "/proj/src/B.vue.verter.ts",
+        "/proj/src/B.vue.tsx",
+    ])
+    .await;
+
+    assert_eq!(
+        frames.len(),
+        2,
+        "one batch requires exactly one plugin refresh and one host-turn fence"
+    );
+    assert_eq!(frames[0]["command"].as_str(), Some("configurePlugin"));
+    assert_eq!(frames[1]["command"].as_str(), Some("configure"));
+    assert_eq!(
+        frames[0]["arguments"]["configuration"]["activeCarrierSources"],
+        serde_json::json!([]),
+        "workspace publication carries the active set separately from the published inventory"
+    );
+}
+
+/// The plugin refresh token is the one invalidation authority: its handler compares
+/// manifest identities, reloads changed ScriptInfos, clears the project's semantic
+/// cache, and reconciles configured roots. A following no-op `configure` response
+/// proves the deferred `setImmediate` graph update received a host turn, without
+/// eagerly constructing a program.
 #[tokio::test]
 async fn tsserver_cold_read_no_sticky_ts2307() {
     let frames = run_notify_carrier_changed_capture("/proj/src/Comp.vue.tsx").await;
 
     assert_eq!(
         frames.len(),
-        3,
-        "carrier invalidation must issue the warm refresh, cold eviction, and ordering fence"
+        2,
+        "carrier invalidation needs one plugin refresh and one host-turn fence"
     );
     let configure = &frames[0];
     assert_eq!(configure["command"].as_str(), Some("configurePlugin"));
@@ -1341,41 +1635,7 @@ async fn tsserver_cold_read_no_sticky_ts2307() {
         Some(1),
         "a changed token is the plugin's warm ScriptInfo reload signal"
     );
-
-    let frame = &frames[1];
-    assert_eq!(
-        frame["command"].as_str(),
-        Some("updateOpen"),
-        "the eviction lever is the `updateOpen` file-changed notification"
-    );
-    let changed = &frame["arguments"]["changedFiles"];
-    assert_eq!(
-        changed[0]["fileName"].as_str(),
-        Some("/proj/src/Comp.vue.tsx"),
-        "the eviction targets the COMPANION path (the path whose fileExists/module \
-         resolution tsserver cached cold)"
-    );
-    // The edit is empty (a content-preserving touch): the bytes are unchanged, only
-    // tsserver's cached resolution for the file is invalidated.
-    assert!(
-        changed[0]["textChanges"]
-            .as_array()
-            .is_some_and(|c| c.is_empty()),
-        "the eviction is a content-preserving touch (empty textChanges): {frame}"
-    );
-
-    let fence = &frames[2];
-    assert_eq!(fence["command"].as_str(), Some("projectInfo"));
-    assert_eq!(
-        fence["arguments"]["file"].as_str(),
-        Some("/proj/src/Comp.vue.tsx"),
-        "the ordering fence targets the same newly-published companion"
-    );
-    assert_eq!(
-        fence["arguments"]["needFileNameList"].as_bool(),
-        Some(false),
-        "the fence must not materialize a project-wide file list"
-    );
+    assert_eq!(frames[1]["command"].as_str(), Some("configure"));
 }
 
 /// The cold-companion classifier matches ONLY the tsserver "the file argument
@@ -1527,14 +1787,11 @@ fn resync_open_frame_for<'a>(
     })
 }
 
-/// A resync must reopen a SOURCE file WITH its `fileContent` (tsserver owns its
-/// content) but a CARRIER COMPANION CONTENTLESSLY — resending the carrier's bytes
-/// would convert it back into a tsserver content authority, violating the
-/// "plugin `getScriptSnapshot` is the sole content authority" contract. The bug
-/// this guards: `resync_open_files` reopened EVERY tracked path with
-/// `fileContent`, including carrier companions.
+/// A resync restores exact bytes for ordinary sources while reopening an active
+/// managed carrier contentlessly. The plugin/store remains the carrier content
+/// authority; closed/background carriers are absent from the open set.
 #[tokio::test]
-async fn resync_reopens_source_with_content_but_carrier_contentless() {
+async fn resync_reopens_source_with_content_and_active_carrier_contentlessly() {
     let source = "/project/src/real.ts";
     let carrier = "/project/src/Comp.vue.tsx";
     let frames = run_resync_capture(
@@ -1542,7 +1799,7 @@ async fn resync_reopens_source_with_content_but_carrier_contentless() {
             (source, OpenKind::Source, "export const x = 1;\n"),
             (
                 carrier,
-                OpenKind::CarrierCompanion,
+                OpenKind::CarrierSource,
                 "export default {} as any;\n",
             ),
         ],
@@ -1560,13 +1817,12 @@ async fn resync_reopens_source_with_content_but_carrier_contentless() {
 
     let carrier_open =
         resync_open_frame_for(&frames, carrier).expect("carrier must be reopened on resync");
-    assert!(
-        carrier_open["arguments"].get("fileContent").is_none(),
-        "a CARRIER COMPANION must be reopened CONTENTLESSLY on resync — resending its \
-         bytes makes tsserver the content authority and breaks the plugin's \
-         getScriptSnapshot contract: {carrier_open}"
+    assert_eq!(
+        carrier_open["arguments"]["fileContent"].as_str(),
+        None,
+        "an active carrier must remain contentless so generated bytes never cross the protocol: {carrier_open}"
     );
-    // The contentless carrier reopen must still route to its OWN configured project
+    // The carrier reopen must still route to its OWN configured project
     // (the tsconfig dir), exactly like the publish-time `register_carrier_member`.
     assert_eq!(
         carrier_open["arguments"]["projectRootPath"].as_str(),
@@ -1610,7 +1866,7 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         .write()
         .insert(file.to_string(), "/project/tsconfig.json".to_string());
 
-    let result = open_carrier_companion_contentless(
+    let result = open_carrier_source_contentless(
         &transport,
         &opened_files,
         &carrier_projects,
@@ -1633,6 +1889,208 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
     assert!(
         !carrier_projects.read().contains_key(file),
         "a failed open MUST roll back the carrier_projects routing entry too"
+    );
+}
+
+#[tokio::test]
+async fn carrier_activation_rolls_back_when_transient_bootstrap_cannot_be_sent() {
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    drop(stdin_rx);
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx,
+        pending: Arc::new(TsserverPendingRequests::default()),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
+        cancellation: None,
+    });
+    let active = Arc::new(parking_lot::RwLock::new(BTreeSet::new()));
+    let projects = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    let bootstraps = Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    let file = "/project/src/App.vue".to_string();
+
+    let result = activate_published_carrier_inner(
+        PublishedCarrierActivation {
+            transport,
+            opened_files: Arc::new(Mutex::new(HashMap::new())),
+            carrier_projects: projects,
+            active_sources: Arc::clone(&active),
+            project_bootstraps: Arc::clone(&bootstraps),
+        },
+        file.clone(),
+        "/project/src/App.vue.__verter.tsx".to_string(),
+        "/project/tsconfig.json".to_string(),
+        "TSX",
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "the sole project-bootstrap send failure must surface"
+    );
+    assert!(
+        !active.read().contains(&file) && bootstraps.read().is_empty(),
+        "a failed project bootstrap must roll back source and project tracking"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_carrier_activation_is_a_control_plane_noop() {
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    drop(stdin_rx);
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx,
+        pending: Arc::new(TsserverPendingRequests::default()),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
+        cancellation: None,
+    });
+    let file = "/project/src/App.svelte".to_string();
+    let active = Arc::new(parking_lot::RwLock::new(BTreeSet::from([file.clone()])));
+    let projects = Arc::new(parking_lot::RwLock::new(HashMap::from([(
+        file.clone(),
+        "/project/tsconfig.json".to_string(),
+    )])));
+
+    let result = activate_published_carrier_inner(
+        PublishedCarrierActivation {
+            transport,
+            opened_files: Arc::new(Mutex::new(HashMap::from([(
+                file.clone(),
+                OpenKind::CarrierSource,
+            )]))),
+            carrier_projects: projects,
+            active_sources: Arc::clone(&active),
+            project_bootstraps: Arc::new(parking_lot::RwLock::new(HashMap::from([(
+                "/project/tsconfig.json".to_string(),
+                file.clone(),
+            )]))),
+        },
+        file.clone(),
+        "/project/src/App.svelte.__verter.tsx".to_string(),
+        "/project/tsconfig.json".to_string(),
+        "TSX",
+    )
+    .await;
+
+    assert!(
+        !result.expect("an already-open source identity must not touch the transport"),
+        "an already-active source must not request another plugin refresh"
+    );
+    assert_eq!(
+        active.read().iter().cloned().collect::<Vec<_>>(),
+        vec![file]
+    );
+}
+
+#[test]
+fn carrier_metadata_refresh_is_limited_to_changed_active_ide_projections() {
+    let active = BTreeSet::from(["/project/src/App.svelte".to_string()]);
+
+    assert!(carrier_metadata_requires_refresh(
+        true,
+        &active,
+        "/project/src/App.svelte",
+        "/project/src/App.svelte.tsx",
+    ));
+    assert!(!carrier_metadata_requires_refresh(
+        false,
+        &active,
+        "/project/src/App.svelte",
+        "/project/src/App.svelte.tsx",
+    ));
+    assert!(!carrier_metadata_requires_refresh(
+        true,
+        &active,
+        "/project/src/App.svelte",
+        "/project/src/App.svelte.verter.ts",
+    ));
+    assert!(!carrier_metadata_requires_refresh(
+        true,
+        &active,
+        "/project/src/Imported.svelte",
+        "/project/src/Imported.svelte.tsx",
+    ));
+}
+
+#[tokio::test]
+async fn carrier_activation_bootstraps_then_retains_the_authored_source() {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(TsserverPendingRequests::default()),
+        next_seq: AtomicI64::new(1),
+        consecutive_failures: AtomicU32::new(0),
+        last_strike_at: StdMutex::new(None),
+        last_message_at: Arc::new(StdMutex::new(std::time::Instant::now())),
+        crash_notify: None,
+        membership_recovery: Mutex::new(None),
+        cancellation: None,
+    });
+    let file = "/project/src/App.svelte".to_string();
+    let companion = "/project/src/App.svelte.__verter.tsx".to_string();
+    let active = Arc::new(parking_lot::RwLock::new(BTreeSet::new()));
+    let newly_active = activate_published_carrier_inner(
+        PublishedCarrierActivation {
+            transport,
+            opened_files: Arc::new(Mutex::new(HashMap::new())),
+            carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            active_sources: Arc::clone(&active),
+            project_bootstraps: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        },
+        file.clone(),
+        companion.clone(),
+        "/project/tsconfig.json".to_string(),
+        "TSX",
+    )
+    .await
+    .expect("source activation must succeed");
+    assert!(
+        newly_active,
+        "first editor activation must refresh plugin roots"
+    );
+    let mut reader = BufReader::new(client_reader);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .await
+        .expect("read transient bootstrap open");
+    let frame: serde_json::Value = serde_json::from_str(line.trim()).expect("bootstrap JSON");
+    assert_eq!(frame["command"], "open");
+    assert_eq!(frame["arguments"]["file"], companion);
+    assert!(frame["arguments"].get("fileContent").is_none());
+
+    line.clear();
+    reader
+        .read_line(&mut line)
+        .await
+        .expect("read authored-source open");
+    let frame: serde_json::Value = serde_json::from_str(line.trim()).expect("source JSON");
+    assert_eq!(frame["command"], "open");
+    assert_eq!(frame["arguments"]["file"], file);
+    assert!(frame["arguments"].get("fileContent").is_none());
+
+    line.clear();
+    reader
+        .read_line(&mut line)
+        .await
+        .expect("read transient bootstrap close");
+    let frame: serde_json::Value = serde_json::from_str(line.trim()).expect("close JSON");
+    assert_eq!(frame["command"], "close");
+    assert_eq!(frame["arguments"]["file"], companion);
+    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+    assert!(
+        active.read().contains(&file),
+        "the authored source, not its generated bootstrap, is the active identity"
     );
 }
 
@@ -2589,18 +3047,13 @@ async fn resync_reopens_source_with_current_content_when_generation_matches() {
 }
 
 #[tokio::test]
-async fn resync_reopens_carrier_companion_contentlessly() {
-    // PRESERVED behavior: a carrier companion is reopened with NO `fileContent`
-    // (the plugin stays the engine-side content authority) and routed to its
-    // owning project's directory. It carries no bytes, so the generation gate
-    // never applies to it.
+async fn resync_reopens_active_carrier_contentlessly() {
     let h = resync_harness();
     let carrier = "/project/src/App.vue.tsx";
-
     h.opened_files
         .lock()
         .await
-        .insert(carrier.to_string(), OpenKind::CarrierCompanion);
+        .insert(carrier.to_string(), OpenKind::CarrierSource);
     h.carrier_projects
         .write()
         .insert(carrier.to_string(), "/project/tsconfig.json".to_string());
@@ -2625,7 +3078,7 @@ async fn resync_reopens_carrier_companion_contentlessly() {
         .expect("carrier companion is reopened");
     assert!(
         open["arguments"].get("fileContent").is_none(),
-        "a carrier companion must be reopened CONTENTLESSLY, frame={open:?}"
+        "managed carriers must reload from the store-backed plugin, frame={open:?}"
     );
     assert_eq!(
         open["arguments"]["projectRootPath"], "/project",
@@ -2838,9 +3291,11 @@ impl RealReloadHarness {
         let project = tempfile::tempdir().expect("create real reload project");
         std::fs::write(
             project.path().join("tsconfig.json"),
-            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["*.tsx"]}"#,
+            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#,
         )
         .expect("write real reload tsconfig");
+        std::fs::write(project.path().join("main.ts"), "export {};\n")
+            .expect("write configured-project anchor");
         let carriers: Vec<RealReloadCarrier> = RECOVERY_CARRIERS
             .iter()
             .map(|fixture| {
@@ -2852,6 +3307,15 @@ impl RealReloadHarness {
                     .expect("fixture companion file name");
                 let source_path = project.path().join(source_name);
                 let companion_path = project.path().join(companion_name);
+                std::fs::write(
+                    &source_path,
+                    if fixture.source_path.ends_with(".vue") {
+                        "<template><div /></template>\n"
+                    } else {
+                        "<div />\n"
+                    },
+                )
+                .expect("write authored recovery carrier");
                 std::fs::write(&companion_path, fixture.stale_disk_content)
                     .expect("write stale reload carrier bytes");
                 RealReloadCarrier {
@@ -2880,14 +3344,16 @@ impl RealReloadHarness {
             .to_string_lossy()
             .replace('\\', "/");
         let carrier_store_dir = project.path().join("carrier-store");
-        crate::resilient::resilient_tests::publish_unready_recovery_carrier_store(
+        crate::resilient::resilient_tests::publish_recovery_carrier_store(
             &carrier_store_dir,
             &project_file_name,
+            1,
             1,
             carriers.iter().map(|carrier| {
                 (
                     carrier.source_path.as_str(),
                     carrier.companion_path.as_str(),
+                    carrier.content,
                 )
             }),
         );
@@ -2915,6 +3381,10 @@ impl RealReloadHarness {
         )
         .await
         .expect("spawn real reload tsserver");
+        provider
+            .open_file(&format!("{workspace_root}/main.ts"), "export {};\n")
+            .await
+            .expect("open configured-project anchor");
 
         Self {
             _project: project,
@@ -2938,6 +3408,15 @@ impl RealReloadHarness {
                 )
                 .await
                 .expect("register real reload carrier");
+            self.provider
+                .activate_carrier_member(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    &self.project_file_name,
+                    crate::traits::CarrierScriptKind::Tsx,
+                )
+                .await
+                .expect("activate real reload source identity");
         }
     }
 
@@ -2961,11 +3440,29 @@ impl RealReloadHarness {
         );
     }
 
+    async fn refresh_publication(&self, generation: u64) {
+        notify_carriers_changed_inner(
+            Arc::clone(&self.provider.transport),
+            self.carriers
+                .iter()
+                .map(|carrier| carrier.source_path.clone())
+                .collect(),
+            generation,
+            self.carriers
+                .iter()
+                .map(|carrier| carrier.source_path.clone())
+                .collect(),
+        )
+        .await
+        .expect("the plugin publication refresh must complete");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     async fn raw_quickinfo(&self, carrier: &RealReloadCarrier) -> Result<String, String> {
         let (line, offset) = byte_offset_to_tsserver_pos(carrier.content, carrier.hover_offset);
         let args = inject_project_file_name(
             serde_json::json!({
-                "file": carrier.companion_path,
+                "file": carrier.source_path,
                 "line": line,
                 "offset": offset,
             }),
@@ -2982,19 +3479,6 @@ impl RealReloadHarness {
                     .unwrap_or_default()
                     .to_string()
             })
-    }
-
-    async fn assert_raw_stale_on_disk(&self) {
-        for carrier in &self.carriers {
-            let display = self
-                .raw_quickinfo(carrier)
-                .await
-                .unwrap_or_else(|error| panic!("raw stale quickinfo failed: {error}"));
-            assert!(
-                display.contains(": null"),
-                "epoch-1 unready carrier must expose stale disk bytes before explicit recovery, got {display:?}"
-            );
-        }
     }
 
     async fn assert_raw_types(&self, changed: bool) {
@@ -3028,24 +3512,6 @@ impl RealReloadHarness {
                 "raw quickinfo must derive {expected} from the refreshed store, got {display:?}"
             );
             assert!(!display.contains(": any"));
-        }
-    }
-
-    async fn assert_raw_types_once(&self, changed: bool) {
-        for carrier in &self.carriers {
-            let expected = if changed {
-                carrier.changed_hover
-            } else {
-                carrier.expected_hover
-            };
-            let display = self
-                .raw_quickinfo(carrier)
-                .await
-                .unwrap_or_else(|error| panic!("raw quickinfo failed: {error}"));
-            assert!(
-                display.contains(expected),
-                "raw quickinfo must remain {expected}, got {display:?}"
-            );
         }
     }
 
@@ -3212,33 +3678,28 @@ async fn reload_projects_recovery_fires_again_after_cooldown() {
 }
 
 #[tokio::test]
-async fn real_reload_projects_recovery_refreshes_plugin_carriers() {
+async fn real_publication_refresh_admits_plugin_carriers() {
     let real = RealReloadHarness::new().await;
     real.register_carriers().await;
-    real.assert_raw_stale_on_disk().await;
     real.publish_ready(2, 1, false);
-    recover_companion_membership(&real.provider.transport).await;
+    real.refresh_publication(2).await;
     real.assert_raw_types(false).await;
     real.shutdown().await;
 }
 
 #[tokio::test]
-async fn real_reload_projects_recovery_refreshes_after_cooldown() {
+async fn real_source_identity_observes_targeted_refresh_without_reload_projects() {
     let real = RealReloadHarness::new().await;
     real.register_carriers().await;
-    real.assert_raw_stale_on_disk().await;
-
     real.publish_ready(2, 1, false);
-    recover_companion_membership(&real.provider.transport).await;
+    real.refresh_publication(2).await;
     real.assert_raw_types(false).await;
 
     real.publish_ready(3, 2, true);
-    // Suppressed inside the cooldown: the existing Program must remain on v1.
-    recover_companion_membership(&real.provider.transport).await;
-    real.assert_raw_types_once(false).await;
-
-    tokio::time::sleep(MEMBERSHIP_RECOVERY_COOLDOWN + std::time::Duration::from_millis(80)).await;
-    recover_companion_membership(&real.provider.transport).await;
+    // Advance the plugin's publication token. The project reloads only the
+    // changed source ScriptInfos; no `reloadProjects` or protocol reopen is
+    // required.
+    real.refresh_publication(3).await;
     real.assert_raw_types(true).await;
     real.shutdown().await;
 }
@@ -3287,36 +3748,96 @@ fn test_transport_with_notify(
     }
 }
 
+#[tokio::test]
+async fn silence_watchdog_restarts_without_timing_out_the_request() {
+    let pending = Arc::new(TsserverPendingRequests::default());
+    let (tx, _rx) = oneshot::channel();
+    assert!(pending.insert(1, tx));
+    let last_message_at = Arc::new(StdMutex::new(
+        std::time::Instant::now() - std::time::Duration::from_millis(50),
+    ));
+    let notify = Arc::new(Notify::new());
+    let waiter = notify.notified();
+    tokio::spawn(watch_tsserver_silence(
+        Arc::downgrade(&pending),
+        last_message_at,
+        Arc::clone(&notify),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+    ));
+    tokio::time::timeout(std::time::Duration::from_millis(200), waiter)
+        .await
+        .expect("silent provider must trigger lifecycle recovery");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the watchdog signals provider lifecycle recovery; it does not time out requests itself"
+    );
+}
+
+/// Long editor idleness is not provider silence for a request that did not yet
+/// exist. A newly submitted request receives the full watchdog allowance even
+/// when the last tsserver event predates that request by hours.
+#[tokio::test]
+async fn silence_watchdog_starts_at_the_new_pending_interval_after_long_idle() {
+    let pending = Arc::new(TsserverPendingRequests::default());
+    let last_message_at = Arc::new(StdMutex::new(
+        std::time::Instant::now() - std::time::Duration::from_secs(3600),
+    ));
+    let notify = Arc::new(Notify::new());
+    tokio::spawn(watch_tsserver_silence(
+        Arc::downgrade(&pending),
+        last_message_at,
+        Arc::clone(&notify),
+        std::time::Duration::from_millis(2),
+        std::time::Duration::from_millis(60),
+    ));
+
+    let (tx, _rx) = oneshot::channel();
+    assert!(pending.insert(1, tx));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), notify.notified())
+            .await
+            .is_err(),
+        "an hour-old idle timestamp must not restart tsserver on the first watchdog poll"
+    );
+    tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified())
+        .await
+        .expect("the watchdog must still recover a request silent for its full allowance");
+}
+
 /// A hop issued under an ambient request deadline must fail at that deadline,
 /// not at the transport's own fixed bound. With the fixed bound winning, the
 /// outer deadline always fires first and the transport's failure branch — the
 /// only place the pending entry is released and the failure counted — never
 /// runs at all.
 #[tokio::test]
-async fn a_tsserver_hop_fires_inside_the_ambient_request_deadline() {
-    // Nothing drains the lane past the first frame and no read loop exists, so
-    // the request can never be answered.
+async fn production_tsserver_request_outlives_the_ambient_deadline() {
     let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
-    let transport = test_transport(stdin_tx);
-
-    let started = std::time::Instant::now();
-    let outcome = crate::deadline::with_deadline(std::time::Duration::from_millis(400), async {
-        transport.request("quickinfo", serde_json::json!({})).await
-    })
-    .await;
-    let elapsed = started.elapsed();
-
-    let err = outcome.expect_err("an unanswered request must fail, not succeed");
+    let transport = Arc::new(test_transport(stdin_tx));
+    let request = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            crate::deadline::with_deadline(std::time::Duration::from_millis(20), async {
+                transport.request("quickinfo", serde_json::json!({})).await
+            })
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     assert!(
-        err.message.contains("timed out"),
-        "the hop must fail as a provider timeout so the failure is attributable to \
-         the engine, got {}",
-        err.message
+        !request.is_finished(),
+        "the ambient latency budget must not cancel a production provider request"
     );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "the hop must fire inside the 400ms ambient deadline, not at the transport's \
-         fixed 10s bound; took {elapsed:?}"
+    transport
+        .pending
+        .take_any()
+        .expect("request is pending")
+        .send(serde_json::json!({ "success": true, "body": { "displayString": "ok" } }))
+        .expect("request still awaits its response");
+    assert_eq!(
+        request.await.unwrap().unwrap(),
+        serde_json::json!({ "displayString": "ok" })
     );
 }
 
@@ -3324,24 +3845,19 @@ async fn a_tsserver_hop_fires_inside_the_ambient_request_deadline() {
 /// on the transport's own fixed bound — so the cleanup behind it (releasing the
 /// slot, cancelling the engine's work) actually runs.
 #[tokio::test]
-async fn deadline_bounded_tsserver_hops_all_give_up_promptly() {
+async fn dropping_production_tsserver_requests_releases_every_slot() {
     let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
     let transport = test_transport(stdin_tx);
 
-    let ran = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        for _ in 0..HANG_THRESHOLD {
-            let _ = crate::deadline::with_deadline(std::time::Duration::from_millis(300), async {
-                transport.request("quickinfo", serde_json::json!({})).await
-            })
-            .await;
+    for _ in 0..HANG_THRESHOLD {
+        {
+            let mut request = Box::pin(transport.request("quickinfo", serde_json::json!({})));
+            tokio::select! {
+                _ = &mut request => panic!("no response was sent"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
         }
-    })
-    .await;
-    assert!(
-        ran.is_ok(),
-        "three hops under a 300ms ambient deadline must all complete well inside 3s; \
-         a fixed 10s inner bound parks each one instead"
-    );
+    }
     assert_eq!(
         pending_len(&transport),
         0,
@@ -3365,7 +3881,13 @@ async fn a_deadline_shortened_tsserver_hop_is_not_charged_to_hang_detection() {
 
     for _ in 0..(HANG_THRESHOLD + 2) {
         let _ = crate::deadline::with_deadline(std::time::Duration::from_millis(250), async {
-            transport.request("quickinfo", serde_json::json!({})).await
+            transport
+                .request_with_timeout(
+                    "quickinfo",
+                    serde_json::json!({}),
+                    std::time::Duration::from_secs(10),
+                )
+                .await
         })
         .await;
     }
@@ -3542,6 +4064,82 @@ async fn an_undeadlined_tsserver_hop_keeps_its_configured_bound() {
         "with no ambient scope open the configured bound is kept verbatim, not \
          shortened; took {elapsed:?}"
     );
+}
+
+async fn receive_tsserver_request(
+    stdin_rx: &mut mpsc::Receiver<TsserverStdinMessage>,
+) -> serde_json::Value {
+    let message = tokio::time::timeout(std::time::Duration::from_secs(1), stdin_rx.recv())
+        .await
+        .expect("tsserver request must be enqueued promptly")
+        .expect("stdin lane must remain open");
+    let TsserverStdinMessage::Frame(frame) = message else {
+        panic!("unexpected shutdown on tsserver stdin lane");
+    };
+    serde_json::from_slice(&frame).expect("request frame must be valid JSON")
+}
+
+/// Diagnostics are background work. If a user request arrives while tsserver is
+/// computing diagnostics, the diagnostics request must be cancelled through the
+/// out-of-band pipe and retried only after the interactive request completes.
+/// Otherwise one ten-second semantic pass monopolizes tsserver's only JS thread.
+#[tokio::test]
+async fn interactive_request_preempts_and_then_defers_background_diagnostics() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let transport = Arc::new(test_transport(stdin_tx));
+
+    let background = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            transport
+                .request_background("semanticDiagnosticsSync", serde_json::json!({}))
+                .await
+        })
+    };
+    let first_background = receive_tsserver_request(&mut stdin_rx).await;
+    let first_background_seq = first_background["seq"].as_i64().expect("background seq");
+    assert_eq!(
+        first_background["command"], "semanticDiagnosticsSync",
+        "the first request is the diagnostics pull"
+    );
+
+    let interactive = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move { transport.request("quickinfo", serde_json::json!({})).await })
+    };
+    let interactive_request = receive_tsserver_request(&mut stdin_rx).await;
+    let interactive_seq = interactive_request["seq"]
+        .as_i64()
+        .expect("interactive seq");
+    assert_eq!(interactive_request["command"], "quickinfo");
+    assert!(
+        cancellation_path(&transport, first_background_seq).exists(),
+        "interactive traffic must cancel the active diagnostics seq out of band"
+    );
+
+    // No diagnostics retry may queue ahead of the user request.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(80), stdin_rx.recv())
+            .await
+            .is_err(),
+        "background diagnostics must remain deferred while interactive work is in flight"
+    );
+
+    send_success_response(&transport.pending, interactive_seq, "quickinfo").await;
+    interactive
+        .await
+        .expect("interactive task must not panic")
+        .expect("interactive request must succeed");
+
+    let retry = receive_tsserver_request(&mut stdin_rx).await;
+    let retry_seq = retry["seq"].as_i64().expect("retry seq");
+    assert_eq!(retry["command"], "semanticDiagnosticsSync");
+    assert_ne!(retry_seq, first_background_seq, "retry needs a fresh seq");
+    send_success_response(&transport.pending, retry_seq, "semanticDiagnosticsSync").await;
+    background
+        .await
+        .expect("background task must not panic")
+        .expect("diagnostics must complete after interactive traffic becomes idle");
 }
 
 // ===========================================================================
@@ -3819,5 +4417,163 @@ async fn a_tsserver_cancellation_envelope_is_an_error_not_an_empty_result() {
         err.message.contains("cancel"),
         "the failure must name the cancellation so it is attributable, got {}",
         err.message
+    );
+}
+
+#[tokio::test]
+async fn project_loading_events_track_in_flight_loads_and_saturate_at_zero() {
+    let pending = TsserverPendingRequests::default();
+    let start = serde_json::json!({
+        "type": "event",
+        "event": "projectLoadingStart",
+        "body": { "projectName": "tsconfig.app.json" }
+    });
+    let finish = serde_json::json!({
+        "type": "event",
+        "event": "projectLoadingFinish",
+        "body": { "projectName": "tsconfig.app.json" }
+    });
+
+    handle_message(&start, &pending);
+    assert_eq!(pending.project_loads_in_flight.load(Ordering::Relaxed), 1);
+    handle_message(&finish, &pending);
+    assert_eq!(pending.project_loads_in_flight.load(Ordering::Relaxed), 0);
+    handle_message(&finish, &pending);
+    assert_eq!(
+        pending.project_loads_in_flight.load(Ordering::Relaxed),
+        0,
+        "a stray Finish must never drive the load counter negative"
+    );
+}
+
+/// tsserver diagnostic events identify a file but carry no ScriptInfo/document
+/// version (TypeScript 5.4 through 6.0). Caching such an event would let a later
+/// failed pull return diagnostics from an unknown, potentially stale snapshot.
+/// The synchronous pull response is the only diagnostics result this provider
+/// may expose; LSP publication applies its own exact document-version fence.
+///
+/// @ai-generated - Guards diagnostics snapshot provenance for tsserver events.
+#[tokio::test]
+async fn handle_message_does_not_cache_unversioned_diagnostic_events() {
+    let pending = TsserverPendingRequests::default();
+    let event = serde_json::json!({
+        "seq": 0,
+        "type": "event",
+        "event": "semanticDiag",
+        "body": {
+            "file": "/project/src/main.ts",
+            "diagnostics": [{
+                "start": { "line": 1, "offset": 7 },
+                "end": { "line": 1, "offset": 12 },
+                "text": "Type 'string' is not assignable to type 'number'.",
+                "code": 2322,
+                "category": "error"
+            }]
+        }
+    });
+
+    // The handler has no diagnostics-cache/content capability by construction;
+    // accepting this event can only update lifecycle health state.
+    handle_message(&event, &pending);
+
+    assert_eq!(
+        pending.project_loads_in_flight.load(Ordering::Relaxed),
+        0,
+        "an unversioned diagnostics event must remain a non-authoritative progress signal"
+    );
+}
+
+/// A last-good synchronous pull may mask a transient transport failure only for
+/// the exact local content generation that produced it. An edit or close/reopen
+/// must make the fallback miss instead of reviving stale diagnostics.
+///
+/// @ai-generated - Guards generation-fenced diagnostics fallback behavior.
+#[test]
+fn diagnostics_fallback_requires_the_exact_content_generation() {
+    let diagnostic = TypeDiagnostic {
+        message: "sentinel".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 0,
+        end: 1,
+        code: Some("2322".to_string()),
+        tags: Vec::new(),
+        related_information: Vec::new(),
+    };
+    let cached = CachedDiagnostics {
+        content_generation: 41,
+        diagnostics: vec![diagnostic.clone()],
+    };
+
+    let exact = cached_diagnostics_for_generation(Some(&cached), Some(41));
+    assert_eq!(exact.len(), 1);
+    assert_eq!(
+        exact[0].message, diagnostic.message,
+        "an exact-generation transient failure may preserve the last-good pull"
+    );
+    assert!(
+        cached_diagnostics_for_generation(Some(&cached), Some(42)).is_empty(),
+        "an edit must invalidate the last-good diagnostics fallback"
+    );
+    assert!(
+        cached_diagnostics_for_generation(Some(&cached), None).is_empty(),
+        "close must invalidate the last-good diagnostics fallback"
+    );
+}
+
+#[tokio::test]
+async fn hang_strikes_are_suspended_during_a_healthy_project_load() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let notify = Arc::new(Notify::new());
+    let transport = test_transport_with_notify(stdin_tx, notify);
+    transport
+        .pending
+        .project_loads_in_flight
+        .store(1, Ordering::Relaxed);
+
+    for _ in 0..(HANG_THRESHOLD + 2) {
+        transport.note_hang_failure("quickinfo", std::time::Instant::now());
+    }
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        0,
+        "a silent synchronous monorepo build is busy work, not a wedged child"
+    );
+
+    transport
+        .pending
+        .project_loads_in_flight
+        .store(0, Ordering::Relaxed);
+    for _ in 0..HANG_THRESHOLD {
+        transport.note_hang_failure("quickinfo", std::time::Instant::now());
+    }
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        HANG_THRESHOLD,
+        "ordinary silent full-bound hops must still trip hang detection"
+    );
+}
+
+#[tokio::test]
+async fn project_load_suspension_has_an_absolute_silence_backstop() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<TsserverStdinMessage>(16);
+    let notify = Arc::new(Notify::new());
+    let transport = test_transport_with_notify(stdin_tx, notify);
+    transport
+        .pending
+        .project_loads_in_flight
+        .store(1, Ordering::Relaxed);
+    *transport
+        .last_message_at
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        std::time::Instant::now() - LOADING_WEDGE_SILENCE_CAP - std::time::Duration::from_secs(1);
+
+    for _ in 0..HANG_THRESHOLD {
+        transport.note_hang_failure("quickinfo", std::time::Instant::now());
+    }
+    assert_eq!(
+        transport.consecutive_failures.load(Ordering::Relaxed),
+        HANG_THRESHOLD,
+        "a child silent beyond the backstop must restart even if Finish was lost"
     );
 }

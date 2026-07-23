@@ -65,30 +65,72 @@ fn summarize_lsp_params(params: &serde_json::Value) -> String {
 /// awaited to completion, so cleanup that could only run on an async path would
 /// never run at all.
 #[derive(Default)]
+struct PendingRequestState {
+    map: HashMap<i64, oneshot::Sender<serde_json::Value>>,
+    closed: bool,
+}
+
+#[derive(Default)]
 struct PendingRequests {
-    map: StdMutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
+    state: StdMutex<PendingRequestState>,
 }
 
 impl PendingRequests {
-    fn insert(&self, id: i64, tx: oneshot::Sender<serde_json::Value>) {
-        self.map.lock().unwrap().insert(id, tx);
+    /// Register a request only while the reader is alive. The closed check and
+    /// insertion share one lock with [`Self::drain_with_crash_error`], closing
+    /// the EOF race where a request could be inserted immediately after the
+    /// reader drained the map and then wait forever for a dead process.
+    fn insert(&self, id: i64, tx: oneshot::Sender<serde_json::Value>) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return false;
+        }
+        state.map.insert(id, tx);
+        true
     }
 
     fn take(&self, id: i64) -> Option<oneshot::Sender<serde_json::Value>> {
-        self.map.lock().unwrap().remove(&id)
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map
+            .remove(&id)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map
+            .is_empty()
     }
 
     /// How many requests are in flight. The leak surface: a request abandoned
     /// without releasing its slot shows up here and nowhere else.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.map.lock().unwrap().len()
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map
+            .len()
     }
 
     /// Fail every in-flight request so callers return immediately instead of
-    /// waiting out their own timeouts.
+    /// waiting indefinitely. The closed flag makes process death sticky for
+    /// this transport; the resilient owner creates a fresh transport on restart.
     fn drain_with_crash_error(&self) {
-        let drained: Vec<_> = self.map.lock().unwrap().drain().collect();
+        let drained: Vec<_> = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.closed = true;
+            state.map.drain().collect()
+        };
         for (_id, tx) in drained {
             let _ = tx.send(serde_json::json!({
                 "error": { "code": -32099, "message": "tsgo process crashed" }
@@ -460,26 +502,20 @@ struct LspTransport {
     teardown_intent: Arc<AtomicBool>,
 }
 
-/// Default timeout for LSP requests (10 seconds).
-const REQUEST_TIMEOUT_SECS: u64 = 10;
-
 /// List-level cap on completion-detail enrichment
 /// ([`TsgoTypeProvider::get_completion_details`]).
 ///
-/// Each enriched item costs one `completionItem/resolve` round-trip (a
-/// [`REQUEST_TIMEOUT_SECS`]-bounded request); a member enumeration can return a
-/// large list, so only the leading (sorted-order = most relevant) items are
-/// enriched and the tail passes through unchanged — still present in the list,
-/// still lazily resolvable. Bounds the worst-case enrichment cost independent of
-/// list size.
+/// Each enriched item costs one cancellable `completionItem/resolve`
+/// round-trip. A member enumeration can return a large list, so only the
+/// leading (sorted-order = most relevant) items are enriched and the tail
+/// passes through unchanged — still present and lazily resolvable. This bounds
+/// work independently of list size.
 const MAX_COMPLETION_DETAIL_ENRICH: usize = 50;
 
 /// Max in-flight `completionItem/resolve` requests while enriching a completion
 /// list ([`TsgoTypeProvider::get_completion_details`]).
 ///
-/// Bounds concurrency over the (already list-capped) enriched subset so the
-/// worst case is `ceil(MAX_COMPLETION_DETAIL_ENRICH / this) × REQUEST_TIMEOUT_SECS`
-/// rather than a serial `N × REQUEST_TIMEOUT_SECS`, without flooding the
+/// Bounds concurrency over the already list-capped subset without flooding the
 /// single-process tsgo transport with the whole batch at once.
 const COMPLETION_DETAIL_RESOLVE_CONCURRENCY: usize = 8;
 
@@ -492,6 +528,44 @@ const INITIALIZE_TIMEOUT_SECS: u64 = 30;
 /// When reached, `crash_notify` is fired to trigger the `ResilientTypeProvider`'s
 /// existing restart machinery (kill process, backoff, re-spawn, replay file cache).
 const HANG_THRESHOLD: u32 = 3;
+
+const ENGINE_SILENCE_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+const SILENCE_WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Provider-health watchdog, not a request timeout. Feature requests remain
+/// pending until response or client cancellation. A restart is requested only
+/// when the child has pending work and emits no protocol output whatsoever for
+/// the absolute silence cap.
+async fn watch_tsgo_silence(
+    pending: std::sync::Weak<PendingRequests>,
+    last_message_at: Arc<StdMutex<std::time::Instant>>,
+    crash_notify: Arc<Notify>,
+    teardown_intent: Arc<AtomicBool>,
+    poll: std::time::Duration,
+    silence_cap: std::time::Duration,
+) {
+    loop {
+        tokio::time::sleep(poll).await;
+        let Some(pending) = pending.upgrade() else {
+            return;
+        };
+        if teardown_intent.load(Ordering::SeqCst) || pending.is_empty() {
+            continue;
+        }
+        let silent_for = last_message_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed();
+        if silent_for < silence_cap {
+            continue;
+        }
+        tracing::error!(
+            "tsgo emitted no output for {silent_for:?} while requests were pending; restarting"
+        );
+        crash_notify.notify_waiters();
+        return;
+    }
+}
 
 use crate::traits::ProviderPriority;
 
@@ -589,19 +663,57 @@ impl LspTransport {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
+    fn finish_response(
+        &self,
+        method: &str,
+        id: i64,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        self.clear_hang_evidence();
+        if let Some(error) = value.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or("unknown error");
+            crate::type_runtime_trace_event!(
+                "tsgo_transport_request_error",
+                format!("method={} id={} message={}", method, id, message),
+            );
+            return Err(TypeProviderError::new(message));
+        }
+        crate::type_runtime_trace_event!(
+            "tsgo_transport_request_result",
+            format!(
+                "method={} id={} result_kind={}",
+                method,
+                id,
+                value
+                    .get("result")
+                    .map(|result| match result {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Bool(_) => "bool",
+                        serde_json::Value::Number(_) => "number",
+                    })
+                    .unwrap_or("missing"),
+            ),
+        );
+        Ok(value
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
     /// Send an LSP request at Interactive priority and wait for the response.
     async fn request(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        self.request_with_priority(
-            method,
-            params,
-            REQUEST_TIMEOUT_SECS,
-            ProviderPriority::Interactive,
-        )
-        .await
+        self.request_with_priority(method, params, None, ProviderPriority::Interactive)
+            .await
     }
 
     /// Send an LSP request at a specific priority with a custom timeout.
@@ -609,9 +721,14 @@ impl LspTransport {
         &self,
         method: &str,
         params: serde_json::Value,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
         priority: ProviderPriority,
     ) -> Result<serde_json::Value, TypeProviderError> {
+        let Some(timeout_secs) = timeout_secs else {
+            return self
+                .request_unbounded_with_priority(method, params, priority)
+                .await;
+        };
         crate::type_runtime_trace_scope_async!(
             "tsgo_transport_request",
             format!(
@@ -628,7 +745,9 @@ impl LspTransport {
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let (tx, rx) = oneshot::channel();
-                self.pending.insert(id, tx);
+                if !self.pending.insert(id, tx) {
+                    return Err(TypeProviderError::new("tsgo process is not available"));
+                }
                 // Armed from the instant the id is registered: every exit from
                 // here on — return, error, or the caller's future being dropped
                 // mid-await — releases the registration and cancels the engine's
@@ -765,6 +884,75 @@ impl LspTransport {
                         )))
                     }
                 }
+            }
+        )
+        .await
+    }
+
+    /// Production feature-request path. The engine owns the duration of valid
+    /// project work; the LSP client owns cancellation. Dropping this future
+    /// removes the pending entry and emits `$/cancelRequest` through the
+    /// unbounded control lane, so removing the latency timeout does not leak or
+    /// strand abandoned work.
+    async fn request_unbounded_with_priority(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        priority: ProviderPriority,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        crate::type_runtime_trace_scope_async!(
+            "tsgo_transport_request",
+            format!(
+                "method={} priority={:?} {}",
+                method,
+                priority,
+                summarize_lsp_params(&params),
+            ),
+            async {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let message = jsonrpc_body(Some(id), method, &params);
+                let body = serde_json::to_string(&message)
+                    .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
+
+                let (tx, rx) = oneshot::channel();
+                if !self.pending.insert(id, tx) {
+                    return Err(TypeProviderError::new("tsgo process is not available"));
+                }
+                let mut registration = PendingRequest {
+                    id,
+                    pending: Arc::clone(&self.pending),
+                    control_tx: self.control_tx.clone(),
+                    armed: true,
+                };
+
+                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                if self
+                    .tx_for_priority(priority)
+                    .send(StdinMessage::Frame(frame.into_bytes()))
+                    .await
+                    .is_err()
+                {
+                    registration.disarm();
+                    self.pending.take(id);
+                    return Err(TypeProviderError::new("stdin writer closed"));
+                }
+
+                let value = match rx.await {
+                    Ok(value) => value,
+                    Err(_) => {
+                        registration.disarm();
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!(
+                                "method={} id={} message=response channel closed",
+                                method, id
+                            ),
+                        );
+                        return Err(TypeProviderError::new("response channel closed"));
+                    }
+                };
+                registration.disarm();
+                self.finish_response(method, id, value)
             }
         )
         .await
@@ -999,8 +1187,8 @@ async fn deliver_document_close(
     Ok(())
 }
 
-/// Drain all pending requests, sending crash error responses so callers
-/// fail immediately instead of waiting for the 10s timeout.
+/// Close the transport and drain all pending requests, sending crash error
+/// responses so current and future callers fail immediately after process death.
 fn drain_pending(pending: &PendingRequests) {
     pending.drain_with_crash_error();
 }
@@ -2006,7 +2194,7 @@ impl TsgoTypeProvider {
                         "name": "workspace"
                     }]
                 }),
-                INITIALIZE_TIMEOUT_SECS,
+                Some(INITIALIZE_TIMEOUT_SECS),
                 ProviderPriority::Interactive,
             )
             .await
@@ -2114,6 +2302,16 @@ impl TsgoTypeProvider {
             crash_notify: crash_notify.as_ref().map(Arc::clone),
             teardown_intent: Arc::clone(&teardown_intent),
         });
+        if let Some(notify) = crash_notify.as_ref() {
+            tokio::spawn(watch_tsgo_silence(
+                Arc::downgrade(&pending),
+                Arc::clone(&last_message_at),
+                Arc::clone(notify),
+                Arc::clone(&teardown_intent),
+                SILENCE_WATCHDOG_POLL,
+                ENGINE_SILENCE_CAP,
+            ));
+        }
         let diagnostics_cache = Arc::new(Mutex::new(HashMap::new()));
         let contents = Arc::new(Mutex::new(HashMap::new()));
         tokio::spawn(read_loop(
@@ -3687,7 +3885,7 @@ impl TypeProvider for TsgoTypeProvider {
                 .request_with_priority(
                     "textDocument/diagnostic",
                     serde_json::json!({ "textDocument": { "uri": uri } }),
-                    REQUEST_TIMEOUT_SECS,
+                    None,
                     ProviderPriority::Background,
                 )
                 .await;

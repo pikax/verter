@@ -874,6 +874,12 @@ pub fn carrier_ide_provider_path(source_id: &str, is_jsx: bool) -> String {
 /// guard rather than a shared import.
 pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
 
+/// The module-specifier spelling used by generated IDE carriers when importing
+/// the TypeScript API carrier. TypeScript's standard `.js`-to-`.ts` extension
+/// substitution resolves this to [`CARRIER_API_VIRTUAL_SUFFIX`] without
+/// requiring a consumer project to enable `allowImportingTsExtensions`.
+pub const CARRIER_API_MODULE_SPECIFIER_SUFFIX: &str = ".verter.js";
+
 /// The carrier-independent API virtual-file derivation: append the reserved
 /// [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts`) to the FULL carrier canonical
 /// (`Foo.vue` → `Foo.vue.verter.ts`, `Foo.svelte` → `Foo.svelte.verter.ts`).

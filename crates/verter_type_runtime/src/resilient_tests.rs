@@ -832,47 +832,6 @@ pub(crate) fn publish_recovery_carrier_store<'a>(
     .expect("publish recovery carrier manifest");
 }
 
-pub(crate) fn publish_unready_recovery_carrier_store<'a>(
-    store_dir: &std::path::Path,
-    project_file_name: &str,
-    epoch: u64,
-    carriers: impl IntoIterator<Item = (&'a str, &'a str)>,
-) {
-    std::fs::create_dir_all(store_dir.join("blobs"))
-        .expect("create unready recovery carrier blob store");
-    std::fs::create_dir_all(store_dir.join("maps"))
-        .expect("create unready recovery carrier map store");
-    let owned_sources = carriers
-        .into_iter()
-        .map(|(source_path, companion_path)| {
-            serde_json::json!({
-                "source_uri": source_path,
-                "provider_uri": companion_path,
-                "role": "CarrierIde",
-                "script_kind": "TSX",
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut projects = serde_json::Map::new();
-    projects.insert(
-        project_file_name.to_string(),
-        serde_json::json!({
-            "owned_sources": owned_sources,
-            "ready_files": {},
-        }),
-    );
-    std::fs::write(
-        store_dir.join("manifest.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "epoch": epoch,
-            "host_version": "real-recovery-test",
-            "projects": projects,
-        }))
-        .expect("serialize unready recovery carrier manifest"),
-    )
-    .expect("publish unready recovery carrier manifest");
-}
-
 #[test]
 fn real_recovery_store_uses_production_blake3_wire_identity() {
     let store = tempfile::tempdir().expect("create wire-identity store");
@@ -910,9 +869,11 @@ impl RealRecoveryHarness {
         let project = tempfile::tempdir().expect("create real recovery project");
         std::fs::write(
             project.path().join("tsconfig.json"),
-            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["*.tsx"]}"#,
+            r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#,
         )
         .expect("write real recovery tsconfig");
+        std::fs::write(project.path().join("main.ts"), "export {};\n")
+            .expect("write configured-project anchor");
 
         let carriers: Vec<MaterializedRecoveryCarrier> = RECOVERY_CARRIERS
             .iter()
@@ -982,6 +943,7 @@ impl RealRecoveryHarness {
         )
         .await
         .expect("spawn initial real tsserver");
+        let anchor_path = format!("{workspace_root}/main.ts");
         let spawn_attempts = Arc::new(AtomicUsize::new(0));
         let provider = ResilientProvider::new(
             initial,
@@ -998,6 +960,10 @@ impl RealRecoveryHarness {
             Arc::new(TracingNotifier),
             3,
         );
+        provider
+            .open_file(&anchor_path, "export {};\n")
+            .await
+            .expect("open configured-project anchor");
 
         Self {
             _project: project,
@@ -1032,6 +998,15 @@ impl RealRecoveryHarness {
                 )
                 .await
                 .expect("register real recovery carrier");
+            self.provider
+                .activate_carrier_member(
+                    &carrier.source_path,
+                    &carrier.companion_path,
+                    &self.project_file_name,
+                    crate::traits::CarrierScriptKind::Tsx,
+                )
+                .await
+                .expect("activate real recovery source identity");
         }
     }
 

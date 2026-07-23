@@ -1,4 +1,16 @@
 use super::*;
+
+#[test]
+fn process_death_closes_pending_registration_atomically() {
+    let pending = PendingRequests::default();
+    pending.drain_with_crash_error();
+
+    let (tx, _rx) = oneshot::channel();
+    assert!(
+        !pending.insert(1, tx),
+        "a request racing after EOF must be rejected instead of waiting forever"
+    );
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout};
 use verter_tsgo_api::jsonrpc::framing::{encode_message, MessageFramer};
@@ -179,6 +191,35 @@ fn test_transport_with_control(
     )
 }
 
+#[tokio::test]
+async fn silence_watchdog_restarts_without_timing_out_the_request() {
+    let pending = Arc::new(PendingRequests::default());
+    let (tx, _rx) = oneshot::channel();
+    assert!(pending.insert(1, tx));
+    let last_message_at = Arc::new(StdMutex::new(
+        std::time::Instant::now() - std::time::Duration::from_millis(50),
+    ));
+    let notify = Arc::new(Notify::new());
+    let teardown = Arc::new(AtomicBool::new(false));
+    let waiter = notify.notified();
+    tokio::spawn(watch_tsgo_silence(
+        Arc::downgrade(&pending),
+        last_message_at,
+        Arc::clone(&notify),
+        teardown,
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+    ));
+    tokio::time::timeout(std::time::Duration::from_millis(200), waiter)
+        .await
+        .expect("silent provider must trigger lifecycle recovery");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the watchdog signals provider lifecycle recovery; it does not time out requests itself"
+    );
+}
+
 /// Decode the JSON body of a framed stdin message.
 fn frame_body(msg: &StdinMessage) -> serde_json::Value {
     let StdinMessage::Frame(bytes) = msg else {
@@ -215,7 +256,7 @@ async fn dropping_an_in_flight_request_releases_its_pending_slot() {
         let mut fut = Box::pin(transport.request_with_priority(
             "textDocument/hover",
             serde_json::json!({}),
-            30,
+            Some(30),
             ProviderPriority::Interactive,
         ));
         // Poll once so the id is registered and the future is parked on the
@@ -251,7 +292,7 @@ async fn dropping_an_in_flight_request_cancels_it_at_the_engine() {
         let mut fut = Box::pin(transport.request_with_priority(
             "textDocument/definition",
             serde_json::json!({}),
-            30,
+            Some(30),
             ProviderPriority::Interactive,
         ));
         tokio::select! {
@@ -297,7 +338,7 @@ async fn cancellation_does_not_queue_behind_the_lane_it_cancels() {
         let mut fut = Box::pin(transport.request_with_priority(
             "textDocument/hover",
             serde_json::json!({}),
-            30,
+            Some(30),
             ProviderPriority::Interactive,
         ));
         tokio::select! {
@@ -344,7 +385,7 @@ async fn an_answered_request_emits_no_cancellation() {
         .request_with_priority(
             "textDocument/hover",
             serde_json::json!({}),
-            30,
+            Some(30),
             ProviderPriority::Interactive,
         )
         .await
@@ -379,7 +420,7 @@ async fn a_hop_times_out_inside_the_callers_request_deadline() {
         transport.request_with_priority(
             "textDocument/hover",
             serde_json::json!({}),
-            30,
+            Some(30),
             ProviderPriority::Interactive,
         ),
     )
@@ -399,6 +440,41 @@ async fn a_hop_times_out_inside_the_callers_request_deadline() {
         pending.len(),
         0,
         "a timed-out hop must release its pending slot"
+    );
+}
+
+/// Production feature requests are cancellation-driven, not latency-budgeted.
+/// An ambient legacy deadline may elapse while a cold project is still validly
+/// loading; the eventual engine response must remain observable.
+#[tokio::test]
+async fn production_tsgo_request_outlives_the_ambient_deadline() {
+    let (stdin_tx, _stdin_rx) = mpsc::channel(16);
+    let pending = Arc::new(PendingRequests::default());
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
+    let request = {
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            crate::deadline::with_deadline(
+                std::time::Duration::from_millis(20),
+                transport.request("textDocument/hover", serde_json::json!({})),
+            )
+            .await
+        })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    assert!(
+        !request.is_finished(),
+        "the ambient latency budget must not cancel a production tsgo request"
+    );
+    pending
+        .take(1)
+        .expect("request is pending")
+        .send(serde_json::json!({ "id": 1, "result": { "contents": "ok" } }))
+        .expect("request still awaits its response");
+    assert_eq!(
+        request.await.unwrap().unwrap(),
+        serde_json::json!({ "contents": "ok" })
     );
 }
 
@@ -2696,7 +2772,7 @@ async fn test_pending_request_channel_closed_on_read_loop_exit() {
 
     // Register a pending request manually
     let (tx, rx) = oneshot::channel();
-    pending.insert(42, tx);
+    assert!(pending.insert(42, tx));
 
     // Drop the sender side by removing it — simulates read_loop exiting
     // and the pending HashMap being dropped/cleared
@@ -2759,9 +2835,9 @@ async fn test_provider_operations_fail_after_process_death() {
     // may appear to succeed on the first call if the writer loop hasn't exited yet.
     // Subsequent calls will fail once the writer loop detects the dead pipe and exits.
     //
-    // request()-based operations (get_diagnostics, get_hover) have a 10s internal timeout,
-    // so we need 12s here to accommodate the internal timeout + buffer.
-    let timeout = std::time::Duration::from_secs(12);
+    // Request operations have no latency timeout. Process death is instead a
+    // sticky transport state, so calls made after EOF must fail promptly.
+    let timeout = std::time::Duration::from_secs(2);
 
     // First call: may succeed (channel send works, writer loop hasn't failed yet)
     let result =
@@ -2779,9 +2855,8 @@ async fn test_provider_operations_fail_after_process_death() {
     let result = tokio::time::timeout(timeout, provider.close_file("test.tsx")).await;
     assert!(result.is_ok(), "close_file should not hang");
 
-    // get_diagnostics does a transport.request() with a 10s internal timeout.
-    // On a dead pipe, the request either fails fast (channel closed) or times out
-    // and falls back to cache. Either way, it should complete within 12s.
+    // On a dead process, the transport fails fast and diagnostics falls back to
+    // its cache without relying on a feature-request deadline.
     let result = tokio::time::timeout(timeout, provider.get_diagnostics("test.tsx")).await;
     assert!(result.is_ok(), "get_diagnostics should not hang");
     let diags = result.unwrap();
@@ -4161,7 +4236,7 @@ async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_f
                         "textDocument": { "uri": "file:///w/a.tsx" },
                         "position": { "line": 0, "character": i }
                     }),
-                    1,
+                    Some(1),
                     ProviderPriority::Interactive,
                 )
                 .await
@@ -4214,7 +4289,7 @@ async fn interactive_request_stays_bounded_when_the_writer_is_stalled_behind_a_f
                     "textDocument": { "uri": "file:///w/a.tsx" },
                     "position": { "line": 1, "character": 1 }
                 }),
-                1,
+                Some(1),
                 ProviderPriority::Interactive,
             )
             .await;
