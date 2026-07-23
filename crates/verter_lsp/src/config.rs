@@ -50,6 +50,10 @@ pub fn parse_experimental_init_options(
 /// Hover-related init options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HoverOptions {
+    /// Include Verter's native semantic/structural hover contribution. The
+    /// TypeScript provider remains the default hover authority; native hover is
+    /// explicitly opt-in so it cannot add semantic work to the IDE hot path.
+    pub native_semantics: bool,
     /// When `true`, hover responses are enriched with a provenance
     /// markdown section showing files loaded and derivation chain.
     /// Default `false` — opt-in.
@@ -62,10 +66,38 @@ pub struct HoverOptions {
 pub fn parse_hover_init_options(init_options: &serde_json::Value) -> HoverOptions {
     let hover = init_options.get("hover");
     HoverOptions {
+        native_semantics: hover
+            .and_then(|v| v.get("nativeSemantics"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         provenance: hover
             .and_then(|v| v.get("provenance"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+    }
+}
+
+/// Optional native semantic-enrichment policy. TypeScript-backed IDE features
+/// never depend on this lane; the Analysis UI or an explicitly enabled Verter
+/// lint configuration opts into isolated background snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NativeSemanticOptions {
+    pub enabled: bool,
+}
+
+pub fn parse_native_semantic_options(init_options: &serde_json::Value) -> NativeSemanticOptions {
+    let analysis_enabled = init_options
+        .get("analysis")
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let lint_enabled = init_options
+        .get("lint")
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    NativeSemanticOptions {
+        enabled: analysis_enabled || lint_enabled,
     }
 }
 
@@ -144,7 +176,10 @@ mod config_migration_tests {
         let opts = serde_json::json!({});
         assert_eq!(
             parse_hover_init_options(&opts),
-            HoverOptions { provenance: false }
+            HoverOptions {
+                native_semantics: false,
+                provenance: false,
+            }
         );
     }
 
@@ -153,7 +188,10 @@ mod config_migration_tests {
         let opts = serde_json::json!({ "hover": { "provenance": true } });
         assert_eq!(
             parse_hover_init_options(&opts),
-            HoverOptions { provenance: true }
+            HoverOptions {
+                native_semantics: false,
+                provenance: true,
+            }
         );
     }
 
@@ -162,8 +200,42 @@ mod config_migration_tests {
         let opts = serde_json::json!({ "hover": { "provenance": "yes" } });
         assert_eq!(
             parse_hover_init_options(&opts),
-            HoverOptions { provenance: false },
+            HoverOptions {
+                native_semantics: false,
+                provenance: false,
+            },
             "non-bool provenance value should fall back to default"
+        );
+    }
+
+    #[test]
+    fn native_hover_semantics_are_opt_in() {
+        assert!(!parse_hover_init_options(&serde_json::json!({})).native_semantics);
+        assert!(
+            parse_hover_init_options(&serde_json::json!({
+                "hover": { "nativeSemantics": true }
+            }))
+            .native_semantics
+        );
+    }
+
+    #[test]
+    fn native_semantic_enrichment_is_opt_in() {
+        assert_eq!(
+            parse_native_semantic_options(&serde_json::json!({})),
+            NativeSemanticOptions { enabled: false }
+        );
+        assert!(
+            parse_native_semantic_options(&serde_json::json!({
+                "analysis": { "enabled": true }
+            }))
+            .enabled
+        );
+        assert!(
+            parse_native_semantic_options(&serde_json::json!({
+                "lint": { "enabled": true }
+            }))
+            .enabled
         );
     }
 

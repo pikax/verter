@@ -298,6 +298,66 @@ fn merge_hover_strips_synthetic_prefix_from_type_block() {
     );
 }
 
+#[test]
+fn merge_hover_displays_svelte_snippet_contract_without_internal_brand() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let type_hover = HoverInfo {
+        contents: "const header: __VerterSnippet<[{ title: string; count: number }]>".to_string(),
+        range_start: None,
+        range_end: None,
+    };
+
+    let result = merge_hover(
+        None,
+        Some(type_hover),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    );
+    let text = extract_hover_text(&result.unwrap());
+    assert!(
+        text.contains("Snippet<[{"),
+        "the public snippet type remains visible: {text}"
+    );
+    assert!(
+        !text.contains("__VerterSnippet"),
+        "the internal snippet brand must not reach user-facing hover: {text}"
+    );
+}
+
+#[test]
+fn svelte_public_facade_hover_uses_authored_component_name() {
+    let mut hover = HoverInfo {
+        contents: "(alias) const __VerterPublicComponent: Component<__VerterPublicProps, {}, \"\">"
+            .to_string(),
+        range_start: None,
+        range_end: None,
+    };
+
+    super::hover::rewrite_svelte_public_component_label(&mut hover, Some("DirectChild"));
+
+    assert_eq!(
+        hover.contents,
+        "(alias) const DirectChild: Component<__VerterPublicProps, {}, \"\">"
+    );
+}
+
+#[test]
+fn svelte_public_facade_hover_is_unchanged_without_an_authored_identifier() {
+    let original = "(alias) const __VerterPublicComponent: Component<Props>";
+    let mut hover = HoverInfo {
+        contents: original.to_string(),
+        range_start: None,
+        range_end: None,
+    };
+
+    super::hover::rewrite_svelte_public_component_label(&mut hover, None);
+
+    assert_eq!(hover.contents, original);
+}
+
 // ── Completion merge tests ─────────────────────────────────────
 
 fn make_verter_completion(label: &str) -> CompletionItem {
@@ -4619,6 +4679,7 @@ fn merge_definitions_uses_barrel_resolver_for_non_carrier_targets() {
         &mapper,
         &carrier_li,
         None,
+        None,
         &test_doc_uri(),
         &carrier_exists,
         Some(&resolver),
@@ -4630,6 +4691,73 @@ fn merge_definitions_uses_barrel_resolver_for_non_carrier_targets() {
         Some(GotoDefinitionResponse::Scalar(loc)) => assert_eq!(loc, expected),
         other => panic!("expected scalar resolved location, got {:?}", other),
     }
+}
+
+#[test]
+fn merge_definitions_maps_carrier_api_target_to_authored_source() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let carrier_source =
+        "<script lang=\"ts\">\nlet { prop }: { prop: string } = $props();\n</script>\n";
+    let api_surface =
+        "declare const Child: import(\"svelte\").Component<{ prop: string }, {}, \"\">;\n";
+    let api_start = api_surface.find("prop").unwrap() as u32;
+    let source_col = carrier_source
+        .lines()
+        .nth(1)
+        .and_then(|line| line.find("prop: string"))
+        .unwrap() as u32;
+
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("/src/Child.svelte", carrier_source);
+    builder.add_token(0, api_start, 1, source_col, Some(source_id), None);
+    builder.add_token(0, api_start + 4, 0, 0, None, None);
+    let api_mapper = ProviderPositionMapper::source_map(
+        PositionMapper::from_json(&builder.into_sourcemap().to_json_string()).unwrap(),
+    );
+    let api_li = LineIndex::new_utf16(api_surface);
+    let api_carrier_li = LineIndex::new_utf16(carrier_source);
+    let api_path = "/src/Child.svelte.verter.ts";
+    let api_resolver = |path: &str| {
+        if path == api_path {
+            ApiSurfaceResolution::Vouched(ExternalIdeContext {
+                tsx_line_index: api_li.clone(),
+                mapper: api_mapper.clone(),
+                carrier_line_index: api_carrier_li.clone(),
+                carrier_negotiated_line_index: Some(api_carrier_li.clone()),
+            })
+        } else {
+            ApiSurfaceResolution::NotVirtual
+        }
+    };
+    let carrier_source_exists = |path: &str| path == "/src/Child.svelte";
+
+    let result = merge_definitions_with_barrel_resolver(
+        None,
+        vec![TypeLocation {
+            path: api_path.to_string(),
+            start: api_start,
+            end: api_start + 4,
+        }],
+        "/src/Parent.svelte.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &test_doc_uri(),
+        &carrier_source_exists,
+        None,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
+
+    let Some(GotoDefinitionResponse::Scalar(location)) = result else {
+        panic!("expected one mapped public-API definition, got {result:?}");
+    };
+    assert_eq!(location.uri, file_path_to_uri("/src/Child.svelte").unwrap());
+    assert_eq!(location.range.start.line, 1);
+    assert_eq!(location.range.start.character, source_col);
+    assert_eq!(location.range.end.character, source_col + 4);
 }
 
 /// Regression: when verter resolves to a same-file import and TSGO resolves

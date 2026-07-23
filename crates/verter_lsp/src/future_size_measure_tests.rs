@@ -34,8 +34,10 @@ struct MeasureServer {
 
 impl MeasureServer {
     fn new(audit_enabled: bool) -> Self {
-        let mut config = HostConfig::default();
-        config.audit_enabled = audit_enabled;
+        let config = HostConfig {
+            audit_enabled,
+            ..HostConfig::default()
+        };
         let host = Arc::new(VerterHost::new_standalone(config));
         let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
         let host_for_server = Arc::clone(&host);
@@ -248,8 +250,10 @@ async fn measure_wrapper_layer_sizes() {
     report("run_with_deadline(tiny)", size_of_val(&run_deadline));
 
     // Dummy host for run_with_audit.
-    let mut config_on = HostConfig::default();
-    config_on.audit_enabled = true;
+    let config_on = HostConfig {
+        audit_enabled: true,
+        ..HostConfig::default()
+    };
     let host = Arc::new(VerterHost::new_standalone(config_on));
     let audit_on = crate::audit_harness::run_with_audit(
         &host,
@@ -265,8 +269,10 @@ async fn measure_wrapper_layer_sizes() {
     report("run_with_audit(tiny, audit_on)", size_of_val(&audit_on));
     drop(audit_on);
 
-    let mut config_off = HostConfig::default();
-    config_off.audit_enabled = false;
+    let config_off = HostConfig {
+        audit_enabled: false,
+        ..HostConfig::default()
+    };
     let host_off = Arc::new(VerterHost::new_standalone(config_off));
     let audit_off = crate::audit_harness::run_with_audit(
         &host_off,
@@ -393,7 +399,7 @@ async fn measure_handler_future_sizes() {
         // Direct body futures (inner layers).
         {
             let fut = super::nav_features_navigation::handle_goto_definition(
-                &server,
+                server,
                 goto_params(&uri, position),
             );
             report("handle_goto_definition body", size_of_val(&fut));
@@ -401,7 +407,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::nav_features_audit::handle_goto_definition_with_audit(
-                &server,
+                server,
                 goto_params(&uri, position),
             );
             report("handle_goto_definition_with_audit", size_of_val(&fut));
@@ -413,13 +419,13 @@ async fn measure_handler_future_sizes() {
             drop(fut);
         }
         {
-            let fut = super::nav_features::handle_hover(&server, hover_params(&uri, position));
+            let fut = super::nav_features::handle_hover(server, hover_params(&uri, position));
             report("handle_hover body", size_of_val(&fut));
             drop(fut);
         }
         {
             let fut = super::nav_features_audit::handle_hover_with_audit(
-                &server,
+                server,
                 hover_params(&uri, position),
             );
             report("handle_hover_with_audit", size_of_val(&fut));
@@ -427,13 +433,13 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut =
-                super::nav_features::handle_completion(&server, completion_params(&uri, position));
+                super::nav_features::handle_completion(server, completion_params(&uri, position));
             report("handle_completion body", size_of_val(&fut));
             drop(fut);
         }
         {
             let fut = super::nav_features_audit::handle_completion_with_audit(
-                &server,
+                server,
                 completion_params(&uri, position),
             );
             report("handle_completion_with_audit", size_of_val(&fut));
@@ -441,7 +447,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::nav_features_navigation::handle_references(
-                &server,
+                server,
                 references_params(&uri, position),
             );
             report("handle_references body", size_of_val(&fut));
@@ -449,7 +455,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::nav_features_audit::handle_references_with_audit(
-                &server,
+                server,
                 references_params(&uri, position),
             );
             report("handle_references_with_audit", size_of_val(&fut));
@@ -457,7 +463,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::nav_features_navigation::handle_rename(
-                &server,
+                server,
                 rename_params(&uri, position),
             );
             report("handle_rename body", size_of_val(&fut));
@@ -465,7 +471,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::nav_features_audit::handle_rename_with_audit(
-                &server,
+                server,
                 rename_params(&uri, position),
             );
             report("handle_rename_with_audit", size_of_val(&fut));
@@ -473,7 +479,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::nav_features_navigation::handle_goto_type_definition(
-                &server,
+                server,
                 goto_params(&uri, position),
             );
             report("handle_goto_type_definition body", size_of_val(&fut));
@@ -481,23 +487,23 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut =
-                super::aux_features::handle_document_symbol(&server, document_symbol_params(&uri));
+                super::aux_features::handle_document_symbol(server, document_symbol_params(&uri));
             report("handle_document_symbol body", size_of_val(&fut));
             drop(fut);
         }
         {
-            let fut = super::aux_features::handle_code_action(&server, code_action_params(&uri));
+            let fut = super::aux_features::handle_code_action(server, code_action_params(&uri));
             report("handle_code_action body", size_of_val(&fut));
             drop(fut);
         }
         {
-            let fut = super::aux_features::handle_inlay_hint(&server, inlay_hint_params(&uri));
+            let fut = super::aux_features::handle_inlay_hint(server, inlay_hint_params(&uri));
             report("handle_inlay_hint body", size_of_val(&fut));
             drop(fut);
         }
         {
             let fut = super::aux_features::handle_semantic_tokens_full(
-                &server,
+                server,
                 semantic_tokens_params(&uri),
             );
             report("handle_semantic_tokens_full body", size_of_val(&fut));
@@ -505,7 +511,7 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::aux_features::handle_signature_help(
-                &server,
+                server,
                 signature_help_params(&uri, position),
             );
             report("handle_signature_help body", size_of_val(&fut));
@@ -513,27 +519,21 @@ async fn measure_handler_future_sizes() {
         }
         {
             let fut = super::aux_features::handle_document_highlight(
-                &server,
+                server,
                 document_highlight_params(&uri, position),
             );
             report("handle_document_highlight body", size_of_val(&fut));
             drop(fut);
         }
 
-        // Sync chain futures polled from handlers, plus the handler-side
-        // readiness join (the import-set pass itself is a detached spawned
-        // task and never a handler-polled future).
+        // Sync-chain futures polled from handlers. Dependency readiness is now
+        // a synchronous capture; the import-set pass is a detached spawned task
+        // and never a handler-polled future.
         {
             let fut = server.ensure_current_file_synced(&uri);
             report("ensure_current_file_synced", size_of_val(&fut));
             drop(fut);
         }
-        {
-            let fut = server.dependency_readiness_join(&uri);
-            report("dependency_readiness_join", size_of_val(&fut));
-            drop(fut);
-        }
-
         // Lifecycle notifications (also land on the serve loop).
         {
             let fut = server.did_open(DidOpenTextDocumentParams {

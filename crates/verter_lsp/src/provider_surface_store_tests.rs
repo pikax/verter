@@ -42,6 +42,64 @@ fn record_makes_current_and_returns_stamped_snapshot() {
 }
 
 #[test]
+fn captured_provider_paths_use_filesystem_identity() {
+    let store = ProviderSurfaceStore::new();
+    store.record(RecordSurface::carrier_api_legacy(
+        r"D:\src\Child.svelte.verter.ts".to_string(),
+        r"D:\src\Child.svelte".to_string(),
+        Arc::from("api\n"),
+        None,
+        Arc::from("carrier\n"),
+    ));
+
+    let captured = store.capture_current_carrier_api_set();
+    assert!(
+        captured
+            .snapshot_for("d:/src/Child.svelte.verter.ts")
+            .is_some(),
+        "provider-returned slash and drive-letter spelling must resolve the captured surface"
+    );
+}
+
+#[test]
+fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
+    use tower_lsp_server::ls_types::PositionEncodingKind;
+
+    let store = ProviderSurfaceStore::new();
+    let provider_path = "/src/Child.svelte.tsx";
+    let source_map = crate::documents::provider_projection::ProviderPositionMapper::source_map(
+        crate::documents::position_map::PositionMapper::from_json(
+            r#"{"version":3,"sources":["Child.svelte"],"names":[],"mappings":"AAAA"}"#,
+        )
+        .expect("valid source map"),
+    );
+    store.record(RecordSurface::carrier_legacy(
+        ProviderSurfaceKind::CarrierIde,
+        provider_path.to_string(),
+        "/src/Child.svelte".to_string(),
+        Arc::from("contractProp\n"),
+        Some(source_map),
+        Arc::from("contractProp\n"),
+    ));
+    let captured = store.capture_current_carrier_ide_set();
+    let documents = crate::documents::DocumentRegistry::new(Arc::new(
+        verter_session::VerterHost::new_standalone(verter_session::HostConfig::default()),
+    ));
+
+    assert!(
+        foreign_ide_context_from_captured(
+            &store,
+            &documents,
+            &captured,
+            provider_path,
+            PositionEncodingKind::UTF16,
+        )
+        .is_some(),
+        "a closed imported carrier must map through the captured provider/source generation"
+    );
+}
+
+#[test]
 fn each_record_advances_generation() {
     let store = ProviderSurfaceStore::new();
     let a = store.record(record_surface("api v1\n", "carrier v1\n"));

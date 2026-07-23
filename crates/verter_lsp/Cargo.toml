@@ -68,6 +68,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 futures-util = "0.3.32"
+tower-service = "0.3.3"
 # Used by `tests/cases/kebab_tag_mapping_full_columns.rs` to compile a REAL SFC
 # through the production IDE codegen and assert, through the production
 # `PositionMapper`, that every letter column of a rewritten kebab component tag

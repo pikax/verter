@@ -15,7 +15,8 @@ use crate::type_provider::protocol::TypeLocation;
 use crate::uri::path_to_file_uri;
 
 use super::position::{
-    tsx_range_to_carrier_range, BarrelResolver, ExternalIdeResolver, ExternalSourceReader,
+    api_surface_range_to_carrier_range, tsx_range_to_carrier_range, ApiSurfaceResolution,
+    BarrelResolver, ExternalApiResolver, ExternalIdeResolver, ExternalSourceReader,
 };
 
 /// Resolve a definition/type-definition target's byte-offset range to an LSP `Range` by
@@ -194,6 +195,7 @@ pub fn merge_definitions(
         mapper,
         carrier_line_index,
         external_resolver,
+        None,
         document_uri,
         carrier_source_exists,
         None,
@@ -214,6 +216,7 @@ pub fn merge_definitions_with_barrel_resolver(
     mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
+    external_api_resolver: Option<ExternalApiResolver<'_>>,
     document_uri: &Uri,
     carrier_source_exists: &dyn Fn(&str) -> bool,
     barrel_resolver: Option<BarrelResolver<'_>>,
@@ -242,6 +245,48 @@ pub fn merge_definitions_with_barrel_resolver(
         let mut locations: Vec<Location> = type_defs
             .into_iter()
             .filter_map(|loc| {
+                // A provider may resolve a cross-component property to the
+                // imported component's generated PUBLIC-API surface. Its byte
+                // offsets map through that surface's own captured source map,
+                // never through the current file's IDE mapper.
+                if is_carrier_api_path(&loc.path, carrier_source_exists) {
+                    match external_api_resolver
+                        .map(|resolver| resolver(&loc.path))
+                        .unwrap_or(ApiSurfaceResolution::NotVirtual)
+                    {
+                        ApiSurfaceResolution::Vouched(ctx) => {
+                            let range = ctx.carrier_negotiated_line_index.as_ref().and_then(
+                                |negotiated| {
+                                    api_surface_range_to_carrier_range(
+                                        loc.start,
+                                        loc.end,
+                                        &ctx.tsx_line_index,
+                                        &ctx.mapper,
+                                        &ctx.carrier_line_index,
+                                        negotiated,
+                                    )
+                                },
+                            )?;
+                            let carrier_path =
+                                normalize_carrier_path(&loc.path, carrier_source_exists);
+                            let uri = path_to_uri(carrier_path)?;
+                            return Some(Location { uri, range });
+                        }
+                        ApiSurfaceResolution::VirtualDrop => return None,
+                        ApiSurfaceResolution::NotVirtual => {
+                            let uri = path_to_uri(&loc.path)?;
+                            let range = resolve_external_target_range(
+                                &loc.path,
+                                loc.start,
+                                loc.end,
+                                negotiated_encoding.clone(),
+                                source_reader,
+                            )?;
+                            return Some(Location { uri, range });
+                        }
+                    }
+                }
+
                 // A carrier IDE virtual file (`{carrier}.tsx`/`.jsx`): the provider's byte
                 // offsets index the generated TSX; map them back to the carrier source through
                 // that file's own CodeTransform sourcemap — the current file's in-context mapper

@@ -7,14 +7,17 @@ real_provider_test!(
     fixture = "single-project",
     async fn run(session) {
         let uri = session.open_fixture_file("src/App.vue").await;
-        let _mycomp = session.open_fixture_file("src/MyComp.vue").await;
+        let mycomp = session.open_fixture_file("src/MyComp.vue").await;
+        // Rename is capture-only and never joins background publication. A test
+        // asserting complete cross-file edits must join the explicit sync receipts
+        // before issuing it; production instead fails closed promptly when the
+        // same completeness is not available yet.
+        session.ensure_synced(&uri).await;
+        session.ensure_synced(&mycomp).await;
+        session.settle_import_dependencies(&uri).await;
 
-        // `handle_rename` never starts import-set work: it CAPTURES the
-        // DependencyReady receipt minted by the `did_open`-triggered background
-        // publication (or joins one in flight), so no test-only sync helper is
-        // needed. `wait_until_ready` runs only as a best-effort WARM-UP (give
-        // the publication + provider time to settle and index); its result NO
-        // LONGER gates the cross-file assertion — a green run always EXECUTES R9.
+        // The completion probe verifies that the engine indexed the exact active
+        // snapshot after those receipts settled.
         let _warm = session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await;
 
         // R1: prepare rename on `const count = ref(0)` → accepted
@@ -82,6 +85,8 @@ function renderTyped(): string {
 "#,
             )
             .await;
+        session.ensure_synced(&contract).await;
+        session.settle_import_dependencies(&contract).await;
         let script_pos = session.find_position(&contract, "const typedValue", 6);
         let script_edit = session
             .rename_edits(&contract, script_pos, "typedDatum")
@@ -122,6 +127,9 @@ function renderTyped(): string {
         // MyComp's `{carrier}.ts` API surface, the generation-pinned snapshot is captured under
         // the fence, tsserver reports the renamed prop against that surface, and the merge maps
         // it back onto MyComp.vue through the pinned snapshot. No skip path guards this.
+        // Opening the throw-away RenameContract above advanced the workspace
+        // generation, so refresh App's generation-keyed dependency receipt first.
+        session.settle_import_dependencies(&uri).await;
         let pos = session.find_position(&uri, r#"foo="literal""#, 0);
         let edits = session.rename_edits(&uri, pos, "fooRenamed").await;
         assert!(edits.is_some(), "cross-file rename foo should return edits");
@@ -184,7 +192,10 @@ real_provider_test!(
         let app = session.open_fixture_file("src/App.vue").await;
         let child_uri = session.workspace_uri("src/MyComp.vue");
 
-        // Best-effort warm-up only (no gating); the production handler syncs.
+        // The parent receipt includes the normal imported-carrier prewarm. Rename
+        // itself stays capture-only and does not join this background work.
+        session.ensure_synced(&app).await;
+        session.settle_import_dependencies(&app).await;
         let _warm = session.wait_until_ready(&app, "action.disabled", 7, "disabled").await;
 
         // Rename the `foo` prop usage in App.vue. `<MyComp foo="literal" …>`.
@@ -267,6 +278,9 @@ real_provider_test!(
                 "<script setup lang=\"ts\">\nimport KebabChild from './KebabChild.vue'\nconst v = 'x'\n</script>\n<template>\n  <KebabChild :my-prop=\"v\" />\n</template>\n",
             )
             .await;
+        session.ensure_synced(&child).await;
+        session.ensure_synced(&parent).await;
+        session.settle_import_dependencies(&parent).await;
         let _warm = session
             .wait_until_ready(&parent, ":my-prop=", 1, "my-prop")
             .await;

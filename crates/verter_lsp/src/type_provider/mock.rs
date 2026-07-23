@@ -116,11 +116,26 @@ mod inner {
         NotifyCarrierChanged {
             companion_path: String,
         },
+        NotifyCarriersChanged {
+            companion_paths: Vec<String>,
+        },
         RegisterCarrierMember {
             source_path: String,
             companion_path: String,
             content: String,
             project_file_name: String,
+        },
+        RegisterCarrierMetadata {
+            source_path: String,
+            companion_path: String,
+            content: String,
+            project_file_name: String,
+        },
+        ActivateCarrierMember {
+            source_path: String,
+            companion_path: String,
+            project_file_name: String,
+            script_kind: verter_type_runtime::CarrierScriptKind,
         },
     }
 
@@ -152,13 +167,16 @@ mod inner {
         /// When `true`, `get_definition` RECORDS its call and then returns a
         /// future that NEVER resolves, simulating a wedged type provider (a
         /// managed tsgo stuck in a busy dispatch loop). Drives the handler
-        /// deadline repro: without an always-on production request deadline the
-        /// definition handler parks on this forever.
+        /// cancellation and explicitly bounded diagnostic-host behavior.
         hang_definition: bool,
         /// As `hang_definition`, for `get_hover`.
         hang_hover: bool,
         /// As `hang_definition`, for `get_signature_help`.
         hang_signature_help: bool,
+        /// As `hang_definition`, for `get_diagnostics`. This pins that an
+        /// unbounded provider pull cannot starve independently available
+        /// framework diagnostics.
+        hang_diagnostics: bool,
         completion_responses: Vec<(String, u32, Vec<Completion>)>,
         diagnostic_responses: Vec<(String, Vec<TypeDiagnostic>)>,
         definition_responses: Vec<(String, u32, Vec<TypeLocation>)>,
@@ -286,8 +304,7 @@ mod inner {
 
         /// Make every subsequent `get_definition` RECORD its call and then hang
         /// forever (a wedged type provider). The handler-deadline repro uses
-        /// this to prove the definition handler now fails closed on a deadline
-        /// instead of parking.
+        /// this to exercise cancellation or an explicit diagnostic-host bound.
         pub fn hang_definition(&self) {
             let mut state = self.state.lock().unwrap();
             state.hang_definition = true;
@@ -301,11 +318,17 @@ mod inner {
         }
 
         /// Wedge `get_signature_help`. Signature help reaches the provider on a
-        /// keystroke, so a wedge here parks the handler on every `(` the user
-        /// types until the request deadline fires.
+        /// keystroke; production recovery comes from engine lifecycle health and
+        /// client cancellation, not a feature latency deadline.
         pub fn hang_signature_help(&self) {
             let mut state = self.state.lock().unwrap();
             state.hang_signature_help = true;
+        }
+
+        /// Wedge `get_diagnostics` after recording the call.
+        pub fn hang_diagnostics(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.hang_diagnostics = true;
         }
 
         /// Configure completions for a specific path and offset.
@@ -901,6 +924,17 @@ mod inner {
             Box::pin(async { Ok(()) })
         }
 
+        fn notify_carriers_changed<'a>(
+            &'a self,
+            companion_paths: &'a [String],
+        ) -> ProviderFuture<'a, ()> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::NotifyCarriersChanged {
+                companion_paths: companion_paths.to_vec(),
+            });
+            Box::pin(async { Ok(()) })
+        }
+
         fn register_carrier_member(
             &self,
             source_path: &str,
@@ -931,6 +965,46 @@ mod inner {
                 }
                 Ok(())
             })
+        }
+
+        fn register_carrier_metadata(
+            &self,
+            source_path: &str,
+            companion_path: &str,
+            content: &str,
+            project_file_name: &str,
+        ) -> ProviderFuture<'_, ()> {
+            self.state
+                .lock()
+                .unwrap()
+                .calls
+                .push(MockCall::RegisterCarrierMetadata {
+                    source_path: source_path.to_string(),
+                    companion_path: companion_path.to_string(),
+                    content: content.to_string(),
+                    project_file_name: project_file_name.to_string(),
+                });
+            Box::pin(async { Ok(()) })
+        }
+
+        fn activate_carrier_member(
+            &self,
+            source_path: &str,
+            companion_path: &str,
+            project_file_name: &str,
+            script_kind: verter_type_runtime::CarrierScriptKind,
+        ) -> ProviderFuture<'_, ()> {
+            self.state
+                .lock()
+                .unwrap()
+                .calls
+                .push(MockCall::ActivateCarrierMember {
+                    source_path: source_path.to_string(),
+                    companion_path: companion_path.to_string(),
+                    project_file_name: project_file_name.to_string(),
+                    script_kind,
+                });
+            Box::pin(async { Ok(()) })
         }
 
         fn get_completions(
@@ -1030,7 +1104,7 @@ mod inner {
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-            let (result, on_query) = {
+            let (result, on_query, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDiagnostics {
                     path: path.to_string(),
@@ -1047,12 +1121,15 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query)
+                (result, on_query, state.hang_diagnostics)
             };
             // Run the one-shot mid-request seam AFTER releasing the state lock
             // (a callback that re-enters the mock must not deadlock).
             if let Some(callback) = on_query {
                 callback();
+            }
+            if hang {
+                return Box::pin(std::future::pending());
             }
             Box::pin(async move { Ok(result) })
         }

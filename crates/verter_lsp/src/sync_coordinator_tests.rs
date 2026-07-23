@@ -8,6 +8,7 @@
 use super::*;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::ProjectSyncMode;
+use futures_util::{FutureExt, StreamExt};
 use tower_lsp_server::{LspService, Server};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
@@ -49,28 +50,27 @@ fn make_test_client() -> Client {
 
 #[tokio::test]
 async fn sync_coordinator_coalesces_rapid_changes() {
-    // Test the coordinator's channel and signal delivery.
-    // We verify that all signals arrive and can be coalesced.
-    let (tx, mut rx) = mpsc::unbounded_channel::<SyncSignal>();
-    let handle = SyncCoordinatorHandle { tx };
+    let (handle, mut wake_rx) = SyncCoordinatorHandle::new_for_test();
 
-    // Send 10 rapid changes (no delay — instant burst)
-    for _ in 0..10 {
+    // Ten edits occupy one wake slot and one latest-value document entry.
+    for version in 0..10 {
         handle.signal(
             "C:/project/src/App.vue".to_string(),
-            "file:///C:/project/src/App.vue".to_string(),
+            format!("file:///C:/project/src/App.vue?v={version}"),
         );
     }
 
-    // Drain signals and verify they were received
-    let mut count = 0;
-    while let Ok(signal) = rx.try_recv() {
-        count += 1;
-        assert_eq!(signal.canonical_id, "C:/project/src/App.vue");
-    }
-
-    // All 10 signals should have been sent
-    assert_eq!(count, 10, "all 10 signals should be in the channel");
+    assert_eq!(wake_rx.try_recv(), Ok(()), "one wake must be queued");
+    assert!(
+        wake_rx.try_recv().is_err(),
+        "the capacity-one wake channel must not queue per-keystroke work"
+    );
+    let pending = handle.take_pending_for_test();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending.get("C:/project/src/App.vue").map(String::as_str),
+        Some("file:///C:/project/src/App.vue?v=9")
+    );
 }
 
 #[tokio::test]
@@ -770,6 +770,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
             &uri,
             canonical_id,
             &file_language,
+            deps.type_provider_kind.requires_explicit_source_graph(),
         )
         .await,
         "the shadow sync should succeed against the mock provider"
@@ -1443,6 +1444,7 @@ async fn make_carrier_diagnostics_fixture() -> (
     Arc<MockTypeProvider>,
     String,
     String,
+    SyncCoordinatorDeps,
 ) {
     use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
 
@@ -1519,6 +1521,7 @@ async fn make_carrier_diagnostics_fixture() -> (
         provider,
         canonical_id,
         ide_path,
+        deps,
     )
 }
 
@@ -1527,7 +1530,7 @@ async fn make_carrier_diagnostics_fixture() -> (
 /// an over-eager fail-closed gate dropping healthy background diagnostics.
 #[tokio::test(flavor = "multi_thread")]
 async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface() {
-    let (documents, provider_sync_states, provider, canonical_id, _ide_path) =
+    let (documents, provider_sync_states, provider, canonical_id, _ide_path, _deps) =
         make_carrier_diagnostics_fixture().await;
 
     let merged = carrier_provider_diagnostics(
@@ -1545,6 +1548,197 @@ async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface
     );
 }
 
+/// `needs_provider_sync` is a reconciliation work bit, not a document revision:
+/// an interactive IDE sync may reinsert it for deferred API work after the
+/// coordinator has synchronized the current carrier. Valid diagnostics for that
+/// same LSP version must still run.
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
+    let (_documents, _states, provider, canonical_id, ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    provider.clear_calls();
+    deps.needs_provider_sync.insert(canonical_id.clone());
+
+    publish_merged_diagnostics(&deps, &canonical_id, "file:///workspace/src/App.vue").await;
+
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::GetDiagnostics { path } if path == &ide_path)),
+        "same-version deferred API work must not suppress provider diagnostics"
+    );
+}
+
+/// tsserver's synchronous diagnostic response has no authored LSP version in
+/// its payload. The coordinator captures the current version before the pull
+/// and must reject the response if that version advances, even when the edit is
+/// textually identical and the provider-surface generation therefore remains
+/// valid. This isolates the document-version fence from the surface fence.
+///
+/// @ai-generated - Guards exact-version diagnostics publication after provider I/O.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_diagnostics_are_not_published_for_a_superseded_document_version() {
+    let (documents, _states, provider, canonical_id, ide_path, mut deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let source = documents
+        .get(&uri)
+        .expect("fixture document")
+        .source
+        .to_string();
+
+    let documents_during_query = Arc::clone(&documents);
+    let uri_during_query = uri.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            let _ = documents_during_query.did_change(&uri_during_query, 2, &source);
+        }),
+    );
+
+    let client_slot = Arc::new(std::sync::Mutex::new(None));
+    let client_slot_for_service = Arc::clone(&client_slot);
+    let (mut service, mut socket) = LspService::new(move |client| {
+        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
+        NoopLanguageServer
+    });
+    deps.client = client_slot
+        .lock()
+        .expect("client lock")
+        .clone()
+        .expect("test client should be captured");
+    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
+        .id(1)
+        .params(serde_json::json!({
+            "processId": null,
+            "rootUri": null,
+            "capabilities": {}
+        }))
+        .finish();
+    let response = tower_service::Service::call(&mut service, initialize)
+        .await
+        .expect("initialize service call")
+        .expect("initialize response");
+    assert!(
+        response.is_ok(),
+        "test client must initialize: {response:?}"
+    );
+
+    let publish_uri = uri.to_string();
+    let publish = tokio::spawn(async move {
+        publish_merged_diagnostics(&deps, &canonical_id, &publish_uri).await
+    });
+    let request = socket
+        .next()
+        .await
+        .expect("the staged Verter diagnostics batch must publish");
+    assert_eq!(request.method(), "textDocument/publishDiagnostics");
+    let params: PublishDiagnosticsParams = serde_json::from_value(
+        serde_json::to_value(request.params().expect("publish params"))
+            .expect("publish params serialize"),
+    )
+    .expect("publish params deserialize");
+    assert_eq!(params.version, Some(1));
+    publish
+        .await
+        .expect("the diagnostics publication task must not panic");
+    assert_eq!(
+        documents.get(&uri).map(|document| document.version),
+        Some(2),
+        "the provider callback must advance only the authored document version"
+    );
+    assert!(
+        socket.next().now_or_never().is_none(),
+        "the provider result for version 1 must not publish after version 2 becomes current"
+    );
+}
+
+/// A provider diagnostic pass can legitimately be unbounded while tsserver
+/// constructs a cold configured project. Framework diagnostics are independent
+/// snapshot results and must reach the editor before that pull completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
+    let (documents, _states, provider, canonical_id, ide_path, mut deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let source = "<script setup lang=\"ts\">\n\
+                  defineProps<{ deadProp: string }>();\n\
+                  </script>\n\
+                  <template><div /></template>\n";
+    let _ = documents.did_change(&uri, 2, source);
+    sync_file(&deps, &canonical_id, uri.as_str()).await;
+    provider.clear_calls();
+    provider.hang_diagnostics();
+
+    let client_slot = Arc::new(std::sync::Mutex::new(None));
+    let client_slot_for_service = Arc::clone(&client_slot);
+    let (mut service, mut socket) = LspService::new(move |client| {
+        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
+        NoopLanguageServer
+    });
+    deps.client = client_slot
+        .lock()
+        .expect("client lock")
+        .clone()
+        .expect("test client should be captured");
+    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
+        .id(1)
+        .params(serde_json::json!({
+            "processId": null,
+            "rootUri": null,
+            "capabilities": {}
+        }))
+        .finish();
+    let response = tower_service::Service::call(&mut service, initialize)
+        .await
+        .expect("initialize service call")
+        .expect("initialize response");
+    assert!(
+        response.is_ok(),
+        "test client must initialize: {response:?}"
+    );
+
+    let publish = tokio::spawn(async move {
+        publish_merged_diagnostics(&deps, &canonical_id, uri.as_str()).await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(1), socket.next())
+        .await
+        .expect("Verter diagnostics must publish without waiting for the provider")
+        .expect("client socket must remain open");
+    assert_eq!(request.method(), "textDocument/publishDiagnostics");
+    let params: PublishDiagnosticsParams = serde_json::from_value(
+        serde_json::to_value(request.params().expect("publish params"))
+            .expect("publish params serialize"),
+    )
+    .expect("publish params deserialize");
+    assert_eq!(params.version, Some(2));
+    assert!(
+        params.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        }),
+        "the first staged batch must contain the ready Verter hint: {:?}",
+        params.diagnostics
+    );
+
+    tokio::task::yield_now().await;
+    assert!(
+        provider
+            .calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::GetDiagnostics { path } if path == &ide_path)),
+        "the provider pull must still start in the background"
+    );
+    assert!(
+        !publish.is_finished(),
+        "the test provider remains wedged after the staged Verter publish"
+    );
+    publish.abort();
+}
+
 /// A provider re-sync landing a FRESH surface generation while the background
 /// diagnostics request is awaiting the provider must cause the provider
 /// diagnostics to be DROPPED (fail closed): the response was produced against a
@@ -1552,7 +1746,7 @@ async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface
 /// publish wrong positions. The Verter-only diagnostics still publish.
 #[tokio::test(flavor = "multi_thread")]
 async fn carrier_diagnostics_drop_provider_results_when_surface_regenerates_mid_request() {
-    let (documents, provider_sync_states, provider, canonical_id, ide_path) =
+    let (documents, provider_sync_states, provider, canonical_id, ide_path, _deps) =
         make_carrier_diagnostics_fixture().await;
 
     let store = documents.provider_surfaces().clone();
@@ -1597,7 +1791,7 @@ async fn carrier_diagnostics_drop_provider_results_when_surface_regenerates_mid_
 /// drop, the Verter-only set survives, no panic.
 #[tokio::test(flavor = "multi_thread")]
 async fn carrier_diagnostics_drop_provider_results_when_surface_retired_mid_request() {
-    let (documents, provider_sync_states, provider, canonical_id, ide_path) =
+    let (documents, provider_sync_states, provider, canonical_id, ide_path, _deps) =
         make_carrier_diagnostics_fixture().await;
 
     let store = documents.provider_surfaces().clone();
@@ -1689,6 +1883,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
             &uri,
             canonical_id,
             &file_language,
+            deps.type_provider_kind.requires_explicit_source_graph(),
         )
         .await,
         "the shadow sync should succeed against the mock provider"
@@ -1828,4 +2023,85 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn semantic_completion_republishes_without_provider_file_sync() {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    documents.set_semantic_analysis_enabled(true);
+    let source = "<script setup lang=\"ts\">\n\
+                  defineProps<{ deadProp: string }>();\n\
+                  </script>\n\
+                  <template><div /></template>\n";
+    let uri: Uri = "file:///workspace/src/SemanticHint.vue"
+        .parse()
+        .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("open doc has a canonical id");
+    let provider = Arc::new(MockTypeProvider::new());
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: Some(ProjectSync::new(
+            provider.clone(),
+            ProjectSyncMode::FullProject,
+        )),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: Some(provider.clone()),
+        cached_verter_diags: Arc::clone(&cached_verter_diags),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsserver,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+    let _handle = spawn_sync_coordinator(deps);
+    documents.schedule_semantic_analysis(&uri);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let hint_ready = cached_verter_diags.get(uri.as_str()).is_some_and(|entry| {
+            entry.2.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic.code.as_ref(),
+                    Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+                )
+            })
+        });
+        if hint_ready {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "semantic completion must trigger a diagnostics-only publish"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        provider.calls().is_empty(),
+        "optional semantic completion must not open/update provider files or query an uncommitted surface: {:?}",
+        provider.calls()
+    );
+    assert!(
+        !documents.semantic_analysis_enabled() || documents.get_analysis(&uri).is_some(),
+        "the diagnostic event must follow immutable semantic snapshot commit"
+    );
+    assert_eq!(
+        documents.get_canonical_id(&uri).as_deref(),
+        Some(canonical_id.as_str())
+    );
 }

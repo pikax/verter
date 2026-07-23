@@ -69,9 +69,9 @@ pub fn external_ide_context_from_snapshot(
 /// - the captured surface is no longer honored at merge time (a mid-request
 ///   re-sync with different content, or a close, invalidates — a
 ///   byte-identical same-map re-sync stays honored);
-/// - the foreign carrier's OPEN document no longer byte-matches the captured
-///   carrier source (a closed foreign document also drops — mapping targets
-///   the open buffer, matching the live resolver this replaces);
+/// - when the foreign carrier is OPEN, its live buffer no longer byte-matches
+///   the captured carrier source. A CLOSED imported carrier stays mappable
+///   through the coherent captured source/map generation;
 /// - the captured surface has no usable source map.
 #[must_use]
 pub fn foreign_ide_context_from_captured(
@@ -88,8 +88,17 @@ pub fn foreign_ide_context_from_captured(
     if !store.captured_snapshot_still_honored(snapshot) {
         return None;
     }
-    if !surface_matches_open_document_source(documents, &snapshot.source_canonical, snapshot) {
-        return None;
+    // An open foreign carrier is governed by its editor buffer and must still
+    // byte-match the captured source. A closed imported carrier has no editor
+    // buffer to validate; its captured provider bytes + source map are the
+    // coherent generation the provider answered against, so it remains
+    // mappable. Requiring an open document here would make cross-file
+    // navigation start working only after the user manually opened the target.
+    if let Some(uri) = documents.canonical_id_to_uri(&snapshot.source_canonical) {
+        let document = documents.get(&uri)?;
+        if ContentHash::of(&document.source) != snapshot.source_hash {
+            return None;
+        }
     }
     external_ide_context_from_snapshot(snapshot, negotiated_encoding)
 }

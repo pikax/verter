@@ -1,9 +1,234 @@
 //! Completion tests ported from E2E suite.
 
-use tower_lsp_server::ls_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
+use tower_lsp_server::ls_types::{
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, VersionedTextDocumentIdentifier,
+};
 use tower_lsp_server::LanguageServer;
 
 use crate::test_harness::{real_provider_test, RealProviderTestSession};
+
+real_provider_test!(
+    completion_vue_script_auto_import_resolves_import_edit,
+    fixture = "vue-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/features/AutoImportSymbol.vue")
+            .await;
+        let position = session.find_position(&uri, "comput(() =>", "comput".len());
+        let mut observations = Vec::new();
+        let mut import_edit = None;
+
+        'attempts: for attempt in 0..16 {
+            let response = session
+                .server()
+                .completion(tower_lsp_server::ls_types::CompletionParams {
+                    text_document_position:
+                        tower_lsp_server::ls_types::TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position,
+                        },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(tower_lsp_server::ls_types::CompletionContext {
+                        trigger_kind:
+                            tower_lsp_server::ls_types::CompletionTriggerKind::INVOKED,
+                        trigger_character: None,
+                    }),
+                })
+                .await
+                .expect("completion request succeeds");
+            let items = match response {
+                Some(tower_lsp_server::ls_types::CompletionResponse::Array(items)) => items,
+                Some(tower_lsp_server::ls_types::CompletionResponse::List(list)) => list.items,
+                None => Vec::new(),
+            };
+
+            for item in items.into_iter().filter(|item| item.label == "computed") {
+                let resolved = session
+                    .server()
+                    .completion_resolve(item)
+                    .await
+                    .expect("completion resolve succeeds");
+                observations.push(format!("edits={:?}", resolved.additional_text_edits));
+                for edit in resolved.additional_text_edits.unwrap_or_default() {
+                    if edit.new_text.contains("computed") {
+                        import_edit = Some(edit);
+                        break 'attempts;
+                    }
+                }
+            }
+
+            if attempt < 15 {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+
+        let edit = import_edit.unwrap_or_else(|| {
+            panic!(
+                "accepting the Vue script completion must resolve an authored-source import edit; observations={observations:?}"
+            )
+        });
+        let document = session
+            .server()
+            .test_documents()
+            .get(&uri)
+            .expect("the fixture remains open");
+        let start = document
+            .line_index
+            .position_to_offset(&edit.range.start)
+            .expect("the resolved edit start is a valid authored-source offset");
+        let end = document
+            .line_index
+            .position_to_offset(&edit.range.end)
+            .expect("the resolved edit end is a valid authored-source offset");
+        let analysis = session
+            .server()
+            .test_documents()
+            .get_analysis(&uri)
+            .expect("the fixture has script analysis");
+        assert!(
+            analysis.imports.iter().any(|import| {
+                import.source == "vue" && import.span.start <= start && end <= import.span.end
+            }),
+            "the resolved edit must land inside the authored Vue import declaration: {edit:?}"
+        );
+        let mut applied = document.source.to_string();
+        drop(document);
+        applied.replace_range(start as usize..end as usize, &edit.new_text);
+        let vue_import = applied
+            .lines()
+            .find(|line| line.contains("from \"vue\"") || line.contains("from 'vue'"))
+            .expect("the applied source retains the Vue import");
+        assert!(
+            vue_import.contains("computed") && vue_import.contains("ref"),
+            "applying the edit must extend the existing Vue import, got {vue_import:?} from {edit:?}"
+        );
+        assert!(
+            !applied.contains("computed, const base"),
+            "the edit must not be mapped onto the following authored declaration"
+        );
+    }
+);
+
+real_provider_test!(
+    completion_svelte_component_callback_expression_offers_local_handler,
+    fixture = "svelte-parity",
+    async fn run(session) {
+        session
+            .server()
+            .set_provider_only_completions_for_test(true);
+        let uri = session
+            .open_fixture_file("src/ide/IdeSurfaceParent.svelte")
+            .await;
+        let original = session
+            .server()
+            .test_documents()
+            .get(&uri)
+            .expect("fixture remains open")
+            .source
+            .to_string();
+        let edited = original.replacen("{onPick}", "onPick={on}", 1);
+        assert_ne!(edited, original, "fixture must contain the shorthand callback");
+        session
+            .server()
+            .did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: edited,
+                }],
+            })
+            .await;
+        let position = session.find_position(&uri, "onPick={on}", "onPick={on".len());
+
+        let mut labels = Vec::new();
+        for _ in 0..20 {
+            labels = session.completion_labels(&uri, position, None).await;
+            if labels.iter().any(|label| label == "onPick") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        assert!(
+            labels.iter().any(|label| label == "onPick"),
+            "Svelte callback expression completion must include the authored local handler; labels={:?}",
+            labels.iter().filter(|label| label.starts_with("on")).collect::<Vec<_>>()
+        );
+    }
+);
+
+real_provider_test!(
+    completion_vue_scoped_slot_string_member_survives_incomplete_edit,
+    fixture = "vue-parity",
+    async fn run(session) {
+        let uri = session
+            .open_virtual(
+                "src/ide/ScopedSlotMemberCompletion.vue",
+                r#"<script setup lang="ts">
+import IdeSurfaceChild from './IdeSurfaceChild.vue'
+</script>
+<template>
+  <IdeSurfaceChild :label="'x'" :count="1">
+    <template #header="{ title }">{{ title. }}</template>
+  </IdeSurfaceChild>
+</template>
+"#,
+            )
+            .await;
+        let position = session.find_position(&uri, "title.", "title.".len());
+        let mut labels = Vec::new();
+        for _ in 0..24 {
+            labels = session.completion_labels(&uri, position, Some(".")).await;
+            if labels.iter().any(|label| {
+                matches!(label.as_str(), "length" | "toUpperCase" | "charAt" | "slice")
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        let debug = session.server().test_type_provider_context(&uri).map(|ctx| {
+            let strict = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
+                &position,
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+            );
+            let fallback = crate::type_provider::merge::carrier_completion_member_boundary_offset(
+                &position,
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+                &ctx.tsx_content,
+                session
+                    .server()
+                    .test_documents()
+                    .get(&uri)
+                    .expect("open source")
+                    .source
+                    .as_ref(),
+            );
+            let offset = strict.or(fallback);
+            let snippet = offset.map(|at| {
+                let at = at as usize;
+                let start = at.saturating_sub(180);
+                let end = (at + 220).min(ctx.tsx_content.len());
+                ctx.tsx_content[start..end].to_string()
+            });
+            (strict, fallback, offset, snippet)
+        });
+        assert!(
+            labels.iter().any(|label| {
+                matches!(label.as_str(), "length" | "toUpperCase" | "charAt" | "slice")
+            }),
+            "a scoped-slot string binding must keep its member type during an incomplete dot edit; got={labels:?}, debug={debug:?}"
+        );
+    }
+);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn svelte_contract_tsgo_template_completion_survives_provider_specialization() {
@@ -134,6 +359,12 @@ real_provider_test!(
             eprintln!("skipping: provider not warmed up");
             return;
         }
+        // This test issues a long sequence of exact completion assertions. Join
+        // the test-only dependency-publication receipt once so tsgo cannot swap
+        // project roots between the warm-up probe and the immediately following
+        // member query while the full workspace suite is heavily scheduled.
+        // Production completion remains capture-only and never waits here.
+        session.settle_import_dependencies(&uri).await;
 
         // --- Mustache expression: {{ count }} ---
         let pos = session.find_position(&uri, "{{ count }}", 3);

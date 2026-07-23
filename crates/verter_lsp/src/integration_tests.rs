@@ -3042,7 +3042,7 @@ const val{i} = 'original'
 /// - All happening on the same VerterHost simultaneously
 #[test]
 fn stress_test_no_deadlock_under_heavy_concurrent_load() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -3079,6 +3079,7 @@ const stress{i} = 'init'
     const EDITS_PER_WRITER: i32 = 50;
 
     let done = Arc::new(AtomicBool::new(false));
+    let writer_progress = Arc::new(AtomicUsize::new(0));
     let mut writer_handles = Vec::new();
     let mut reader_handles = Vec::new();
 
@@ -3087,6 +3088,7 @@ const stress{i} = 'init'
     for (i, uri) in uris.iter().enumerate() {
         let reg = Arc::clone(&registry);
         let uri = uri.clone();
+        let writer_progress = Arc::clone(&writer_progress);
         writer_handles.push(std::thread::spawn(move || {
             for version in 2..(2 + EDITS_PER_WRITER) {
                 let source = format!(
@@ -3105,6 +3107,7 @@ const stress{i} = 'v{version}'
                         text: source,
                     }],
                 );
+                writer_progress.fetch_add(1, Ordering::Relaxed);
             }
         }));
     }
@@ -3128,18 +3131,16 @@ const stress{i} = 'v{version}'
 
     // Join the writers first (they self-terminate after their fixed edit
     // count), then signal readers to stop. All threads must join without
-    // deadlock — a 10s hard watchdog per thread turns any deadlock into a
-    // loud panic rather than a silent hang.
+    // deadlock. The watchdog allows slow machines to keep working as long as
+    // some writer progresses, but turns 10 seconds of total writer inactivity
+    // into a loud panic rather than a silent hang.
     //
     // The join itself runs on a separate thread that reports the join
-    // outcome through a rendezvous channel; the main side blocks on
-    // `recv_timeout(10s)`. A genuinely deadlocked thread never produces an
-    // outcome, so the `recv_timeout` elapses and we PANIC with the
-    // deadlock message — the watchdog therefore surfaces a hang as a loud
-    // failure within ~10s instead of blocking the suite forever (the old
-    // `watchdog.join()` was itself unbounded and would hang on a real
-    // deadlock, so the assertion below it was never reached).
-    let join_with_watchdog = |handle: std::thread::JoinHandle<()>, idx: usize| {
+    // outcome through a rendezvous channel; the main side polls it with a
+    // short timeout. A genuinely deadlocked writer eventually stops the
+    // shared progress counter, so the watchdog panics after 10 seconds without
+    // progress instead of blocking the suite forever.
+    let join_writer_with_watchdog = |handle: std::thread::JoinHandle<()>, idx: usize| {
         let (tx, rx) = std::sync::mpsc::sync_channel::<std::thread::Result<()>>(1);
         std::thread::spawn(move || {
             // `send` fails only if the receiver was dropped (the main side
@@ -3147,24 +3148,41 @@ const stress{i} = 'v{version}'
             // thread does not itself panic on a benign disconnect.
             let _ = tx.send(handle.join());
         });
-        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => panic!("thread {idx} panicked"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                panic!("thread {idx} deadlocked (join did not complete within 10s)")
+        let mut observed = writer_progress.load(Ordering::Relaxed);
+        let mut last_progress = std::time::Instant::now();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(Ok(())) => break,
+                Ok(Err(_)) => panic!("thread {idx} panicked"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("thread {idx} watchdog channel disconnected before reporting")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("thread {idx} watchdog channel disconnected before reporting")
+            let current = writer_progress.load(Ordering::Relaxed);
+            if current != observed {
+                observed = current;
+                last_progress = std::time::Instant::now();
+            } else if last_progress.elapsed() >= std::time::Duration::from_secs(10) {
+                panic!("thread {idx} deadlocked (no writer made progress for 10s)")
             }
         }
     };
 
     for (i, handle) in writer_handles.into_iter().enumerate() {
-        join_with_watchdog(handle, i);
+        join_writer_with_watchdog(handle, i);
     }
     done.store(true, Ordering::Relaxed);
     for (i, handle) in reader_handles.into_iter().enumerate() {
-        join_with_watchdog(handle, i);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(handle.join());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => panic!("reader thread {i} panicked"),
+            Err(_) => panic!("reader thread {i} did not stop within 10s"),
+        }
     }
 
     // Verify all files are in a consistent state
@@ -4015,15 +4033,13 @@ fn server_skips_diagnostics_during_rapid_typing() {
     );
 }
 
-/// The SyncCoordinator signal channel works correctly: signals are
-/// non-blocking and all arrive at the receiver.
+/// The SyncCoordinator inbox is non-blocking and bounded by document count,
+/// not keystroke count.
 #[tokio::test]
-async fn sync_coordinator_channel_delivers_all_signals() {
-    use crate::sync_coordinator::{SyncCoordinatorHandle, SyncSignal};
-    use tokio::sync::mpsc;
+async fn sync_coordinator_channel_coalesces_signals_per_document() {
+    use crate::sync_coordinator::SyncCoordinatorHandle;
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<SyncSignal>();
-    let handle = SyncCoordinatorHandle::new_for_test(tx);
+    let (handle, mut wake_rx) = SyncCoordinatorHandle::new_for_test();
 
     // Send 20 rapid signals (simulating 20 keystrokes)
     for _ in 0..20 {
@@ -4033,12 +4049,13 @@ async fn sync_coordinator_channel_delivers_all_signals() {
         );
     }
 
-    // All 20 signals should arrive
-    let mut count = 0;
-    while rx.try_recv().is_ok() {
-        count += 1;
-    }
-    assert_eq!(count, 20, "all 20 signals should be delivered");
+    assert_eq!(wake_rx.try_recv(), Ok(()));
+    assert!(wake_rx.try_recv().is_err(), "only one wake may be queued");
+    assert_eq!(
+        handle.take_pending_for_test().len(),
+        1,
+        "rapid edits to one document must occupy one pending entry"
+    );
 }
 
 /// Consecutive timeout tracking on LspTransport works correctly:

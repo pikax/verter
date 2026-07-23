@@ -39,7 +39,7 @@ use crate::external_ts::{
 };
 use crate::project_resolver::{IdeProjectConfig, NativeProjectResolver};
 use crate::provider_surface_store::ProviderSurfaceStore;
-use crate::type_provider::mock::MockTypeProvider;
+use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::workspace_scanner::{classify_from_snapshot, Tier};
 
 fn owned_carrier_state() -> ProviderSyncState {
@@ -920,6 +920,7 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
         }),
         admission: &admission,
         reason: ReconcileReason::SourceSynced,
@@ -1004,6 +1005,7 @@ async fn managed_tsgo_reconcile_publishes_editor_membership_and_keeps_direct_ope
         membership: Some(CarrierMembershipCtx {
             coordinator: &coordinator,
             provider_delivery: CarrierProviderDelivery::DirectOpen,
+            activate_provider_member: false,
         }),
         admission: &admission,
         reason: ReconcileReason::SourceSynced,
@@ -1336,6 +1338,7 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: true,
         }),
         admission: &admission,
         reason: ReconcileReason::SourceSynced,
@@ -1359,6 +1362,28 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
         committed_state.owner_binding,
         ProviderOwnerBinding::Owned(expected_owner.clone()),
         "the gateway must serve under the shared snapshot authority's single default owner"
+    );
+    let provider_calls = mock.calls();
+    assert!(
+        provider_calls.iter().any(|call| matches!(
+            call,
+            MockCall::ActivateCarrierMember {
+                source_path,
+                companion_path,
+                project_file_name,
+                ..
+            } if source_path == &source
+                && companion_path.ends_with("Comp.vue.tsx")
+                && project_file_name == &expected_owner
+        )),
+        "an open authored carrier must be promoted only after its metadata publication: \
+         {provider_calls:?}"
+    );
+    assert!(
+        provider_calls
+            .iter()
+            .all(|call| !matches!(call, MockCall::RegisterCarrierMember { .. })),
+        "publication itself must never activate a carrier root: {provider_calls:?}"
     );
     let losing_owner = if expected_owner == tsconfig_a {
         tsconfig_b.clone()
@@ -1436,6 +1461,7 @@ async fn unowned_carrier_sync_is_terminal_unresolved_no_provider() {
         membership: Some(CarrierMembershipCtx {
             coordinator: &coord,
             provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
         }),
         admission: &admission,
         reason: ReconcileReason::SourceSynced,

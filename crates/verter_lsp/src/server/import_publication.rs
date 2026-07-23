@@ -8,8 +8,8 @@
 //! freshness memo on [`super::ImportSyncMemo`]). Handlers may:
 //!
 //! - CAPTURE a committed receipt for the live revision and query the engine;
-//! - JOIN a publication already in flight (await its watch, then re-check);
-//! - ENQUEUE a background publication and answer without the provider.
+//! - ENQUEUE a background publication on a miss and return the best currently
+//!   available answer without waiting for that pass.
 //!
 //! They may not do more. The previous request-started preamble ran inside the
 //! deadline-cancelled handler body: its p90 sat on the definition deadline, the
@@ -28,7 +28,6 @@ use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::Uri;
 
-use super::handler_guard::block_in_place_if_available;
 use super::server_utils::*;
 use super::sync_orchestration::ImportSyncOutcome;
 use super::VerterLanguageServer;
@@ -36,6 +35,17 @@ use super::VerterLanguageServer;
 /// The debounce for edit-triggered publication, matching the sync
 /// coordinator's edit-silence window: one publication per typing burst.
 const EDIT_DEBOUNCE_MS: u64 = 300;
+
+type ModuleReferenceSignature = (
+    u8,
+    u8,
+    bool,
+    String,
+    Option<String>,
+    Vec<String>,
+    Option<String>,
+    u8,
+);
 
 /// How urgently an enqueued publication should run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +72,22 @@ pub(super) enum DependencyReadiness {
     NotReady,
 }
 
+/// Syntax-owned root set consumed by dependency publication. Source positions
+/// and local import binding names are deliberately excluded: they do not change
+/// which provider files the publication owns. Resolver changes are fenced by
+/// the receipt's resolver-snapshot generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DependencyFrontierSignature {
+    imports: Vec<(String, Option<String>, bool)>,
+    module_references: Vec<ModuleReferenceSignature>,
+}
+
+impl DependencyFrontierSignature {
+    fn is_rootless(&self) -> bool {
+        self.imports.is_empty() && self.module_references.is_empty()
+    }
+}
+
 impl DependencyReadiness {
     pub(super) fn is_ready(self) -> bool {
         matches!(self, DependencyReadiness::Ready)
@@ -69,6 +95,50 @@ impl DependencyReadiness {
 }
 
 impl VerterLanguageServer {
+    /// Capture the direct dependency roots for one document without walking the
+    /// graph or touching the provider. Used to prove that a source edit preserved
+    /// an already-delivered dependency closure.
+    pub(super) fn dependency_frontier_signature(
+        &self,
+        canonical_id: &str,
+    ) -> Option<DependencyFrontierSignature> {
+        let ingress = self.documents.host().get_script_ingress(canonical_id)?;
+        let mut imports = ingress
+            .imports
+            .iter()
+            .map(|import| {
+                (
+                    import.source.clone(),
+                    import.resolved_canonical_id.clone(),
+                    import.is_type_only,
+                )
+            })
+            .collect::<Vec<_>>();
+        imports.sort();
+
+        let mut module_references = ingress
+            .module_references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.syntax as u8,
+                    reference.semantics as u8,
+                    reference.is_type_only,
+                    reference.raw_text.clone(),
+                    reference.literal_specifier.clone(),
+                    reference.finite_specifiers.clone(),
+                    reference.static_prefix.clone(),
+                    reference.analyzability as u8,
+                )
+            })
+            .collect::<Vec<_>>();
+        module_references.sort();
+        Some(DependencyFrontierSignature {
+            imports,
+            module_references,
+        })
+    }
+
     /// Enqueue a detached background publication of `uri`'s import-dependency
     /// closure (imported carrier APIs + barrel re-export graph). Never awaited
     /// by callers; the spawned task outlives any request, so a request
@@ -108,7 +178,7 @@ impl VerterLanguageServer {
 
     /// The BACKGROUND import-dependency publication pass for one document:
     /// per-document singleflight, freshness re-check, in-flight registration
-    /// (the join handle interactive requests await), the imported-carrier +
+    /// (used only to coalesce background enqueues), the imported-carrier +
     /// barrel delivery legs, and — only for a COMPLETE pass under a stable
     /// key — the DependencyReady receipt mint.
     ///
@@ -146,83 +216,24 @@ impl VerterLanguageServer {
         // still to be retried.
         if let Some(key) = key {
             if outcome.is_complete() && self.import_sync_freshness_key() == Some(key) {
-                self.import_sync
-                    .record_delivered(canonical_id.to_string(), key);
+                let rootless = self
+                    .dependency_frontier_signature(canonical_id)
+                    .is_some_and(|frontier| frontier.is_rootless());
+                self.import_sync.record_delivered_with_rootless(
+                    canonical_id.to_string(),
+                    key,
+                    rootless,
+                );
             }
         }
     }
 
-    /// Dependency readiness for an interactive navigation request
-    /// (definition / typeDefinition / rename): capture the committed receipt,
-    /// JOIN an in-flight publication for the live revision, or enqueue a
-    /// background publication and report [`DependencyReadiness::NotReady`].
-    ///
-    /// Joining awaits work that is ALREADY running — bounded by the caller's
-    /// ambient request deadline — and re-checks the receipt when it settles.
-    /// This method never runs a delivery leg inline and never takes the
-    /// publication lane lock, so it can never become the request-started
-    /// preamble it replaces.
-    pub(super) async fn dependency_readiness_join(&self, uri: &Uri) -> DependencyReadiness {
-        if self.type_provider.is_none() {
-            // No in-process provider: there is no engine query to gate.
-            return DependencyReadiness::Ready;
-        }
-        if self.is_self_file_projection(uri) {
-            // A SELF-FILE projection (plain script / rune module) serves its
-            // OWN-path provider buffer: its queries never depend on the
-            // imported-carrier closure being live, so the receipt does not
-            // gate them (a scratch `.ts` answers even pre-snapshot). The
-            // capture still enqueues background publication on a miss so
-            // cross-file legs heal.
-            let _ = self.dependency_readiness_capture(uri);
-            return DependencyReadiness::Ready;
-        }
-        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-            // No canonical identity ⇒ no dependency tracking applies; the
-            // provider-context capture is the remaining (fail-closed) gate.
-            return DependencyReadiness::Ready;
-        };
-        loop {
-            let Some(key) = self.import_sync_freshness_key() else {
-                // Bootstrap (no published resolver): the receipt DIMENSION does
-                // not exist yet, so a receipt gate would structurally deny every
-                // provider query until init publishes a snapshot — breaking the
-                // editor-liveness contract the bootstrap unresolved sync exists
-                // for (open documents answer pre-snapshot). Enqueue best-effort
-                // background delivery and let the query proceed against the
-                // bootstrap surfaces; the post-init sweep re-publishes and
-                // mints real receipts once a snapshot exists.
-                self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
-                return DependencyReadiness::Ready;
-            };
-            if self.import_sync.is_fresh_at(&canonical_id, key) {
-                return DependencyReadiness::Ready;
-            }
-            match self.import_sync.in_flight_watch(&canonical_id) {
-                Some(mut watch) => {
-                    // JOIN: await the running publication (value change or
-                    // sender drop both resolve), then re-check from the top.
-                    if watch.changed().await.is_err() {
-                        // Dead registration (publisher panicked between
-                        // registering and its guard drop): clear it so the
-                        // re-check enqueues instead of spinning.
-                        self.import_sync.clear_dead_in_flight(&canonical_id, &watch);
-                    }
-                }
-                None => {
-                    self.spawn_import_dependency_publication(uri, PublicationUrgency::Immediate);
-                    return DependencyReadiness::NotReady;
-                }
-            }
-        }
-    }
-
-    /// Capture-only dependency readiness for completion: never waits — a
+    /// Capture-only dependency readiness for interactive requests: never waits — a
     /// committed receipt reads [`DependencyReadiness::Ready`]; anything else
     /// reads `NotReady` after (at most) enqueueing a background publication.
-    /// Completion still queries the engine either way (a partial member list
-    /// beats none mid-typing); the verdict exists for callers that want it and
-    /// for the enqueue-on-miss healing side effect.
+    /// Non-destructive navigation callers still query the engine because a
+    /// partial answer beats none mid-typing; rename consumes the verdict to
+    /// fail closed on cross-file completeness. No caller joins publication.
     pub(super) fn dependency_readiness_capture(&self, uri: &Uri) -> DependencyReadiness {
         if self.type_provider.is_none() {
             return DependencyReadiness::Ready;
@@ -248,7 +259,7 @@ impl VerterLanguageServer {
     /// The workspace `(content_generation, resolver_snapshot_generation)` pair
     /// that keys the DependencyReady receipt. `None` when no published resolver
     /// exists yet (bootstrap) — publication then delivers without minting.
-    fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
+    pub(super) fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
         let content_generation = self.documents.host().workspace_read().content_generation();
         let snapshot_generation = {
             let ws = self.vfs_workspace.read();
@@ -290,12 +301,12 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return ImportSyncOutcome::Complete;
         };
-        let Some(analysis) = self.documents.get_analysis(uri) else {
+        let Some(ingress) = self.documents.host().get_script_ingress(&canonical_id) else {
             return ImportSyncOutcome::Complete;
         };
 
         let mut import_ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
-            &analysis.imports,
+            &ingress.imports,
             Some(&canonical_id),
             |parent, specifier| self.resolve_import_specifier(parent, specifier),
         );
@@ -306,7 +317,7 @@ impl VerterLanguageServer {
             snapshot.as_ref(),
             &reader,
             &canonical_id,
-            &analysis.module_references,
+            &ingress.module_references,
         );
         let mut seen: HashSet<String> = import_ids.iter().cloned().collect();
         for import_id in dynamic_ids {
@@ -377,13 +388,14 @@ impl VerterLanguageServer {
     /// When a component is imported through a barrel (`import { Comp } from './components'`),
     /// possibly across several `export *` / `export { … } from` hops, `ensure_imported_carrier_apis_synced`
     /// misses both the intermediate `.ts` barrels and the terminal carrier (`.vue` / `.svelte`)
-    /// re-export targets. This walks the re-export graph reachable from the template's component
-    /// usages (a bounded level-BFS), classifies each hop by its RESOLVED target's carrier-ness
+    /// re-export targets. This walks only the `export ... from` graph reachable from the
+    /// template's component usages (a bounded level-BFS), classifies each hop by its RESOLVED
+    /// target's carrier-ness
     /// (never by the specifier string, so aliased `@/…` and `export *` re-exports are followed,
     /// and the terminal carrier is reached at any depth), syncs the discovered carrier
-    /// dependencies first, then syncs the intermediate barrels. Provider-neutral: both tsgo and
-    /// tsserver benefit (a bounded over-sync of unrelated barrel imports is acceptable — the
-    /// provider decides the actual symbol). PRIVATE to the background publication pass.
+    /// dependencies first, then publishes only non-carrier modules whose provider projection
+    /// differs from their on-disk bytes. Ordinary imports and unchanged compiled output remain
+    /// provider-resolved from disk. PRIVATE to the background publication pass.
     async fn ensure_barrel_imports_synced(&self, uri: &Uri) -> ImportSyncOutcome {
         let Some(sync) = &self.project_sync else {
             return ImportSyncOutcome::Complete;
@@ -394,10 +406,7 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
             return ImportSyncOutcome::Complete;
         };
-        let Some(analysis) = self.documents.get_analysis(uri) else {
-            return ImportSyncOutcome::Complete;
-        };
-        let Some(template) = analysis.template.as_ref() else {
+        let Some(ingress) = self.documents.host().get_script_ingress(&canonical_id) else {
             return ImportSyncOutcome::Complete;
         };
 
@@ -420,15 +429,13 @@ impl VerterLanguageServer {
         let mut non_carrier_cap_traced = false;
         let mut carrier_cap_traced = false;
 
-        // Seed the frontier from template component import sources that resolve to a
-        // non-carrier (barrel) module. A directly-resolved carrier is already handled by
-        // carrier sync.
+        // Seed from the active document's direct syntax imports. This may include a
+        // few non-component barrels, but avoids requiring template semantic analysis
+        // and remains bounded. Direct carriers are already handled by carrier sync.
         let mut frontier: Vec<String> = Vec::new();
-        for component in &template.components {
-            let Some(import_source) = component.import_source.as_deref() else {
-                continue;
-            };
-            let Some(resolved) = self.resolve_import_specifier(&canonical_id, import_source) else {
+        for import in ingress.imports.iter() {
+            let Some(resolved) = self.resolve_import_specifier(&canonical_id, &import.source)
+            else {
                 continue;
             };
             if verter_workspace::path_is_carrier(&resolved) {
@@ -463,12 +470,17 @@ impl VerterLanguageServer {
                     let lifecycle_lane = self.ide_sync_lifecycle_lease(barrel_id);
                     let _lifecycle_guard = lifecycle_lane.lock().await;
                     host.ensure_loaded(barrel_id);
-                    host.get_analysis(barrel_id)
+                    host.get_script_ingress(barrel_id)
                 };
                 let Some(barrel_analysis) = barrel_analysis else {
                     continue;
                 };
                 for module_ref in barrel_analysis.module_references.iter() {
+                    if module_ref.syntax
+                        != verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
+                    {
+                        continue;
+                    }
                     let Some(specifier) = module_ref.literal_specifier.as_deref() else {
                         continue;
                     };
@@ -529,11 +541,20 @@ impl VerterLanguageServer {
             outcome = outcome.and(self.sync_imported_carrier_api_lightweight(carrier_id).await);
         }
 
-        // Sync barrel files. Carrier import specifiers already carry their
-        // resolvable suffix before reaching the provider — the compiler rewrites
-        // in-project carrier imports to the `.vue.tsx` IDE carrier, and the
-        // resolver rewrites non-carrier importer specifiers to the `.verter.ts`
-        // API carrier — so the provider sends content unmodified.
+        // The tsserver plugin owns carrier-specifier resolution and keeps
+        // ordinary TS/JS files under TypeScript's disk authority, matching the
+        // official Vue and Svelte plugin architecture. Rewritten barrel copies
+        // create duplicate script identities and force configured-project
+        // rebuilds. tsgo has no host plugin, so it retains the rewritten-file
+        // publication path below.
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+            return outcome;
+        }
+
+        // Publish only barrel files whose export-from specifiers need a provider
+        // rewrite (or whose framework self-file projection changes their bytes).
+        // Unchanged non-carrier modules remain disk-resolved by the provider;
+        // pushing them serializes a local package graph behind DependencyReady.
         for barrel_id in &barrel_ids {
             // Skip if already synced
             if let Some(state) = self.provider_sync_state_for_source(barrel_id) {
@@ -542,7 +563,7 @@ impl VerterLanguageServer {
                 }
             }
 
-            // Order this barrel's host upsert + provider sync with its document
+            // Order this barrel's host read + provider sync with its document
             // lifecycle (see `sync_imported_carrier_api_lightweight`).
             let lifecycle_lane = self.ide_sync_lifecycle_lease(barrel_id);
             let _lifecycle_guard = lifecycle_lane.lock().await;
@@ -551,22 +572,20 @@ impl VerterLanguageServer {
                 continue;
             };
             // Framework carriers never sync as raw scripts.
-            let Some(file_language) =
-                crate::provider_sync::provider_script_language(host, barrel_id)
-            else {
+            if crate::provider_sync::provider_script_language(host, barrel_id).is_none() {
+                continue;
+            }
+            let Some(ingress) = host.get_script_ingress(barrel_id) else {
                 continue;
             };
-            let module_references = block_in_place_if_available(|| {
-                host.upsert(verter_session::UpsertRequest {
-                    canonical_id: Some(barrel_id.clone()),
-                    input_id: barrel_id.clone(),
-                    source: source.clone(),
-                    file_language,
-                    aliases: Vec::new(),
+            let module_references: Vec<verter_session::ScriptModuleReference> = ingress
+                .module_references
+                .iter()
+                .filter(|reference| {
+                    reference.syntax == verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
                 })
-                .map(|result| result.module_references)
-                .unwrap_or_default()
-            });
+                .map(verter_session::ScriptModuleReference::from)
+                .collect();
             let reader = LspProjectResolverReader::new(&self.documents);
             let Some(prepared) = prepare_non_carrier_provider_sync(
                 Some(&snapshot),
@@ -577,6 +596,9 @@ impl VerterLanguageServer {
             ) else {
                 continue;
             };
+            if prepared.rewritten.as_str() == source.as_ref() {
+                continue;
+            }
 
             if let Some(transition) = self.prepare_non_carrier_provider_sync_transition(barrel_id) {
                 self.close_provider_paths(&transition.stale_paths).await;

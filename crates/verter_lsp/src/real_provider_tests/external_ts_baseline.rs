@@ -136,6 +136,43 @@ async fn vue_carrier_surfaces_semantic_type_error_on_source_tsserver() {
     session.shutdown().await;
 }
 
+/// The diagnostic routing and active-companion architecture is carrier-generic:
+/// Svelte projections query the same generated companion identity and map the
+/// result back to the authored `.svelte` source.
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_carrier_surfaces_semantic_type_error_on_source_tsserver() {
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
+        .fixture(FIXTURE)
+        .build()
+        .await
+    else {
+        return;
+    };
+    let uri = session
+        .open_fixture_file("src/TypeErrorCarrier.svelte")
+        .await;
+    let diags = session.merged_diagnostics(&uri).await;
+
+    assert!(
+        has_code(&diags, "2322") || diags.iter().any(|d| d.message.contains("not assignable")),
+        "a Svelte carrier script type error must surface TS2322 on the `.svelte` source; \
+         got: {diags:?}"
+    );
+    let decl = session.find_position(&uri, "typedNumber", 0);
+    assert!(
+        diags.iter().any(|d| {
+            (has_code(std::slice::from_ref(d), "2322") || d.message.contains("not assignable"))
+                && d.range.start.line <= decl.line
+                && d.range.end.line >= decl.line
+        }),
+        "the TS2322 diagnostic must map back to the `typedNumber` declaration line {} in the \
+         `.svelte` source; got: {diags:?}",
+        decl.line
+    );
+
+    session.shutdown().await;
+}
+
 // ── The TS2322 PRESENCE proof TIED to the provider-sync ownership backbone ──
 //
 // The presence proof above proves carrier diagnostics flow; this companion proves

@@ -367,6 +367,32 @@ real_provider_test!(
     }
 );
 
+real_provider_test!(
+    diagnostics_vue_unresolved_markup_binding_is_provider_owned,
+    fixture = "vue-parity",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("src/diagnostics/UnresolvedMarkup.vue")
+            .await;
+        session.ensure_synced(&uri).await;
+
+        let provider_path = session
+            .provider_sync_state(&uri)
+            .and_then(|state| state.ide_path)
+            .expect("a synced Vue carrier must have a committed IDE provider path");
+        let provider_diagnostics = diagnostics_until_nonempty(session, &provider_path).await;
+        let diagnostics = session.merged_diagnostics(&uri).await;
+
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                lsp_diagnostic_code(diagnostic).as_deref() == Some("2339")
+                    && diagnostic.message.contains("totallyMissingName")
+            }),
+            "an unresolved template binding must surface through the provider and map to the authored Vue file; public={diagnostics:?}; provider={provider_diagnostics:?}"
+        );
+    }
+);
+
 // ---------------------------------------------------------------------------
 // Unused DECLARED props / events / slots — Verter-owned, provider-stable
 // ---------------------------------------------------------------------------

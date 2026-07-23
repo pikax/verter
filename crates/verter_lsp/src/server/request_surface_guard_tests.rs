@@ -109,6 +109,19 @@ fn provider_backed_handlers_do_not_read_live_context_ingredients() {
     }
 }
 
+/// Interactive consistency repair may await a slow but healthy engine; a
+/// feature-latency timeout would cancel the provider mutation and turn a cold
+/// project into a repeatable empty-result loop.
+#[test]
+fn interactive_provider_repair_has_no_wall_clock_timeout() {
+    let source = read_server_source("server/sync_orchestration.rs");
+    let repair = fn_slice(&source, "ensure_current_file_synced");
+    assert!(
+        !repair.contains("tokio::time::timeout"),
+        "interactive provider repair must rely on cancellation and lifecycle health, not a wall-clock feature timeout"
+    );
+}
+
 /// Every provider-backed handler that merges/maps a provider response back
 /// onto the carrier runs the post-await validation gate.
 #[test]

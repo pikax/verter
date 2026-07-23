@@ -936,6 +936,7 @@ async fn apply_owner_resolved_carrier_sync(
             provider_delivery: carrier_publish
                 .expect("coordinator came from the publish context")
                 .provider_delivery,
+            activate_provider_member: documents.canonical_id_to_uri(canonical_id).is_some(),
         });
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
         host: documents.host(),

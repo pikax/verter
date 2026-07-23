@@ -1275,6 +1275,87 @@ fn test_svelte_render_callee_context() {
     }
 }
 
+#[test]
+fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent() {
+    let source = "<IdeSurfaceChild onPick={on} />";
+    let blocks = scan_sfc_blocks(source);
+    let cursor = (source.find("{on}").expect("attribute expression") + "{on".len()) as u32;
+
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Expression {
+                kind: ExpressionKind::Prop { ref prop_name }
+            }) if prop_name == "onPick"
+        ),
+        "the edit-time source is authoritative for a Svelte braced attribute expression: {ctx:?}"
+    );
+}
+
+fn assert_svelte_source_prop_expression(source: &str, marker: &str, expected_prop: &str) {
+    let blocks = scan_sfc_blocks(source);
+    let cursor = (source.find(marker).expect("cursor marker") + marker.len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Expression {
+                kind: ExpressionKind::Prop { ref prop_name }
+            }) if prop_name == expected_prop
+        ),
+        "expected source-owned Svelte prop expression for {expected_prop}: {ctx:?}"
+    );
+}
+
+#[test]
+fn svelte_attribute_comparison_does_not_replace_the_open_tag_anchor() {
+    assert_svelte_source_prop_expression(
+        "<Child value={count < limit ? foo. : bar} />",
+        "foo.",
+        "value",
+    );
+}
+
+#[test]
+fn svelte_attribute_regex_angle_bracket_does_not_replace_the_open_tag_anchor() {
+    assert_svelte_source_prop_expression(
+        r#"<Child value={/</.test(text) ? foo. : bar} />"#,
+        "foo.",
+        "value",
+    );
+}
+
+#[test]
+fn svelte_attribute_comment_delimiters_do_not_corrupt_brace_depth() {
+    assert_svelte_source_prop_expression(
+        "<Child value={foo /* } <Fake */ + bar.} />",
+        "bar.",
+        "value",
+    );
+}
+
+#[test]
+fn svelte_attribute_nested_expression_keeps_the_outer_prop_anchor() {
+    assert_svelte_source_prop_expression(
+        "<Child value={{ nested: count < limit ? foo. : bar }} />",
+        "foo.",
+        "value",
+    );
+}
+
 // =============================================================================
 // Nested-element content classification must terminate
 // =============================================================================

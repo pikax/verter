@@ -8,6 +8,28 @@ use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::features::hover::HoverSourceToken;
 use crate::type_provider::protocol::HoverInfo;
 
+const SVELTE_PUBLIC_COMPONENT_DISPLAY_NAME: &str = "__VerterPublicComponent";
+
+/// Replace the implementation-only name used by the Svelte public facade with
+/// the authored identifier under the cursor.
+///
+/// TypeScript normally presents the local import alias for a default import.
+/// When a provider follows Verter's declaration carrier to its default-export
+/// target, however, QuickInfo can expose the carrier's private facade const
+/// instead. This is a display-only normalization at the LSP boundary: provider
+/// identity and navigation continue to use the unmodified typed surface.
+pub(crate) fn rewrite_svelte_public_component_label(
+    type_hover: &mut HoverInfo,
+    authored_identifier: Option<&str>,
+) {
+    let Some(authored_identifier) = authored_identifier else {
+        return;
+    };
+    type_hover.contents = type_hover
+        .contents
+        .replace(SVELTE_PUBLIC_COMPONENT_DISPLAY_NAME, authored_identifier);
+}
+
 /// Merge verter hover with TypeProvider hover.
 ///
 /// Strategy:
@@ -79,7 +101,12 @@ pub fn merge_hover(
 /// Verter's reserved namespace (`super::completion::VERTER_INTERNAL_PREFIX`),
 /// so no user identifier can legitimately contain it.
 fn strip_synthetic_prefix(content: &str) -> String {
-    content.replace(super::completion::VERTER_INTERNAL_PREFIX, "")
+    content
+        .replace(super::completion::VERTER_INTERNAL_PREFIX, "")
+        // Svelte snippet declarations are branded internally so TypeScript
+        // preserves their callable tuple contract. The authored display type
+        // is `Snippet`; the helper identifier is projection-only.
+        .replace("__VerterSnippet", "Snippet")
 }
 
 /// Wrap type content in a code fence if not already Markdown-formatted.

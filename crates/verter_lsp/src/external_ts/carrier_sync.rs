@@ -75,6 +75,10 @@ pub(crate) struct CarrierMembershipCtx<'a> {
     /// Provider delivery remains direct for tsgo even though the editor store is
     /// published in the same ownership transaction.
     pub provider_delivery: CarrierProviderDelivery,
+    /// Whether the authored carrier is currently open in the editor. Publication
+    /// always records metadata; only this independent lifecycle fact may promote
+    /// the IDE projection into the managed tsserver working set.
+    pub activate_provider_member: bool,
 }
 
 /// The inputs to one carrier-sync gateway pass.
@@ -679,6 +683,31 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         Ok(ReconcileOutcome::Advertised { receipt, .. }) => {
             match membership.provider_delivery {
                 CarrierProviderDelivery::StoreBacked => {
+                    if membership.activate_provider_member {
+                        match membership
+                            .coordinator
+                            .activate_published_source(req.canonical_id)
+                            .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::warn!(
+                                    "carrier-sync gateway: freshly published membership was not \
+                                     activatable for {}",
+                                    req.canonical_id
+                                );
+                                return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "carrier-sync gateway: provider activation failed for {}: \
+                                     {error}",
+                                    req.canonical_id
+                                );
+                                return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+                            }
+                        }
+                    }
                     // The semantic provider consumes both store-resident
                     // companions, so no direct provider I/O is pending.
                     if committed_state.api_path.is_some() {

@@ -76,8 +76,15 @@ impl ImportSyncOutcome {
 
 impl VerterLanguageServer {
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
+        let Some(snapshot) = self.documents.snapshot_identity(uri) else {
+            return;
+        };
         let diagnostics = self.compute_full_diagnostics(uri).await;
-        self.publish_diagnostics_raw(uri, diagnostics).await;
+        if !self.documents.snapshot_identity_is_current(uri, &snapshot) {
+            return;
+        }
+        self.publish_diagnostics_raw(uri, diagnostics, snapshot.version)
+            .await;
     }
 
     /// Compute the merged (Verter lint/template + type-provider) diagnostic set for
@@ -220,7 +227,12 @@ impl VerterLanguageServer {
     }
 
     /// Low-level: push pre-computed diagnostics to the client.
-    pub(super) async fn publish_diagnostics_raw(&self, uri: &Uri, diagnostics: Vec<Diagnostic>) {
+    pub(super) async fn publish_diagnostics_raw(
+        &self,
+        uri: &Uri,
+        diagnostics: Vec<Diagnostic>,
+        version: i32,
+    ) {
         let _timer = self
             .statistics
             .timer("diagnostics", Some(uri.as_str().to_string()));
@@ -232,7 +244,7 @@ impl VerterLanguageServer {
         );
 
         self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
             .await;
 
         tracing::info!("publish_diagnostics EXIT {}", uri.as_str());
@@ -595,7 +607,7 @@ impl VerterLanguageServer {
         let Some(snapshot) = self.published_resolver() else {
             return;
         };
-        let Some(analysis) = self.documents.host().get_analysis(canonical_id) else {
+        let Some(ingress) = self.documents.host().get_script_ingress(canonical_id) else {
             return;
         };
 
@@ -604,7 +616,7 @@ impl VerterLanguageServer {
             &snapshot.resolver,
             &reader,
             canonical_id,
-            &analysis.module_references,
+            &ingress.module_references,
         );
 
         self.documents.host.set_import_dependencies(
@@ -1177,23 +1189,17 @@ impl VerterLanguageServer {
 
         // Choose open_file vs update_file based on existing state
         let result = if ide_path_loaded {
-            // Already known to provider — update
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                sync.sync_tsx(&ide_path, &ide.code),
-            )
-            .await
+            // Already known to provider — update. Interactive repair has no
+            // wall-clock feature budget: client cancellation drops the future,
+            // while the provider lifecycle watchdog owns genuine engine silence.
+            sync.sync_tsx(&ide_path, &ide.code).await
         } else {
-            // First time — open
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                sync.open_tsx(&ide_path, &ide.code),
-            )
-            .await
+            // First time — open under the same cancellation/health contract.
+            sync.open_tsx(&ide_path, &ide.code).await
         };
 
         match result {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface).
                 self.record_carrier_ide_snapshot(
@@ -1314,16 +1320,9 @@ impl VerterLanguageServer {
                 // Queue deferred API sync
                 self.needs_deferred_sync.insert(canonical_id);
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 tracing::warn!(
                     "ensure_current_file_synced: IDE sync failed for {}: {e}",
-                    uri.as_str()
-                );
-                self.needs_ide_sync.insert(canonical_id);
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "ensure_current_file_synced: IDE sync timed out for {}",
                     uri.as_str()
                 );
                 self.needs_ide_sync.insert(canonical_id);
@@ -1433,8 +1432,7 @@ impl VerterLanguageServer {
     /// generation of the new workspace and serve a warm skip for a pass that never
     /// ran against it.
     pub(super) fn swap_vfs_workspace(&self, workspace: Arc<verter_workspace::FilesystemWorkspace>) {
-        let workspace_dyn: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.clone();
-        self.documents.host().set_workspace(workspace_dyn);
+        self.documents.set_workspace(Arc::clone(&workspace));
         *self.vfs_workspace.write() = Some(workspace);
         self.import_sync.evict_all();
     }
@@ -1722,6 +1720,7 @@ impl VerterLanguageServer {
             uri,
             &canonical_id,
             &file_language,
+            self.type_provider_kind.requires_explicit_source_graph(),
         )
         .await
     }
@@ -1961,18 +1960,6 @@ impl VerterLanguageServer {
             })
     }
 
-    /// Returns the active IDE path only when the provider is already bound to
-    /// the current desired artifact path and can be updated in place.
-    pub(super) fn eager_syncable_ide_path_for_uri(&self, uri: &Uri) -> Option<String> {
-        let canonical_id = self.documents.get_canonical_id(uri)?;
-        let state = self.provider_sync_state_for_source(&canonical_id)?;
-        if !state.ide_background_loaded {
-            return None;
-        }
-        let desired_path = self.target_ide_path_for_uri(uri)?;
-        (state.ide_path.as_deref() == Some(desired_path.as_str())).then_some(desired_path)
-    }
-
     pub(super) async fn spawn_background_init(
         &self,
         init_lint_opts: Option<serde_json::Value>,
@@ -2092,14 +2079,46 @@ impl VerterLanguageServer {
         };
         if let Some(api) = public_api {
             let ide = if is_tsgo {
-                self.documents.host.get_ide(canonical_id, &profile)
+                let cached = self.documents.host.get_ide(canonical_id, &profile);
+                if cached.is_some() {
+                    cached
+                } else {
+                    // The workspace scanner may have prepared only the public
+                    // API projection. That is sufficient for tsserver, whose
+                    // plugin resolves authored carrier imports through the
+                    // store, but tsgo has no host plugin and queries the IDE
+                    // companion directly. Materialize that missing companion
+                    // before reconciling; otherwise an API-only state is
+                    // committed and cross-file navigation resolves only to the
+                    // use-site's synthetic JSX property.
+                    let _ = block_in_place_if_available(|| {
+                        self.documents
+                            .host
+                            .ensure_ide_compiled(canonical_id, &profile)
+                    });
+                    self.documents.host.get_ide(canonical_id, &profile)
+                }
             } else {
                 None
             };
+            let ide_missing_for_tsgo = is_tsgo && ide.is_none();
+            if ide_missing_for_tsgo {
+                // Public API alone is not a complete imported-carrier surface
+                // for tsgo: unlike tsserver, it has no authored-file plugin
+                // that can resolve through the carrier store. Preserve any
+                // useful API delivery below, but keep the publication retryable
+                // until the IDE companion exists and no completeness receipt
+                // can be minted prematurely.
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+            }
 
             if !ownership_ready {
                 // Bootstrap: unresolved sync is allowed
-                let mut outcome = ImportSyncOutcome::Complete;
+                let mut outcome = if ide_missing_for_tsgo {
+                    ImportSyncOutcome::Retry
+                } else {
+                    ImportSyncOutcome::Complete
+                };
                 if let Some(ide) = ide.as_ref() {
                     let delivered = self
                         .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx)
@@ -2112,7 +2131,11 @@ impl VerterLanguageServer {
                 return outcome.and(ImportSyncOutcome::from_ok(delivered));
             }
 
-            let mut outcome = ImportSyncOutcome::Complete;
+            let mut outcome = if ide_missing_for_tsgo {
+                ImportSyncOutcome::Retry
+            } else {
+                ImportSyncOutcome::Complete
+            };
             if let Some(sync) = &self.project_sync {
                 // The dialect comes from the compile, falling back to the
                 // parse-level script language when the compile is unavailable.

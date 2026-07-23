@@ -50,6 +50,29 @@ fn coordinator() -> (CarrierPublishCoordinator, MockTypeProvider) {
     (coord, mock)
 }
 
+#[tokio::test]
+async fn workspace_publication_refresh_is_one_provider_batch() {
+    let (coord, mock) = coordinator();
+    let paths = vec![
+        "/proj/src/A.vue.verter.ts".to_string(),
+        "/proj/src/A.vue.tsx".to_string(),
+        "/proj/src/B.vue.verter.ts".to_string(),
+        "/proj/src/B.vue.tsx".to_string(),
+    ];
+
+    coord
+        .refresh_published_companions(&paths)
+        .await
+        .expect("one workspace refresh succeeds");
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1, "one provider call for the whole batch");
+    assert!(matches!(
+        &calls[0],
+        MockCall::NotifyCarriersChanged { companion_paths } if companion_paths == &paths
+    ));
+}
+
 /// A host + filesystem workspace with NO published snapshot — the no-owner case.
 fn host_without_snapshot() -> (Arc<VerterHost>, verter_workspace::FilesystemWorkspace) {
     let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(

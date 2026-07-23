@@ -1295,6 +1295,21 @@ impl TypeProvider for TsgoCompositeProvider {
         )
     }
 
+    fn activate_carrier_member(
+        &self,
+        source_path: &str,
+        companion_path: &str,
+        project_file_name: &str,
+        script_kind: verter_type_runtime::CarrierScriptKind,
+    ) -> ProviderFuture<'_, ()> {
+        self.managed.activate_carrier_member(
+            source_path,
+            companion_path,
+            project_file_name,
+            script_kind,
+        )
+    }
+
     fn resync_open_files(&self) -> ProviderFuture<'_, ()> {
         self.managed.resync_open_files()
     }

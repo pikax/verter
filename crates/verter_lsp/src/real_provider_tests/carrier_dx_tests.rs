@@ -92,10 +92,19 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     // Open the components via the LSP `did_open` so their carriers are PUBLISHED
     // into the on-disk store the plugin reads (the production carrier-publish
     // path); opening the consumer also prewarms its imports' carrier APIs.
-    let _comp = session.open_fixture_file("src/Comp.vue").await;
-    let _widget = session.open_fixture_file("src/Widget.svelte").await;
-    let _consumer_uri = session.open_fixture_file("src/Consumer.ts").await;
-    let _second_uri = session.open_fixture_file("src/SecondConsumer.ts").await;
+    let comp_uri = session.open_fixture_file("src/Comp.vue").await;
+    let widget_uri = session.open_fixture_file("src/Widget.svelte").await;
+    let consumer_uri = session.open_fixture_file("src/Consumer.ts").await;
+    let second_uri = session.open_fixture_file("src/SecondConsumer.ts").await;
+
+    // Carrier publication and semantic enrichment are intentionally asynchronous.
+    // The contract below queries the provider directly, bypassing the LSP feature
+    // handlers' snapshot capture, so explicitly join the test harness's sync
+    // receipts before asserting cross-file membership. Treating `didOpen` return as
+    // publication-ready made this test race the background carrier lane.
+    for uri in [&comp_uri, &widget_uri, &consumer_uri, &second_uri] {
+        session.ensure_synced(uri).await;
+    }
 
     // Open the plain `.ts` importers DIRECTLY in the provider as real on-disk
     // configured-project members, and query the real tsserver+plugin on them.
@@ -200,43 +209,73 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
             .collect::<Vec<_>>()
     );
 
-    let widget_use_off = offset_of(
-        &csrc,
-        "export const widget = Widget;",
-        "export const widget = ".len(),
-    );
-    let widget_hover = session
-        .provider()
-        .get_hover(&consumer, widget_use_off)
-        .await
-        .ok()
-        .flatten()
-        .map(|h| h.contents)
-        .unwrap_or_default();
-    // Type-definition is the resolution-independent corroborator: it must land in
-    // the Svelte source.
-    let widget_type_defs = session
-        .provider()
-        .get_type_definition(&consumer, widget_use_off)
-        .await
-        .unwrap_or_default();
+    let widget_use_offsets = [
+        offset_of(&csrc, "import Widget from", "import W".len()),
+        offset_of(
+            &csrc,
+            "export const widget = Widget;",
+            "export const widget = W".len(),
+        ),
+        offset_of(
+            &csrc,
+            "typeof Comp, typeof Widget",
+            "typeof Comp, typeof W".len(),
+        ),
+    ];
+    // Manifest publication is asynchronous and may trigger one final configured-
+    // project refresh after import-specifier navigation has become available. Join
+    // that semantic readiness here instead of treating the first empty quick-info
+    // response as the final public surface.
+    let mut widget_hovers = Vec::new();
+    let mut widget_type_defs = Vec::new();
+    for _ in 0..16 {
+        widget_hovers.clear();
+        widget_type_defs.clear();
+        for offset in widget_use_offsets {
+            if let Some(hover) = session
+                .provider()
+                .get_hover(&consumer, offset)
+                .await
+                .ok()
+                .flatten()
+            {
+                widget_hovers.push(hover.contents);
+            }
+            // Type-definition is the resolution-independent corroborator: it must
+            // land in the Svelte source.
+            widget_type_defs.extend(
+                session
+                    .provider()
+                    .get_type_definition(&consumer, offset)
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
+        if !widget_hovers.is_empty() || !widget_type_defs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     assert!(
-        widget_hover.contains("Component<")
-            || widget_hover.contains("Component<Props")
+        widget_hovers
+            .iter()
+            .any(|hover| hover.contains("Component<") || hover.contains("Component<Props"))
             || widget_type_defs
                 .iter()
                 .any(|d| d.path.ends_with("Widget.svelte")),
         "(1) Svelte: the component's public surface must flow into the `.ts` — hover on the \
          imported `Widget` should surface the native Svelte Component type, or \
-         type-definition land in Widget.svelte; got hover={widget_hover:?}, type_defs={:?}",
+         type-definition land in Widget.svelte; got hovers={widget_hovers:?}, type_defs={:?}",
         widget_type_defs.iter().map(|d| &d.path).collect::<Vec<_>>()
     );
     assert!(
-        !widget_hover.contains("__VerterPublicInstance")
-            && !widget_hover.contains("new (...args")
-            && !widget_hover.contains("new (options"),
+        widget_hovers.iter().all(|hover| {
+            !hover.contains("__VerterPublicInstance")
+                && !hover.contains("new (...args")
+                && !hover.contains("new (options")
+        }),
         "(1) Svelte: hover must not regress to Verter's retired class/constructor shim; \
-         got hover={widget_hover:?}"
+         got hovers={widget_hovers:?}"
     );
 
     // ── (3) find-all-references spans the `.ts` importer(s) AND reaches the component ──

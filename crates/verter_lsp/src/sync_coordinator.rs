@@ -30,35 +30,67 @@ use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
 
-/// Signal sent to the coordinator when a file changes.
-pub struct SyncSignal {
-    pub canonical_id: String,
-    pub uri_str: String,
-}
-
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
 pub struct SyncCoordinatorHandle {
-    tx: mpsc::UnboundedSender<SyncSignal>,
+    /// Capacity-one edge trigger. Repeated edits do not allocate queued messages.
+    wake_tx: mpsc::Sender<()>,
+    /// Latest URI per canonical document. Replacements coalesce while the actor
+    /// is busy synchronizing another file or waiting on a provider commit.
+    pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingSignal {
+    uri: String,
+    requires_sync: bool,
+    force_diagnostics: bool,
 }
 
 impl SyncCoordinatorHandle {
     /// Signal that a file has changed and needs a debounced sync.
     pub fn signal(&self, canonical_id: String, uri_str: String) {
-        let _ = self.tx.send(SyncSignal {
-            canonical_id,
-            uri_str,
-        });
+        self.pending
+            .lock()
+            .entry(canonical_id)
+            .and_modify(|pending| {
+                pending.uri = uri_str.clone();
+                pending.requires_sync = true;
+            })
+            .or_insert(PendingSignal {
+                uri: uri_str,
+                requires_sync: true,
+                force_diagnostics: false,
+            });
+        // Full means a wake is already queued, which is exactly the desired
+        // coalescing behavior. Closed means the server is shutting down.
+        let _ = self.wake_tx.try_send(());
     }
 
-    /// Create a handle from a raw sender (for testing).
+    /// Create an isolated handle/inbox pair for testing the coalescing contract.
     #[cfg(test)]
-    pub fn new_for_test(tx: mpsc::UnboundedSender<SyncSignal>) -> Self {
-        Self { tx }
+    pub fn new_for_test() -> (Self, mpsc::Receiver<()>) {
+        let (wake_tx, wake_rx) = mpsc::channel(1);
+        (
+            Self {
+                wake_tx,
+                pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            },
+            wake_rx,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn take_pending_for_test(&self) -> HashMap<String, String> {
+        std::mem::take(&mut *self.pending.lock())
+            .into_iter()
+            .map(|(canonical_id, pending)| (canonical_id, pending.uri))
+            .collect()
     }
 }
 
 /// Shared state the coordinator needs to perform syncs and publish diagnostics.
+#[derive(Clone)]
 pub struct SyncCoordinatorDeps {
     pub documents: Arc<DocumentRegistry>,
     /// The in-process provider connection. `None` on routes with no in-process
@@ -102,37 +134,134 @@ const DEBOUNCE_MS: u64 = 300;
 
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
-    tokio::spawn(coordinator_loop(rx, deps));
-    SyncCoordinatorHandle { tx }
+    tokio::spawn(coordinator_loop(
+        wake_rx,
+        semantic_ready_rx,
+        Arc::clone(&pending),
+        Arc::new(deps),
+    ));
+    SyncCoordinatorHandle { wake_tx, pending }
 }
 
-async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: SyncCoordinatorDeps) {
+async fn coordinator_loop(
+    mut wake_rx: mpsc::Receiver<()>,
+    mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
+    inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    deps: Arc<SyncCoordinatorDeps>,
+) {
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     // Map from canonical_id → (last_change_time, uri_str)
-    let mut pending_files: HashMap<String, (Instant, String)> = HashMap::new();
+    let mut pending_files: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
+    // Provider-state commits are serialized and allowed to finish. Diagnostics
+    // are immutable snapshot reads, so a new edit can cancel only the stale
+    // diagnostic task without risking a half-committed provider surface.
+    let mut diagnostic_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
 
     loop {
         // Calculate next deadline from pending files
         let next_deadline = pending_files.values().map(|(t, _)| *t + debounce).min();
 
         tokio::select! {
-            msg = rx.recv() => {
-                match msg {
-                    Some(signal) => {
-                        tracing::debug!(
-                            "sync_coordinator: signal {}",
-                            signal.canonical_id
-                        );
-                        // Reset timer for this file
-                        pending_files.insert(
-                            signal.canonical_id,
-                            (Instant::now(), signal.uri_str),
-                        );
+            wake = wake_rx.recv() => {
+                match wake {
+                    Some(()) => {
+                        let signals = std::mem::take(&mut *inbox.lock());
+                        let received_at = Instant::now();
+                        for (canonical_id, signal) in signals {
+                            tracing::debug!("sync_coordinator: signal {canonical_id}");
+                            if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
+                                stale.abort();
+                            }
+                            // Reset the quiet window for the latest edit only.
+                            pending_files
+                                .entry(canonical_id)
+                                .and_modify(|(changed_at, pending)| {
+                                    *changed_at = received_at;
+                                    pending.uri = signal.uri.clone();
+                                    pending.requires_sync |= signal.requires_sync;
+                                    pending.force_diagnostics |= signal.force_diagnostics;
+                                })
+                                .or_insert((received_at, signal));
+                        }
                     }
                     None => {
-                        // Channel closed — coordinator shutting down
+                        // All handles dropped — coordinator shutting down.
+                        for (_, task) in diagnostic_tasks.drain() {
+                            task.abort();
+                        }
+                        return;
+                    }
+                }
+            }
+            semantic_ready = semantic_ready_rx.recv() => {
+                match semantic_ready {
+                    Ok(ready) => {
+                        if ready
+                            .uri
+                            .parse::<Uri>()
+                            .ok()
+                            .and_then(|uri| {
+                                deps.documents.get(&uri).map(|document| document.version)
+                            })
+                            == Some(ready.version)
+                        {
+                            // An earlier pre-semantic pass may have cached an empty
+                            // result under this same document/host generation.
+                            deps.cached_verter_diags.remove(&ready.uri);
+                            if let Some(stale) = diagnostic_tasks.remove(&ready.canonical_id) {
+                                stale.abort();
+                            }
+                            let received_at = Instant::now();
+                            pending_files
+                                .entry(ready.canonical_id)
+                                .and_modify(|(changed_at, pending)| {
+                                    *changed_at = received_at;
+                                    pending.uri = ready.uri.clone();
+                                    pending.force_diagnostics = true;
+                                })
+                                .or_insert((
+                                    received_at,
+                                    PendingSignal {
+                                        uri: ready.uri,
+                                        requires_sync: false,
+                                        force_diagnostics: true,
+                                    },
+                                ));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Recover from a burst by invalidating and scheduling every
+                        // open document. These are diagnostics-only passes.
+                        let received_at = Instant::now();
+                        for uri in deps.documents.open_uris() {
+                            let Ok(parsed) = uri.parse::<Uri>() else { continue; };
+                            let Some(canonical_id) = deps.documents.get_canonical_id(&parsed) else { continue; };
+                            deps.cached_verter_diags.remove(&uri);
+                            pending_files.insert(
+                                canonical_id,
+                                (
+                                    received_at,
+                                    PendingSignal {
+                                        uri,
+                                        requires_sync: false,
+                                        force_diagnostics: true,
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // The registry owns the sender for the server lifetime.
+                        // A closed channel therefore means the coordinator's
+                        // dependency graph is shutting down; returning avoids a
+                        // permanently-ready select branch spinning the runtime.
+                        for (_, task) in diagnostic_tasks.drain() {
+                            task.abort();
+                        }
                         return;
                     }
                 }
@@ -145,29 +274,58 @@ async fn coordinator_loop(mut rx: mpsc::UnboundedReceiver<SyncSignal>, deps: Syn
             } => {
                 // Find files that have been quiet for >= debounce_ms
                 let now = Instant::now();
-                let ready: Vec<(String, String)> = pending_files
+                let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
                     .filter(|(_, (t, _))| now.duration_since(*t) >= debounce)
-                    .map(|(id, (_, uri))| (id.clone(), uri.clone()))
+                    .map(|(id, (_, signal))| (id.clone(), signal.clone()))
                     .collect();
 
-                let mut synced_files: Vec<(String, String)> = Vec::new();
-                for (canonical_id, uri_str) in ready {
+                for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
-                    // Only sync if the file is still marked dirty
-                    if deps.needs_provider_sync.remove(&canonical_id).is_some() {
-                        sync_file(&deps, &canonical_id, &uri_str).await;
-                        synced_files.push((canonical_id, uri_str));
+                    let mut publish_diagnostics = signal.force_diagnostics;
+                    if signal.requires_sync
+                        && deps.needs_provider_sync.remove(&canonical_id).is_some()
+                    {
+                        let sync_version = signal.uri
+                            .parse::<Uri>()
+                            .ok()
+                            .and_then(|uri| deps.documents.get(&uri).map(|document| document.version));
+                        sync_file(&deps, &canonical_id, &signal.uri).await;
+                        // A new editor revision can land while the non-cancellable
+                        // provider-state commit is in flight. Fence diagnostics on
+                        // the actual LSP version—not `needs_provider_sync`, which is
+                        // also an API-reconciliation work bit and may legitimately be
+                        // reinserted by an interactive sync for this SAME revision.
+                        let current_version = signal.uri.parse::<Uri>().ok().and_then(|uri| {
+                            deps.documents.get(&uri).map(|document| document.version)
+                        });
+                        if sync_version.is_none() || current_version != sync_version {
+                            continue;
+                        }
+                        publish_diagnostics = true;
+                    }
+
+                    if publish_diagnostics {
+
+                        if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
+                            stale.abort();
+                        }
+                        let task_deps = Arc::clone(&deps);
+                        let task_canonical_id = canonical_id.clone();
+                        diagnostic_tasks.insert(
+                            canonical_id,
+                            tokio::spawn(async move {
+                                publish_merged_diagnostics(
+                                    &task_deps,
+                                    &task_canonical_id,
+                                    &signal.uri,
+                                )
+                                .await;
+                            }),
+                        );
                     }
                 }
-
-                // After syncing, publish fresh merged diagnostics for each synced file.
-                // Push diagnostics replace the previous squiggles — no flickering because
-                // VS Code adjusts push diagnostic positions during typing, and we only
-                // publish fresh ones after the debounce (typing has stopped).
-                for (canonical_id, uri_str) in &synced_files {
-                    publish_merged_diagnostics(&deps, canonical_id, uri_str).await;
-                }
+                diagnostic_tasks.retain(|_, task| !task.is_finished());
             }
         }
     }
@@ -221,6 +379,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 &uri,
                 canonical_id,
                 &file_language,
+                deps.type_provider_kind.requires_explicit_source_graph(),
             )
             .await;
         } else if snapshot.ownership_ready {
@@ -265,6 +424,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             } else {
                 crate::external_ts::CarrierProviderDelivery::StoreBacked
             },
+            activate_provider_member: deps.documents.canonical_id_to_uri(canonical_id).is_some(),
         });
 
     // Route the freshly-debounced carrier through the SINGLE carrier-sync gateway:
@@ -754,9 +914,50 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
         Ok(u) => u,
         Err(_) => return,
     };
-    let diagnostics = compute_merged_diagnostics(deps, canonical_id, &uri).await;
+    let Some(snapshot) = deps.documents.snapshot_identity(&uri) else {
+        return;
+    };
+    let verter_diagnostics = compute_verter_diagnostics(deps, canonical_id, &uri);
+    tracing::debug!(
+        "sync_coordinator: VERTER_DIAGNOSTICS_READY {canonical_id} count={} codes={}",
+        verter_diagnostics.len(),
+        verter_diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.code.as_ref())
+            .map(|code| match code {
+                NumberOrString::Number(value) => value.to_string(),
+                NumberOrString::String(value) => value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    );
+    if !deps.documents.snapshot_identity_is_current(&uri, &snapshot) {
+        return;
+    }
+    // Framework/native diagnostics are an independent snapshot lane. Publish
+    // them as soon as the current revision is available; a cold TypeScript
+    // configured-project build must not starve lint, ownership, or framework
+    // declaration hints. The provider result replaces this staged batch below.
     deps.client
-        .publish_diagnostics(uri, diagnostics, None)
+        .publish_diagnostics(
+            uri.clone(),
+            verter_diagnostics.clone(),
+            Some(snapshot.version),
+        )
+        .await;
+
+    if deps.type_provider.is_none() {
+        return;
+    }
+    let diagnostics = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
+    // Revalidate after every provider await. Provider synchronization and API
+    // reconciliation deliberately share a work bit, so only the editor's LSP
+    // version is a valid freshness authority for diagnostics publication.
+    if !deps.documents.snapshot_identity_is_current(&uri, &snapshot) {
+        return;
+    }
+    deps.client
+        .publish_diagnostics(uri, diagnostics, Some(snapshot.version))
         .await;
 }
 
@@ -766,7 +967,20 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
 /// (the coordinator otherwise pushes to the client socket, which a test cannot
 /// read) — the same compute/publish split the request-side
 /// `compute_full_diagnostics` uses.
+#[cfg(test)]
 async fn compute_merged_diagnostics(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    uri: &Uri,
+) -> Vec<Diagnostic> {
+    let verter_diags = compute_verter_diagnostics(deps, canonical_id, uri);
+    merge_provider_diagnostics(deps, canonical_id, verter_diags).await
+}
+
+/// Compute diagnostics owned by Verter without entering the TypeScript
+/// provider. This stage is synchronous with respect to provider I/O and is safe
+/// to publish while the provider's background semantic pass is still pending.
+fn compute_verter_diagnostics(
     deps: &SyncCoordinatorDeps,
     canonical_id: &str,
     uri: &Uri,
@@ -842,6 +1056,14 @@ async fn compute_merged_diagnostics(
         });
     }
 
+    verter_diags
+}
+
+async fn merge_provider_diagnostics(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    verter_diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
     // A self-file document (rune module or plain TS-family script) has NO IDE
     // TSX — its provider buffer is served from its OWN canonical path. Route
     // its debounced diagnostics through the generalized self-file projection
@@ -855,20 +1077,19 @@ async fn compute_merged_diagnostics(
         }
     }
 
-    if let Some(tp) = &deps.type_provider {
-        let encoding = deps.position_encoding.read().clone();
-        carrier_provider_diagnostics(
-            &deps.documents,
-            &deps.provider_sync_states,
-            tp.as_ref(),
-            encoding,
-            canonical_id,
-            verter_diags,
-        )
-        .await
-    } else {
-        verter_diags
-    }
+    let Some(tp) = &deps.type_provider else {
+        return verter_diags;
+    };
+    let encoding = deps.position_encoding.read().clone();
+    carrier_provider_diagnostics(
+        &deps.documents,
+        &deps.provider_sync_states,
+        tp.as_ref(),
+        encoding,
+        canonical_id,
+        verter_diags,
+    )
+    .await
 }
 
 /// Merge a carrier's provider type diagnostics into `verter_diags` for a
@@ -900,11 +1121,17 @@ pub(crate) async fn carrier_provider_diagnostics(
         documents,
         canonical_id,
     ) else {
+        tracing::debug!(
+            "carrier_provider_diagnostics: no committed current IDE surface for {canonical_id}"
+        );
         return verter_diags;
     };
     // No usable source map ⇒ the provider's offsets could not be mapped back
     // onto the carrier ⇒ fail closed to Verter-only.
     let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
+        tracing::debug!(
+            "carrier_provider_diagnostics: current IDE surface has no source map for {canonical_id}"
+        );
         return verter_diags;
     };
     let tsx_path = snapshot.stamp.provider_path.to_string();

@@ -12,8 +12,9 @@
 use tower_lsp_server::ls_types::{Position, Range};
 
 use super::auto_import::{
-    translate_completion_import_edits, AutoImportEditMappingError, ProviderImportEdit,
-    ScriptImportInsertionAnchor,
+    translate_completion_import_edits, translate_completion_import_edits_with_context,
+    AutoImportEditMappingError, CompletionImportTranslationContext, ExistingImportEditContext,
+    ProviderImportEdit, ScriptImportInsertionAnchor,
 };
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -52,6 +53,97 @@ fn strict_mapped_preamble_fixture() -> (String, LineIndex, LineIndex, ProviderPo
     let carrier_li = LineIndex::new_utf16(&carrier_source);
     let tsx_li = LineIndex::new_utf16(tsx_source);
     (carrier_source, carrier_li, tsx_li, mapper)
+}
+
+#[test]
+fn moved_existing_import_edit_uses_mapped_binding_witness_before_preamble_classification() {
+    use verter_semantic::analysis::types::{AnalyzedImportBinding, ImportBindingKind};
+    use verter_semantic::analysis::AnalyzedImport;
+
+    let carrier_source =
+        "<script setup lang=\"ts\">\nimport { ref } from \"vue\";\nconst base = ref(1);\n</script>\n";
+    let provider_source =
+        "import { ref } from \"vue\";\nimport type { VNode } from \"vue\";\nconst base = ref(1);\n";
+    let carrier_li = LineIndex::new_utf16(carrier_source);
+    let tsx_li = LineIndex::new_utf16(provider_source);
+
+    let provider_ref = provider_source.find("ref").unwrap() as u32;
+    let carrier_ref = carrier_source.find("ref").unwrap() as u32;
+    let carrier_import_start = carrier_source.find("import").unwrap() as u32;
+    let carrier_import_end = carrier_source.find(';').unwrap() as u32 + 1;
+    let provider_ref_pos = tsx_li.offset_to_position(provider_ref).unwrap();
+    let carrier_ref_pos = carrier_li.offset_to_position(carrier_ref).unwrap();
+
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("App.vue", carrier_source);
+    builder.add_token(
+        provider_ref_pos.line,
+        provider_ref_pos.character,
+        carrier_ref_pos.line,
+        carrier_ref_pos.character,
+        Some(source_id),
+        None,
+    );
+    builder.add_token(
+        provider_ref_pos.line,
+        provider_ref_pos.character + 3,
+        carrier_ref_pos.line,
+        carrier_ref_pos.character + 3,
+        Some(source_id),
+        None,
+    );
+    let mut map: serde_json::Value =
+        serde_json::from_str(&builder.into_sourcemap().to_json_string()).unwrap();
+    // The authored import was moved into the generated prefix. Its edit is
+    // geometrically before the helper-preamble boundary, so the binding witness
+    // must be consulted before the synthetic-preamble classifier.
+    map["x_verter_helper_preamble_end"] = serde_json::json!({ "line": 2, "character": 0 });
+    let mapper = ProviderPositionMapper::source_map(
+        PositionMapper::from_json(&serde_json::to_string(&map).unwrap()).unwrap(),
+    );
+
+    let analyzed_imports = vec![AnalyzedImport {
+        source: "vue".to_string(),
+        owner: verter_type_expr::TopLevelOwnerId::instance(0),
+        is_type_only: false,
+        bindings: vec![AnalyzedImportBinding {
+            name: "ref".to_string(),
+            kind: ImportBindingKind::Named,
+            imported_name: Some("ref".to_string()),
+            is_type_only: false,
+            vue_api: None,
+            span: verter_span::Span::new(carrier_ref, carrier_ref + 3),
+        }],
+        span: verter_span::Span::new(carrier_import_start, carrier_import_end),
+        resolved_canonical_id: None,
+    }];
+    let edits = vec![ProviderImportEdit {
+        start: provider_ref,
+        end: provider_ref,
+        new_text: "computed, ".to_string(),
+    }];
+
+    let translated = translate_completion_import_edits_with_context(
+        &edits,
+        CompletionImportTranslationContext {
+            anchor: None,
+            provider_line_index: &tsx_li,
+            mapper: &mapper,
+            carrier_line_index: &carrier_li,
+            edit_target_path: "/ws/App.vue",
+            carrier_source_exists: &(|_: &str| false),
+            existing_import: Some(ExistingImportEditContext {
+                provider_source,
+                analyzed_imports: &analyzed_imports,
+            }),
+        },
+    )
+    .expect("the moved authored import is structurally mappable");
+
+    assert_eq!(translated.len(), 1);
+    assert_eq!(translated[0].range.start, carrier_ref_pos);
+    assert_eq!(translated[0].range.end, carrier_ref_pos);
+    assert_eq!(translated[0].new_text, "computed, ");
 }
 
 /// A completion-resolve auto-import insertion that STRICT-MAPS to carrier `(0,0)` (the file top,

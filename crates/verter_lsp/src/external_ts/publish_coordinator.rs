@@ -172,6 +172,18 @@ impl CarrierPublishCoordinator {
         }
     }
 
+    /// Promote an already-published carrier into the managed tsserver working
+    /// set. This consumes only ledger/store metadata and is intentionally
+    /// independent of Verter semantic regeneration.
+    pub(crate) async fn activate_published_source(
+        &self,
+        source_canonical: &str,
+    ) -> Result<bool, verter_type_runtime::protocol::TypeProviderError> {
+        self.reconciler()
+            .activate_published_source(&CanonicalSource::from(source_canonical))
+            .await
+    }
+
     /// The SINGLE membership-transition entry every production decision point routes
     /// through: resolve ownership ONCE (synchronously; the borrowing resolver is
     /// dropped before any await) and run the authoritative transition through the
@@ -236,6 +248,19 @@ impl CarrierPublishCoordinator {
         self.reconciler()
             .remove_source_membership(&CanonicalSource::from(source_canonical), reason)
             .await
+    }
+
+    /// Refresh the managed provider once after a background publication batch.
+    /// Store-backed providers coalesce their plugin token, changed-file eviction,
+    /// and ordering fence across the complete companion set.
+    pub(crate) async fn refresh_published_companions(
+        &self,
+        companion_paths: &[String],
+    ) -> Result<(), verter_type_runtime::TypeProviderError> {
+        let Some(provider) = &self.provider else {
+            return Ok(());
+        };
+        provider.notify_carriers_changed(companion_paths).await
     }
 
     /// Resolve a carrier source's ownership ONCE, synchronously.
@@ -336,13 +361,10 @@ impl CarrierPublishCoordinator {
 }
 
 /// The ON-DISK implementation of the engine-agnostic membership-commit seam for the
-/// tsserver engine. The commit is a synchronous fsync'd store swap (the
-/// content-addressed blobs + atomic manifest the out-of-process
-/// `@verter/typescript-plugin` reads), so the async `commit_owned` / `retract`
-/// futures do that synchronous store work INLINE — the seam is async to admit a
-/// future in-memory-overlay engine whose re-snapshot is genuinely asynchronous,
-/// without changing this on-disk store's two-phase-publish / manifest /
-/// negative-cache-evict behavior.
+/// tsserver engine. The store mutation is a synchronous fsync'd swap, so these
+/// futures move it onto Tokio's blocking pool and await the result. This preserves
+/// two-phase durability and fail-closed errors without occupying an async runtime
+/// worker while the filesystem flushes.
 impl CarrierMembershipCommitter for CarrierPublishCoordinator {
     fn commit_owned<'a>(
         &'a self,
@@ -350,11 +372,31 @@ impl CarrierMembershipCommitter for CarrierPublishCoordinator {
         source_canonical: &'a str,
         companions: &'a [CarrierCompanion],
     ) -> CommitFuture<'a> {
-        Box::pin(async move { self.publish_owned_resolved(binding, source_canonical, companions) })
+        let coordinator = self.clone();
+        let binding = binding.clone();
+        let source_canonical = source_canonical.to_string();
+        let companions = companions.to_vec();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                coordinator.publish_owned_resolved(&binding, &source_canonical, &companions)
+            })
+            .await
+            .map_err(|error| {
+                CarrierPublishError::Publish(format!("publish task failed: {error}"))
+            })?
+        })
     }
 
     fn retract<'a>(&'a self, source_canonical: &'a str) -> CommitFuture<'a> {
-        Box::pin(async move { self.retract_carrier(source_canonical) })
+        let coordinator = self.clone();
+        let source_canonical = source_canonical.to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || coordinator.retract_carrier(&source_canonical))
+                .await
+                .map_err(|error| {
+                    CarrierPublishError::Retract(format!("retract task failed: {error}"))
+                })?
+        })
     }
 }
 

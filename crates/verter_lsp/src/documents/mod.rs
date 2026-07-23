@@ -1,3 +1,5 @@
+mod analysis;
+pub(crate) use analysis::SemanticReady;
 pub mod line_index;
 pub mod position_map;
 pub mod provider_projection;
@@ -48,6 +50,16 @@ pub struct DocumentRegistry {
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
     /// Signalled on every document registration (a request racing `did_open` waits on it).
     pub(crate) registration: registration_signal::RegistrationSignal,
+    /// Full Verter semantic enrichment is deliberately isolated from the
+    /// editor-critical projection host. The host is created lazily only when the
+    /// client opts in, owns a single CPU worker, and is never queried inline by an
+    /// LSP handler.
+    semantic_host: RwLock<Option<Arc<VerterHost>>>,
+    semantic_workspace: RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
+    semantic_enabled: std::sync::atomic::AtomicBool,
+    semantic_snapshots: DashMap<String, analysis::SemanticSnapshot>,
+    semantic_serial: Arc<tokio::sync::Mutex<()>>,
+    semantic_ready_tx: tokio::sync::broadcast::Sender<analysis::SemanticReady>,
 }
 
 /// Tracked state for an open document.
@@ -77,8 +89,22 @@ pub struct DocumentState {
     pub virtual_source_uri: Option<String>,
 }
 
+/// Immutable identity for one open-document revision.
+///
+/// LSP versions are not globally unique: clients may reuse a version after a
+/// close/reopen and buggy clients may even replace text without incrementing
+/// it. The source allocation therefore participates in the identity fence.
+/// Every registry write installs a fresh `Arc<str>`, so pointer equality also
+/// distinguishes the close/reopen ABA case when the text is unchanged.
+#[derive(Clone)]
+pub(crate) struct DocumentSnapshotIdentity {
+    pub(crate) version: i32,
+    source: Arc<str>,
+}
+
 impl DocumentRegistry {
     pub fn new(host: Arc<VerterHost>) -> Self {
+        let (semantic_ready_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             host,
             documents: DashMap::new(),
@@ -91,6 +117,12 @@ impl DocumentRegistry {
             encoding: RwLock::new(PositionEncodingKind::UTF16),
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
             registration: registration_signal::RegistrationSignal::default(),
+            semantic_host: RwLock::new(None),
+            semantic_workspace: RwLock::new(None),
+            semantic_enabled: std::sync::atomic::AtomicBool::new(false),
+            semantic_snapshots: DashMap::new(),
+            semantic_serial: Arc::new(tokio::sync::Mutex::new(())),
+            semantic_ready_tx,
         }
     }
 
@@ -187,6 +219,7 @@ impl DocumentRegistry {
         }
 
         let canonical_id = uri_to_canonical_id(&params.uri);
+        self.semantic_snapshots.remove(&canonical_id);
         let source: Arc<str> = Arc::from(params.text.as_str());
 
         let file_language = self.document_file_language(&params.language_id, &canonical_id);
@@ -273,6 +306,7 @@ impl DocumentRegistry {
         }
 
         let canonical_id = uri_to_canonical_id(uri);
+        self.semantic_snapshots.remove(&canonical_id);
         let source: Arc<str> = Arc::from(text);
 
         let stored_language_id = self
@@ -427,11 +461,33 @@ impl DocumentRegistry {
         self.host.notify_close(&canonical_id);
 
         self.documents.remove(uri.as_str());
+        self.semantic_snapshots.remove(&canonical_id);
     }
 
     /// Get the document state for a URI.
     pub fn get(&self, uri: &Uri) -> Option<dashmap::mapref::one::Ref<'_, String, DocumentState>> {
         self.documents.get(uri.as_str())
+    }
+
+    /// Capture the exact open-document revision that an asynchronous operation
+    /// is about to observe.
+    pub(crate) fn snapshot_identity(&self, uri: &Uri) -> Option<DocumentSnapshotIdentity> {
+        let document = self.documents.get(uri.as_str())?;
+        Some(DocumentSnapshotIdentity {
+            version: document.version,
+            source: Arc::clone(&document.source),
+        })
+    }
+
+    /// Return whether `snapshot` is still the exact open-document revision.
+    pub(crate) fn snapshot_identity_is_current(
+        &self,
+        uri: &Uri,
+        snapshot: &DocumentSnapshotIdentity,
+    ) -> bool {
+        self.documents.get(uri.as_str()).is_some_and(|document| {
+            document.version == snapshot.version && Arc::ptr_eq(&document.source, &snapshot.source)
+        })
     }
 
     /// Get the document's provider projection (the source↔provider mapper +
@@ -657,12 +713,6 @@ impl DocumentRegistry {
             .unwrap_or(false)
     }
 
-    /// Get the analysis snapshot for a document.
-    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
-        let canonical_id = self.get_canonical_id(uri)?;
-        self.host.get_analysis(&canonical_id)
-    }
-
     /// Get the diagnostics for a document.
     pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_session::DiagnosticsSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
@@ -753,8 +803,7 @@ impl DocumentRegistry {
     /// When the negotiated encoding is not UTF-8, all `spanStart`/`spanEnd` byte
     /// offsets in the analysis are converted to the negotiated encoding (UTF-16 or UTF-32).
     pub fn get_analysis_json(&self, uri: &Uri) -> Option<serde_json::Value> {
-        let canonical_id = self.get_canonical_id(uri)?;
-        let analysis = self.host.get_analysis(&canonical_id)?;
+        let analysis = self.get_analysis(uri)?;
         let mut json = serde_json::to_value(&analysis).ok()?;
         let encoding = self.encoding();
         if encoding != PositionEncodingKind::UTF8 {
@@ -813,69 +862,9 @@ impl DocumentRegistry {
 
 /// Recursively walk a JSON value and convert all `spanStart`/`spanEnd` fields
 /// from UTF-8 byte offsets to the negotiated encoding.
-fn convert_analysis_spans_json(
-    value: &mut serde_json::Value,
-    source: &str,
-    encoding: &PositionEncodingKind,
-) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, val) in map.iter_mut() {
-                if let Some(byte_offset) = val
-                    .as_u64()
-                    .filter(|_| key == "spanStart" || key == "spanEnd")
-                {
-                    let byte_offset = byte_offset as u32;
-                    let converted = convert_byte_offset(source, byte_offset, encoding);
-                    *val = serde_json::Value::Number(serde_json::Number::from(converted));
-                } else {
-                    convert_analysis_spans_json(val, source, encoding);
-                }
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for item in arr.iter_mut() {
-                convert_analysis_spans_json(item, source, encoding);
-            }
-        }
-        _ => {}
-    }
-}
+use analysis::convert_analysis_spans_json;
 
 /// Convert a UTF-8 byte offset to the target encoding's offset.
-fn convert_byte_offset(source: &str, byte_offset: u32, encoding: &PositionEncodingKind) -> u32 {
-    if *encoding == PositionEncodingKind::UTF16 {
-        byte_offset_to_utf16(source, byte_offset)
-    } else if *encoding == PositionEncodingKind::UTF32 {
-        byte_offset_to_utf32(source, byte_offset)
-    } else {
-        byte_offset // UTF-8 passthrough
-    }
-}
-
-/// Convert a UTF-8 byte offset to a UTF-16 code unit offset.
-fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
-    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
-    source[..clamped].encode_utf16().count() as u32
-}
-
-/// Convert a UTF-8 byte offset to a UTF-32 (Unicode code point) offset.
-fn byte_offset_to_utf32(source: &str, byte_offset: u32) -> u32 {
-    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
-    source[..clamped].chars().count() as u32
-}
-
-/// Clamp an offset to the nearest valid char boundary (at or before the offset).
-fn clamp_to_char_boundary(source: &str, offset: usize) -> usize {
-    let clamped = offset.min(source.len());
-    // Walk backwards to find a valid char boundary
-    let mut pos = clamped;
-    while pos > 0 && !source.is_char_boundary(pos) {
-        pos -= 1;
-    }
-    pos
-}
-
 /// Convert an LSP document URI to a canonical file path ID.
 ///
 /// Extracts the path component from `file://` URIs.
@@ -1032,6 +1021,52 @@ mod tests {
             uris.contains(&"file:///home/user/Main.vue".to_string()),
             "should still contain Main.vue URI"
         );
+    }
+
+    /// A client may replace text without advancing its version. Diagnostics and
+    /// other asynchronous results must still recognize that as a new revision.
+    #[test]
+    fn snapshot_identity_rejects_same_version_text_replacement() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div>old</div></template>".to_string(),
+        });
+        let captured = registry.snapshot_identity(&uri).unwrap();
+
+        registry.did_change(&uri, 1, "<template><div>new</div></template>");
+
+        assert!(!registry.snapshot_identity_is_current(&uri, &captured));
+    }
+
+    /// Close/reopen resets the client's version sequence. Even identical text
+    /// at the same version is a distinct open-document lifetime (ABA fence).
+    #[test]
+    fn snapshot_identity_rejects_close_reopen_at_same_version() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
+        let item = TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<template><div>same</div></template>".to_string(),
+        };
+        registry.did_open(&item);
+        let captured = registry.snapshot_identity(&uri).unwrap();
+
+        registry.did_close(&uri);
+        registry.did_open(&item);
+
+        assert!(!registry.snapshot_identity_is_current(&uri, &captured));
     }
 
     #[test]
@@ -1401,102 +1436,6 @@ mod tests {
              allocation (rebuild installs a new Arc; it must not mutate the \
              pre-edit pointee in place)"
         );
-    }
-
-    /// A `.svelte.ts` rune module is NOT a carrier; did_open must build a
-    /// SELF-FILE projection whose mapper offsets the user-source line by the
-    /// rune prelude line count. Without the offset wiring, a source position
-    /// would map to the same provider line (off by `prelude_line_count`) — the
-    /// discriminating assertion.
-    #[test]
-    fn did_open_rune_module_builds_self_file_projection_with_prelude_offset() {
-        use provider_projection::DocumentProviderProjection;
-        use verter_span::{LspPosition, TsPosition};
-
-        let host = Arc::new(verter_session::VerterHost::new_standalone(
-            verter_session::HostConfig::default(),
-        ));
-        let registry = DocumentRegistry::new(Arc::clone(&host));
-
-        let uri: Uri = "file:///x/store.svelte.ts".parse().expect("uri");
-        let _ = registry.did_open(&TextDocumentItem {
-            uri: uri.clone(),
-            language_id: "typescript".to_string(),
-            version: 1,
-            text: "export const s = $state(0);\n".to_string(),
-        });
-
-        let projection = registry
-            .get_projection(&uri)
-            .expect("a .svelte.ts rune module must build a provider projection");
-        let mapper = match &projection {
-            DocumentProviderProjection::SelfFile { mapper } => mapper.clone(),
-            DocumentProviderProjection::CarrierIde { .. } => {
-                panic!("a .svelte.ts rune module is NOT a carrier — must be a SelfFile projection")
-            }
-        };
-        let prelude = mapper.prelude_line_count();
-        assert!(
-            prelude > 0,
-            "the rune prelude must occupy at least one line (the offset to wire)"
-        );
-
-        // Source line 0 maps to provider line `prelude` — NOT line 0.
-        let prov = registry
-            .get_position_mapper(&uri)
-            .expect("unified mapper")
-            .carrier_to_tsx(LspPosition::new(0, 13))
-            .expect("source maps to provider");
-        assert_eq!(
-            prov.pos,
-            TsPosition::new(prelude, 13),
-            "the source line must shift DOWN by the prelude line count (off-by-prelude if unwired)"
-        );
-        // The provider position maps back to source line 0.
-        let back = registry
-            .get_position_mapper(&uri)
-            .expect("unified mapper")
-            .tsx_to_carrier(TsPosition::new(prelude, 13))
-            .expect("provider maps back");
-        assert_eq!(back.pos, LspPosition::new(0, 13));
-        // A provider position inside the prelude region drops (never clamps).
-        assert!(
-            registry
-                .get_position_mapper(&uri)
-                .expect("unified mapper")
-                .tsx_to_carrier(TsPosition::new(0, 0))
-                .is_none(),
-            "a provider position in the prelude region must drop, not surface a fake source line"
-        );
-    }
-
-    /// get_ide() fast path should not overwrite an existing position mapper.
-    #[test]
-    fn position_mapper_not_overwritten_when_present() {
-        let host = Arc::new(verter_session::VerterHost::new_standalone(
-            verter_session::HostConfig::default(),
-        ));
-        let registry = DocumentRegistry::new(host);
-        let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
-
-        registry.did_open(&TextDocumentItem {
-            uri: uri.clone(),
-            language_id: "vue".to_string(),
-            version: 1,
-            text: "<template><div>hello</div></template><script setup lang=\"ts\">\nconst x = 1;\n</script>".to_string(),
-        });
-
-        // Grab the original mapper
-        let original = registry.get_position_mapper(&uri);
-        assert!(original.is_some(), "mapper should exist after did_open");
-
-        // Call get_ide() — should not replace the mapper
-        let ide = registry.get_ide(&uri);
-        assert!(ide.is_some());
-
-        // Mapper should still be the same instance
-        let after = registry.get_position_mapper(&uri);
-        assert!(after.is_some(), "mapper should still exist after get_ide");
     }
 }
 

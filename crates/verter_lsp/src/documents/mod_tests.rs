@@ -3,6 +3,66 @@
 
 use super::*;
 
+#[test]
+fn did_open_rune_module_builds_self_file_projection_with_prelude_offset() {
+    use provider_projection::DocumentProviderProjection;
+    use verter_span::{LspPosition, TsPosition};
+
+    let host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host);
+    let uri: Uri = "file:///x/store.svelte.ts".parse().expect("uri");
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "typescript".into(),
+        version: 1,
+        text: "export const s = $state(0);\n".into(),
+    });
+
+    let projection = registry.get_projection(&uri).expect("rune projection");
+    let DocumentProviderProjection::SelfFile { mapper } = projection else {
+        panic!("a rune module must use a self-file projection")
+    };
+    let prelude = mapper.prelude_line_count();
+    assert!(prelude > 0);
+    let mapper = registry.get_position_mapper(&uri).expect("unified mapper");
+    assert_eq!(
+        mapper
+            .carrier_to_tsx(LspPosition::new(0, 13))
+            .expect("source maps")
+            .pos,
+        TsPosition::new(prelude, 13)
+    );
+    assert_eq!(
+        mapper
+            .tsx_to_carrier(TsPosition::new(prelude, 13))
+            .expect("provider maps")
+            .pos,
+        LspPosition::new(0, 13)
+    );
+    assert!(mapper.tsx_to_carrier(TsPosition::new(0, 0)).is_none());
+}
+
+#[test]
+fn position_mapper_not_overwritten_when_present() {
+    let host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host);
+    let uri: Uri = "file:///home/user/App.vue".parse().expect("uri");
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".into(),
+        version: 1,
+        text: "<template><div>hello</div></template><script setup lang=\"ts\">\nconst x = 1;\n</script>".into(),
+    });
+
+    assert!(registry.get_position_mapper(&uri).is_some());
+    assert!(registry.get_ide(&uri).is_some());
+    assert!(registry.get_position_mapper(&uri).is_some());
+}
+
 /// A plain TS-family script is NOT a carrier either: did_open must build a
 /// SELF-FILE projection whose zero-prelude mapper is the identity (its
 /// provider buffer is the source bytes verbatim). Without the projection,
@@ -126,4 +186,68 @@ fn is_jsx_for_canonical_falls_back_to_parse_dialect_without_ide_compile() {
         !registry.is_jsx_for_canonical("/x/TsComp.vue"),
         "a lang=ts Vue carrier is .tsx without an IDE compile"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
+    let cases = [
+        (
+            "vue",
+            "file:///workspace/App.vue",
+            "<script setup lang=\"ts\">\nimport Child from './Child.vue'\nconst count = 1\n</script>\n<template><Child>{{ count }}</Child></template>",
+        ),
+        (
+            "svelte",
+            "file:///workspace/App.svelte",
+            "<script lang=\"ts\">\nimport Child from './Child.svelte';\nconst count = 1;\n</script>\n<Child>{count}</Child>",
+        ),
+    ];
+
+    for (language_id, uri_text, source) in cases {
+        let projection_host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::IMPORTS),
+                ..verter_session::HostConfig::default()
+            },
+        ));
+        let registry = Arc::new(DocumentRegistry::new(projection_host));
+        let uri: tower_lsp_server::ls_types::Uri = uri_text.parse().unwrap();
+        let _ = registry.did_open(&tower_lsp_server::ls_types::TextDocumentItem {
+            uri: uri.clone(),
+            language_id: language_id.to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
+
+        registry.schedule_semantic_analysis(&uri);
+        tokio::task::yield_now().await;
+        assert!(
+            registry.semantic_host.read().is_none(),
+            "disabled {language_id} enrichment must not construct the isolated semantic host"
+        );
+        assert!(
+            registry.get_analysis(&uri).is_none(),
+            "the {language_id} projection host must not lazily reconstruct semantic enrichment"
+        );
+
+        registry.set_semantic_analysis_enabled(true);
+        registry.schedule_semantic_analysis(&uri);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if registry
+                    .get_analysis(&uri)
+                    .is_some_and(|analysis| analysis.template.is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "background {language_id} semantic snapshot should publish without inline request computation"
+            )
+        });
+    }
 }

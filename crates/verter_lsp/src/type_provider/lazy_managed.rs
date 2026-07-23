@@ -43,6 +43,7 @@ struct RegisteredCarrier {
     source_path: String,
     content: String,
     project_file_name: String,
+    active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +187,7 @@ impl LazyManagedTypeProvider {
         }
 
         // Every exit path from here must record an outcome, INCLUDING cancellation.
-        // The production request deadline drops the handler body, so an activation
+        // Client cancellation drops the handler body, so an activation
         // cancelled mid-factory never reaches the terminal arms below: without a
         // drop record the cooldown never arms, the `OnceCell` stays unset, and the
         // next request spawns another managed child — one per request, unbounded.
@@ -249,14 +250,22 @@ impl LazyManagedTypeProvider {
         }
 
         for (path, carrier) in desired.carriers {
-            provider
-                .register_carrier_member(
+            let registration = if carrier.active {
+                provider.register_carrier_member(
                     &carrier.source_path,
                     &path,
                     &carrier.content,
                     &carrier.project_file_name,
                 )
-                .await?;
+            } else {
+                provider.register_carrier_metadata(
+                    &carrier.source_path,
+                    &path,
+                    &carrier.content,
+                    &carrier.project_file_name,
+                )
+            };
+            registration.await?;
         }
 
         for (path, file) in desired.files {
@@ -282,8 +291,12 @@ impl LazyManagedTypeProvider {
             }
         }
 
-        for path in desired.carrier_notifications {
-            provider.notify_carrier_changed(&path).await?;
+        let carrier_notifications: Vec<String> =
+            desired.carrier_notifications.into_iter().collect();
+        if !carrier_notifications.is_empty() {
+            provider
+                .notify_carriers_changed(&carrier_notifications)
+                .await?;
         }
         if desired.resync_open_files {
             provider.resync_open_files().await?;
@@ -724,6 +737,25 @@ impl TypeProvider for LazyManagedTypeProvider {
         })
     }
 
+    fn notify_carriers_changed<'a>(
+        &'a self,
+        companion_paths: &'a [String],
+    ) -> ProviderFuture<'a, ()> {
+        let companion_paths = companion_paths.to_vec();
+        Box::pin(async move {
+            let _activation = self.activation.lock().await;
+            self.desired
+                .lock()
+                .unwrap()
+                .carrier_notifications
+                .extend(companion_paths.iter().cloned());
+            let Some(provider) = self.current() else {
+                return Ok(());
+            };
+            provider.notify_carriers_changed(&companion_paths).await
+        })
+    }
+
     fn register_carrier_member(
         &self,
         source_path: &str,
@@ -743,6 +775,7 @@ impl TypeProvider for LazyManagedTypeProvider {
                     source_path: source_path.clone(),
                     content: content.clone(),
                     project_file_name: project_file_name.clone(),
+                    active: true,
                 },
             );
             let Some(provider) = self.current() else {
@@ -754,6 +787,89 @@ impl TypeProvider for LazyManagedTypeProvider {
                     &companion_path,
                     &content,
                     &project_file_name,
+                )
+                .await
+        })
+    }
+
+    fn register_carrier_metadata(
+        &self,
+        source_path: &str,
+        companion_path: &str,
+        content: &str,
+        project_file_name: &str,
+    ) -> ProviderFuture<'_, ()> {
+        let source_path = source_path.to_string();
+        let companion_path = companion_path.to_string();
+        let content = content.to_string();
+        let project_file_name = project_file_name.to_string();
+        Box::pin(async move {
+            let _activation = self.activation.lock().await;
+            {
+                let mut desired = self.desired.lock().unwrap();
+                match desired.carriers.entry(companion_path.clone()) {
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let carrier = entry.get_mut();
+                        carrier.source_path = source_path.clone();
+                        carrier.content = content.clone();
+                        carrier.project_file_name = project_file_name.clone();
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(RegisteredCarrier {
+                            source_path: source_path.clone(),
+                            content: content.clone(),
+                            project_file_name: project_file_name.clone(),
+                            active: false,
+                        });
+                    }
+                }
+            }
+            let Some(provider) = self.current() else {
+                return Ok(());
+            };
+            provider
+                .register_carrier_metadata(
+                    &source_path,
+                    &companion_path,
+                    &content,
+                    &project_file_name,
+                )
+                .await
+        })
+    }
+
+    fn activate_carrier_member(
+        &self,
+        source_path: &str,
+        companion_path: &str,
+        project_file_name: &str,
+        script_kind: verter_type_runtime::CarrierScriptKind,
+    ) -> ProviderFuture<'_, ()> {
+        let source_path = source_path.to_string();
+        let companion_path = companion_path.to_string();
+        let project_file_name = project_file_name.to_string();
+        Box::pin(async move {
+            let _activation = self.activation.lock().await;
+            if let Some(carrier) = self
+                .desired
+                .lock()
+                .unwrap()
+                .carriers
+                .get_mut(&companion_path)
+            {
+                carrier.source_path = source_path.clone();
+                carrier.project_file_name = project_file_name.clone();
+                carrier.active = true;
+            }
+            let Some(provider) = self.current() else {
+                return Ok(());
+            };
+            provider
+                .activate_carrier_member(
+                    &source_path,
+                    &companion_path,
+                    &project_file_name,
+                    script_kind,
                 )
                 .await
         })

@@ -46,6 +46,8 @@ use self::handler_guard::{block_in_place_if_available, ACTIVE_HANDLERS};
 // publish paths) can route VFS source reads through the same guard the server
 // handlers use, instead of an unguarded `tokio::task::block_in_place`.
 pub(crate) use self::handler_guard::block_in_place_if_available as block_in_place_guarded;
+pub(crate) use self::handler_guard::wait_for_handlers_idle;
+pub(crate) use self::handler_guard::wait_for_handlers_quiet;
 
 // Provider-sync state CRUD + context helpers. Inherent-impl
 // extension methods on `VerterLanguageServer` covering MRU bookkeeping,
@@ -299,29 +301,6 @@ struct IdeSyncPausePoint {
     release: Arc<tokio::sync::Notify>,
 }
 
-/// One ordered provider-publication turn assigned while the document commit
-/// fence is held. Waiting happens only after the commit is visible, so slow
-/// provider I/O cannot delay later registry commits. The drop notification also
-/// makes cancellation skip a turn instead of wedging every later edit.
-struct DidChangeProviderTurn {
-    predecessor: Option<Arc<tokio::sync::Notify>>,
-    completion: Arc<tokio::sync::Notify>,
-}
-
-impl DidChangeProviderTurn {
-    async fn wait(&self) {
-        if let Some(predecessor) = &self.predecessor {
-            predecessor.notified().await;
-        }
-    }
-}
-
-impl Drop for DidChangeProviderTurn {
-    fn drop(&mut self) {
-        self.completion.notify_one();
-    }
-}
-
 #[cfg(test)]
 struct CompletionSnapshotPause {
     arrived: Arc<tokio::sync::Notify>,
@@ -354,133 +333,8 @@ struct CompletionSnapshotPause {
 /// can collide with a low generation of the new one and serve a warm skip for a
 /// pass that never ran against it. Eviction also bounds the maps' growth across a
 /// long session.
-#[derive(Default)]
-pub(crate) struct ImportSyncMemo {
-    fresh_at: DashMap<String, (u64, u64)>,
-    locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
-    /// In-flight background publication per document: a watch receiver that
-    /// resolves (value change or sender drop) when the publication settles.
-    /// Registered by the publisher AFTER it holds the singleflight lock, so at
-    /// most one live entry exists per document.
-    in_flight: DashMap<String, tokio::sync::watch::Receiver<bool>>,
-    /// Edit-debounce epochs: a debounced enqueue bumps its document's epoch and
-    /// only the LATEST enqueue survives its debounce sleep, so a typing burst
-    /// coalesces onto one publication after the silence window.
-    enqueue_epochs: DashMap<String, u64>,
-    epoch_counter: std::sync::atomic::AtomicU64,
-}
-
-impl ImportSyncMemo {
-    /// The per-document singleflight lock. A tokio `Mutex` is fair (FIFO) and
-    /// cancel-safe, so a request storm cannot starve or wedge the pass.
-    pub(crate) fn lock_for(&self, canonical_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.locks
-            .entry(canonical_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
-    /// Whether this document's import set was already delivered at `key`.
-    pub(crate) fn is_fresh_at(&self, canonical_id: &str, key: (u64, u64)) -> bool {
-        self.fresh_at.get(canonical_id).map(|entry| *entry) == Some(key)
-    }
-
-    pub(crate) fn record_delivered(&self, canonical_id: String, key: (u64, u64)) {
-        self.fresh_at.insert(canonical_id, key);
-    }
-
-    /// Register this document's publication as in flight and return the guard
-    /// that (a) resolves every joiner and (b) removes the registration when the
-    /// publication settles — including on panic, so a dead entry can never
-    /// strand joiners. Call ONLY while holding [`Self::lock_for`]'s lock.
-    pub(crate) fn begin_in_flight(self: &Arc<Self>, canonical_id: &str) -> InFlightPublication {
-        let (sender, receiver) = tokio::sync::watch::channel(false);
-        self.in_flight.insert(canonical_id.to_string(), receiver);
-        InFlightPublication {
-            memo: Arc::clone(self),
-            canonical_id: canonical_id.to_string(),
-            sender,
-        }
-    }
-
-    /// The in-flight publication watch for `canonical_id`, if one is running.
-    /// A joiner awaits `changed()` on the clone (value change or sender drop
-    /// both resolve it) and then re-reads the receipt — it never starts work.
-    pub(crate) fn in_flight_watch(
-        &self,
-        canonical_id: &str,
-    ) -> Option<tokio::sync::watch::Receiver<bool>> {
-        self.in_flight.get(canonical_id).map(|entry| entry.clone())
-    }
-
-    /// Drop a DEAD in-flight registration (its sender is gone but the entry is
-    /// still present — a publisher that panicked between registration and its
-    /// guard's drop). Removes only the exact channel the caller observed dead,
-    /// never a newer live registration.
-    pub(crate) fn clear_dead_in_flight(
-        &self,
-        canonical_id: &str,
-        dead: &tokio::sync::watch::Receiver<bool>,
-    ) {
-        self.in_flight
-            .remove_if(canonical_id, |_, current| current.same_channel(dead));
-    }
-
-    /// Bump and return the edit-debounce epoch for `canonical_id`. A debounced
-    /// enqueue captures the returned value and abandons itself after its sleep
-    /// when a newer enqueue has bumped past it.
-    pub(crate) fn bump_enqueue_epoch(&self, canonical_id: &str) -> u64 {
-        let epoch = self
-            .epoch_counter
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-            + 1;
-        self.enqueue_epochs.insert(canonical_id.to_string(), epoch);
-        epoch
-    }
-
-    /// Whether `epoch` is still the newest enqueue for `canonical_id`.
-    pub(crate) fn enqueue_epoch_is_current(&self, canonical_id: &str, epoch: u64) -> bool {
-        self.enqueue_epochs.get(canonical_id).map(|entry| *entry) == Some(epoch)
-    }
-
-    /// Drop every entry. Called whenever the workspace is replaced, because the
-    /// generations the keys are built from belong to the OLD workspace.
-    pub(crate) fn evict_all(&self) {
-        self.fresh_at.clear();
-        self.locks.clear();
-        self.in_flight.clear();
-        self.enqueue_epochs.clear();
-    }
-
-    /// Number of documents currently recorded as delivered (test observation).
-    #[cfg(test)]
-    pub(crate) fn recorded_len(&self) -> usize {
-        self.fresh_at.len()
-    }
-}
-
-/// RAII registration of an in-flight background publication. Dropping it —
-/// normal completion or panic — removes the in-flight entry and resolves every
-/// joiner's watch. The receipt (if any) must be recorded BEFORE this drops so a
-/// woken joiner re-reads a settled memo.
-pub(crate) struct InFlightPublication {
-    memo: Arc<ImportSyncMemo>,
-    canonical_id: String,
-    sender: tokio::sync::watch::Sender<bool>,
-}
-
-impl Drop for InFlightPublication {
-    fn drop(&mut self) {
-        self.memo
-            .in_flight
-            .remove_if(&self.canonical_id, |_, current| {
-                current.same_channel(&self.sender.subscribe())
-            });
-        // Wake joiners AFTER the registry removal so a woken joiner that
-        // re-checks sees either the fresh receipt or a clean Missing state.
-        let _ = self.sender.send(true);
-    }
-}
+mod import_sync_state;
+pub(crate) use import_sync_state::ImportSyncMemo;
 
 /// The Verter language server implementation.
 ///
@@ -643,11 +497,6 @@ pub struct ServerCore {
     /// lock at a time. Others `.await` this mutex, YIELDING their worker thread back to
     /// the runtime so timers, completions, and heartbeats can still run.
     did_change_mutex: tokio::sync::Mutex<()>,
-    /// Tail of the ordered provider-publication chain. Each `did_change`
-    /// appends a turn while holding `did_change_mutex`, then releases the commit
-    /// fence before awaiting its predecessor. This keeps provider writes ordered
-    /// without allowing blocked provider I/O to stall registry commits.
-    did_change_provider_tail: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
     #[cfg(test)]
     completion_snapshot_pauses:
         parking_lot::Mutex<std::collections::VecDeque<CompletionSnapshotPause>>,
@@ -685,6 +534,9 @@ pub struct ServerCore {
     /// `false`. Read-only after `initialize()` sets it from
     /// `initializationOptions.hover.provenance`.
     hover_provenance_enabled: std::sync::atomic::AtomicBool,
+    /// Whether Verter contributes native semantic/structural hover content.
+    /// Default false: the selected TypeScript provider owns the hot path.
+    hover_native_semantics_enabled: std::sync::atomic::AtomicBool,
     /// LRU-100 cache of provenance-enriched hover payloads. Entries
     /// are invalidated on `textDocument/didChange` for the matching
     /// canonical (transitive deps NOT invalidated — codified
@@ -735,18 +587,6 @@ impl VerterLanguageServer {
                 .lsp_method_timeouts
                 .request_deadlines,
         )
-    }
-
-    fn enqueue_did_change_provider_update(&self) -> DidChangeProviderTurn {
-        let completion = Arc::new(tokio::sync::Notify::new());
-        let predecessor = self
-            .did_change_provider_tail
-            .lock()
-            .replace(Arc::clone(&completion));
-        DidChangeProviderTurn {
-            predecessor,
-            completion,
-        }
     }
 
     #[cfg(test)]
@@ -1209,7 +1049,6 @@ impl VerterLanguageServer {
             sync_coordinator,
             last_change_ms: std::sync::atomic::AtomicU64::new(0),
             did_change_mutex: tokio::sync::Mutex::new(()),
-            did_change_provider_tail: parking_lot::Mutex::new(None),
             #[cfg(test)]
             completion_snapshot_pauses: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
@@ -1223,6 +1062,7 @@ impl VerterLanguageServer {
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
             vfs_workspace,
             hover_provenance_enabled: std::sync::atomic::AtomicBool::new(false),
+            hover_native_semantics_enabled: std::sync::atomic::AtomicBool::new(false),
             hover_provenance_cache: Arc::new(
                 crate::features::hover_provenance::HoverProvenanceCache::new(),
             ),
@@ -1285,9 +1125,26 @@ impl VerterLanguageServer {
         &self.documents
     }
 
+    /// Explicitly opt a legacy contract fixture into the optional native hover
+    /// lane. Production changes this flag only through initialization options.
+    pub(crate) fn enable_native_hover_semantics_for_tests(&self) {
+        self.hover_native_semantics_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Trigger interactive file sync to the type provider (test harness access).
     pub(crate) async fn test_ensure_synced(&self, uri: &tower_lsp_server::ls_types::Uri) {
         self.ensure_current_file_synced(uri).await;
+    }
+
+    /// Deterministically settle the background-owned import dependency receipt
+    /// for cross-file contract tests. Interactive production handlers never use
+    /// this joining path.
+    pub(crate) async fn test_settle_import_dependencies(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+    ) {
+        self.publish_import_dependencies_settled(uri).await;
     }
 
     /// Install ONLY the server-side VFS workspace handle (test harness access).
@@ -1342,6 +1199,23 @@ impl VerterLanguageServer {
     ) -> Option<crate::provider_sync::ProviderSyncState> {
         let canonical_id = self.documents.get_canonical_id(uri)?;
         self.provider_sync_state_for_source(&canonical_id)
+    }
+
+    /// Read the committed provider state for a closed imported carrier by its
+    /// canonical source id (test harness access).
+    pub(crate) fn test_provider_sync_state_for_canonical(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::provider_sync::ProviderSyncState> {
+        self.provider_sync_state_for_source(canonical_id)
+    }
+
+    /// Capture the generated provider context for a real-provider assertion.
+    pub(crate) fn test_type_provider_context(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+    ) -> Option<TypeProviderContext> {
+        self.type_provider_context(uri)
     }
 
     /// The server's shared declaration-overlay lifecycle owner (test harness
