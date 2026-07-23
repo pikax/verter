@@ -13,6 +13,8 @@ const RESTART_REQUIRED_SETTINGS = [
   "verter.viteConfig.trustedFiles",
   "verter.experimental.conditionalRootNarrowing",
   "verter.experimental.strictSlots",
+  "verter.hover.nativeSemantics",
+  "verter.hover.provenance",
 ] as const;
 
 export function shouldRestartLanguageServerForConfigurationChange(

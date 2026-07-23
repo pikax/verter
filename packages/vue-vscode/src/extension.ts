@@ -39,6 +39,7 @@ import { tmpdir } from "os";
 
 import type { PatchClient, NotificationParams } from "@verter/language-shared";
 import {
+  ACTIVE_CARRIER_SOURCES_CONFIG_KEY,
   CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY,
   EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY,
@@ -80,6 +81,7 @@ import {
 } from "./frameworkWiring";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
+import { createTypeScriptPluginRefreshScheduler } from "./typescriptPluginRefreshScheduler";
 import { addShowRecentAuditRecordsCommand } from "./audit";
 import {
   buildRelayEditorEnv,
@@ -197,6 +199,22 @@ async function activateExtension(context: ExtensionContext) {
   // features become editor-owned only after an exact tsserver project attests;
   // managed/shared tsgo must not be merged with a second carrier provider.
   let editorOwnsCarrierSourceFeatures = false;
+  // External-file membership is an authored-source working set, not a mirror
+  // of every carrier the background compiler has warmed. Imported carriers are
+  // reached through normal TypeScript module resolution.
+  const activeCarrierSources = new Set(
+    workspace.textDocuments
+      .filter(
+        (document) =>
+          document.uri.scheme === "file" && isFrameworkCarrierLanguageId(document.languageId),
+      )
+      .map((document) => document.uri.fsPath),
+  );
+  const typeScriptPluginRefreshScheduler = createTypeScriptPluginRefreshScheduler(() => {
+    carrierStoreRefreshToken += 1;
+    void ensureTypeScriptPluginConfigured(undefined, true);
+  });
+  context.subscriptions.push(typeScriptPluginRefreshScheduler);
 
   const getStartedClient = () => {
     if (!server) {
@@ -220,6 +238,7 @@ async function activateExtension(context: ExtensionContext) {
     editorOwnsCarrierSourceFeatures: boolean;
     e2eProviderOnlyCompletions: boolean;
     carrierStoreRefreshToken: number;
+    activeCarrierSources: string[];
     exposeBindingsTesting?: boolean;
     carrierStoreDir?: string;
   } => {
@@ -229,6 +248,7 @@ async function activateExtension(context: ExtensionContext) {
       editorOwnsCarrierSourceFeatures: boolean;
       e2eProviderOnlyCompletions: boolean;
       carrierStoreRefreshToken: number;
+      activeCarrierSources: string[];
       exposeBindingsTesting?: boolean;
       carrierStoreDir?: string;
     } = {
@@ -237,6 +257,7 @@ async function activateExtension(context: ExtensionContext) {
       [EDITOR_OWNS_CARRIER_SOURCE_FEATURES_CONFIG_KEY]: editorOwnsCarrierSourceFeatures,
       [E2E_PROVIDER_ONLY_COMPLETIONS_CONFIG_KEY]: e2eProviderOnlyCompletions,
       [CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY]: carrierStoreRefreshToken,
+      [ACTIVE_CARRIER_SOURCES_CONFIG_KEY]: [...activeCarrierSources],
     };
     const experimentalConfig = workspace.getConfiguration("verter.experimental");
     const inspect = experimentalConfig.inspect<boolean>("exposeBindingsTesting");
@@ -359,8 +380,7 @@ async function activateExtension(context: ExtensionContext) {
         void ensureTypeScriptPluginConfigured(undefined, true);
       },
       onTypeProviderSyncComplete: () => {
-        carrierStoreRefreshToken += 1;
-        void ensureTypeScriptPluginConfigured(undefined, true);
+        typeScriptPluginRefreshScheduler.request();
       },
     })
       .then((runtime) => {
@@ -392,8 +412,20 @@ async function activateExtension(context: ExtensionContext) {
 
   context.subscriptions.push(
     workspace.onDidOpenTextDocument((document) => {
-      ensureTypeScriptPluginConfiguredForDocument(document);
+      if (document.uri.scheme === "file" && isFrameworkCarrierLanguageId(document.languageId)) {
+        activeCarrierSources.add(document.uri.fsPath);
+        void ensureTypeScriptPluginConfigured(document, true);
+      } else {
+        ensureTypeScriptPluginConfiguredForDocument(document);
+      }
       ensureStartedForFrameworkDocument(document);
+    }),
+    workspace.onDidCloseTextDocument((document) => {
+      if (document.uri.scheme !== "file" || !isFrameworkCarrierLanguageId(document.languageId)) {
+        return;
+      }
+      activeCarrierSources.delete(document.uri.fsPath);
+      void ensureTypeScriptPluginConfigured(undefined, true);
     }),
     window.onDidChangeActiveTextEditor((editor) => {
       ensureTypeScriptPluginConfiguredForDocument(editor?.document);
@@ -620,6 +652,15 @@ export async function activateVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      analysis: {
+        enabled: workspace.getConfiguration("verter.analysis").get<boolean>("enabled", false),
+      },
+      hover: {
+        nativeSemantics: workspace
+          .getConfiguration("verter.hover")
+          .get<boolean>("nativeSemantics", false),
+        provenance: workspace.getConfiguration("verter.hover").get<boolean>("provenance", false),
+      },
       // Every registered framework carrier the client wires (manifest-derived).
       frameworks: activeFrameworks,
       lint: {

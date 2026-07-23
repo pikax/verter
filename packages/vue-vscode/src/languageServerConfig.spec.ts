@@ -28,4 +28,15 @@ describe("shouldRestartLanguageServerForConfigurationChange", () => {
       shouldRestartLanguageServerForConfigurationChange(makeEvent(["verter.analysis.enabled"])),
     ).toBe(false);
   });
+
+  it("restarts for init-only hover policy settings", () => {
+    expect(
+      shouldRestartLanguageServerForConfigurationChange(
+        makeEvent(["verter.hover.nativeSemantics"]),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRestartLanguageServerForConfigurationChange(makeEvent(["verter.hover.provenance"])),
+    ).toBe(true);
+  });
 });

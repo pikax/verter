@@ -144,7 +144,7 @@
         "verter.analysis.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable the Verter Analysis sidebar (virtual files, component tree, analysis, source map sync)."
+          "description": "Enable the Verter Analysis sidebar and isolated background semantic enrichment. TypeScript IDE features remain independent."
         },
         "verter.decorations.vueApiCalls": {
           "type": "boolean",
@@ -328,6 +328,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Experimental**: Enforce strict type checking for slot children. When a component defines typed slots via `defineSlots()`, only matching children types are accepted. See [RFC #733](https://github.com/vuejs/rfcs/discussions/733)."
+        },
+        "verter.hover.nativeSemantics": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable Verter's native semantic and framework-structural hover contribution. Disabled by default so the selected TypeScript provider exclusively owns the hover hot path."
         },
         "verter.hover.provenance": {
           "type": "boolean",
