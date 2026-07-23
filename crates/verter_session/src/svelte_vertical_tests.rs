@@ -1361,3 +1361,40 @@ fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
         );
     }
 }
+
+#[test]
+fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
+    let host = host();
+    let source = "<script lang=\"ts\">\nexport let count: number;\n</script>\n<div>{count}</div>\n";
+    upsert_svelte(&host, "/LegacyCounter.svelte", source);
+
+    let api = host
+        .get_public_api("/LegacyCounter.svelte")
+        .expect("Svelte public API projection")
+        .expect("a legacy component with props projects a public API");
+    let code = api.code.as_ref();
+    let map_json = api
+        .source_map
+        .as_deref()
+        .expect("the svelte public-API carrier carries a source map");
+    let map = sourcemap::SourceMap::from_slice(map_json.as_bytes())
+        .expect("the published map parses as V3 JSON");
+
+    let generated_offset = code
+        .find("count")
+        .unwrap_or_else(|| panic!("the shim renders the legacy prop:\n{code}"));
+    let authored_offset = source
+        .find("count: number")
+        .expect("the authored export-let binding");
+    let (dst_line, dst_col) = byte_line_col(code, generated_offset);
+    let (src_line, src_col) = byte_line_col(source, authored_offset);
+    let token = map
+        .tokens()
+        .find(|token| token.get_dst_line() == dst_line && token.get_dst_col() == dst_col)
+        .unwrap_or_else(|| panic!("a mapping segment starts at the generated `count` token"));
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        (src_line, src_col),
+        "the generated legacy prop maps to the authored export-let binding"
+    );
+}

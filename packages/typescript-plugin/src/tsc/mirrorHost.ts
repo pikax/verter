@@ -409,7 +409,10 @@ function lineColumnToOffset(text: string, line: number, column: number): number 
     offset = nl + 1;
     currentLine += 1;
   }
-  return offset + (column - 1);
+  const lineEnd = text.indexOf("\n", offset);
+  const limit = lineEnd === -1 ? text.length : lineEnd;
+  const resolved = offset + (column - 1);
+  return resolved <= limit ? resolved : null;
 }
 
 /**
@@ -1112,17 +1115,24 @@ function makeResolveOne(
     }
 
     // (2) A relative specifier targeting a materialised carrier in the MIRROR
-    //     (the IDE carrier's `./{name}.verter.ts` self-import) resolves in the
-    //     mirror, relative to the carrier's mirror directory — it is a
+    //     (the IDE carrier's `./{name}.verter.js` self-import) resolves in the
+    //     mirror through TypeScript's normal `.js` → `.ts` substitution. It is a
     //     Verter-generated sibling, NOT a user-tree file, so it must NOT re-root.
     if (mirrorFs.isCarrier(containingSlash) && (name.startsWith("./") || name.startsWith("../"))) {
-      const mirrorCandidate = toSlash(path.resolve(path.dirname(containingSlash), name));
-      if (mirrorFs.isCarrier(mirrorCandidate) || mirrorFs.fileExists(mirrorCandidate)) {
-        return {
-          resolvedFileName: mirrorCandidate,
-          extension: carrierExtension(ts, mirrorCandidate),
-          isExternalLibraryImport: false,
-        };
+      const mirrorResolution = ts.resolveModuleName(
+        name,
+        containingSlash,
+        optionsArg,
+        resolutionHost,
+        undefined,
+        redirectedReference,
+      ).resolvedModule;
+      if (
+        mirrorResolution !== undefined &&
+        (mirrorFs.isCarrier(mirrorResolution.resolvedFileName) ||
+          mirrorFs.fileExists(mirrorResolution.resolvedFileName))
+      ) {
+        return mirrorResolution;
       }
     }
 

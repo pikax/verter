@@ -581,7 +581,7 @@ pub struct NapiIdeResponse {
 }
 
 /// TSC output for TypeScript declaration generation (macro-extraction only).
-#[napi(object)]
+#[napi(object, use_nullable = true)]
 pub struct NapiTscResponse {
     pub code: String,
     pub sourceMap: Option<String>,
@@ -607,7 +607,7 @@ pub struct NapiTscScriptSetupAttrsFailureSubject {
 }
 
 /// Stable structured identity for a failed public-API projection.
-#[napi(object)]
+#[napi(object, use_nullable = true)]
 pub struct NapiPublicApiProjectionError {
     pub code: String,
     pub detailCode: String,
@@ -620,7 +620,7 @@ pub struct NapiPublicApiProjectionError {
 }
 
 /// Explicit tri-state public-API result: value, ordinary absence, or failure.
-#[napi(object)]
+#[napi(object, use_nullable = true)]
 pub struct NapiPublicApiResult {
     pub value: Option<NapiTscResponse>,
     pub error: Option<NapiPublicApiProjectionError>,
