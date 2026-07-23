@@ -1,10 +1,5 @@
 use super::*;
 
-/// Resolve a relative import path against an importer's directory.
-///
-/// Handles `./foo.vue`, `../bar/baz.vue`, etc.
-/// Check whether a requested `context.only` filter includes the given code action kind.
-///
 /// Check whether a canonical ID (or URI string) refers to a config file
 /// that should trigger a project registry rebuild when changed on disk.
 ///

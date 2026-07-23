@@ -120,6 +120,10 @@ mod nav_features;
 // prepare_rename, rename.
 mod nav_features_css;
 mod nav_features_navigation;
+mod rename_prepare;
+
+#[cfg(test)]
+mod test_support;
 
 // Completion-resolve auto-import edit translation:
 // `resolve_provider_auto_import_edits` and `completion_resolve_error`, called
@@ -1147,68 +1151,6 @@ impl VerterLanguageServer {
         self.publish_import_dependencies_settled(uri).await;
     }
 
-    /// Run the production carrier-publication pass to completion for a real-
-    /// provider harness that intentionally does not call `initialized()`. This
-    /// mirrors the workspace scanner's carrier phase so workspace-symbol tests
-    /// exercise a complete configured-project Program instead of relying on a
-    /// partial set of manually opened fixture files.
-    pub(crate) async fn test_settle_workspace_carriers(&self) {
-        let sources = {
-            let Some(workspace) = self.vfs_workspace.read().clone() else {
-                return;
-            };
-            let Some(published) = workspace.load_published() else {
-                return;
-            };
-            let mut sources = Vec::new();
-            for project in &published.snapshot.projects {
-                if let verter_workspace::workspace_snapshot::ProjectPayload::Configured {
-                    membership,
-                    ..
-                } = &project.payload
-                {
-                    sources.extend(
-                        membership
-                            .materialized_files
-                            .iter()
-                            .map(|path| path.as_str().to_string())
-                            .filter(|path| verter_workspace::resolver::path_is_carrier(path)),
-                    );
-                }
-            }
-            sources.sort_unstable();
-            sources.dedup();
-            sources
-        };
-        let profile = self.documents.tsx_profile.read().clone();
-        let mut published_companions = Vec::new();
-        for source in sources {
-            crate::workspace_scanner::sync_file_to_provider(
-                &source,
-                self.documents.host(),
-                &profile,
-                self.project_sync.as_ref(),
-                self.documents.provider_surfaces(),
-                &self.vfs_workspace,
-                matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo),
-                &self.provider_sync_states,
-                self.carrier_publish_coordinator.as_ref(),
-                &self.carrier_transaction_coordinator,
-                Some(&self.pending_snapshot_provider_sync),
-                Some(&mut published_companions),
-            )
-            .await;
-        }
-        if let Some(coordinator) = &self.carrier_publish_coordinator {
-            if !published_companions.is_empty() {
-                coordinator
-                    .refresh_published_companions(&published_companions)
-                    .await
-                    .expect("test carrier batch refresh must succeed");
-            }
-        }
-    }
-
     /// Install ONLY the server-side VFS workspace handle (test harness access).
     /// Unlike the production [`VerterLanguageServer::swap_vfs_workspace`] this does
     /// NOT re-point the host or evict generation-keyed caches — a harness that
@@ -1408,7 +1350,7 @@ impl LanguageServer for VerterLanguageServer {
     ) -> Result<Option<PrepareRenameResponse>> {
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
-            nav_features_navigation::handle_prepare_rename(self, params),
+            rename_prepare::handle_prepare_rename(self, params),
         )
         .await
     }

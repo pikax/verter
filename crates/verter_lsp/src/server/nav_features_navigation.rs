@@ -17,11 +17,13 @@ use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
-use crate::features::rename::{is_css_rename_position, prepare_rename, rename_at_position};
+use crate::features::rename::{is_css_rename_position, rename_at_position};
 use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
+pub(super) use super::rename_prepare::handle_prepare_rename;
+use super::rename_prepare::multi_claimant_rename_unavailable_error;
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
@@ -938,65 +940,6 @@ fn inject_child_prop_declaration(
     } else {
         Some(locations)
     }
-}
-
-/// The fail-closed error a rename / prepare-rename returns for a carrier owned by
-/// MULTIPLE configured projects. Non-silent (the editor surfaces the message), and
-/// carries NO edit — so a partial cross-project rename can never ship for the
-/// newly-resolved multi-claimant case.
-fn multi_claimant_rename_unavailable_error() -> tower_lsp_server::jsonrpc::Error {
-    tower_lsp_server::jsonrpc::Error {
-        // LSP `RequestFailed` (-32803): the request failed for a known, user-facing
-        // reason (not a protocol/internal fault). tower-lsp has no named variant.
-        code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
-        message: "verter: rename is unavailable for a carrier owned by multiple TypeScript \
-                  projects — a cross-project rename could leave the symbol dangling in sibling \
-                  projects. Give the carrier a single owning tsconfig (disambiguate its \
-                  include/references) to enable rename."
-            .into(),
-        data: None,
-    }
-}
-
-pub(super) async fn handle_prepare_rename(
-    server: &VerterLanguageServer,
-    params: TextDocumentPositionParams,
-) -> Result<Option<PrepareRenameResponse>> {
-    let _hg = HandlerGuard::new("prepare_rename");
-    let uri = &params.text_document.uri;
-    let position = &params.position;
-
-    if server.editor_owns_carrier_rename() {
-        return Ok(None);
-    }
-
-    // Virtual file: not supported (no Verter rename context for generated code)
-    if server.documents.get_virtual_source_uri(uri).is_some() {
-        return Ok(None);
-    }
-
-    // Multi-claimant carrier: fail rename closed (see `handle_rename`) so the editor
-    // surfaces the reason BEFORE the user starts a rename that could partial-edit
-    // across sibling projects.
-    if server.carrier_is_multi_claimant(uri) {
-        return Err(multi_claimant_rename_unavailable_error());
-    }
-
-    let result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let range = prepare_rename(
-            position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-        )?;
-        Some(PrepareRenameResponse::Range(range))
-    })();
-
-    Ok(result)
 }
 
 pub(super) async fn handle_rename(
