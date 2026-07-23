@@ -871,6 +871,75 @@ describe("host-proxy matrix: resolveModuleNameLiterals (in-project → IDE carri
     const resolved = resolveOne(info, "./plain", "d:/ws/src/consumer.ts");
     expect(resolved).toBeUndefined();
   });
+
+  it("prefers an installed @verter/types package whose declarations use the package types entry", () => {
+    const owner = track(mkdtempSync(join(tmpdir(), "verter-types-owner-")));
+    const packageRoot = join(owner, "node_modules", "@verter", "types");
+    const declarations = join(packageRoot, "dist", "index.d.ts");
+    mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    writeFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ name: "@verter/types", types: "./dist/index.d.ts" }),
+      "utf8",
+    );
+    writeFileSync(declarations, "export type InstalledMarker = true;\n", "utf8");
+
+    const info = createInfo(undefined, { diskFiles: {} }, join(owner, "tsconfig.json"));
+    info.project.getCurrentDirectory = () => owner;
+    info.project.getCompilerOptions = () => ({
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+    });
+    info.serverHost.fileExists = ts.sys.fileExists;
+    info.serverHost.readFile = ts.sys.readFile;
+    info.serverHost.directoryExists = ts.sys.directoryExists;
+    info.serverHost.getDirectories = ts.sys.getDirectories;
+    info.serverHost.realpath = ts.sys.realpath;
+    info.languageServiceHost.resolveModuleNameLiterals = (
+      literals: readonly ts.StringLiteralLike[],
+      containingFile: string,
+    ) =>
+      literals.map(({ text }) => ({
+        resolvedModule: ts.resolveModuleName(
+          text,
+          containingFile,
+          info.project.getCompilerOptions(),
+          ts.sys,
+        ).resolvedModule,
+      }));
+
+    const priorCwd = process.cwd();
+    init({ typescript: ts } as any).create(info);
+    process.chdir(priorCwd);
+
+    const resolved = resolveOne(info, "@verter/types", join(owner, "src", "App.vue.tsx"));
+    expect(resolved?.replace(/\\/g, "/").toLowerCase()).toBe(
+      declarations.replace(/\\/g, "/").toLowerCase(),
+    );
+    expect(info.serverHost.readFile(resolved!)).toContain("InstalledMarker");
+  });
+
+  it("preserves the project host's authoritative @verter/types resolution", () => {
+    const info = createInfo(undefined, { diskFiles: {} });
+    const projectResolution = "d:/pnp/@verter/types/index.d.ts";
+    info.languageServiceHost.resolveModuleNameLiterals = (
+      literals: readonly ts.StringLiteralLike[],
+    ) =>
+      literals.map(({ text }) => ({
+        resolvedModule:
+          text === "@verter/types"
+            ? {
+                resolvedFileName: projectResolution,
+                extension: ts.Extension.Dts,
+                isExternalLibraryImport: true,
+              }
+            : undefined,
+      }));
+
+    init({ typescript: ts } as any).create(info);
+
+    expect(resolveOne(info, "@verter/types", "d:/ws/src/App.vue.tsx")).toBe(projectResolution);
+  });
 });
 
 describe("getExternalFiles carrier working-set ownership", () => {

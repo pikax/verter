@@ -1,8 +1,10 @@
 # Global-component typing and fail-closed diagnostics
 
-Status: deferred by product-owner ruling. This note records the eight
-`real_provider_tests::global_components` cases; it does not authorize weakening
-or ignoring them.
+Status: partially resolved. Verter now supplies `@verter/types` virtually when
+the project does not install it, and the real-provider harness stages the
+fixture's declared framework dependencies hermetically. The setup, unknown-tag,
+and custom-element contracts pass on both providers. The two Options-arm cases
+remain deferred with their test and fixture intentionally unchanged.
 
 ## Affected tests and observed symptoms
 
@@ -62,14 +64,17 @@ export type GlobalComponentType<N> =
     : unknown;
 ```
 
-The test setup at
-`crates/verter_lsp/src/real_provider_tests/global_components.rs:32`
-materializes only `@verter/types`. The nested fixture declares Vue in its own
-`package.json`, but a root `pnpm install --frozen-lockfile` does not install that
-nested package. Consequently `import("vue").GlobalComponents` is an unresolved
-error type. TypeScript propagates that error surface as `any` through `keyof` and
-indexed access, so the emitted const is `any`, not the registered member type and
-not the alias's apparent `unknown` fallback.
+Historically, the test setup materialized only `@verter/types`; the nested
+fixture declared Vue in its own `package.json`, but a root
+`pnpm install --frozen-lockfile` did not install that nested package.
+Consequently `import("vue").GlobalComponents` was an unresolved error type.
+TypeScript propagated that error surface as `any` through `keyof` and indexed
+access, so the emitted const was `any`, not the registered member type and not
+the alias's apparent `unknown` fallback.
+
+The harness now copies declaration-only fixture dependencies from the workspace
+installation, while Verter supplies its own types through provider-virtual
+fallbacks. A project-installed `@verter/types` package remains authoritative.
 
 This is why finding both engine executables does not establish this test's type
 environment: the engines run, but the module on which the conditional type is
@@ -106,33 +111,24 @@ hover is non-empty, so it stops before the provider-specific assertion can
 observe a later typed response. This explains the raw-tag symptom and is
 separate from the type alias becoming `any`.
 
-## Minimal reproduction
+## Verification
 
-From a fresh checkout:
+From a fresh checkout, the resolved non-Options matrix is:
 
 ```powershell
 pnpm install --frozen-lockfile
-$env:RUST_MIN_STACK=268435456
-cargo test -p verter_lsp --lib real_provider_tests::global_components -- --nocapture
+$env:VERTER_REQUIRE_TSGO=1
+$env:VERTER_REQUIRE_TSSERVER=1
+cargo test -p verter_lsp --lib global_component_tag_typed_in_setup_arm -- --nocapture
+cargo test -p verter_lsp --lib global_component_unknown_tag_fails_closed -- --nocapture
+cargo test -p verter_lsp --lib custom_element_tag_stays_fail_open -- --nocapture
 ```
 
-That is the root-only state in which `@verter/types` is materialized by the test
-but the fixture's declared Vue dependency is not installed. Inspect hover on
-`<GlobalCountComp>` and diagnostics on `<TotallyUnknownComp>`.
-
-For the dependency control, install the fixture from its own working directory,
-then repeat the same Rust command:
-
-```powershell
-Push-Location packages/vue-vscode/e2e/fixtures/single-project
-npm install --no-package-lock --ignore-scripts
-Pop-Location
-```
-
-Do not use `npm install --prefix`: it can rewrite the fixture manifest's local
-package entry.
+The full module still includes the intentionally untouched Options pair.
 
 ## Measurements
+
+Historical measurements that motivated the fix:
 
 - Untouched root-only full-module run: all eight cases failed. Registered-tag
   hovers included `const GlobalCountComp: any`; both unknown-tag cases returned
@@ -145,9 +141,8 @@ package entry.
   case was intermittent; five isolated repetitions produced 4 passes / 1
   native-only hover failure.
 
-The ordering fence was implemented for the non-global carrier-publication defect;
-these improved global results are incidental. No global-component-specific code
-was changed.
+Current strict-provider verification passes the six non-Options cases. The
+Options pair remains outside this change.
 
 ## Future fix and falsifiable predictions
 

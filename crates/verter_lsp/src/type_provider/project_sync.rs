@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 use crate::type_provider::protocol::TypeProviderError;
 use crate::type_provider::traits::TypeProvider;
 use crate::{ProjectSyncMode, TypeProviderKind};
+
+const VERTER_TYPES_VIRTUAL_DTS: &str = include_str!("../verter_types_stub.d.ts");
 
 /// Immutable evidence of the exact carrier bytes a provider operation
 /// successfully delivered. Its fields are private: only `ProjectSync`, which
@@ -26,6 +28,25 @@ impl SyncedTsxSurface {
     pub(crate) fn content(&self) -> &Arc<str> {
         &self.content
     }
+}
+
+struct PreparedTsxContent<'a> {
+    content: Cow<'a, str>,
+    virtual_verter_types_path: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderLane {
+    Foreground,
+    Background,
+    Normal,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderFileVerb {
+    Load,
+    Open,
+    Update,
 }
 
 /// Syncs project files to a `TypeProvider`.
@@ -61,6 +82,12 @@ pub struct ProjectSync {
     /// Shared across clones because server/background producers must record the
     /// same immutable provider surface that the engine actually received.
     synced_tsx_contents: Arc<DashMap<String, Arc<str>>>,
+    /// Adjacent provider-only `@verter/types` declaration overlays currently
+    /// published for tsgo carriers.
+    virtual_verter_types_paths: Arc<DashSet<String>>,
+    /// Serializes each carrier with its adjacent declaration overlay so
+    /// concurrent foreground/background publications cannot reorder the pair.
+    virtual_verter_types_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Published workspace policy used to project generated carrier imports.
     /// Absent in isolated unit tests; production binds the server's atomic VFS.
     workspace: Option<Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>>,
@@ -84,6 +111,8 @@ impl ProjectSync {
             // store-publish suppression is opt-in via `new_with_kind`.
             kind: TypeProviderKind::Tsgo,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            virtual_verter_types_paths: Arc::new(DashSet::new()),
+            virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
         }
     }
@@ -101,6 +130,8 @@ impl ProjectSync {
             mode,
             kind,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            virtual_verter_types_paths: Arc::new(DashSet::new()),
+            virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
         }
     }
@@ -118,6 +149,8 @@ impl ProjectSync {
             mode,
             kind,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            virtual_verter_types_paths: Arc::new(DashSet::new()),
+            virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: Some(workspace),
         }
     }
@@ -171,11 +204,11 @@ impl ProjectSync {
     /// are therefore adapted to owner-bound classic JSX namespaces in the
     /// provider buffer. Callers that record a provider surface use this method
     /// first so the recorded bytes are the exact bytes delivered to the engine.
-    pub(crate) fn prepare_tsx_content<'a>(
+    fn prepare_tsx_surface<'a>(
         &self,
         tsx_path: &str,
         tsx_content: &'a str,
-    ) -> Result<Cow<'a, str>, TypeProviderError> {
+    ) -> Result<PreparedTsxContent<'a>, TypeProviderError> {
         let specialized = if matches!(self.kind, TypeProviderKind::Tsgo) {
             if let Some(prepared) =
                 crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
@@ -206,7 +239,10 @@ impl ProjectSync {
         let Some(companion) =
             verter_session::framework::descriptor::classify_carrier_companion(tsx_path)
         else {
-            return Ok(specialized);
+            return Ok(PreparedTsxContent {
+                content: specialized,
+                virtual_verter_types_path: None,
+            });
         };
         let workspace = self
             .workspace
@@ -218,11 +254,164 @@ impl ProjectSync {
             specialized.as_ref(),
             tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
         );
-        if prepared.content.as_ref() == specialized.as_ref() {
-            Ok(specialized)
+        let projected = if prepared.content.as_ref() == specialized.as_ref() {
+            specialized
         } else {
-            Ok(Cow::Owned(prepared.content.to_string()))
+            Cow::Owned(prepared.content.to_string())
+        };
+        if matches!(self.kind, TypeProviderKind::Tsgo) {
+            if let Some(virtual_types) =
+                crate::carrier_provider_projection::prepare_tsgo_verter_types_virtual(
+                    workspace.as_deref(),
+                    &companion.source,
+                    tsx_path,
+                    projected.as_ref(),
+                )
+            {
+                return Ok(PreparedTsxContent {
+                    content: Cow::Owned(virtual_types.content.to_string()),
+                    virtual_verter_types_path: Some(virtual_types.virtual_path),
+                });
+            }
         }
+        Ok(PreparedTsxContent {
+            content: projected,
+            virtual_verter_types_path: None,
+        })
+    }
+
+    fn virtual_verter_types_lock(&self, tsx_path: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.virtual_verter_types_locks
+            .entry(tsx_path.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn publish_provider_file(
+        &self,
+        path: &str,
+        content: &str,
+        lane: ProviderLane,
+        verb: ProviderFileVerb,
+    ) -> Result<(), TypeProviderError> {
+        match (lane, verb) {
+            (ProviderLane::Foreground, ProviderFileVerb::Load) => {
+                self.provider.load_file(path, content).await
+            }
+            (ProviderLane::Foreground, ProviderFileVerb::Open) => {
+                self.provider.open_file(path, content).await
+            }
+            (ProviderLane::Foreground, ProviderFileVerb::Update) => {
+                self.provider.update_file(path, content).await
+            }
+            (ProviderLane::Background, ProviderFileVerb::Load) => {
+                self.provider.load_file_background(path, content).await
+            }
+            (ProviderLane::Background, ProviderFileVerb::Open) => {
+                self.provider.open_file_background(path, content).await
+            }
+            (ProviderLane::Background, ProviderFileVerb::Update) => {
+                self.provider.update_file_background(path, content).await
+            }
+            (ProviderLane::Normal, ProviderFileVerb::Load) => {
+                self.provider.load_file_normal(path, content).await
+            }
+            (ProviderLane::Normal, ProviderFileVerb::Open) => {
+                self.provider.open_file_normal(path, content).await
+            }
+            (ProviderLane::Normal, ProviderFileVerb::Update) => {
+                self.provider.update_file_normal(path, content).await
+            }
+        }
+    }
+
+    async fn publish_tsx(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+        lane: ProviderLane,
+        verb: ProviderFileVerb,
+    ) -> Result<(), TypeProviderError> {
+        if self.carrier_companion_open_suppressed() {
+            return Ok(());
+        }
+
+        let lock = self.virtual_verter_types_lock(tsx_path);
+        let _guard = lock.lock().await;
+        let prepared = self.prepare_tsx_surface(tsx_path, tsx_content)?;
+        let virtual_path = prepared.virtual_verter_types_path.as_deref();
+        let virtual_was_live =
+            virtual_path.is_some_and(|path| self.virtual_verter_types_paths.contains(path));
+
+        // A carrier rewritten to the overlay may only be published after its
+        // dependency is available.
+        if let Some(path) = virtual_path {
+            self.publish_provider_file(path, VERTER_TYPES_VIRTUAL_DTS, lane, verb)
+                .await?;
+            self.virtual_verter_types_paths.insert(path.to_owned());
+        }
+
+        let result = self
+            .publish_provider_file(tsx_path, prepared.content.as_ref(), lane, verb)
+            .await;
+        if result.is_err() {
+            // A dependency created solely for a failed carrier publication has
+            // no live consumer. Preserve an older overlay because the provider
+            // may still serve the previous carrier that imports it.
+            if virtual_path.is_some() && !virtual_was_live {
+                let _ = self.close_virtual_verter_types(tsx_path, lane).await;
+            }
+            return result;
+        }
+
+        self.record_synced_tsx_content(tsx_path, prepared.content.as_ref());
+
+        // When an installed package becomes available, publish the unrewritten
+        // carrier first. Closing its old overlay before that update would break
+        // the still-live previous carrier if the update failed.
+        if virtual_path.is_none() {
+            self.close_virtual_verter_types(tsx_path, lane).await?;
+        }
+        Ok(())
+    }
+
+    async fn close_tsx_in_lane(
+        &self,
+        tsx_path: &str,
+        lane: ProviderLane,
+    ) -> Result<(), TypeProviderError> {
+        let lock = self.virtual_verter_types_lock(tsx_path);
+        let _guard = lock.lock().await;
+        let result = match lane {
+            ProviderLane::Foreground => self.provider.close_file(tsx_path).await,
+            ProviderLane::Background => self.provider.close_file_background(tsx_path).await,
+            ProviderLane::Normal => self.provider.close_file_normal(tsx_path).await,
+        };
+        if result.is_ok() {
+            self.retract_synced_tsx_content(tsx_path);
+            self.close_virtual_verter_types(tsx_path, lane).await?;
+        }
+        result
+    }
+
+    async fn close_virtual_verter_types(
+        &self,
+        tsx_path: &str,
+        lane: ProviderLane,
+    ) -> Result<(), TypeProviderError> {
+        let path = format!("{tsx_path}.__verter_types.d.ts");
+        if self.virtual_verter_types_paths.remove(&path).is_none() {
+            return Ok(());
+        }
+        let result = match lane {
+            ProviderLane::Foreground => self.provider.close_file(&path).await,
+            ProviderLane::Background => self.provider.close_file_background(&path).await,
+            ProviderLane::Normal => self.provider.close_file_normal(&path).await,
+        };
+        if result.is_err() {
+            self.virtual_verter_types_paths.insert(path);
+        }
+        result
     }
 
     /// Load a Vue file's TSX into the type provider for import resolution only.
@@ -235,15 +424,13 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.load_file(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Foreground,
+            ProviderFileVerb::Load,
+        )
+        .await
     }
 
     /// Sync a Vue file's TSX representation to the type provider.
@@ -256,15 +443,13 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.update_file(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Foreground,
+            ProviderFileVerb::Update,
+        )
+        .await
     }
 
     /// Open a new TSX file in the type provider.
@@ -278,25 +463,20 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.open_file(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Foreground,
+            ProviderFileVerb::Open,
+        )
+        .await
     }
 
     /// Close a TSX file in the type provider. Active for every engine — a close
     /// is provider state cleanup, never a carrier-content authority.
     pub async fn close_tsx(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
-        let result = self.provider.close_file(tsx_path).await;
-        if result.is_ok() {
-            self.retract_synced_tsx_content(tsx_path);
-        }
-        result
+        self.close_tsx_in_lane(tsx_path, ProviderLane::Foreground)
+            .await
     }
 
     /// Register a published carrier companion with the provider so its queries
@@ -404,15 +584,13 @@ impl ProjectSync {
         // priority lane (foreground/background/normal): the companion reaches
         // tsserver as a store-backed `getExternalFiles` member, never a competing
         // direct content open.
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.load_file_background(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Background,
+            ProviderFileVerb::Load,
+        )
+        .await
     }
 
     pub async fn open_tsx_background(
@@ -420,15 +598,13 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.open_file_background(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Background,
+            ProviderFileVerb::Open,
+        )
+        .await
     }
 
     pub async fn sync_tsx_background(
@@ -436,26 +612,18 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self
-            .provider
-            .update_file_background(tsx_path, &content)
-            .await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Background,
+            ProviderFileVerb::Update,
+        )
+        .await
     }
 
     pub async fn close_tsx_background(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
-        let result = self.provider.close_file_background(tsx_path).await;
-        if result.is_ok() {
-            self.retract_synced_tsx_content(tsx_path);
-        }
-        result
+        self.close_tsx_in_lane(tsx_path, ProviderLane::Background)
+            .await
     }
 
     pub async fn load_dts_background(
@@ -528,15 +696,13 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.load_file_normal(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Normal,
+            ProviderFileVerb::Load,
+        )
+        .await
     }
 
     pub async fn open_tsx_normal(
@@ -544,15 +710,13 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.open_file_normal(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Normal,
+            ProviderFileVerb::Open,
+        )
+        .await
     }
 
     pub async fn sync_tsx_normal(
@@ -560,23 +724,17 @@ impl ProjectSync {
         tsx_path: &str,
         tsx_content: &str,
     ) -> Result<(), TypeProviderError> {
-        if self.carrier_companion_open_suppressed() {
-            return Ok(());
-        }
-        let content = self.prepare_tsx_content(tsx_path, tsx_content)?;
-        let result = self.provider.update_file_normal(tsx_path, &content).await;
-        if result.is_ok() {
-            self.record_synced_tsx_content(tsx_path, &content);
-        }
-        result
+        self.publish_tsx(
+            tsx_path,
+            tsx_content,
+            ProviderLane::Normal,
+            ProviderFileVerb::Update,
+        )
+        .await
     }
 
     pub async fn close_tsx_normal(&self, tsx_path: &str) -> Result<(), TypeProviderError> {
-        let result = self.provider.close_file_normal(tsx_path).await;
-        if result.is_ok() {
-            self.retract_synced_tsx_content(tsx_path);
-        }
-        result
+        self.close_tsx_in_lane(tsx_path, ProviderLane::Normal).await
     }
 
     pub async fn load_dts_normal(
@@ -698,6 +856,8 @@ mod tests {
             mode,
             kind: TypeProviderKind::Tsgo,
             synced_tsx_contents: Arc::new(DashMap::new()),
+            virtual_verter_types_paths: Arc::new(DashSet::new()),
+            virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
         }
     }
@@ -739,6 +899,273 @@ mod tests {
                 assert_eq!(content, "const x = 1;");
             }
             _ => panic!("expected OpenFile"),
+        }
+    }
+
+    /// Missing `@verter/types` is served as a provider-only declaration overlay.
+    #[tokio::test]
+    async fn managed_tsgo_serves_verter_types_as_an_adjacent_virtual_module_when_absent() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source =
+            "import type { GlobalComponentType } from \"@verter/types\";\ntype T = GlobalComponentType<\"X\">;\n";
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo open succeeds");
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "virtual declarations must open before the carrier"
+        );
+        let virtual_path = match &calls[0] {
+            MockCall::OpenFile { path, content } => {
+                assert!(path.ends_with("App.vue.tsx.__verter_types.d.ts"));
+                assert_eq!(content, VERTER_TYPES_VIRTUAL_DTS);
+                path
+            }
+            other => panic!("expected virtual @verter/types open, got {other:?}"),
+        };
+        match &calls[1] {
+            MockCall::OpenFile { path, content } => {
+                assert_eq!(path, &provider_path);
+                assert!(content.contains("from \"./App.vue.tsx.__verter_types\""));
+                assert!(!content.contains("from \"@verter/types\""));
+            }
+            other => panic!("expected carrier open, got {other:?}"),
+        }
+        assert_ne!(virtual_path, &provider_path);
+        assert!(
+            !std::path::Path::new(virtual_path).exists(),
+            "the fallback must remain provider-virtual"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_tsgo_loads_virtual_verter_types_without_opening_it() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n";
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        sync.load_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo load succeeds");
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            matches!(&calls[0], MockCall::LoadFile { path, .. } if path.ends_with("App.vue.tsx.__verter_types.d.ts")),
+            "the dependency overlay must retain load-only semantics: {calls:?}"
+        );
+        assert!(
+            matches!(&calls[1], MockCall::LoadFile { path, .. } if path == &provider_path),
+            "the carrier must remain load-only: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_tsgo_rolls_back_new_virtual_types_when_carrier_sync_fails() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let virtual_path = format!("{provider_path}.__verter_types.d.ts");
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n";
+        let mock = MockTypeProvider::new();
+        mock.set_fail_sync_path(&provider_path);
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        assert!(sync.open_tsx(&provider_path, source).await.is_err());
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "a failed carrier publication must close its newly-created dependency overlay"
+        );
+        assert!(matches!(
+            &calls[2],
+            MockCall::CloseFile { path } if path == &virtual_path
+        ));
+        assert!(
+            !sync.virtual_verter_types_paths.contains(&virtual_path),
+            "rolled-back overlays must not remain in the live ledger"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_tsgo_keeps_old_virtual_types_when_installed_transition_fails() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let virtual_path = format!("{provider_path}.__verter_types.d.ts");
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n";
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("initial virtual publication succeeds");
+
+        let package = owner.path().join("node_modules/@verter/types");
+        std::fs::create_dir_all(&package).expect("installed package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
+        )
+        .expect("installed package manifest");
+        std::fs::write(
+            package.join("index.d.ts"),
+            "export type Installed = true;\n",
+        )
+        .expect("installed declarations");
+        mock.set_fail_sync_path(&provider_path);
+
+        assert!(sync.sync_tsx(&provider_path, source).await.is_err());
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "the old overlay must not close before the replacement carrier succeeds: {calls:?}"
+        );
+        assert!(matches!(
+            &calls[2],
+            MockCall::UpdateFile { path, .. } if path == &provider_path
+        ));
+        assert!(
+            sync.virtual_verter_types_paths.contains(&virtual_path),
+            "the previous live carrier still imports this overlay"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_tsgo_serializes_carrier_close_with_virtual_publication() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let virtual_path = format!("{provider_path}.__verter_types.d.ts");
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n";
+        let mock = MockTypeProvider::new();
+        let (virtual_arrived, release_virtual) = mock.block_open_file(&virtual_path);
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        let opening_sync = sync.clone();
+        let opening_path = provider_path.clone();
+        let opening =
+            tokio::spawn(async move { opening_sync.open_tsx(&opening_path, source).await });
+        virtual_arrived.notified().await;
+
+        let closing_sync = sync.clone();
+        let closing_path = provider_path.clone();
+        let mut closing = tokio::spawn(async move { closing_sync.close_tsx(&closing_path).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut closing)
+                .await
+                .is_err(),
+            "close must wait until the carrier and its dependency finish publishing"
+        );
+
+        release_virtual.notify_one();
+        opening
+            .await
+            .expect("opening task joins")
+            .expect("opening succeeds");
+        closing
+            .await
+            .expect("closing task joins")
+            .expect("closing succeeds");
+
+        let calls = mock.file_sync_calls();
+        assert!(matches!(
+            calls.as_slice(),
+            [
+                MockCall::OpenFile { path: opened_virtual, .. },
+                MockCall::OpenFile { path: opened_carrier, .. },
+                MockCall::CloseFile { path: closed_carrier },
+                MockCall::CloseFile { path: closed_virtual },
+            ] if opened_virtual == &virtual_path
+                && opened_carrier == &provider_path
+                && closed_carrier == &provider_path
+                && closed_virtual == &virtual_path
+        ));
+    }
+
+    /// A real package always wins over the provider fallback.
+    #[tokio::test]
+    async fn managed_tsgo_preserves_installed_verter_types_resolution() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let package = owner.path().join("node_modules/@verter/types");
+        std::fs::create_dir_all(package.join("dist")).expect("package directory");
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@verter/types","types":"dist/index.d.ts"}"#,
+        )
+        .expect("package manifest");
+        std::fs::write(
+            package.join("dist/index.d.ts"),
+            "export type Installed = true;\n",
+        )
+        .expect("package declarations");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().unwrap()).expect("provider parent");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source =
+            "import type { GlobalComponentType } from \"@verter/types\";\ntype T = GlobalComponentType<\"X\">;\n";
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo open succeeds");
+
+        let calls = mock.file_sync_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "installed packages must suppress the fallback"
+        );
+        match &calls[0] {
+            MockCall::OpenFile { path, content } => {
+                assert_eq!(path, &provider_path);
+                assert_eq!(content, source);
+            }
+            other => panic!("expected carrier open, got {other:?}"),
         }
     }
 

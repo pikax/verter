@@ -22,7 +22,7 @@ use crate::capabilities::{adapter_module_watch_glob, carrier_watch_glob, server_
 use crate::documents::uri_to_canonical_id;
 use crate::provider_sync::ProviderPathKind;
 
-use super::background_init::{is_generated_verter_types_event, spawn_heartbeat};
+use super::background_init::spawn_heartbeat;
 use super::handler_guard::{block_in_place_if_available, HandlerGuard, ACTIVE_HANDLERS};
 use super::protocol_types::*;
 use super::server_utils::*;
@@ -1089,12 +1089,6 @@ pub(super) async fn handle_did_change_watched_files(
         // Skip files that are currently open in the editor — the editor's
         // didChange notification is authoritative for open files.
         if server.documents.get(&event.uri).is_some() {
-            continue;
-        }
-
-        // Skip watcher events for Verter-generated @verter/types stubs.
-        // Real installed @verter/types packages (no marker) pass through normally.
-        if is_generated_verter_types_event(&canonical_id) {
             continue;
         }
 

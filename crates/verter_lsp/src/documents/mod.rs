@@ -32,10 +32,6 @@ pub struct DocumentRegistry {
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     /// Default compile profile for TSX generation (LSP mode).
-    /// Wrapped in `Arc<RwLock>` so `set_embed_ambient_types()` can update it
-    /// after `initialized()` determines whether `@verter/types` is installed.
-    /// Arc-wrapped so the background init task can share the same profile instance
-    /// and see `embed_ambient_types` toggled without cloning.
     pub(crate) tsx_profile: Arc<RwLock<CompileProfile>>,
     /// Negotiated position encoding from the client (LSP 3.17).
     /// Set once during `initialize()`, before any documents are opened.
@@ -138,6 +134,11 @@ impl DocumentRegistry {
         *self.encoding.write() = encoding;
     }
 
+    #[cfg(test)]
+    pub fn set_embed_ambient_types(&self, embed: bool) {
+        self.tsx_profile.write().embed_ambient_types = embed;
+    }
+
     /// Build the self-file provider projection for an own-path provider
     /// document: a Svelte rune module (`.svelte.ts` / `.svelte.js`) gets the
     /// rune-prelude line count plus the import-specifier rewrite segments; a
@@ -166,12 +167,6 @@ impl DocumentRegistry {
         let mapper =
             SelfFileProviderMapper::new(built.prelude_line_count, replacements, line_index);
         Some(DocumentProviderProjection::SelfFile { mapper })
-    }
-
-    /// Enable embedding ambient `declare module "@verter/types"` in generated TSX.
-    /// Called when `@verter/types` is not installed in the workspace.
-    pub fn set_embed_ambient_types(&self, embed: bool) {
-        self.tsx_profile.write().embed_ambient_types = embed;
     }
 
     /// Get the negotiated encoding.

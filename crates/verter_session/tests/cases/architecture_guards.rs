@@ -9406,7 +9406,7 @@ mod foundations_guards {
         ),
         (
             "crates/verter_lsp/src/background_init.rs",
-            "writes Verter-generated `@verter/types` stub files into `node_modules` for tool setup; reads them back via marker detection. Test fixtures inside `#[cfg(test)] mod tests` use temp-dir scratch space.",
+            "background-initialization unit tests stage tsconfig/source files in temp directories to verify snapshot publication; test fixtures only.",
         ),
         (
             "crates/verter_lsp/src/svelte_assets.rs",
@@ -9425,6 +9425,10 @@ mod foundations_guards {
             "LSP integration test harness — sets up scratch worktrees and reads fixture files for end-to-end tests.",
         ),
         (
+            "crates/verter_lsp/src/test_harness_fixture_dependencies.rs",
+            "real-provider test harness materializes declaration-only framework dependencies under gitignored fixture node_modules; test setup only.",
+        ),
+        (
             "crates/verter_lsp/src/test_utils.rs",
             "LSP unit-test utilities — temp workspace creation and `canonicalize` for fixture path resolution.",
         ),
@@ -9433,12 +9437,8 @@ mod foundations_guards {
             "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper uses `std::fs::read_to_string` to read on-disk fixture content for a CLOSED file and assert the on-disk-vs-LSP-edit contract. Same test-fixture-read category as `test_harness.rs`/`test_utils.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
-            "crates/verter_lsp/src/real_provider_tests/global_components.rs",
-            "real-provider global-component integration tests (`#[cfg(test)] mod real_provider_tests`) — `materialize_fixture_verter_types` writes the `@verter/types` declaration package under the fixture's gitignored `node_modules`, mirroring the production `materialize_verter_types` background-init step the harness does not run. Same test-fixture-materialization category as `test_harness.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
-        ),
-        (
             "crates/verter_lsp/src/type_provider/project_sync.rs",
-            "managed-tsgo project-sync tests (`#[cfg(test)] mod tests`) — stage a `node_modules/svelte` package (package.json + `.d.ts`) plus a carrier path in a tempdir to assert the exact Svelte carrier delivered to the provider. Test-fixture materialization category as `test_harness.rs`/`test_utils.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+            "managed-tsgo project-sync tests (`#[cfg(test)] mod tests`) stage temporary dependency packages and carrier paths to assert virtual-fallback and exact-delivery behavior; test fixtures only.",
         ),
         (
             "crates/verter_lsp/src/vue_assets.rs",

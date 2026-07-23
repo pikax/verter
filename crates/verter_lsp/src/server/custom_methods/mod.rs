@@ -21,7 +21,6 @@ use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::type_provider::merge;
 
-use super::background_init::is_generated_verter_types_event;
 use super::protocol_types::*;
 use super::server_utils::*;
 use super::VerterLanguageServer;
@@ -96,12 +95,6 @@ impl VerterLanguageServer {
         } else {
             crate::documents::uri_to_canonical_id_from_str(&params.uri)
         };
-
-        // Skip watcher events for Verter-generated @verter/types stubs.
-        // Real installed @verter/types packages (no marker) pass through normally.
-        if is_generated_verter_types_event(&canonical_id) {
-            return;
-        }
 
         if let Some(ws) = self.vfs_workspace.read().as_ref() {
             let change = match params.change_type.as_str() {

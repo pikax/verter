@@ -165,8 +165,8 @@ mod background_drain_decl_closure;
 #[path = "../background_init.rs"]
 mod background_init;
 // Glob re-export so `server_tests.rs` (a child of `server`) sees
-// `drain_pending_snapshot_provider_sync`, `sync_pending_carrier_provider_file`,
-// `is_generated_verter_types_event`, etc. via its `use super::*;`.
+// `drain_pending_snapshot_provider_sync`,
+// `sync_pending_carrier_provider_file`, etc. via its `use super::*;`.
 // The declaration-overlay lifecycle owner is reached by the drain
 // (`background_drain`), the server struct, and the `did_close` lifecycle —
 // glob-export it at module scope so all three resolve the bare name.
@@ -177,9 +177,6 @@ pub(crate) use self::background_drain_decl_closure::DeclOverlayOwner;
 // `DeclCloseTarget` is named only by the lifecycle regression tests.
 #[cfg(test)]
 pub(crate) use self::background_drain_decl_closure::{carrier_dependency_ids, DeclCloseTarget};
-#[cfg(test)]
-use self::background_init::*;
-
 /// Lightweight snapshot of the published resolver, replacing the old `ResolverSnapshot`.
 ///
 /// Preserves the `.resolver` field access pattern so callers don't need deep changes.
