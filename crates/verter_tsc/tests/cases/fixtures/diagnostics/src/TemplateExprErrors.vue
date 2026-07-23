@@ -3,7 +3,7 @@ const count = 42;
 const msg = "hello";
 </script>
 <template>
-  <!-- PINNED: line 7, TS2304 — undefinedVar not defined -->
+  <!-- PINNED: line 7, TS2339 — undefinedVar is absent from the component instance -->
   <div>{{ undefinedVar }}</div>
   <!-- TS2339 — number has no property 'length' -->
   <div>{{ count.length }}</div>

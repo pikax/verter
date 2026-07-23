@@ -332,11 +332,12 @@ fn verter_tsc_diagnostics_e2e() {
     assert_has_error(&diags, "PropErrors.vue", 2322);
     assert_min_errors(&diags, "PropErrors.vue", 6);
 
-    // TemplateExprErrors.vue — TS2339 (count.length), TS2345 (toFixed('bad')), TS2362 (msg*5)
+    // TemplateExprErrors.vue — TS2339 (undefinedVar, count.length),
+    // TS2345 (toFixed('bad')), TS2362 (msg*5)
     assert_has_error(&diags, "TemplateExprErrors.vue", 2339);
     assert_has_error(&diags, "TemplateExprErrors.vue", 2345);
     assert_has_error(&diags, "TemplateExprErrors.vue", 2362);
-    assert_min_errors(&diags, "TemplateExprErrors.vue", 3);
+    assert_min_errors(&diags, "TemplateExprErrors.vue", 4);
 
     // EmitErrors.vue — TS2769 (no overload matches) for each wrong emit call
     assert_has_error(&diags, "EmitErrors.vue", 2769);
@@ -384,8 +385,11 @@ fn verter_tsc_diagnostics_e2e() {
     assert_has_error(&diags, "GenericInstanceErrors.vue", 2322);
     assert_error_at(&diags, "GenericInstanceErrors.vue", 5, 2322);
 
-    // DirectiveErrors.vue — directive usage produces errors (slot instance typing)
-    assert_min_errors(&diags, "DirectiveErrors.vue", 2);
+    // DirectiveErrors.vue — local directives are resolved as authored bindings, so
+    // invalid modifier and value types surface instead of an unused-binding artifact.
+    assert_has_error(&diags, "DirectiveErrors.vue", 2345);
+    assert_has_error(&diags, "DirectiveErrors.vue", 2353);
+    assert_min_errors(&diags, "DirectiveErrors.vue", 5);
 
     // OptionsApiErrors.vue — TS2322 in methods (string → number)
     assert_has_error(&diags, "OptionsApiErrors.vue", 2322);
@@ -424,7 +428,8 @@ fn verter_tsc_diagnostics_e2e() {
     // These verify source map remapping accuracy for specific known positions.
     // If a fixture file changes, update both the file and these assertions.
 
-    // TemplateExprErrors.vue — all 3 template errors have correct line mapping
+    // TemplateExprErrors.vue — all 4 template errors have correct line mapping
+    assert_error_at(&diags, "TemplateExprErrors.vue", 7, 2339); // undefinedVar
     assert_error_at(&diags, "TemplateExprErrors.vue", 9, 2339); // count.length
     assert_error_at(&diags, "TemplateExprErrors.vue", 11, 2345); // toFixed('bad')
     assert_error_at(&diags, "TemplateExprErrors.vue", 13, 2362); // msg * 5
