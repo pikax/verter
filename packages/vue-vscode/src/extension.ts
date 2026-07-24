@@ -907,33 +907,36 @@ export async function activateVueLanguageServer(
   };
   bindPlainScriptSync(client);
 
-  // Track type provider child PID for orphan cleanup on restart failure.
-  let typeProviderPid: number | undefined;
+  // Track type provider child PIDs for orphan cleanup on restart failure.
+  // A SET, not one pid: on the project-tsserver topology the server owns one
+  // engine per owning configured project, so a monorepo announces several. Only
+  // remembering the newest would leave the earlier engines orphaned.
+  const typeProviderPids = new Set<number>();
   function registerTypeProviderPidListener(lc: LanguageClient) {
     // New unified notification
     lc.onNotification(
       NotificationType.TypeProviderStarted,
       (params: { pid: number; kind: "tsgo" | "tsserver" }) => {
-        typeProviderPid = params.pid;
+        typeProviderPids.add(params.pid);
         log.info(`Type provider (${params.kind}) started with PID ${params.pid}`);
         startupProbe?.markTypeProviderStarted(params.kind);
       },
     );
     // Legacy notification — only sent when TSGO is actually active
     lc.onNotification(NotificationType.TsgoStarted, (params: { pid: number }) => {
-      typeProviderPid = params.pid;
+      typeProviderPids.add(params.pid);
     });
   }
   function killTrackedTypeProvider() {
-    if (typeProviderPid != null) {
-      log.info(`Killing orphaned type provider process (PID ${typeProviderPid})`);
+    for (const pid of typeProviderPids) {
+      log.info(`Killing orphaned type provider process (PID ${pid})`);
       try {
-        process.kill(typeProviderPid);
+        process.kill(pid);
       } catch {
         // Already dead — ignore.
       }
-      typeProviderPid = undefined;
     }
+    typeProviderPids.clear();
   }
   registerTypeProviderPidListener(client);
 
