@@ -1,6 +1,6 @@
 {
   "name": "@verter/type-ir",
-  "version": "0.0.1-beta.1",
+  "version": "0.0.1-beta.2",
   "description": "Generic Type IR — JSON-serializable, framework-agnostic type descriptor tree shared across Verter consumers",
   "keywords": [
     "type-ir",

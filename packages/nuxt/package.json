@@ -1,6 +1,6 @@
 {
   "name": "@verter/nuxt",
-  "version": "0.0.1-beta.1",
+  "version": "0.0.1-beta.2",
   "description": "Nuxt module for Verter Vue compiler",
   "keywords": [
     "compiler",
