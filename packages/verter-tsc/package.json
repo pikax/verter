@@ -29,7 +29,10 @@
   "optionalDependencies": {
     "@verter/tsc-darwin-arm64": "workspace:*",
     "@verter/tsc-darwin-x64": "workspace:*",
+    "@verter/tsc-linux-arm64-gnu": "workspace:*",
+    "@verter/tsc-linux-arm64-musl": "workspace:*",
     "@verter/tsc-linux-x64-gnu": "workspace:*",
+    "@verter/tsc-linux-x64-musl": "workspace:*",
     "@verter/tsc-win32-x64-msvc": "workspace:*"
   },
   "engines": {

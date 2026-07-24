@@ -313,7 +313,7 @@ importers:
     devDependencies:
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -600,7 +600,7 @@ importers:
         version: 4.3.0
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
       tsx:
         specifier: ^4.22.3
         version: 4.22.3
@@ -634,9 +634,18 @@ importers:
       '@verter/tsc-darwin-x64':
         specifier: workspace:*
         version: link:npm/darwin-x64
+      '@verter/tsc-linux-arm64-gnu':
+        specifier: workspace:*
+        version: link:npm/linux-arm64-gnu
+      '@verter/tsc-linux-arm64-musl':
+        specifier: workspace:*
+        version: link:npm/linux-arm64-musl
       '@verter/tsc-linux-x64-gnu':
         specifier: workspace:*
         version: link:npm/linux-x64-gnu
+      '@verter/tsc-linux-x64-musl':
+        specifier: workspace:*
+        version: link:npm/linux-x64-musl
       '@verter/tsc-win32-x64-msvc':
         specifier: workspace:*
         version: link:npm/win32-x64-msvc
@@ -645,7 +654,13 @@ importers:
 
   packages/verter-tsc/npm/darwin-x64: {}
 
+  packages/verter-tsc/npm/linux-arm64-gnu: {}
+
+  packages/verter-tsc/npm/linux-arm64-musl: {}
+
   packages/verter-tsc/npm/linux-x64-gnu: {}
+
+  packages/verter-tsc/npm/linux-x64-musl: {}
 
   packages/verter-tsc/npm/win32-x64-msvc: {}
 
@@ -768,7 +783,7 @@ importers:
         version: 130.0.0
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -21676,7 +21691,7 @@ snapshots:
 
   ts-dedent@2.2.0: {}
 
-  tsdown@0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31):
+  tsdown@0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)):
     dependencies:
       ansis: 4.3.0
       cac: 7.0.0
