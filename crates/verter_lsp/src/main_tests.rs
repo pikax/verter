@@ -219,7 +219,14 @@ async fn tsserver_route_reclassifies_ts7_family_install_before_any_spawn() {
 
     let args = CliArgs::parse_from(["--type-provider=tsserver".to_string()]);
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
-    match try_spawn_tsserver(&args, tmp.path().to_str().unwrap(), &client_cell).await {
+    match try_spawn_tsserver(
+        args.tsdk.as_deref(),
+        args.plugin_path.as_deref(),
+        tmp.path().to_str().unwrap(),
+        &client_cell,
+    )
+    .await
+    {
         Ok(_) => panic!("a native-family install must never spawn as tsserver"),
         Err(err) => assert!(
             matches!(err, TsserverSpawnError::NativeFamily { major: 7 }),
@@ -406,6 +413,65 @@ fn genuine_tsgo_shapes_stay_plausible_candidates() {
             "{provenance:?} is operator- or policy-controlled and stays plausible"
         );
     }
+}
+
+// ── DISCRIMINATING (the demand-time degradation): a `tsc` on PATH or named by
+//    VERTER_TSGO_BIN that belongs to a TypeScript 5.x/6.x install is the
+//    tsserver family, NOT a plausible tsgo — even though those tiers are
+//    operator-controlled. Counting it sent the session down the managed-tsgo
+//    route, where activation failed validation and every query degraded
+//    against a provider the session had built tsgo-side state for. The probe
+//    now reads the candidate's own `typescript/package.json` (filesystem-only)
+//    and routes the workspace to its tsserver at CONSTRUCTION time. ──────────
+#[test]
+fn a_ts5_or_ts6_install_is_never_a_plausible_tsgo_candidate_on_any_tier() {
+    use verter_tsgo_api::toolchain::discovery::Provenance;
+    let (_tmp, tsc) = fake_npm_tsc("5.9.3");
+    for provenance in [
+        Provenance::ProjectLocal,
+        Provenance::SharedPath,
+        Provenance::EnvOverride,
+    ] {
+        assert!(
+            !plausible_tsgo_candidate(&tsc, provenance, false),
+            "a TypeScript 5.9.3 tsc is the tsserver family, never tsgo ({provenance:?})"
+        );
+    }
+    let (_tmp, tsc) = fake_npm_tsc("6.0.3");
+    assert!(
+        !plausible_tsgo_candidate(&tsc, Provenance::SharedPath, false),
+        "a TypeScript 6.0.3 tsc is the tsserver family, never tsgo"
+    );
+}
+
+// ── CONTROL: a genuine TS7 native-family install stays plausible on every
+//    tier — the same package.json evidence that rejects 5.x/6.x admits 7+. ───
+#[test]
+fn a_ts7_install_stays_a_plausible_tsgo_candidate() {
+    use verter_tsgo_api::toolchain::discovery::Provenance;
+    let (_tmp, tsc) = fake_npm_tsc("7.0.2");
+    for provenance in [Provenance::SharedPath, Provenance::EnvOverride] {
+        assert!(
+            plausible_tsgo_candidate(&tsc, provenance, false),
+            "a TypeScript 7 install IS the tsgo family ({provenance:?})"
+        );
+    }
+}
+
+/// Materialize an npm-style `typescript/bin/tsc` install (the layout a global
+/// or project-local TypeScript contributes) with the given package version.
+fn fake_npm_tsc(version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("typescript").join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let tsc = bin_dir.join("tsc");
+    std::fs::write(&tsc, "#!/usr/bin/env node\n").unwrap();
+    std::fs::write(
+        tmp.path().join("typescript").join("package.json"),
+        format!(r#"{{ "name": "typescript", "version": "{version}" }}"#),
+    )
+    .unwrap();
+    (tmp, tsc)
 }
 
 // ── DISCRIMINATING: the two tsgo TOPOLOGIES must be distinguishable from the
