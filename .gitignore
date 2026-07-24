@@ -83,3 +83,10 @@ scratchpad/
 packages/verter-tsc/npm/*/verter-tsc
 packages/verter-tsc/npm/*/verter-tsc.exe
 packages/native/npm/*/*.node
+
+# Local tool state, not project content.
+.serena/
+
+# Build-system directory stamps.
+.dirstamp
+**/.dirstamp
