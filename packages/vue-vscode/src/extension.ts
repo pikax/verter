@@ -471,6 +471,58 @@ async function activateExtension(context: ExtensionContext) {
       }
       await server.restart(true);
     }),
+    // Clicking the type-provider status bar opens this. The choices and their
+    // descriptions are read from THIS extension's own `verter.typeProvider`
+    // contribution, so the picker can never drift from the setting's schema.
+    commands.registerCommand("verter.selectTypeProvider", async () => {
+      const schema = extensions.getExtension("verter.vscode")?.packageJSON?.contributes
+        ?.configuration?.properties?.["verter.typeProvider"] as
+        | { enum?: string[]; enumDescriptions?: string[] }
+        | undefined;
+      const values = schema?.enum ?? ["auto"];
+      const descriptions = schema?.enumDescriptions ?? [];
+
+      const config = workspace.getConfiguration("verter");
+      const current = config.get<string>("typeProvider") ?? "auto";
+
+      const picked = await window.showQuickPick(
+        values.map((value, index) => ({
+          label: value === current ? `$(check) ${value}` : value,
+          description: value === current ? "current" : undefined,
+          detail: descriptions[index],
+          value,
+        })),
+        {
+          title: "Verter: TypeScript type provider",
+          placeHolder: `Currently: ${current} — changing this restarts the language server`,
+          matchOnDetail: true,
+        },
+      );
+      if (!picked || picked.value === current) {
+        return;
+      }
+
+      // Workspace scope when a folder is open so the choice travels with the
+      // project; otherwise global, since there is nowhere else to put it.
+      const target = workspace.workspaceFolders?.length
+        ? ConfigurationTarget.Workspace
+        : ConfigurationTarget.Global;
+      await config.update("typeProvider", picked.value, target);
+      // The restart is driven by the configuration listener below, so a choice
+      // made here and a hand-edited setting take exactly the same path.
+    }),
+    // `verter.typeProvider` documents itself as restarting the server. Nothing
+    // honoured that, so a hand-edited setting silently kept the old engine.
+    workspace.onDidChangeConfiguration(async (event) => {
+      if (!event.affectsConfiguration("verter.typeProvider")) {
+        return;
+      }
+      if (!server) {
+        await ensureLanguageServerStarted();
+        return;
+      }
+      await server.restart(true);
+    }),
     commands.registerCommand("verter.setupMcpForClaudeCode", () =>
       setupMcpForClaudeCode(context, log),
     ),
@@ -1027,7 +1079,7 @@ export async function activateVueLanguageServer(
     StatusBarAlignment.Right,
     98,
   );
-  typeProviderStatusBar.command = "verter.showOutputChannel";
+  typeProviderStatusBar.command = "verter.selectTypeProvider";
   typeProviderStatusBar.text = "$(sync~spin) Verter";
   typeProviderStatusBar.tooltip = "Verter: waiting for type provider status...";
   typeProviderStatusBar.show();

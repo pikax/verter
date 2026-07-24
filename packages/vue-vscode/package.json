@@ -625,6 +625,11 @@
         "title": "Verter: Restart Language Server"
       },
       {
+        "command": "verter.selectTypeProvider",
+        "title": "Select TypeScript Type Provider",
+        "category": "Verter"
+      },
+      {
         "command": "verter.showCompiledCodeToSide",
         "title": "Verter: Show compiled Code to Side"
       },
