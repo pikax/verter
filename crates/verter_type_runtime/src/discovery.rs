@@ -3,6 +3,7 @@
 //! Moved from `verter_lsp::tsserver::mod` to be shared between LSP and
 //! component-meta consumers.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Detect the major TypeScript version from the workspace.
@@ -133,21 +134,99 @@ pub fn tsserver_native_family_major(tsserver_path: &Path) -> Option<u32> {
     detect_ts_major_version(tsserver_path).filter(|major| ts_major_is_native_family(*major))
 }
 
-/// Find the tsserver.js binary path.
+/// The tier that supplied a usable tsserver install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TsserverSource {
+    /// The owning configured project's nearest ancestor `node_modules/typescript`.
+    ProjectLocal,
+    /// The user-configured `typescript.tsdk` directory.
+    ConfiguredTsdk,
+    /// The TypeScript package below `npm root -g`.
+    Global,
+}
+
+/// A validated TypeScript install suitable for tsserver serving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTsserver {
+    /// Canonical `tsserver.js` path. Canonicalization is load-bearing for pnpm:
+    /// tsserver's script-relative default-lib lookup must run beside the real
+    /// `.pnpm/typescript@...` package, not through a package-level symlink.
+    pub path: PathBuf,
+    /// The tier that supplied the install.
+    pub source: TsserverSource,
+    /// Number of sibling `lib.*.d.ts` default-library files observed.
+    pub default_lib_count: usize,
+}
+
+/// One rejected tsserver candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TsserverCandidateRejection {
+    /// Candidate path before canonicalization.
+    pub path: PathBuf,
+    /// Clear refusal reason.
+    pub reason: String,
+}
+
+/// No searched TypeScript install was safe to serve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TsserverDiscoveryError {
+    /// Candidate-specific refusals, including library-less installs.
+    pub rejections: Vec<TsserverCandidateRejection>,
+}
+
+impl fmt::Display for TsserverDiscoveryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "no usable TypeScript installation was found for this configured project"
+        )?;
+        for rejection in &self.rejections {
+            writeln!(f, "  - {}: {}", rejection.path.display(), rejection.reason)?;
+        }
+        write!(
+            f,
+            "install it in the owning package: npm install -D typescript; \
+             for a non-standard location, set the VS Code `typescript.tsdk` setting. \
+             Verter's native analysis remains available without TypeScript."
+        )
+    }
+}
+
+impl std::error::Error for TsserverDiscoveryError {}
+
+/// Resolve and validate the tsserver for one configured project.
 ///
-/// Search order (project TypeScript preferred over bundled/global):
-/// 1. `<workspace>/node_modules/typescript/lib/tsserver.js` (+ parent directories)
-/// 2. `<tsdk>/tsserver.js` (from VS Code setting or extension's bundled TypeScript)
-/// 3. Global TypeScript via `npm root -g`
-pub fn find_tsserver(tsdk: Option<&str>, workspace_root: Option<&str>) -> Option<PathBuf> {
-    // 1. Workspace node_modules — walk up parent directories
-    if let Some(root) = workspace_root {
+/// Search order:
+/// 1. `<owning-project-dir>/node_modules/typescript/lib/tsserver.js`, walking
+///    through every ancestor.
+/// 2. `<tsdk>/tsserver.js` from the user-configured `typescript.tsdk` setting.
+/// 3. Global TypeScript via `npm root -g`.
+///
+/// Every candidate is canonicalized through package-manager symlinks and must
+/// carry at least one sibling `lib.*.d.ts`. A library-less candidate is refused
+/// and the next explicit tier is considered; if none is usable the returned
+/// error preserves every refusal and gives the install/configuration action.
+pub fn resolve_tsserver(
+    tsdk: Option<&str>,
+    owning_project_dir: Option<&str>,
+) -> Result<ResolvedTsserver, TsserverDiscoveryError> {
+    resolve_tsserver_with_global(tsdk, owning_project_dir, global_tsserver_candidate)
+}
+
+fn resolve_tsserver_with_global(
+    tsdk: Option<&str>,
+    owning_project_dir: Option<&str>,
+    global_candidate: impl FnOnce() -> Option<PathBuf>,
+) -> Result<ResolvedTsserver, TsserverDiscoveryError> {
+    let mut candidates = Vec::new();
+
+    if let Some(root) = owning_project_dir.filter(|root| !root.is_empty()) {
         let mut dir = Path::new(root);
-        for _ in 0..10 {
-            let path = dir.join("node_modules/typescript/lib/tsserver.js");
-            if path.exists() {
-                return Some(path);
-            }
+        loop {
+            candidates.push((
+                dir.join("node_modules/typescript/lib/tsserver.js"),
+                TsserverSource::ProjectLocal,
+            ));
             match dir.parent() {
                 Some(parent) if parent != dir => dir = parent,
                 _ => break,
@@ -155,31 +234,115 @@ pub fn find_tsserver(tsdk: Option<&str>, workspace_root: Option<&str>) -> Option
         }
     }
 
-    // 2. From tsdk setting
-    if let Some(tsdk) = tsdk {
-        if !tsdk.is_empty() {
-            let path = Path::new(tsdk).join("tsserver.js");
-            if path.exists() {
-                return Some(path);
+    if let Some(tsdk) = tsdk.filter(|tsdk| !tsdk.is_empty()) {
+        candidates.push((
+            Path::new(tsdk).join("tsserver.js"),
+            TsserverSource::ConfiguredTsdk,
+        ));
+    }
+
+    let mut rejections = Vec::new();
+    for (candidate, source) in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        match validate_tsserver_candidate(&candidate, source) {
+            Ok(resolved) => return Ok(resolved),
+            Err(rejection) => rejections.push(rejection),
+        }
+    }
+    if let Some(candidate) = global_candidate() {
+        if candidate.exists() {
+            match validate_tsserver_candidate(&candidate, TsserverSource::Global) {
+                Ok(resolved) => return Ok(resolved),
+                Err(rejection) => rejections.push(rejection),
             }
         }
     }
 
-    // 3. Global TypeScript
-    if let Ok(output) = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
-    {
-        if output.status.success() {
+    Err(TsserverDiscoveryError { rejections })
+}
+
+fn validate_tsserver_candidate(
+    candidate: &Path,
+    source: TsserverSource,
+) -> Result<ResolvedTsserver, TsserverCandidateRejection> {
+    let path = candidate
+        .canonicalize()
+        .map_err(|error| TsserverCandidateRejection {
+            path: candidate.to_path_buf(),
+            reason: format!("could not resolve the real install path: {error}"),
+        })?;
+    let Some(lib_dir) = path.parent() else {
+        return Err(TsserverCandidateRejection {
+            path: candidate.to_path_buf(),
+            reason: "tsserver.js has no parent library directory".to_string(),
+        });
+    };
+    let default_lib_count = std::fs::read_dir(lib_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("lib.")
+                && name.ends_with(".d.ts")
+                && name.len() > "lib..d.ts".len()
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+        })
+        .count();
+    if default_lib_count == 0 {
+        return Err(TsserverCandidateRejection {
+            path: path.clone(),
+            reason: format!(
+                "refusing library-less TypeScript install: {} contains no sibling lib.*.d.ts \
+                 default libraries",
+                lib_dir.display()
+            ),
+        });
+    }
+    Ok(ResolvedTsserver {
+        path,
+        source,
+        default_lib_count,
+    })
+}
+
+/// The global tier's candidate, resolved AT MOST ONCE per process.
+///
+/// The last tier shells out to `npm root -g`, and it is reached by every
+/// resolution that misses every explicit tier. Per-project resolution asks that
+/// question once per configured project, so a monorepo where many packages have
+/// no TypeScript would otherwise spawn npm once per package — tens of process
+/// spawns on the startup path. `npm root -g` is a stable per-process fact, so it
+/// is memoized (including the "npm is unavailable" answer).
+fn global_tsserver_candidate() -> Option<PathBuf> {
+    static GLOBAL_CANDIDATE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    GLOBAL_CANDIDATE
+        .get_or_init(|| {
+            let output = std::process::Command::new("npm")
+                .args(["root", "-g"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
             let global_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let path = Path::new(&global_root).join("typescript/lib/tsserver.js");
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
+            Some(Path::new(&global_root).join("typescript/lib/tsserver.js"))
+        })
+        .clone()
+}
 
-    None
+/// Compatibility helper returning only the validated canonical path.
+///
+/// New callers that need a user-facing refusal reason should use
+/// [`resolve_tsserver`].
+pub fn find_tsserver(tsdk: Option<&str>, owning_project_dir: Option<&str>) -> Option<PathBuf> {
+    resolve_tsserver(tsdk, owning_project_dir)
+        .ok()
+        .map(|resolved| resolved.path)
 }
 
 /// Find the `node` executable on PATH, with platform-specific fallbacks.
@@ -526,5 +689,59 @@ mod tests {
             result.is_some(),
             "find_node_in_path should find node via PATH"
         );
+    }
+
+    fn write_complete_typescript_install(root: &Path, version: &str) -> PathBuf {
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("tsserver.js"), "// tsserver").unwrap();
+        std::fs::write(lib.join("lib.es5.d.ts"), "interface Array<T> {}").unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            format!(r#"{{ "name": "typescript", "version": "{version}" }}"#),
+        )
+        .unwrap();
+        lib.join("tsserver.js")
+    }
+
+    /// @ai-generated - Pins project-local pnpm resolution and realpath identity.
+    #[cfg(unix)]
+    #[test]
+    fn project_local_pnpm_typescript_resolves_to_the_real_install() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        let store_install = workspace
+            .path()
+            .join("node_modules/.pnpm/typescript@6.0.2/node_modules/typescript");
+        let expected = write_complete_typescript_install(&store_install, "6.0.2");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        symlink(
+            Path::new("../../../node_modules/.pnpm/typescript@6.0.2/node_modules/typescript"),
+            project.join("node_modules/typescript"),
+        )
+        .unwrap();
+
+        let resolved = find_tsserver(None, project.to_str());
+
+        assert_eq!(resolved, Some(expected.canonicalize().unwrap()));
+    }
+
+    /// @ai-generated - Pins fail-closed rejection of a library-less local install.
+    #[test]
+    fn library_less_project_install_falls_through_to_configured_tsdk() {
+        let workspace = tempfile::tempdir().unwrap();
+        let project = workspace.path().join("packages/ui");
+        let broken_lib = project.join("node_modules/typescript/lib");
+        std::fs::create_dir_all(&broken_lib).unwrap();
+        std::fs::write(broken_lib.join("tsserver.js"), "// no default libraries").unwrap();
+
+        let tsdk_install = workspace.path().join("configured-typescript");
+        let expected = write_complete_typescript_install(&tsdk_install, "6.0.2");
+
+        let resolved = find_tsserver(tsdk_install.join("lib").to_str(), project.to_str());
+
+        assert_eq!(resolved, Some(expected.canonicalize().unwrap()));
     }
 }
