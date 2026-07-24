@@ -1,26 +1,23 @@
 #!/usr/bin/env node
 
-// Dry-run publish verification: runs `npm pack --dry-run` on each publishable
-// package and validates the tarball contents.
+// Dry-run publish verification: runs `npm pack --dry-run` on each package in
+// the derived publish set and validates the tarball contents.
 
 import { execSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { computePublishSet, scanWorkspacePackages } from "./lib/publish-set.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 
-/** Packages that are published to npm. */
+// The publish set is derived from the product dependency closure — the same
+// authority the release workflow publishes from — so tarball verification
+// covers exactly what gets published.
+const publishSet = computePublishSet();
+const workspacePackages = scanWorkspacePackages(join(ROOT, "packages"));
 const PUBLISHABLE = [
-  "packages/types",
-  "packages/unplugin",
-  "packages/wasm",
-  "packages/language-shared",
-  "packages/typescript-plugin",
-  "packages/oxc-bindings",
-  "packages/nuxt",
-  "packages/native",
-  // Platform-specific native packages
-  ...readdirSync(join(ROOT, "packages/native/npm")).map((d) => `packages/native/npm/${d}`),
+  ...publishSet.npm.map((name) => relative(ROOT, workspacePackages.get(name).dir)),
+  ...publishSet.platform,
 ];
 
 /** File patterns that should NOT appear in a tarball. */

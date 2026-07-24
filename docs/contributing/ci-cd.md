@@ -85,7 +85,7 @@ validate
 
 1. **Rust crates** -- only `verter_compiler` is published to crates.io (binding crates are consumed via npm)
 2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`)
-3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`
+3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`; the publish set is derived from the product dependency closure by `scripts/lib/publish-set.mjs` (marketplace-only packages such as `verter-vscode` are excluded)
 4. **GitHub Release** -- created with changelog (via git-cliff) and all binary assets
 
 ### Nightly (`nightly.yml`)
@@ -131,7 +131,7 @@ node scripts/check-versions.mjs          # Human-readable output
 node scripts/check-versions.mjs --json   # JSON for CI consumption
 ```
 
-This script compares local versions against published versions, detects pre-release channels, and computes topological publish order from workspace dependencies.
+This script compares local versions against published versions, detects pre-release channels, and computes the topological publish order. The publish set is not hand-maintained: `scripts/lib/publish-set.mjs` derives it from the product roots (`@verter/typeinfo`, `@verter/component-meta`, `@verter/unplugin`, `verter-tsc`, `verter-vscode`) by walking runtime dependency fields (`dependencies` + `optionalDependencies` + `peerDependencies`) across workspace packages. It throws if a package in the closure is `private` (marketplace-only packages exempt) or if a dependency cycle exists.
 
 ## Build Order
 

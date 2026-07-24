@@ -13,8 +13,9 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { computePublishSet, scanWorkspacePackages } from "./lib/publish-set.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -85,40 +86,27 @@ function semverGt(a, b) {
 }
 
 // ---------------------------------------------------------------------------
-// Gather npm packages
+// Gather npm packages — derived from the product dependency closure
+// (scripts/lib/publish-set.mjs), NOT "every non-private package".
+// Marketplace-only packages (verter-vscode) and platform sub-packages are
+// excluded here; the release workflow publishes platform packages separately.
 // ---------------------------------------------------------------------------
 
+const publishSet = computePublishSet();
+const workspacePackages = scanWorkspacePackages(PACKAGES_DIR);
+
 const packages = [];
-const packagesByName = new Map();
 
-for (const dir of readdirSync(PACKAGES_DIR)) {
-  const pkgPath = join(PACKAGES_DIR, dir, "package.json");
-  if (!existsSync(pkgPath)) continue;
-  const pkg = readJson(pkgPath);
-  if (pkg.private) continue;
-
-  const info = {
-    name: pkg.name,
-    dir,
-    localVersion: pkg.version,
+for (const name of publishSet.npm) {
+  const entry = workspacePackages.get(name);
+  packages.push({
+    name,
+    dir: relative(PACKAGES_DIR, entry.dir),
+    localVersion: entry.pkg.version,
     publishedVersion: null,
     needsPublish: false,
     distTag: null,
-    workspaceDeps: [],
-  };
-
-  // Collect workspace deps for topological ordering
-  for (const depField of ["dependencies", "peerDependencies"]) {
-    if (!pkg[depField]) continue;
-    for (const [dep, range] of Object.entries(pkg[depField])) {
-      if (typeof range === "string" && range.startsWith("workspace:")) {
-        info.workspaceDeps.push(dep);
-      }
-    }
-  }
-
-  packages.push(info);
-  packagesByName.set(pkg.name, info);
+  });
 }
 
 // Fetch published versions
@@ -129,30 +117,16 @@ for (const pkg of packages) {
 }
 
 // ---------------------------------------------------------------------------
-// Topological sort
+// Publish order — the derived topological order (dependencies first),
+// restricted to packages that need publishing. Directory names, as
+// release.yml expects (`cd "packages/$pkg_dir"`).
 // ---------------------------------------------------------------------------
 
-function topoSort(pkgs) {
-  const visited = new Set();
-  const order = [];
-  const nameSet = new Set(pkgs.map((p) => p.name));
-
-  function visit(pkg) {
-    if (visited.has(pkg.name)) return;
-    visited.add(pkg.name);
-    for (const dep of pkg.workspaceDeps) {
-      if (nameSet.has(dep)) {
-        visit(packagesByName.get(dep));
-      }
-    }
-    order.push(pkg.dir);
-  }
-
-  for (const pkg of pkgs) visit(pkg);
-  return order;
-}
-
-const order = topoSort(packages.filter((p) => p.needsPublish));
+const needsPublish = new Set(packages.filter((p) => p.needsPublish).map((p) => p.name));
+const dirByName = new Map(packages.map((p) => [p.name, p.dir]));
+const order = publishSet.order
+  .filter((name) => needsPublish.has(name))
+  .map((name) => dirByName.get(name));
 
 // ---------------------------------------------------------------------------
 // Rust crates
