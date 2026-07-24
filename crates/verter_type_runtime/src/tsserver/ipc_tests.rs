@@ -1808,6 +1808,35 @@ fn tsserver_cold_companion_error_classifier_is_narrow() {
     );
 }
 
+// ── DISCRIMINATING (the "hover worked, then silently stopped" defect): a
+//    quickinfo failure must only collapse to `Ok(None)` when it is the
+//    engine's genuine no-hover ANSWER. A crashed/closed/timed-out provider is
+//    a FAILURE and must propagate as `Err` so the caller's recovery engages —
+//    a dead provider must never look like "no hover at this position". ──────
+#[test]
+fn tsserver_no_content_classifier_is_narrow() {
+    let no_content = TypeProviderError::new("No content available.");
+    assert!(
+        tsserver_error_is_no_content(&no_content),
+        "the engine's genuine no-hover answer stays an empty result"
+    );
+
+    for failure in [
+        "tsserver process crashed",
+        "stdin writer closed",
+        "response channel closed",
+        "request 'quickinfo' timed out after 10s",
+        "request 'quickinfo' stdin enqueue timed out after 2s",
+        "request 'quickinfo' was canceled at the engine",
+        "",
+    ] {
+        assert!(
+            !tsserver_error_is_no_content(&TypeProviderError::new(failure)),
+            "a provider failure must surface as Err, never a silent empty hover: {failure:?}"
+        );
+    }
+}
+
 /// Drive the REAL `resync_open_files_inner` against a bare transport + caches and
 /// capture the JSON frames it writes. `entries` are `(file, kind, content)` to
 /// pre-track; `carrier_projects` maps a companion path to its owning tsconfig.

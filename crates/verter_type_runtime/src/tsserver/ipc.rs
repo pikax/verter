@@ -1566,6 +1566,21 @@ fn tsserver_diag_error_is_companion_not_ready(message: &str) -> bool {
     message.contains(TSSERVER_SOURCE_FILE_NOT_IN_PROGRAM) || message.contains(TSSERVER_NO_PROJECT)
 }
 
+/// tsserver's genuine no-hover answer: the engine ANSWERED `quickinfo` with
+/// `success: false` because the position carries no quickinfo (whitespace,
+/// punctuation, an unloaded inferred file). This is an empty RESULT, not a
+/// failure — the only quickinfo error that may surface as `Ok(None)`.
+const TSSERVER_NO_CONTENT: &str = "No content available";
+
+/// Whether a `quickinfo` transport error is the engine's genuine no-content
+/// answer rather than a provider failure (crash, closed transport, timeout).
+/// NARROW by construction: every other error must propagate as `Err` so the
+/// caller's recovery engages instead of the client seeing a silent empty
+/// hover from a dead provider.
+fn tsserver_error_is_no_content(error: &TypeProviderError) -> bool {
+    error.message.contains(TSSERVER_NO_CONTENT)
+}
+
 /// Recover a companion's configured-project membership after a cold "Could not
 /// find source file" miss. The caller re-issues its query after this returns.
 ///
@@ -3360,12 +3375,32 @@ impl TypeProvider for TsserverTypeProvider {
                             }))
                         }
                         Err(e) => {
-                            tracing::warn!("tsserver quickinfo error for {file}: {e}");
-                            crate::type_runtime_trace_event!(
-                                "tsserver_get_hover_result",
-                                format!("file={} error={}", file, e),
-                            );
-                            Ok(None)
+                            // "No content available." is the engine's genuine
+                            // no-hover ANSWER (a position with no quickinfo): an
+                            // empty result, not a failure. Every other error —
+                            // a crashed process, a closed transport, a timeout —
+                            // is a provider FAILURE and must surface as one so
+                            // the caller's resync-and-retry recovery engages;
+                            // collapsing it to `Ok(None)` here made a dead
+                            // provider indistinguishable from "no hover at this
+                            // position" (hover silently stops serving).
+                            if tsserver_error_is_no_content(&e) {
+                                tracing::debug!(
+                                    "tsserver quickinfo: no content for {file} at {line}:{col}"
+                                );
+                                crate::type_runtime_trace_event!(
+                                    "tsserver_get_hover_result",
+                                    format!("file={} no_content=true", file),
+                                );
+                                Ok(None)
+                            } else {
+                                tracing::warn!("tsserver quickinfo error for {file}: {e}");
+                                crate::type_runtime_trace_event!(
+                                    "tsserver_get_hover_result",
+                                    format!("file={} error={}", file, e),
+                                );
+                                Err(e)
+                            }
                         }
                     }
                 }
