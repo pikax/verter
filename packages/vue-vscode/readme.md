@@ -25,13 +25,13 @@ The official VS Code extension for Verter — an experimental Vue compiler and l
 Search for **Verter** in the VS Code Extensions panel, or install from the command line:
 
 ```bash
-code --install-extension pikax.verter-vscode
+code --install-extension verter.vscode
 ```
 
 ### From Source
 
 ```bash
-pnpm --filter verter-vscode package
+pnpm --filter vscode package
 # Produces a .vsix file in packages/vue-vscode/
 code --install-extension packages/vue-vscode/verter-vscode-*.vsix
 ```
@@ -163,10 +163,10 @@ This is useful for debugging type issues, understanding how Verter transforms yo
 pnpm build
 
 # Build only the extension
-pnpm --filter verter-vscode build
+pnpm --filter vscode build
 
 # Watch mode for iterative development
-pnpm --filter verter-vscode watch
+pnpm --filter vscode watch
 ```
 
 ### Debugging
@@ -182,17 +182,17 @@ Alternatively, use `pnpm dev-extension` to build the LSP binary and watch-build 
 
 ```bash
 # Produce a .vsix file for distribution
-pnpm --filter verter-vscode package
+pnpm --filter vscode package
 ```
 
 ### Benchmarking
 
 ```bash
 # Cold-start typed completion benchmark
-pnpm --filter verter-vscode benchmark:startup
+pnpm --filter vscode benchmark:startup
 
 # Steady-state script completion benchmark (tsserver, multi-run JSON summary)
-pnpm --filter verter-vscode benchmark:completion
+pnpm --filter vscode benchmark:completion
 ```
 
 The completion benchmark writes per-run and summary JSON files under

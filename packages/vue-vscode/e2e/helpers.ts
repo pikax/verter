@@ -53,7 +53,7 @@ export function isLspReady(): boolean {
  * "Verter ready".
  */
 export async function waitForExtensionReady(timeoutMs = 45_000): Promise<void> {
-  const ext = vscode.extensions.getExtension("pikax.verter-vscode");
+  const ext = vscode.extensions.getExtension("verter.vscode");
   assert.ok(ext, "Verter extension should be installed");
 
   if (!ext.isActive) {

@@ -1,7 +1,7 @@
 /**
  * Node-side launcher for the extension-host DX driver.
  *
- * This is the plain-Node entry point invoked by `pnpm --filter verter-vscode
+ * This is the plain-Node entry point invoked by `pnpm --filter vscode
  * test:e2e:dx`. It is the ONLY DX module allowed to touch `@verter/dx-harness`
  * (the harness is ESM; the in-host suite compiles CommonJS and must stay a thin VS
  * Code actuator — see `dxScenarioRunner.ts`). The launcher:

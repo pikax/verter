@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export const DISCOVERY_SCHEMA = "verter.discovery.v1";
-export const VERTER_EXTENSION_ID = "pikax.verter-vscode";
+export const VERTER_EXTENSION_ID = "verter.vscode";
 
 export const EXCLUDED_DIR_NAMES = new Set([
   ".git",
@@ -67,7 +67,7 @@ function tryParseJson(raw) {
 function isVerterToolchainName(name) {
   return (
     typeof name === "string" &&
-    (name === "verter" || name === "verter-vscode" || name.startsWith("@verter/"))
+    (name === "verter" || name === "vscode" || name.startsWith("@verter/"))
   );
 }
 

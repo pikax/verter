@@ -110,10 +110,10 @@ pnpm install --frozen-lockfile
 # Build TS packages needed by the extension
 pnpm --filter @verter/language-shared build
 pnpm --filter @verter/typescript-plugin build
-pnpm --filter verter-vscode build:dev
+pnpm --filter vscode build:dev
 
 # Compile E2E test TypeScript
-pnpm --filter verter-vscode exec tsc -p tsconfig.test.json
+pnpm --filter vscode exec tsc -p tsconfig.test.json
 ```
 
 ### Step 4: Run Fixtures
@@ -123,20 +123,20 @@ Run fixtures **sequentially** (never in parallel — VS Code instances conflict)
 ```bash
 # Barrel exports (barrel re-export type resolution)
 E2E_FIXTURE=barrel-exports E2E_TYPE_PROVIDER=tsgo \
-  xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+  xvfb-run -a pnpm --filter vscode test:e2e:run
 
 # Single project (full suite, import rewrite validation)
 E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsgo \
-  xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+  xvfb-run -a pnpm --filter vscode test:e2e:run
 
 # Path aliases (tsconfig paths + per-owner config)
 E2E_FIXTURE=path-aliases E2E_TYPE_PROVIDER=tsgo \
-  xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+  xvfb-run -a pnpm --filter vscode test:e2e:run
 
 # Focused test (single test file within a fixture)
 E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsgo \
   VERTER_E2E_ONLY=hover.test.js \
-  xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+  xvfb-run -a pnpm --filter vscode test:e2e:run
 ```
 
 ### Step 5: Log Inspection
@@ -144,7 +144,7 @@ E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsgo \
 ```bash
 # Tee output for later grep
 E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsgo \
-  xvfb-run -a pnpm --filter verter-vscode test:e2e:run 2>&1 \
+  xvfb-run -a pnpm --filter vscode test:e2e:run 2>&1 \
   | tee /tmp/single-project-tsgo.stdout.log
 
 # Check for specific TS errors (should find nothing)
@@ -197,7 +197,7 @@ The compiled `out-test/` directory may have stale files. Clean and rebuild:
 
 ```bash
 rm -rf packages/vue-vscode/out-test
-pnpm --filter verter-vscode exec tsc -p tsconfig.test.json
+pnpm --filter vscode exec tsc -p tsconfig.test.json
 ```
 
 ### Double-nested `suite/suite/` directory
@@ -207,7 +207,7 @@ If you accidentally `cp -r` the suite directory, it creates `suite/suite/`. Fix:
 ```bash
 rm -rf packages/vue-vscode/e2e/suite/suite
 rm -rf packages/vue-vscode/out-test/e2e/suite/suite
-pnpm --filter verter-vscode exec tsc -p tsconfig.test.json
+pnpm --filter vscode exec tsc -p tsconfig.test.json
 ```
 
 ### WSL node picks up Windows node.exe

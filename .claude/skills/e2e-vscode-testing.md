@@ -29,10 +29,10 @@ Each test workspace is a self-contained fixture in `e2e/fixtures/`:
 ```bash
 # Prerequisites
 pnpm run build:lsp                     # Build Rust LSP binary
-pnpm --filter verter-vscode build:dev  # Bundle extension
+pnpm --filter vscode build:dev  # Bundle extension
 
 # Run single fixture (fast, targeted)
-E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
+E2E_FIXTURE=single-project pnpm --filter vscode test:e2e
 
 # Run from monorepo root
 pnpm run test:e2e
@@ -156,7 +156,7 @@ After ANY change to:
 Run the E2E suite to verify no regressions:
 
 ```bash
-pnpm run build:lsp && pnpm --filter verter-vscode build:dev && E2E_FIXTURE=single-project pnpm --filter verter-vscode test:e2e
+pnpm run build:lsp && pnpm --filter vscode build:dev && E2E_FIXTURE=single-project pnpm --filter vscode test:e2e
 ```
 
 This is non-negotiable. LSP changes directly affect user-facing IDE behavior. Manual testing is never sufficient as the sole verification step.
@@ -252,7 +252,7 @@ Never use `sleep()` to wait for:
 
 1. Create `e2e/fixtures/<name>/` with `.vue` files and config
 2. Update `FIXTURES` array in `e2e/runTests.ts`
-3. Run `E2E_FIXTURE=<name> pnpm --filter verter-vscode test:e2e` to verify
+3. Run `E2E_FIXTURE=<name> pnpm --filter vscode test:e2e` to verify
 
 ## Adding a New Test Suite
 

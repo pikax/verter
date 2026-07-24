@@ -40,9 +40,9 @@ test("derived npm set equals the expected product closure minus marketplace-only
     "@verter/component-meta",
     "@verter/unplugin",
     "verter-tsc",
-    "verter-vscode",
+    "vscode",
   ]);
-  assert.deepEqual(MARKETPLACE_ONLY, ["verter-vscode"]);
+  assert.deepEqual(MARKETPLACE_ONLY, ["vscode"]);
 });
 
 test("every runtime workspace dependency of every published package is itself published", () => {
@@ -71,9 +71,9 @@ test("every runtime workspace dependency of every published package is itself pu
 
 test("verter-vscode is not in the npm set", () => {
   const set = computePublishSet();
-  assert.ok(!set.npm.includes("verter-vscode"));
-  assert.ok(!set.order.includes("verter-vscode"));
-  assert.ok(set.marketplaceOnly.includes("verter-vscode"));
+  assert.ok(!set.npm.includes("vscode"));
+  assert.ok(!set.order.includes("vscode"));
+  assert.ok(set.marketplaceOnly.includes("vscode"));
 });
 
 test("a private package in the closure throws", () => {

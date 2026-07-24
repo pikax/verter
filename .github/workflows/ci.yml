@@ -670,9 +670,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Test VS Code E2E harness units
-        run: pnpm --filter verter-vscode test:e2e:lib:unit
+        run: pnpm --filter vscode test:e2e:lib:unit
       - name: Prepare VS Code E2E artifacts
-        run: pnpm --filter verter-vscode prepare:e2e
+        run: pnpm --filter vscode prepare:e2e
       - name: Derive VS Code E2E route matrix
         id: e2e-matrix
         shell: bash
@@ -822,7 +822,7 @@ jobs:
           name: vscode-e2e-build
           path: packages
       - name: Run E2E tests (${{ matrix.fixture }} / ${{ matrix.type_provider }})
-        run: xvfb-run -a pnpm --filter verter-vscode test:e2e:run
+        run: xvfb-run -a pnpm --filter vscode test:e2e:run
         env:
           E2E_FIXTURE: ${{ matrix.fixture }}
           E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}

@@ -84,10 +84,10 @@ for their own smoke suites without reclassifying Verter notifications as standar
 
 ```bash
 # Rebuild the LSP + extension + E2E bundle, then run a single fixture/provider
-E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e
+E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter vscode test:e2e
 ```
 
-`pnpm --filter verter-vscode test:e2e` now prepares the Rust binary, extension bundle, and compiled E2E tests before launching VS Code. Use `pnpm --filter verter-vscode test:e2e:run` only when artifacts are already prepared, such as in CI.
+`pnpm --filter vscode test:e2e` now prepares the Rust binary, extension bundle, and compiled E2E tests before launching VS Code. Use `pnpm --filter vscode test:e2e:run` only when artifacts are already prepared, such as in CI.
 
 The `E2E_FIXTURE` environment variable selects which test workspace to open. `E2E_TYPE_PROVIDER`
 selects the provider under test (`tsserver`, `tsgo`, or, for relay-enabled fixtures,
@@ -115,7 +115,7 @@ This prepares the artifacts once, then iterates over every fixture/provider comb
 ### Specific fixture via runTests.ts
 
 ```bash
-pnpm --filter verter-vscode test:e2e:matrix -- --fixture=monorepo@tsgo
+pnpm --filter vscode test:e2e:matrix -- --fixture=monorepo@tsgo
 ```
 
 ### From the monorepo root

@@ -548,7 +548,7 @@ suite("VS Code acceptance — TypeScript results in the editor", () => {
     // hook and discards everything measured so far.
     this.timeout(FIRST_HOVER_TIMEOUT_MS + PROVIDER_STATUS_TIMEOUT_MS + SWEEP_BUDGET_MS + 180_000);
 
-    const ext = vscode.extensions.getExtension("pikax.verter-vscode");
+    const ext = vscode.extensions.getExtension("verter.vscode");
     assert.ok(ext, "Verter extension must be installed in the acceptance host");
     if (!ext.isActive) await ext.activate();
 

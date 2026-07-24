@@ -30,9 +30,9 @@ editor-owned tsgo. Compiling the harness alone does not satisfy the release gate
 ## Required local gates
 
 ```sh
-pnpm --filter verter-vscode exec tsc -p tsconfig.test.json --noEmit
-pnpm --filter verter-vscode test:e2e:lib:unit
-pnpm --filter verter-vscode test:e2e:dx:unit
+pnpm --filter vscode exec tsc -p tsconfig.test.json --noEmit
+pnpm --filter vscode test:e2e:lib:unit
+pnpm --filter vscode test:e2e:dx:unit
 ```
 
 Every standard live fixture runs on `tsserver` and `tsgo`; every configured-project fixture
