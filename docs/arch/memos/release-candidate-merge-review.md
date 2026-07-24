@@ -7,15 +7,15 @@ rewrite into `main`, the defects it found, what was fixed, and what was knowingl
 The engineering verdict is in §4–§6. The `BLOCKED` terminal state exists because source-input
 convergence was explicitly skipped, and the review program cannot certify readiness without it.
 
-| | |
-|---|---|
-| Review | 10 groups × 3 independent models, 2026-07-24 |
-| BASE (`origin/main`) | `5c62b6b505b456d61074b18e0fb6d5578b4605b4` |
-| TIP at review start | `2491f179c` (tree `84ad223bd`) |
-| TIP after Co-Authored-By strip | `588a8e8c0` (tree `84ad223bd` — **identical**, messages only) |
-| TIP at memo time | `6822ac7a1` — 23 session commits, 518 ahead of main |
-| Merge shape | **FAST-FORWARD.** `origin/main` is the merge-base, 0 behind. No merge commit, no conflicts. |
-| Agent remote mutations | **NONE.** No push, tag, PR, release, or registry write. |
+|                                |                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| Review                         | 10 groups × 3 independent models, 2026-07-24                                                |
+| BASE (`origin/main`)           | `5c62b6b505b456d61074b18e0fb6d5578b4605b4`                                                  |
+| TIP at review start            | `2491f179c` (tree `84ad223bd`)                                                              |
+| TIP after Co-Authored-By strip | `588a8e8c0` (tree `84ad223bd` — **identical**, messages only)                               |
+| TIP at memo time               | `6822ac7a1` — 23 session commits, 518 ahead of main                                         |
+| Merge shape                    | **FAST-FORWARD.** `origin/main` is the merge-base, 0 behind. No merge commit, no conflicts. |
+| Agent remote mutations         | **NONE.** No push, tag, PR, release, or registry write.                                     |
 
 ---
 
@@ -60,6 +60,7 @@ and Playground all failing; VS Code E2E `DISABLED — flaky`. Last green on main
 the two failure sets could not be diffed.
 
 **Candidate gate: 61 non-tolerated failures**, accepted by owner ruling as non-blocking:
+
 - 50 `verter_lsp` provider tests (31 `real_provider_tests` + 19 `server_tests`)
 - 4 `verter_type_runtime` — `resilient_tests.rs:744` runs `node <esbuild-native-binary>`; **new on
   this branch**, so a genuine regression, mechanical to fix
@@ -152,14 +153,14 @@ correctly feature-gated; the defect is the unevidenced claim, not a dishonest ga
 Packed the derived publish set, installed **outside the repo** from tarballs only, and exercised
 each product package:
 
-| | |
-|---|---|
-| `@verter/unplugin` | ✅ Vite build compiled both SFCs; `v-for` → `renderList` |
+|                          |                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@verter/unplugin`       | ✅ Vite build compiled both SFCs; `v-for` → `renderList`                                                                                                  |
 | `@verter/component-meta` | ✅ props `["label","disabled","size"]`, events `["click","hover"]`, slots `["default","icon"]` — `withDefaults`, emit tuples, optional slots all resolved |
-| `@verter/typeinfo` | ✅ exports present |
-| `verter-tsc` | ✅ runs, typechecks, catches TS2322, exit 1/0 correct → CI-gatable |
-| `@verter/native` | ✅ binding loads — **issue #90 confirmed fixed** (53 platform fallbacks restored in the napi loader) |
-| workspace: leakage | ✅ none — `pnpm pack` rewrites `workspace:*` correctly |
+| `@verter/typeinfo`       | ✅ exports present                                                                                                                                        |
+| `verter-tsc`             | ✅ runs, typechecks, catches TS2322, exit 1/0 correct → CI-gatable                                                                                        |
+| `@verter/native`         | ✅ binding loads — **issue #90 confirmed fixed** (53 platform fallbacks restored in the napi loader)                                                      |
+| workspace: leakage       | ✅ none — `pnpm pack` rewrites `workspace:*` correctly                                                                                                    |
 
 This found **two release blockers no unit test would catch**: the `verter-tsc` exec-bit strip and
 the `component-meta` documented-but-nonexistent API.
@@ -205,13 +206,13 @@ nothing and report success.
 
 ## 9. Outstanding at memo time
 
-| Item | State |
-|---|---|
-| Per-project tsserver routing (monorepo) | ⏳ in flight — see §10 |
-| Drop the ~23 MB bundled TypeScript from the VSIX | ⏳ same change |
-| Owner validation of the tsserver fix | pending |
-| 3-seat adversarial review of this session's work | staged, not yet run |
-| Version bump → merge → push | **owner** |
+| Item                                             | State                  |
+| ------------------------------------------------ | ---------------------- |
+| Per-project tsserver routing (monorepo)          | ⏳ in flight — see §10 |
+| Drop the ~23 MB bundled TypeScript from the VSIX | ⏳ same change         |
+| Owner validation of the tsserver fix             | pending                |
+| 3-seat adversarial review of this session's work | staged, not yet run    |
+| Version bump → merge → push                      | **owner**              |
 
 ---
 
@@ -226,11 +227,13 @@ workspace root often has no `typescript` at all, so it fell through to a bundled
 alpha.1 AND beta.1 both carry `tsserver.js` with **zero** lib files — that tier never worked.
 
 The workspace genuinely requires per-package engines:
+
 ```
 packages/demo            TypeScript 5.8.3
 packages/touch-emulator  TypeScript 5.8.3
 packages/ui              TypeScript 6.0.2   ← the failing package (6 tsconfigs)
 ```
+
 A single workspace-level engine cannot serve this correctly.
 
 `resolve_tsserver` is built and **verified against the real tree**: from `packages/ui` it resolves
@@ -270,3 +273,39 @@ Remaining: wiring the per-project router into the LSP provider path.
 6. Confirm the `verter` marketplace publisher is registered before the VSIX publish step.
 
 **STOP — human-only merge, tag, release, and publish. No agent performed or may perform any of these.**
+
+---
+
+## 13. Adversarial review of this session's own work
+
+The 30 landed commits were written by six agents and reviewed only by their authors. A second
+3-seat adversarial pass (codex · grok · kimi) over `588a8e8c0..HEAD` found **33 findings**
+(codex 11 · grok 11 · kimi 13). All three converged, independently, on the **release authority** —
+an area none was told was suspect. Verified:
+
+| Finding                                                                                                                                                                                                                                                                                                 | Status                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `semverGt` compares prerelease/patch segments as STRINGS: `semverGt("0.0.1-beta.10","0.0.1-beta.9")` is `false`, `semverGt("0.0.2","0.0.10")` is `false`. Since `needsPublish = semverGt(local, published)`, **every package silently stops publishing at `beta.10`** and the release still goes green. | ✅ verified                                                            |
+| `scripts/check-versions.mjs` contains no `process.exit` — it always exits 0, so it is **not a gate**. The verify-before-tag protection does not gate.                                                                                                                                                   | ✅ verified                                                            |
+| The derived publish set **EXCLUDES `@verter/nuxt` (published 0.0.1-beta.1) and `@verter/oxc-bindings` (published 0.0.1-alpha.3)** — both live products. Adopting it as-is silently stops publishing them.                                                                                               | ✅ verified against the live registry                                  |
+| A correct `scripts/lib/semver.mjs` exists but the release-deciding script does not use it.                                                                                                                                                                                                              | reported by grok + kimi                                                |
+| An 83 MB platform binary was committed in an unrelated docs commit.                                                                                                                                                                                                                                     | ✅ verified, untracked in `aeffa1675`; **the blob remains in history** |
+| `publish-set.spec.mjs`'s `EXPECTED_NPM` asserts whatever the implementation produces, so it cannot catch a wrong root list.                                                                                                                                                                             | reported by kimi                                                       |
+
+**What the pass could NOT break**, after direct attempts: the Project-Bound External-TS Contract in
+the new router (every op goes `resolve_carrier → ProjectBinding → ensure_bound(BoundProject)`; all
+four ownership arms fail closed); cross-project engine leakage; musl detection; concurrent
+first-demand (collapses on one `OnceCell` per key); and it found no stub or non-discriminating
+tests in the range. Those are meaningful negative results, not silence.
+
+**Three of the confirmed defects were introduced by the orchestrator, not the agents:** the 83 MB
+binary (a careless `git add -A`), a private project identifier committed into this memo, and the
+publish-set exclusion of two shipped packages. The first two are fixed; the third is open.
+
+### Must fix before tagging
+
+1. `semverGt` — replace with the correct `lib/semver.mjs`, or the release breaks at `beta.10`.
+2. `check-versions.mjs` — make it exit non-zero, or nothing gates the bump.
+3. Publish-set roots — re-include `@verter/nuxt` and `@verter/oxc-bindings`, or they stop shipping.
+4. Re-check `710c9dd17`: codex reports surfaced tsserver hover errors are **still** converted to
+   empty user results, i.e. the silent-empty fix may not be effective.
