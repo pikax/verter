@@ -67,7 +67,7 @@ function tryParseJson(raw) {
 function isVerterToolchainName(name) {
   return (
     typeof name === "string" &&
-    (name === "verter" || name === "vscode" || name.startsWith("@verter/"))
+    (name === "verter" || name === "verter-vscode" || name.startsWith("@verter/"))
   );
 }
 
