@@ -92,6 +92,16 @@ pub enum RejectionReason {
         /// The policy rejection.
         rejection: PolicyRejection,
     },
+    /// The candidate is NOT a tsgo engine at all: its `--version` reports a
+    /// pre-7 TypeScript, i.e. the Node.js toolchain (`tsc` from a TypeScript
+    /// 5.x/6.x install — the tsserver family). Distinct from
+    /// [`RejectionReason::PolicyRejected`]: a TypeScript 5.x install is not a
+    /// "below-floor tsgo", and reporting it as one both misleads the user and
+    /// discards the signal that a servable tsserver toolchain is present.
+    NotTsgoEngine {
+        /// The version string the probe reported (e.g. `5.9.3`).
+        version: String,
+    },
     /// The `--lsp --stdio` `initialize` handshake failed.
     LspHandshakeFailed {
         /// The handshake failure detail.
@@ -131,6 +141,14 @@ impl fmt::Display for RejectionReason {
                 write!(f, "the `--version` probe failed: {detail}")
             }
             Self::PolicyRejected { rejection, .. } => write!(f, "{rejection}"),
+            Self::NotTsgoEngine { version } => write!(
+                f,
+                "this is the TypeScript {version} Node.js toolchain (the tsserver family), \
+                 not the tsgo native engine — Verter serves TypeScript 5.x/6.x workspaces \
+                 through their tsserver, so no tsgo install is required; only install \
+                 typescript@{} or newer 7.0.x if you want the native tsgo engine",
+                super::policy::BUNDLED_TSGO_VERSION
+            ),
             Self::LspHandshakeFailed { detail } => write!(
                 f,
                 "the `--lsp --stdio` initialize handshake failed: {detail}"
@@ -219,13 +237,7 @@ impl ProcessValidator {
             .map_err(|e| RejectionReason::VersionProbeFailed {
                 detail: e.to_string(),
             })?;
-        let version =
-            self.policy
-                .check_str(&probe)
-                .map_err(|rejection| RejectionReason::PolicyRejected {
-                    version: probe.clone(),
-                    rejection,
-                })?;
+        let version = classify_probed_version(&self.policy, &probe)?;
         // 3. The capability smoke on a throwaway process.
         self.smoke(path, &probe, requirement).await?;
         Ok(ValidatedCandidate {
@@ -380,6 +392,33 @@ fn versions_agree(probe: &str, server_info: &str) -> bool {
     }
 }
 
+/// Classify a probed `--version` report against the support policy.
+///
+/// A parseable version whose major is below the tsgo family's
+/// ([`super::policy::SUPPORTED_TSGO_RANGE_MIN`]) is not a below-floor tsgo: it
+/// is the TypeScript Node.js toolchain answering `tsc --version` (a TypeScript
+/// 5.x/6.x install — the tsserver family). It classifies as
+/// [`RejectionReason::NotTsgoEngine`] so the diagnostic names what the binary
+/// actually IS instead of rejecting it against the tsgo version window.
+fn classify_probed_version(
+    policy: &VersionPolicy,
+    probe: &str,
+) -> Result<TsgoVersion, RejectionReason> {
+    if let Ok(version) = TsgoVersion::parse(probe) {
+        if version.major < super::policy::SUPPORTED_TSGO_RANGE_MIN.major {
+            return Err(RejectionReason::NotTsgoEngine {
+                version: probe.to_string(),
+            });
+        }
+    }
+    policy
+        .check_str(probe)
+        .map_err(|rejection| RejectionReason::PolicyRejected {
+            version: probe.to_string(),
+            rejection,
+        })
+}
+
 /// A minimal configured project staged in a unique temp dir, opened by the
 /// `--api` smoke. Removed on drop.
 struct SmokeProject {
@@ -508,6 +547,44 @@ mod tests {
         let msg = api.to_string();
         assert!(msg.contains("--api"), "{msg}");
         assert!(msg.contains("connect the --api pipe"), "{msg}");
+    }
+
+    // ── DISCRIMINATING (the reported misclassification): a TypeScript 5.x/6.x
+    //    `tsc` answering `--version` is the Node.js tsserver toolchain, NOT a
+    //    below-floor tsgo. It must classify as NotTsgoEngine — the diagnostic
+    //    names what the binary is and points at the tsserver route instead of
+    //    rejecting it against the tsgo 7.0.x window. ─────────────────────────
+    #[test]
+    fn a_pre7_version_is_not_a_tsgo_engine() {
+        let policy = VersionPolicy::production();
+        for probe in ["5.9.3", "5.8.3", "6.0.3", "4.9.5"] {
+            match classify_probed_version(&policy, probe) {
+                Err(RejectionReason::NotTsgoEngine { version }) => {
+                    assert_eq!(version, probe);
+                }
+                other => panic!("`{probe}` is the tsserver family, not a tsgo: {other:?}"),
+            }
+        }
+        let msg = classify_probed_version(&policy, "5.9.3")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("5.9.3"), "names the probed version: {msg}");
+        assert!(msg.contains("tsserver"), "names the actual family: {msg}");
+        assert!(
+            !msg.contains("below the supported floor"),
+            "never misreports the tsserver family as a below-floor tsgo: {msg}"
+        );
+
+        // The tsgo family itself still flows through the support policy.
+        assert!(classify_probed_version(&policy, "7.0.2").is_ok());
+        assert!(matches!(
+            classify_probed_version(&policy, "7.1.0"),
+            Err(RejectionReason::PolicyRejected { .. })
+        ));
+        assert!(matches!(
+            classify_probed_version(&policy, "garbage"),
+            Err(RejectionReason::PolicyRejected { .. })
+        ));
     }
 
     #[test]
