@@ -1,0 +1,81 @@
+name: release-tag
+
+# Turns a version commit on main into the v<version> tag that triggers
+# release.yml. Flow: a developer runs `pnpm bump` locally (writes the version
+# across the release surface, commits `release: v<version>`, no tag, no push),
+# reviews the commit, and pushes it to main; this workflow then creates and
+# pushes the annotated tag.
+#
+# This job is a deliberate no-op (clean exit, no tag) for:
+#   - ordinary commits — the message does not match `release: v<version>`;
+#   - release.yml's own CHANGELOG commit — its message matches, but the tag
+#     already exists by then, so the idempotency check exits before tagging.
+#
+# The commit message is only a signal; the tree is the truth. The version is
+# read from Cargo.toml [workspace.package], must agree with the message, and
+# must not already be tagged. Before tagging, the full publish surface is
+# verified so a partial bump can never reach a tag.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+
+      - name: Detect a version commit
+        id: detect
+        run: |
+          msg="$(git log -1 --format=%s)"
+          re='^release: v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+          if [[ ! "$msg" =~ $re ]]; then
+            echo "Not a version commit ('$msg') — nothing to do."
+            exit 0
+          fi
+          msg_version="${BASH_REMATCH[1]}"
+
+          # The tree is authoritative: read the workspace version, not the message.
+          tree_version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [[ -z "$tree_version" ]]; then
+            echo "::error::could not read the workspace version from Cargo.toml"
+            exit 1
+          fi
+          if [[ "$msg_version" != "$tree_version" ]]; then
+            echo "::error::commit message says v$msg_version but the tree is at $tree_version — refusing to guess"
+            exit 1
+          fi
+
+          # Idempotency: never re-tag (covers re-runs and release.yml's
+          # CHANGELOG commit, which lands after the tag already exists).
+          if git rev-parse -q --verify "refs/tags/v$tree_version" >/dev/null; then
+            echo "Tag v$tree_version already exists — nothing to do."
+            exit 0
+          fi
+
+          echo "version=$tree_version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the version is complete
+        if: steps.detect.outputs.version != ''
+        run: |
+          node scripts/set-version.mjs --check "${{ steps.detect.outputs.version }}"
+          node scripts/check-versions.mjs
+
+      - name: Create and push the tag
+        if: steps.detect.outputs.version != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.detect.outputs.version }}" -m "release: v${{ steps.detect.outputs.version }}"
+          git push origin "v${{ steps.detect.outputs.version }}"
