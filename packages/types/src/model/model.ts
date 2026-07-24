@@ -1,4 +1,4 @@
-import { OmitNever, UnionToIntersection } from "../helpers";
+import { OmitNever, UnionToIntersection } from "../helpers/index.js";
 
 /**
  * Extracts model information from a ModelRef type.

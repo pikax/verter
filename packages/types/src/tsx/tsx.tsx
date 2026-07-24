@@ -1,5 +1,5 @@
 /// <reference types="vue/jsx" />
-import "./tsx.attributes";
+import "./tsx.attributes.js";
 
 type VNode<T> = import("vue").VNode & {
   ctx: import("vue").ComponentInternalInstance & { proxy: T };

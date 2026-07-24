@@ -1,2 +1,2 @@
-export * from "./vue";
-export * from "./vue.macros";
+export * from "./vue.js";
+export * from "./vue.macros.js";

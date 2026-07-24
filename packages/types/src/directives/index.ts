@@ -1,1 +1,1 @@
-export * from "./directives";
+export * from "./directives.js";

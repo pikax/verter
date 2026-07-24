@@ -1,5 +1,5 @@
-import { Camelize } from "../name/name";
-import { ExtractHidden, IntersectionFunctionToObject } from "../helpers";
+import { Camelize } from "../name/name.js";
+import { ExtractHidden, IntersectionFunctionToObject } from "../helpers/index.js";
 
 /**
  * Converts event emission function types into Vue props types.

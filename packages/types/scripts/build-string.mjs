@@ -20,8 +20,13 @@ function getSourceFilesFromIndex(indexPath) {
     if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
       if (ts.isStringLiteral(node.moduleSpecifier)) {
         const modulePath = node.moduleSpecifier.text;
-        // Convert "./helpers" to "helpers/helpers.ts" or similar
-        const relativePath = modulePath.replace(/^\.\//, "");
+        // Convert "./helpers/index.js" to "helpers/helpers.ts" or similar.
+        // Source specifiers are explicit ESM (".js", directory "/index.js");
+        // strip both back to the extensionless form before resolving.
+        const relativePath = modulePath
+          .replace(/^\.\//, "")
+          .replace(/\.js$/, "")
+          .replace(/\/index$/, "");
         const folderName = relativePath.split("/").pop();
 
         // Try to resolve the actual implementation file (not index.ts)
@@ -48,7 +53,8 @@ function getSourceFilesFromIndex(indexPath) {
 // Resolve a relative import path to an absolute file path
 function resolveImportPath(importPath, fromFile) {
   const fromDir = path.dirname(fromFile);
-  const resolved = path.resolve(fromDir, importPath);
+  // Source specifiers are explicit ESM (".js"); strip before resolving to .ts.
+  const resolved = path.resolve(fromDir, importPath).replace(/\.js$/, "");
 
   // Try with .ts extension first, then as-is if it's a file, then index.ts
   const possiblePaths = [resolved + ".ts", path.join(resolved, "index.ts")];

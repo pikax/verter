@@ -1,8 +1,8 @@
-export * from "./props";
+export * from "./props.js";
 export type {
   PropsWithDefaults,
   MakePublicProps,
   MakeBooleanOptional,
   ExtractBooleanKeys,
   MakeInternalProps,
-} from "./props";
+} from "./props.js";

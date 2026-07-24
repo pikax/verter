@@ -1,5 +1,5 @@
 // Import for local use
-import type { ExtractFromHTMLElement } from "../tsx/components-tsx";
+import type { ExtractFromHTMLElement } from "../tsx/components-tsx.js";
 
 /**
  * Extracts the instance type from a Vue component definition.

@@ -1,4 +1,4 @@
-import { GetVueComponent } from "../components";
+import { GetVueComponent } from "../components/index.js";
 
 /**
  * Resolves a component from a components map or native element registry.

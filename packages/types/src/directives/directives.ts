@@ -1,6 +1,6 @@
-import { PickByValue } from "../helpers";
-import { ExtractFromHTMLElement } from "../tsx/components-tsx";
-import { SystemModifiers } from "../vue";
+import { PickByValue } from "../helpers/index.js";
+import { ExtractFromHTMLElement } from "../tsx/components-tsx.js";
+import { SystemModifiers } from "../vue/index.js";
 
 export type ExtractLeafElement<T> = T extends HTMLElement
   ? T

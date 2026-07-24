@@ -1,4 +1,4 @@
-import { PropsWithDefaults } from "../props";
+import { PropsWithDefaults } from "../props/index.js";
 
 /**
  * Helper type to prettify types in TS playground and IDEs
@@ -34,9 +34,14 @@ export type MacroNonReturn<T> = { type: T } | { object: T };
 export type MacroReturn<V, T> = MacroReturnType<V, T> | MacroReturnObject<V, T>;
 
 /**
- * Create macro return helper, to be used in setup return types
+ * Create macro return helper, to be used in setup return types.
+ *
+ * Type-level only: it exists so generated type-check code can call it, and
+ * must never execute. The body throws because the package ships real ESM —
+ * a `declare`d (ambient) export would leave `dist/` without a runtime
+ * binding and make the package unimportable under Node ESM.
  */
-export declare function createMacroReturn<
+export function createMacroReturn<
   T extends Partial<
     Record<RegularMacros, MacroReturn<any, any>> & {
       model: Record<string, MacroReturn<any, any>>;
@@ -44,7 +49,9 @@ export declare function createMacroReturn<
       templateRef: Record<string, any>;
     } & Record<NonReturnMacros, MacroNonReturn<any>>
   >,
->(o: T): CreateMacroReturn<T>;
+>(o: T): CreateMacroReturn<T> {
+  throw new Error("createMacroReturn is a type-level helper and must not be called at runtime");
+}
 
 export type CreateMacroReturn<T> = { ____VERTER___MACRO_RETURN_KEY____: T };
 export type OmitMacroReturn<T> = Omit<T, "____VERTER___MACRO_RETURN_KEY____">;

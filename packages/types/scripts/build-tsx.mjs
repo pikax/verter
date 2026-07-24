@@ -24,8 +24,8 @@ function readFile(file) {
 }
 
 function stripAttributesImport(code) {
-  // Remove: import "./tsx.attributes"; (with optional semicolon/whitespace)
-  return code.replace(/^\s*import\s+["']\.\/tsx\.attributes["'];?\s*$/m, "");
+  // Remove: import "./tsx.attributes.js"; (with optional semicolon/whitespace)
+  return code.replace(/^\s*import\s+["']\.\/tsx\.attributes(?:\.js)?["'];?\s*$/m, "");
 }
 
 function mergeTsx() {

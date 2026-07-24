@@ -10,10 +10,10 @@ import {
   NormaliseMacroReturn,
   Prettify,
   SlotsToSlotType,
-} from "../setup";
-import { MakePublicProps, MakeInternalProps } from "../props";
-import { MacroToPropEvents, ModelToEmits, ModelToProps } from "../model";
-import { EmitsToProps } from "../emits";
+} from "../setup/index.js";
+import { MakePublicProps, MakeInternalProps } from "../props/index.js";
+import { MacroToPropEvents, ModelToEmits, ModelToProps } from "../model/index.js";
+import { EmitsToProps } from "../emits/index.js";
 
 export type CreateTypedInternalInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,

@@ -1,4 +1,4 @@
-export * from "./setup";
+export * from "./setup.js";
 export type {
   ReturnMacros,
   RegularMacros,
@@ -25,5 +25,5 @@ export type {
   ExposeToVueExposeKey,
   NormaliseMacroReturn,
   NormalisedMacroReturn,
-} from "./setup";
-export { createMacroReturn } from "./setup";
+} from "./setup.js";
+export { createMacroReturn } from "./setup.js";
