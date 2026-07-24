@@ -2,8 +2,8 @@
  * Stage the `verter-relay-shim` binary into the VS Code extension VSIX `bin/`.
  *
  * The editor is pointed at the bundled shim as its `tsgo`; the shim spawns the
- * REAL tsgo and relays the `--lsp` stdio. The VSIX therefore ships ONLY the
- * Verter shim — NEVER tsgo itself (tsgo is discovered / supplied separately).
+ * REAL tsgo and relays the `--lsp` stdio. The VSIX ships the Verter shim plus the
+ * `verter-lsp` engine — NEVER tsgo itself (tsgo is discovered / supplied separately).
  *
  * This module is PURE (no import-time side effects) so it is unit-testable in
  * isolation from the full `package.mjs` VSIX pipeline. `package.mjs` imports
@@ -33,12 +33,15 @@ import path from "node:path";
 export const SHIM_STEM = "verter-relay-shim";
 
 /**
- * bin/ entries the VSIX is allowed to ship ALONGSIDE the staged shim. EMPTY today — bin/
- * is shim-only. A future extension-owned binary must be added here EXPLICITLY: staging
- * enforces a strict `bin/` whitelist (`[shim basename, ...EXTRA_ALLOWED_BIN_ENTRIES]`) and
- * prunes everything else, so an unlisted file is never silently tolerated.
+ * bin/ entries the VSIX is allowed to ship ALONGSIDE the staged shim: the `verter-lsp`
+ * engine, which the release workflow cross-compiles per platform and copies into bin/
+ * before packaging (only the platform-matching filename is present in any one build).
+ * Both the POSIX and Windows filenames are listed so the engine survives staging on
+ * every target. Any further extension-owned binary must be added here EXPLICITLY:
+ * staging enforces a strict `bin/` whitelist (`[shim basename, ...EXTRA_ALLOWED_BIN_ENTRIES]`)
+ * and prunes everything else, so an unlisted file is never silently tolerated.
  */
-export const EXTRA_ALLOWED_BIN_ENTRIES = [];
+export const EXTRA_ALLOWED_BIN_ENTRIES = ["verter-lsp", "verter-lsp.exe"];
 
 /**
  * The ASCII identity-marker prefix the shim binary embeds in its `.rodata` (see
@@ -511,9 +514,10 @@ export function stageShimBinary({
     readBytes,
   });
 
-  // The strict bin/ whitelist: exactly the staged shim plus any explicitly-allowed extras
-  // (none today). EVERYTHING else — a stale tsgo, an opposite-platform shim, an unrelated
-  // leftover — is pruned so the FINAL bin/ is exactly this set.
+  // The strict bin/ whitelist: exactly the staged shim plus the explicitly-allowed
+  // extras (the `verter-lsp` engine). EVERYTHING else — a stale tsgo, an
+  // opposite-platform shim, an unrelated leftover — is pruned so the FINAL bin/
+  // holds only whitelisted entries.
   const allowedBinEntries = [basename, ...EXTRA_ALLOWED_BIN_ENTRIES];
 
   const binDir = path.join(extensionDir, "bin");
@@ -554,8 +558,10 @@ export function stageShimBinary({
     chmod(dest, 0o755);
   }
 
-  // Assert the FINAL bin/ contents equal the whitelist EXACTLY — the shipped invariant
-  // verified on the directory itself, not merely on the name we copied.
+  // Assert the FINAL bin/ contents stay inside the whitelist and carry the staged shim —
+  // the shipped invariant verified on the directory itself, not merely on the name we
+  // copied. EXTRA_ALLOWED_BIN_ENTRIES are permitted, not required: a per-platform build
+  // stages only its own engine filename, so an absent allowed extra is not a violation.
   const finalEntries = readdirSafe(readdir, binDir).slice().sort();
   const tsgoLeak = finalEntries.filter((f) => /tsgo/i.test(f));
   if (tsgoLeak.length) {
@@ -564,13 +570,12 @@ export function stageShimBinary({
         `after staging — refusing to package.`,
     );
   }
-  const expectedEntries = allowedBinEntries.slice().sort();
   if (
-    finalEntries.length !== expectedEntries.length ||
-    finalEntries.some((entry, i) => entry !== expectedEntries[i])
+    !finalEntries.includes(basename) ||
+    finalEntries.some((entry) => !allowedBinEntries.includes(entry))
   ) {
     throw new Error(
-      `verter-relay-shim packaging: bin/ must contain EXACTLY ${JSON.stringify(expectedEntries)} ` +
+      `verter-relay-shim packaging: bin/ must contain ONLY whitelisted entries ${JSON.stringify(allowedBinEntries)} ` +
         `after staging, found ${JSON.stringify(finalEntries)} — refusing to package.`,
     );
   }
