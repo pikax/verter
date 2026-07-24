@@ -25,7 +25,7 @@ The official VS Code extension for Verter — an experimental Vue compiler and l
 Search for **Verter** in the VS Code Extensions panel, or install from the command line:
 
 ```bash
-code --install-extension verter.verter-vscode
+code --install-extension pikax.verter-vscode
 ```
 
 ### From Source
