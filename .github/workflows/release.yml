@@ -80,6 +80,38 @@ jobs:
           echo "All pre-publish checks passed"
 
   # ---------------------------------------------------------------------------
+  # Test
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview@latest --version
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Rust gate
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: node scripts/gate.mjs
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: JS tests
+        run: pnpm test
+
+  # ---------------------------------------------------------------------------
   # Build native binaries (matrix — for npm platform packages)
   # ---------------------------------------------------------------------------
   build-native:
@@ -415,7 +447,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-crates:
     name: Publish Crates
-    needs: validate
+    needs: [validate, test]
     runs-on: ubuntu-latest
     environment:
       name: crates-io
@@ -462,7 +494,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-npm:
     name: Publish npm
-    needs: [validate, build-native, build-tsc, build-wasm]
+    needs: [validate, test, build-native, build-tsc, build-wasm]
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -722,7 +754,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-vscode:
     name: Publish VS Code Extension
-    needs: [validate, build-lsp, build-native, publish-npm]
+    needs: [validate, test, build-lsp, build-native, publish-npm]
     runs-on: ubuntu-latest
     environment:
       name: vscode-marketplace
