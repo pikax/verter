@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export const DISCOVERY_SCHEMA = "verter.discovery.v1";
-export const VERTER_EXTENSION_ID = "verter.vscode";
+export const VERTER_EXTENSION_ID = "verter.verter-vscode";
 
 export const EXCLUDED_DIR_NAMES = new Set([
   ".git",

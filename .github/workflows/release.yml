@@ -791,7 +791,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: vscode-marketplace
-      url: https://marketplace.visualstudio.com/items?itemName=verter.vscode
+      url: https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4

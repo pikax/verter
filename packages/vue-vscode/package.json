@@ -1,7 +1,7 @@
 {
-  "name": "vscode",
+  "name": "verter-vscode",
   "displayName": "Verter VSCode",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1",
   "private": true,
   "description": "Verter VSCode Extension",
   "categories": [

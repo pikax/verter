@@ -15,7 +15,7 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
   });
 
   test("extension activates successfully", function () {
-    const ext = vscode.extensions.getExtension("verter.vscode");
+    const ext = vscode.extensions.getExtension("verter.verter-vscode");
     expect(ext, "Extension should be found").to.exist;
     expect(ext!.isActive, "Extension should be active").to.be.true;
   });

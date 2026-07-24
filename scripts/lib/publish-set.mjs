@@ -26,11 +26,11 @@ export const PRODUCT_ROOTS = [
   "@verter/unplugin",
   "@verter/nuxt",
   "verter-tsc",
-  "vscode",
+  "verter-vscode",
 ];
 
 /** In the product, but published to the VS Code Marketplace only — never npm. */
-export const MARKETPLACE_ONLY = ["vscode"];
+export const MARKETPLACE_ONLY = ["verter-vscode"];
 
 /** Runtime dependency fields. devDependencies do NOT propagate. */
 const RUNTIME_DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];

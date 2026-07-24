@@ -475,7 +475,7 @@ async function activateExtension(context: ExtensionContext) {
     // descriptions are read from THIS extension's own `verter.typeProvider`
     // contribution, so the picker can never drift from the setting's schema.
     commands.registerCommand("verter.selectTypeProvider", async () => {
-      const schema = extensions.getExtension("verter.vscode")?.packageJSON?.contributes
+      const schema = extensions.getExtension("verter.verter-vscode")?.packageJSON?.contributes
         ?.configuration?.properties?.["verter.typeProvider"] as
         | { enum?: string[]; enumDescriptions?: string[] }
         | undefined;

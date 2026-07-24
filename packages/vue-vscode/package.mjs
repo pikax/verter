@@ -27,7 +27,11 @@ import { execSync } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
 import { stageShimBinary } from "./stage-bin.mjs";
-import { patchWorkspaceRanges, stageRuntimeDependencies } from "./stage-deps.mjs";
+import {
+  discoverWorkspacePackages,
+  patchWorkspaceRanges,
+  stageRuntimeDependencies,
+} from "./stage-deps.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkgPath = path.join(__dirname, "package.json");
@@ -83,8 +87,11 @@ stageRuntimeDependencies({
 console.log("Production dependency graph materialized as real package files");
 
 // --- Step 2: Patch package.json for vsce ---
+// Workspace ranges resolve to each dependency's OWN version, which is independent
+// of the extension version: the VSIX version must be plain semver for the VS Code
+// Marketplace, while the workspace packages carry the monorepo's npm version.
 pkg.vsce.dependencies = true;
-patchWorkspaceRanges(pkg, version);
+patchWorkspaceRanges(pkg, version, discoverWorkspacePackages(repoRoot));
 
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 console.log("package.json patched for vsce (dependencies: true, resolved versions)");

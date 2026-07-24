@@ -39,7 +39,7 @@ import {
 // "provider not ready yet".
 //
 // NOTE: this suite cannot run headless in the agent harness — it requires the
-// VS Code Extension Host (`pnpm --filter vscode test:e2e`). It is wired
+// VS Code Extension Host (`pnpm --filter verter-vscode test:e2e`). It is wired
 // into the e2e matrix and is expected to be exercised there.
 
 /**

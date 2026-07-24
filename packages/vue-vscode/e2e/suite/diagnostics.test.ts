@@ -36,7 +36,7 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
   });
 
   test("extension activates for workspace", async function () {
-    const ext = vscode.extensions.getExtension("verter.vscode");
+    const ext = vscode.extensions.getExtension("verter.verter-vscode");
     expect(ext?.isActive).to.be.true;
   });
 

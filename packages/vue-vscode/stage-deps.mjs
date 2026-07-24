@@ -14,18 +14,39 @@ import path from "node:path";
 
 const DEPENDENCY_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
 
-/** Replace workspace protocol ranges with the release version used by the VSIX. */
-export function patchWorkspaceRanges(manifest, version) {
+/**
+ * Replace workspace protocol ranges with concrete versions.
+ *
+ * Each workspace dependency resolves to ITS OWN version, read from that package
+ * in the workspace. The depending package's version is only a fallback for a
+ * name that is not a workspace package.
+ *
+ * The extension version is deliberately NOT usable as a blanket substitute: the
+ * VSIX version follows the VS Code Marketplace's plain-semver rule (no
+ * prerelease suffix), while the workspace packages carry the monorepo's npm
+ * version (e.g. `0.0.1-beta.2`). Those two are independent, and pinning a
+ * workspace range to the extension version makes vsce's production-tree check
+ * fail with npm ELSPROBLEMS `invalid: <pkg>@<real-version>`.
+ */
+export function patchWorkspaceRanges(manifest, fallbackVersion, workspacePackages) {
   for (const field of DEPENDENCY_FIELDS) {
     const dependencies = manifest[field];
     if (!dependencies) continue;
     for (const [name, range] of Object.entries(dependencies)) {
       if (typeof range === "string" && range.startsWith("workspace:")) {
-        dependencies[name] = version;
+        dependencies[name] = workspaceVersionOf(name, workspacePackages) ?? fallbackVersion;
       }
     }
   }
   return manifest;
+}
+
+/** The on-disk version of a workspace package, or null when it is not one. */
+function workspaceVersionOf(name, workspacePackages) {
+  const packageDir = workspacePackages?.get(name);
+  if (!packageDir) return null;
+  const version = readManifest(packageDir).version;
+  return typeof version === "string" ? version : null;
 }
 
 /**
@@ -81,7 +102,7 @@ function stagePackage({ name, sourceDir, installRoot, workspacePackages, package
 
   const stagedManifest = readManifest(destination);
   if (isWorkspacePackage) {
-    patchWorkspaceRanges(stagedManifest, packageVersion);
+    patchWorkspaceRanges(stagedManifest, packageVersion, workspacePackages);
     writeFileSync(
       path.join(destination, "package.json"),
       `${JSON.stringify(stagedManifest, null, 2)}\n`,
@@ -115,7 +136,8 @@ function stagePackage({ name, sourceDir, installRoot, workspacePackages, package
   }
 }
 
-function discoverWorkspacePackages(workspaceRoot) {
+/** Map every workspace package name to its directory. Discover once, reuse. */
+export function discoverWorkspacePackages(workspaceRoot) {
   const packages = new Map();
   const packagesDir = path.join(workspaceRoot, "packages");
   for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {

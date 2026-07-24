@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 // The packaging helper is JavaScript because it is executed directly by Node
 // from package.mjs. TypeScript validates its public shape at this call site.
 // @ts-expect-error -- stage-deps.mjs intentionally has no generated declaration file.
-import { patchWorkspaceRanges, stageRuntimeDependencies } from "../stage-deps.mjs";
+import {
+  discoverWorkspacePackages,
+  patchWorkspaceRanges,
+  stageRuntimeDependencies,
+} from "../stage-deps.mjs";
 
 const extensionDir = path.resolve(import.meta.dirname, "..");
 const workspaceRoot = path.resolve(extensionDir, "..", "..");
@@ -36,7 +40,11 @@ describe("VSIX runtime dependency staging", () => {
       );
       expect(extensionManifest.dependencies.typescript).toBe("^6.0.3");
       expect(extensionManifest.devDependencies).not.toHaveProperty("typescript");
-      patchWorkspaceRanges(extensionManifest, extensionManifest.version);
+      patchWorkspaceRanges(
+        extensionManifest,
+        extensionManifest.version,
+        discoverWorkspacePackages(workspaceRoot),
+      );
       delete extensionManifest.devDependencies;
       writeFileSync(
         path.join(stageDir, "package.json"),

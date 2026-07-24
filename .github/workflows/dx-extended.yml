@@ -57,7 +57,7 @@ jobs:
       - name: Build DX harness
         run: pnpm --filter "@verter/dx-harness..." build
       - name: Extension-host DX unit suite
-        run: pnpm --filter vscode test:e2e:dx:unit
+        run: pnpm --filter verter-vscode test:e2e:dx:unit
 
   # The full raw-LSP corpus sweep: drives the REAL verter-lsp over EVERY committed
   # hermetic scenario on materialized workspaces, differences each DX signal against
