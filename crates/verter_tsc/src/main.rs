@@ -50,8 +50,8 @@ use clap::Parser;
                   The --noEmit typecheck path drives tsgo in-memory via --api (no temp files);\n\
                   the --declaration emit path runs tsgo --project over temp files.\n\n\
                   Engine: tsgo STABLE 7.0.x only (>=7.0.2, <7.1.0), resolved in order via\n\
-                  --tsgo-bin, VERTER_TSGO_BIN, PATH, project-local node_modules, the update\n\
-                  cache, or the bundled sidecar. Install one: npm install -D typescript@7.0.2"
+                  --tsgo-bin, VERTER_TSGO_BIN, PATH, or project-local node_modules.\n\
+                  Install one: npm install -D typescript@7.0.2"
 )]
 struct Cli {
     /// Path to tsconfig.json [default: tsconfig.json]
@@ -226,19 +226,28 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     // ── DISCRIMINATING (H11): the public help text must describe the SHIPPED
-    //    toolchain policy (stable 7.0.x window, the tiered resolver with
-    //    --tsgo-bin first) and must NOT point users at rejected channels
-    //    (native-preview, npx, a tsc fallback). ────────────────────────────────
+    //    toolchain policy (stable 7.0.x window, the --tsgo-bin → env → PATH →
+    //    project-local precedence) and must NOT point users at rejected channels
+    //    (native-preview, npx, a tsc fallback) or at tiers that can never succeed
+    //    for this binary (no downloader writes the update cache; verter-tsc
+    //    ships no bundled sidecar). ────────────────────────────────────────────
     #[test]
     fn help_text_matches_the_shipped_toolchain_policy() {
         let help = Cli::command().render_long_help().to_string();
-        for rejected in ["native-preview", "npx", "tsc fallback", "(or tsc)"] {
+        for rejected in [
+            "native-preview",
+            "npx",
+            "tsc fallback",
+            "(or tsc)",
+            "update cache",
+            "bundled",
+        ] {
             assert!(
                 !help.contains(rejected),
                 "the help text must not reference the rejected channel `{rejected}`:\n{help}"
             );
         }
-        for expected in ["7.0", "VERTER_TSGO_BIN", "--tsgo-bin", "bundled"] {
+        for expected in ["7.0", "VERTER_TSGO_BIN", "--tsgo-bin"] {
             assert!(
                 help.contains(expected),
                 "the help text must describe the shipped policy (`{expected}`):\n{help}"

@@ -603,10 +603,14 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
 /// through the resolver's env-override channel with every lower tier DISABLED:
 /// an explicitly-named engine that fails validation is a hard user error
 /// naming the flag, never a silent fall-through to PATH/node_modules.
+///
 /// Otherwise the first WORKING candidate across `VERTER_TSGO_BIN` → PATH →
 /// project-local ancestor `node_modules` wins (bounded version probe + support
-/// policy + capability smoke per candidate). A resolution failure carries the
-/// actionable tier report.
+/// policy + capability smoke per candidate). A resolution failure is rendered
+/// by [`render_resolve_failure`] into an actionable message that requests the
+/// install — the update-cache and bundled-sidecar tiers the shared resolver
+/// knows about can never succeed for verter-tsc (no downloader exists and no
+/// sidecar is shipped), so the message does not advertise them.
 ///
 /// This is the ONLY resolution path verter-tsc uses — BOTH the in-memory
 /// typecheck stage and the declaration/emit stage resolve through it (a
@@ -627,7 +631,7 @@ fn resolve_tsgo_engine(
     );
     resolve_tsgo_engine_for(&request)
         .map(|resolution| resolution.path)
-        .map_err(|e| e.to_string())
+        .map_err(|e| render_resolve_failure(&e))
 }
 
 /// Validate an explicitly-named `--tsgo-bin` engine and return it — or a hard
@@ -687,6 +691,49 @@ fn resolve_explicit_engine(
     }
 }
 
+/// Render a resolution failure for verter-tsc users. The shared resolver's own
+/// report lists every tier it walked — including the update cache and the
+/// bundled sidecar, which can never succeed here (nothing downloads into the
+/// cache and no sidecar ships with verter-tsc) — so this renders the
+/// actionable subset instead: what was searched, every candidate that was
+/// found but rejected (e.g. a below-floor tsgo), and the install request as
+/// the primary next step.
+fn render_resolve_failure(error: &verter_tsgo_api::toolchain::discovery::ResolveError) -> String {
+    use verter_tsgo_api::toolchain::discovery::{ResolveError, ENV_OVERRIDE_VAR};
+    use verter_tsgo_api::toolchain::policy::{BUNDLED_TSGO_VERSION, SUPPORTED_TSGO_RANGE_LABEL};
+
+    match error {
+        ResolveError::NoUsableCandidate {
+            rejections,
+            notes,
+            requirement,
+        } => {
+            let mut msg = format!(
+                "no supported tsgo engine found for the `{requirement}` surface.\n\
+                 Verter supports tsgo (TypeScript 7 native) stable {SUPPORTED_TSGO_RANGE_LABEL}.\n\
+                 searched: {ENV_OVERRIDE_VAR}, PATH, project-local node_modules"
+            );
+            for note in notes {
+                msg.push_str(&format!("\nnote: {note}"));
+            }
+            for rejection in rejections {
+                msg.push_str(&format!("\n  - {rejection}"));
+            }
+            msg.push_str(&format!(
+                "\ninstall it: npm install -D typescript@{BUNDLED_TSGO_VERSION} (or any newer \
+                 7.0.x) — tsgo ships with the TypeScript 7 package and is then found via \
+                 project-local node_modules.\n\
+                 for an engine in a non-standard location, use --tsgo-bin <PATH> or set \
+                 {ENV_OVERRIDE_VAR}."
+            ));
+            msg
+        }
+        // A present-but-invalid bundled sidecar keeps the shared product-
+        // integrity message (reinstall directive) verbatim.
+        other => other.to_string(),
+    }
+}
+
 /// The injectable seam of [`resolve_tsgo_engine`]: the full capability-validated
 /// resolution over an EXPLICIT request (tests drive it without touching the
 /// process environment).
@@ -736,7 +783,7 @@ fn run_inmemory_typecheck(
         Ok(p) => strip_unc_prefix(&p),
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
-                "verter-tsc: {e}. (There is no tsc fallback for the typecheck path.)"
+                "verter-tsc: {e}\n(There is no tsc fallback for the typecheck path.)"
             )));
         }
     };
@@ -5429,7 +5476,7 @@ const props = defineProps<{ msg: string }>()
         );
     }
 
-    // ── --tsgo-bin (explicit engine) ─────────────────────────────────────────
+    // ── --tsgo-bin (explicit engine) + the no-engine failure message ─────────
 
     #[test]
     fn explicit_tsgo_bin_nonexistent_is_a_flag_named_error() {
@@ -5477,5 +5524,61 @@ const props = defineProps<{ msg: string }>()
             err.contains("--tsgo-bin"),
             "the validation failure must name the flag: {err}"
         );
+    }
+
+    #[test]
+    fn no_engine_failure_requests_the_install_without_unreachable_tiers() {
+        use verter_tsgo_api::toolchain::discovery::{
+            Candidate, CandidateRejection, Provenance, ResolveError,
+        };
+        use verter_tsgo_api::toolchain::policy::{PolicyRejection, TsgoVersion};
+        use verter_tsgo_api::toolchain::validation::{Capability, RejectionReason};
+
+        let error = ResolveError::NoUsableCandidate {
+            rejections: vec![CandidateRejection {
+                candidate: Candidate {
+                    path: PathBuf::from("/usr/local/bin/tsgo"),
+                    provenance: Provenance::SharedPath,
+                },
+                reason: RejectionReason::PolicyRejected {
+                    version: "7.0.1".to_string(),
+                    rejection: PolicyRejection::BelowSupportedFloor {
+                        version: TsgoVersion::new(7, 0, 1),
+                    },
+                },
+            }],
+            notes: Vec::new(),
+            requirement: Capability::Api,
+        };
+        let msg = render_resolve_failure(&error);
+
+        // The primary, actionable next step is the install request…
+        assert!(
+            msg.contains("npm install -D typescript@7.0.2"),
+            "must request the install: {msg}"
+        );
+        // …with the flag and the env var as alternatives…
+        assert!(msg.contains("--tsgo-bin"), "must mention the flag: {msg}");
+        assert!(
+            msg.contains("VERTER_TSGO_BIN"),
+            "must mention the env var: {msg}"
+        );
+        // …accurate supported-range facts…
+        assert!(
+            msg.contains(">=7.0.2, <7.1.0"),
+            "must state the supported range: {msg}"
+        );
+        // …and the genuinely useful below-floor diagnostic is retained.
+        assert!(
+            msg.contains("7.0.1"),
+            "must keep the found-but-below-floor detail: {msg}"
+        );
+        // Tiers that can never succeed for verter-tsc are not advertised.
+        for unreachable in ["update cache", "bundled sidecar"] {
+            assert!(
+                !msg.contains(unreachable),
+                "must not advertise the unreachable `{unreachable}` tier: {msg}"
+            );
+        }
     }
 }
