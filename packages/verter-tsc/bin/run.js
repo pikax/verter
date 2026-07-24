@@ -145,8 +145,29 @@ function findBinary() {
   return binName;
 }
 
+/**
+ * Ensure a resolved binary path is executable before spawning it.
+ *
+ * npm normalises shipped files to 0644 at pack/install time for any file not
+ * declared in a package's `bin` field, so the platform package's binary
+ * (`@verter/tsc-<target>/verter-tsc`, shipped via `files: ["verter-tsc"]`)
+ * loses its exec bit after a real `npm install` and spawning it fails with
+ * EACCES. Restore the bit here instead of fighting npm's mode normalisation.
+ * Best-effort: a read-only install or an already-correct mode must not crash
+ * the launcher — spawn will surface any real failure. No-op on Windows.
+ */
+function ensureExecutable(binary) {
+  if (process.platform === "win32" || !path.isAbsolute(binary)) return;
+  try {
+    fs.chmodSync(binary, 0o755);
+  } catch {
+    // Read-only filesystem / permissions — let spawn report the real error.
+  }
+}
+
 function main() {
   const binary = findBinary();
+  ensureExecutable(binary);
   const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });
 
   if (result.error) {
