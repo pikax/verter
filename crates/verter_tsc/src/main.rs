@@ -6,14 +6,17 @@
 //!
 //! # Engine resolution
 //!
-//! Both paths resolve the engine through the SAME 4-tier, capability-validated
-//! toolchain resolver (`verter_tsgo_api::toolchain::discovery`): the first
-//! WORKING candidate across `VERTER_TSGO_BIN` → PATH → project-local ancestor
-//! `node_modules` → the temp update cache → the bundled sidecar wins (bounded
-//! version probe + support policy + a capability smoke per candidate). Verter
-//! supports tsgo STABLE `>=7.0.2, <7.1.0` only — RCs, nightlies, and newer
-//! minors are refused — and there is no fallback to the legacy TypeScript
-//! compiler.
+//! Both paths resolve the engine through the SAME capability-validated
+//! toolchain resolver (`verter_tsgo_api::toolchain::discovery`). Precedence,
+//! highest first: `--tsgo-bin` → `VERTER_TSGO_BIN` → PATH → project-local
+//! ancestor `node_modules` (bounded version probe + support policy + a
+//! capability smoke per candidate). An explicitly-named `--tsgo-bin` engine is
+//! validated like any other candidate and a failure is a hard user error —
+//! never a silent fall-through to a lower tier. (The shared resolver also
+//! knows update-cache and bundled-sidecar tiers, but verter-tsc ships
+//! neither, so they can never win here.) Verter supports tsgo STABLE
+//! `>=7.0.2, <7.1.0` only — RCs, nightlies, and newer minors are refused —
+//! and there is no fallback to the legacy TypeScript compiler.
 //!
 //! The `--noEmit` TYPECHECK path drives the gated tsgo `--api` engine IN-MEMORY
 //! (the generated carriers are fed as an in-memory overlay, no temp files).
@@ -47,13 +50,20 @@ use clap::Parser;
                   The --noEmit typecheck path drives tsgo in-memory via --api (no temp files);\n\
                   the --declaration emit path runs tsgo --project over temp files.\n\n\
                   Engine: tsgo STABLE 7.0.x only (>=7.0.2, <7.1.0), resolved in order via\n\
-                  VERTER_TSGO_BIN, PATH, project-local node_modules, the update cache,\n\
-                  or the bundled sidecar. Install one: npm install -D typescript@7.0.2"
+                  --tsgo-bin, VERTER_TSGO_BIN, PATH, project-local node_modules, the update\n\
+                  cache, or the bundled sidecar. Install one: npm install -D typescript@7.0.2"
 )]
 struct Cli {
     /// Path to tsconfig.json [default: tsconfig.json]
     #[arg(short = 'p', long = "project", value_name = "PATH")]
     project: Option<PathBuf>,
+
+    /// Path to a specific tsgo engine binary. Takes precedence over
+    /// VERTER_TSGO_BIN, PATH, and project-local node_modules. Must be a
+    /// supported tsgo (stable >=7.0.2, <7.1.0) — an unusable path is a hard
+    /// error, never a silent fall-through.
+    #[arg(long = "tsgo-bin", value_name = "PATH")]
+    tsgo_bin: Option<PathBuf>,
 
     /// Build mode — type-check a solution-style tsconfig (tsc -b compat).
     /// Accepts optional tsconfig paths as positional arguments.
@@ -169,7 +179,7 @@ fn main() {
     // into an empty diagnostic set that exits 0 (a broken engine masquerading as a
     // clean typecheck). Exit 2 distinguishes this infrastructure failure from a
     // type-error run (exit 1) and a config-load failure (also exit 2).
-    let result = match checker::run(&config, &tsconfig_path, &emit_opts) {
+    let result = match checker::run(&config, &tsconfig_path, &emit_opts, cli.tsgo_bin.as_deref()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
@@ -216,9 +226,9 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     // ── DISCRIMINATING (H11): the public help text must describe the SHIPPED
-    //    toolchain policy (stable 7.0.x window, the 4-tier resolver) and must
-    //    NOT point users at rejected channels (native-preview, npx, a tsc
-    //    fallback). ────────────────────────────────────────────────────────────
+    //    toolchain policy (stable 7.0.x window, the tiered resolver with
+    //    --tsgo-bin first) and must NOT point users at rejected channels
+    //    (native-preview, npx, a tsc fallback). ────────────────────────────────
     #[test]
     fn help_text_matches_the_shipped_toolchain_policy() {
         let help = Cli::command().render_long_help().to_string();
@@ -228,12 +238,36 @@ mod tests {
                 "the help text must not reference the rejected channel `{rejected}`:\n{help}"
             );
         }
-        for expected in ["7.0", "VERTER_TSGO_BIN", "bundled"] {
+        for expected in ["7.0", "VERTER_TSGO_BIN", "--tsgo-bin", "bundled"] {
             assert!(
                 help.contains(expected),
                 "the help text must describe the shipped policy (`{expected}`):\n{help}"
             );
         }
+    }
+
+    #[test]
+    fn cli_accepts_tsgo_bin() {
+        let cli = Cli::try_parse_from([
+            "verter-tsc",
+            "--noEmit",
+            "-p",
+            "tsconfig.json",
+            "--tsgo-bin",
+            "/opt/tsgo/bin/tsgo",
+        ]);
+        assert!(cli.is_ok(), "should accept --tsgo-bin: {:?}", cli.err());
+        let cli = cli.unwrap();
+        assert_eq!(
+            cli.tsgo_bin.as_deref(),
+            Some(std::path::Path::new("/opt/tsgo/bin/tsgo"))
+        );
+    }
+
+    #[test]
+    fn cli_tsgo_bin_defaults_to_none() {
+        let cli = Cli::try_parse_from(["verter-tsc", "--noEmit"]).expect("should parse");
+        assert!(cli.tsgo_bin.is_none());
     }
 
     #[test]

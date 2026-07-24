@@ -444,6 +444,7 @@ pub fn run(
     config: &TsConfig,
     tsconfig_path: &Path,
     opts: &EmitOptions,
+    tsgo_bin: Option<&Path>,
 ) -> Result<CheckResult, api_check::TypecheckError> {
     if config.vue_files.is_empty() {
         return Ok(CheckResult {
@@ -484,7 +485,7 @@ pub fn run(
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
     // A hard failure here (engine absent / connect / protocol) aborts the whole run
     // with `Err` — we never proceed to emit against a compromised typecheck.
-    let in_memory = run_inmemory_typecheck(&host, config, tsconfig_path)?;
+    let in_memory = run_inmemory_typecheck(&host, config, tsconfig_path, tsgo_bin)?;
     let mut diagnostics = in_memory.value;
     let public_api_outcomes = in_memory.outcomes;
     let mut public_api_failures = in_memory.failures;
@@ -494,7 +495,7 @@ pub fn run(
     //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
         let (decl_diagnostics, emitted, declaration_failures) =
-            run_declaration_stage(&host, config, tsconfig_path, opts)?;
+            run_declaration_stage(&host, config, tsconfig_path, opts, tsgo_bin)?;
         diagnostics.extend(decl_diagnostics);
         for failure in declaration_failures {
             if !public_api_failures.iter().any(|existing| {
@@ -595,12 +596,17 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     ]
 }
 
-/// Resolve the gated tsgo engine for verter-tsc via the 4-tier toolchain
-/// resolver ([`verter_tsgo_api::toolchain::discovery`]): shared
-/// (`VERTER_TSGO_BIN`, then PATH) → project-local ancestor `node_modules` →
-/// temp update cache → bundled sidecar; the first WORKING candidate wins
-/// (bounded version probe + support policy + capability smoke per candidate).
-/// A resolution failure carries the actionable tier report.
+/// Resolve the gated tsgo engine for verter-tsc via the capability-validated
+/// toolchain resolver ([`verter_tsgo_api::toolchain::discovery`]).
+///
+/// When `explicit` is `Some` (the `--tsgo-bin` CLI flag), that path is routed
+/// through the resolver's env-override channel with every lower tier DISABLED:
+/// an explicitly-named engine that fails validation is a hard user error
+/// naming the flag, never a silent fall-through to PATH/node_modules.
+/// Otherwise the first WORKING candidate across `VERTER_TSGO_BIN` → PATH →
+/// project-local ancestor `node_modules` wins (bounded version probe + support
+/// policy + capability smoke per candidate). A resolution failure carries the
+/// actionable tier report.
 ///
 /// This is the ONLY resolution path verter-tsc uses — BOTH the in-memory
 /// typecheck stage and the declaration/emit stage resolve through it (a
@@ -610,12 +616,75 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
 fn resolve_tsgo_engine(
     root: &Path,
     requirement: verter_tsgo_api::toolchain::validation::Capability,
-) -> Result<PathBuf, verter_tsgo_api::toolchain::discovery::ResolveError> {
+    explicit: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if let Some(flag_path) = explicit {
+        return resolve_explicit_engine(flag_path, requirement);
+    }
     let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
         requirement,
         Some(root.to_path_buf()),
     );
-    resolve_tsgo_engine_for(&request).map(|resolution| resolution.path)
+    resolve_tsgo_engine_for(&request)
+        .map(|resolution| resolution.path)
+        .map_err(|e| e.to_string())
+}
+
+/// Validate an explicitly-named `--tsgo-bin` engine and return it — or a hard
+/// error naming the flag. The path is routed through the shared resolver's
+/// env-override channel (so the SAME bounded probe + policy + capability smoke
+/// validates it) with all lower tiers disabled, which is what guarantees an
+/// unusable flag value can never fall through to a lower tier.
+fn resolve_explicit_engine(
+    flag_path: &Path,
+    requirement: verter_tsgo_api::toolchain::validation::Capability,
+) -> Result<PathBuf, String> {
+    use verter_tsgo_api::toolchain::discovery::ResolveError;
+    use verter_tsgo_api::toolchain::policy::SUPPORTED_TSGO_RANGE_LABEL;
+
+    if !flag_path.exists() {
+        return Err(format!(
+            "--tsgo-bin points at {} which does not exist",
+            flag_path.display()
+        ));
+    }
+    if !flag_path.is_file() {
+        return Err(format!(
+            "--tsgo-bin points at {} which is not a regular file (a tsgo engine binary \
+             is expected)",
+            flag_path.display()
+        ));
+    }
+    let mut request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+        requirement,
+        None,
+    );
+    request.env_override = Some(flag_path.to_path_buf());
+    request.path_entries = Vec::new();
+    request.cache_root = None;
+    request.host_exe = None;
+    match resolve_tsgo_engine_for(&request) {
+        Ok(resolution) => Ok(resolution.path),
+        Err(ResolveError::NoUsableCandidate {
+            rejections, notes, ..
+        }) => {
+            let mut msg = format!(
+                "--tsgo-bin engine at {} is not a supported tsgo (Verter supports tsgo \
+                 (TypeScript 7 native) stable {SUPPORTED_TSGO_RANGE_LABEL})",
+                flag_path.display()
+            );
+            for note in &notes {
+                msg.push_str(&format!("\nnote: {note}"));
+            }
+            for rejection in &rejections {
+                msg.push_str(&format!("\n  - {rejection}"));
+            }
+            Err(msg)
+        }
+        // host_exe is None above, so no bundled sidecar exists and this arm is
+        // unreachable in practice; render it faithfully if that ever changes.
+        Err(other) => Err(other.to_string()),
+    }
 }
 
 /// The injectable seam of [`resolve_tsgo_engine`]: the full capability-validated
@@ -650,6 +719,7 @@ fn run_inmemory_typecheck(
     host: &VerterHost,
     config: &TsConfig,
     tsconfig_path: &Path,
+    tsgo_bin: Option<&Path>,
 ) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
     let root = strip_unc_prefix(&config.root_dir);
 
@@ -661,6 +731,7 @@ fn run_inmemory_typecheck(
     let engine = match resolve_tsgo_engine(
         &root,
         verter_tsgo_api::toolchain::validation::Capability::Api,
+        tsgo_bin,
     ) {
         Ok(p) => strip_unc_prefix(&p),
         Err(e) => {
@@ -782,6 +853,7 @@ fn run_declaration_stage(
     config: &TsConfig,
     tsconfig_path: &Path,
     opts: &EmitOptions,
+    tsgo_bin: Option<&Path>,
 ) -> Result<DeclarationStageResult, api_check::TypecheckError> {
     // The temp dir MUST be inside the project root so tsc resolves node_modules
     // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
@@ -842,6 +914,7 @@ fn run_declaration_stage(
     let checker_bin = match resolve_tsgo_engine(
         &root,
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
+        tsgo_bin,
     ) {
         Ok(path) => {
             eprintln!(
@@ -2823,7 +2896,7 @@ exit 1
             });
         }
         let (diagnostics, emitted, failures) =
-            run_declaration_stage(&host, config, tsconfig_path, opts)
+            run_declaration_stage(&host, config, tsconfig_path, opts, None)
                 .expect("the declaration stage must run against the validating mock checker");
         assert!(
             failures.is_empty(),
@@ -5353,6 +5426,56 @@ const props = defineProps<{ msg: string }>()
         assert!(
             !emitted_files.is_empty(),
             "emitted_files should not be empty when using tsconfig-sourced output dir"
+        );
+    }
+
+    // ── --tsgo-bin (explicit engine) ─────────────────────────────────────────
+
+    #[test]
+    fn explicit_tsgo_bin_nonexistent_is_a_flag_named_error() {
+        let err = resolve_tsgo_engine(
+            Path::new("."),
+            verter_tsgo_api::toolchain::validation::Capability::Api,
+            Some(Path::new("/nonexistent/tsgo")),
+        )
+        .expect_err("a nonexistent --tsgo-bin must be a hard error, never a fall-through");
+        assert!(
+            err.contains("--tsgo-bin") && err.contains("does not exist"),
+            "the error must name the flag and the missing path: {err}"
+        );
+    }
+
+    #[test]
+    fn explicit_tsgo_bin_directory_is_a_flag_named_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let err = resolve_tsgo_engine(
+            Path::new("."),
+            verter_tsgo_api::toolchain::validation::Capability::Api,
+            Some(dir.path()),
+        )
+        .expect_err("a directory passed to --tsgo-bin must be a hard error");
+        assert!(
+            err.contains("--tsgo-bin") && err.contains("not a regular file"),
+            "the error must name the flag and reject the non-file path: {err}"
+        );
+    }
+
+    #[test]
+    fn explicit_tsgo_bin_rejects_an_unsupported_engine_without_falling_through() {
+        // A real file that is NOT a supported tsgo: validation must fail and the
+        // error must name the flag — never silently resolve a lower-tier engine.
+        let dir = tempfile::TempDir::new().unwrap();
+        let fake = dir.path().join("tsgo");
+        fs::write(&fake, "#!/bin/sh\necho 'not a tsgo'\n").unwrap();
+        let err = resolve_tsgo_engine(
+            Path::new("."),
+            verter_tsgo_api::toolchain::validation::Capability::Api,
+            Some(&fake),
+        )
+        .expect_err("an unusable --tsgo-bin engine must be a hard error");
+        assert!(
+            err.contains("--tsgo-bin"),
+            "the validation failure must name the flag: {err}"
         );
     }
 }
