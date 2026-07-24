@@ -88,6 +88,18 @@ validate
 3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`; the publish set is derived from the product dependency closure by `scripts/lib/publish-set.mjs` (marketplace-only packages such as `verter-vscode` are excluded)
 4. **GitHub Release** -- created with changelog (via git-cliff) and all binary assets
 
+### Release Tag (`release-tag.yml`)
+
+Triggered on every push to `main`. Turns a version commit into the tag that triggers `release.yml`:
+
+1. Exits cleanly unless the HEAD commit message matches `release: v<version>`
+2. Reads the workspace version from the tree and fails if it disagrees with the message
+3. Exits cleanly if the tag `v<version>` already exists (idempotency)
+4. Verifies the full release surface (`scripts/set-version.mjs --check` and `scripts/check-versions.mjs`)
+5. Creates and pushes the annotated tag `v<version>`
+
+See [Publishing a Release](#publishing-a-release) for the full flow.
+
 ### Nightly (`nightly.yml`)
 
 Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/playground/**` change.
@@ -118,11 +130,36 @@ Pre-releases are published with `--tag <channel>` to avoid polluting the `latest
 
 ### Publishing a Release
 
-1. Update versions in relevant `package.json` files and `Cargo.toml`
-2. Commit: `release(all): v0.0.1-beta.1`
-3. Tag: `git tag v0.0.1-beta.1`
-4. Push: `git push origin v0.0.1-beta.1`
-5. The release workflow handles everything else
+Releases start from a local version bump and end with an automatic tag:
+
+1. Run `pnpm bump`. The script computes the next version from the conventional
+   commits since the last `v*` tag (via `git-cliff --bumped-version` when
+   git-cliff is installed, otherwise from the commit types directly: `feat` ->
+   minor, `fix`/`perf` -> patch, breaking changes -> major; a pre-release stays
+   in its channel and increments its counter). Overrides: `pnpm bump -- <version>`
+   for an explicit version, `pnpm bump -- --prerelease <alpha|beta|rc>` for a
+   pre-release channel, `pnpm bump -- --dry-run` to print without changing
+   anything.
+2. `pnpm bump` writes the version across the whole release surface with
+   `scripts/set-version.mjs`: the `Cargo.toml` workspace version (which every
+   crate inherits), `Cargo.lock`, and every package in the npm publish set —
+   the publishable `packages/*` packages plus the platform sub-packages under
+   `packages/{native,verter-tsc}/npm/*`. The target set comes from
+   `scripts/lib/publish-set.mjs`, the same authority the release workflow
+   publishes from; private packages are never touched.
+3. `pnpm bump` requires `scripts/check-versions.mjs` to pass, refuses to run
+   on a dirty tree, and refuses a version that is not greater than the current
+   one. On success it creates exactly one commit, `release: v<version>`. It
+   never creates a tag and never pushes.
+4. Review the commit and push it to `main`.
+5. The `release-tag.yml` workflow detects the version commit on `main` — the
+   commit message must match `release: v<version>` and agree with the
+   workspace version in the tree, and the tag must not exist yet. It re-verifies
+   the whole surface (`set-version.mjs --check` and `check-versions.mjs`), then
+   creates and pushes the annotated tag `v<version>`. For any other commit —
+   including the CHANGELOG commit the release workflow pushes — it is a no-op.
+6. The tag push triggers the `release.yml` workflow, which publishes
+   everything.
 
 ### Version Checking
 
