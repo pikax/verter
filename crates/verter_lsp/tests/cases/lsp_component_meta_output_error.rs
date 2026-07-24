@@ -38,6 +38,7 @@ fn build_test_server(host: Arc<VerterHost>) -> LspService<VerterLanguageServer> 
                 type_provider_kind: TypeProviderKind::Tsserver,
                 mcp_port: None,
                 type_provider_reason: None,
+                type_provider_advisory: None,
                 suppress_imported_carrier_prewarm: false,
             },
         )
