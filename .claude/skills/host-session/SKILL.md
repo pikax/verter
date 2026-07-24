@@ -120,13 +120,16 @@ Both TSGO and tsserver implement `TypeProvider`. Methods: hover, completions, di
 
 ### Provider Selection (`main.rs`)
 
-CLI arg `--type-provider=auto|tsgo|tsserver|off` (from VS Code `verter.typeProvider` setting):
+CLI arg `--type-provider=auto|shared-tsgo|tsgo|tsserver|extension|off` (from VS Code `verter.typeProvider` setting):
 
-- **auto**: detect TS version in node_modules -- TS 5.x/6.x -> tsserver + recommend TSGO; else try TSGO
-- **tsgo/tsserver**: explicit, no fallback
+- **auto**: the managed fallback is CAPABILITY-driven (`probe_managed_engine` + `choose_managed_engine`): a supported tsgo (stable `>=7.0.2, <7.1.0`) wins; otherwise the workspace tsserver serves; `None` only when neither is obtainable. The lazy managed activation applies the same order at demand time (a candidate that fails validation — e.g. `VERTER_TSGO_BIN`/`PATH` naming a TypeScript 5.x/6.x `tsc` — falls through to tsserver, and the client is sent an updated `$/verter/typeProviderStatus`).
+- **tsgo**: explicit managed tsgo; falls back to the workspace tsserver when no supported tsgo validates, `None` only when tsserver is also unavailable.
+- **tsserver**: explicit tsserver; a TS7+ install reclassifies to the managed tsgo route (the native family is never served over the Node protocol).
 - **off**: verter-only mode
 
 Only one provider runs at a time. Provider PID is sent to the extension via `$/verter/typeProviderStarted` notification for orphan cleanup.
+
+**tsserver serving tiers** (floors live in ONE place — `verter_type_runtime::discovery`: `TSSERVER_SUPPORTED_FLOOR`/`TSSERVER_CURRENT_MAJOR`/`tsserver_serving_tier`/`tsserver_serving_advisory`): TypeScript `>=6` is served silently; `>=5.8, <6` is served WITH a one-time upgrade warning (TypeScript 6 or 7; 7 enables the native tsgo engine) delivered via `LspConfig.type_provider_advisory` and shown in `initialized()`; `<5.8` is served best-effort with a below-floor warning. A TypeScript 5.x/6.x `tsc` probed during tsgo resolution classifies as `RejectionReason::NotTsgoEngine` (the tsserver family), never as a below-floor tsgo.
 
 ### LSP Features (`features/`)
 
