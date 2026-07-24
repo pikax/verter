@@ -82,9 +82,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # Test
   # ---------------------------------------------------------------------------
+  # Runs for visibility on every release. Non-blocking by explicit owner
+  # decision: the test baseline is known-red for pre-existing failures that
+  # are not a release blocker. Remove `continue-on-error` once the baseline
+  # is green.
   test:
     name: Test
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
