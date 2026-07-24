@@ -24,15 +24,15 @@ pnpm add @verter/component-meta
 Use the root package when you want a pooled native runtime and direct project/session control.
 
 ```ts
-import { openMetaProject } from "@verter/component-meta";
+import { openComponentMetaSession } from "@verter/component-meta";
 
-const project = await openMetaProject({
+const session = await openComponentMetaSession({
   root: ".",
   tsconfig: "./tsconfig.json",
 });
 
 try {
-  const meta = await project.getComponentMeta("./src/MyButton.vue");
+  const meta = await session.getComponentMeta("./src/MyButton.vue");
 
   console.log(meta.props);
   console.log(meta.events);
@@ -48,20 +48,20 @@ try {
   console.log(meta._verter?.styles);
   console.log(meta._verter?.flags);
 } finally {
-  project.close();
+  session.close();
 }
 ```
 
-### MetaProject API
+### ComponentMetaSession API
 
-- `openMetaProject(config)`: open or reuse a pooled native runtime
-- `project.getComponentMeta(filePath)`: get metadata for a component
-- `project.updateFile(filePath, source)`: apply an in-memory overlay
-- `project.deleteFile(filePath)`: delete an in-memory overlay file
+- `openComponentMetaSession(config)`: open or reuse a pooled native runtime
+- `session.getComponentMeta(filePath)`: get metadata for a component
+- `session.updateFile(filePath, source)`: apply an in-memory overlay
+- `session.deleteFile(filePath)`: delete an in-memory overlay file
 - `project.reload()`: re-read touched files from disk
 - `project.clearCaches()`: clear host/runtime caches
-- `project.close()`: close the session
-- `evictMetaProject(config)`: evict a pooled engine
+- `session.close()`: close the session
+- `evictComponentMetaSession(config)`: evict a pooled engine
 - `shutdownMetaRuntime()`: stop all pooled engines
 
 ## Compat API

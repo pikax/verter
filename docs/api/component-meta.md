@@ -23,32 +23,32 @@ pnpm add @verter/component-meta
 Use the root package for first-class metadata access.
 
 ```ts
-import { openMetaProject } from "@verter/component-meta";
+import { openComponentMetaSession } from "@verter/component-meta";
 
-const project = await openMetaProject({
+const session = await openComponentMetaSession({
   root: ".",
   tsconfig: "./tsconfig.json",
 });
 
 try {
-  const meta = await project.getComponentMeta("./src/MyButton.vue");
+  const meta = await session.getComponentMeta("./src/MyButton.vue");
   console.log(meta.props);
   console.log(meta.events);
   console.log(meta.slots);
   console.log(meta._verter?.styles);
 } finally {
-  project.close();
+  session.close();
 }
 ```
 
 ### Root exports
 
-- `openMetaProject(config)`
-- `MetaProject`
-- `evictMetaProject(config)`
+- `openComponentMetaSession(config)`
+- `ComponentMetaSession`
+- `evictComponentMetaSession(config)`
 - `shutdownMetaRuntime()`
 
-### `MetaProject`
+### `ComponentMetaSession`
 
 - `getComponentMeta(filePath)`
 - `getExportNames(filePath)`
