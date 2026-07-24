@@ -400,8 +400,12 @@ pub enum TypeProviderTopology {
     SharedTsgo,
     /// A tsgo process Verter spawned and owns.
     ManagedTsgo,
-    /// A Node tsserver Verter spawned and owns, from the workspace TypeScript.
-    WorkspaceTsserver,
+    /// Node tsservers Verter spawned and owns — ONE per owning configured
+    /// project, each started from THAT project's own TypeScript install. A
+    /// monorepo whose packages pin different TypeScript versions is served by
+    /// several engines under this one topology; the engine for a given file is
+    /// resolved per operation from its owning tsconfig.
+    ProjectTsserver,
     /// The editor's own tsserver, extended by Verter's contributed plugin.
     EditorTsserver,
     /// A TypeScript language service hosted inside the extension process.
@@ -421,7 +425,7 @@ impl TypeProviderTopology {
     pub fn implied_by(kind: TypeProviderKind) -> Self {
         match kind {
             TypeProviderKind::Tsgo => TypeProviderTopology::ManagedTsgo,
-            TypeProviderKind::Tsserver => TypeProviderTopology::WorkspaceTsserver,
+            TypeProviderKind::Tsserver => TypeProviderTopology::ProjectTsserver,
             TypeProviderKind::EditorTsserver => TypeProviderTopology::EditorTsserver,
             TypeProviderKind::None => TypeProviderTopology::None,
         }
@@ -433,7 +437,7 @@ impl TypeProviderTopology {
         match self {
             TypeProviderTopology::SharedTsgo => "shared-tsgo",
             TypeProviderTopology::ManagedTsgo => "managed-tsgo",
-            TypeProviderTopology::WorkspaceTsserver => "workspace-tsserver",
+            TypeProviderTopology::ProjectTsserver => "project-tsserver",
             TypeProviderTopology::EditorTsserver => "editor-tsserver",
             TypeProviderTopology::ExtensionHosted => "extension-hosted",
             TypeProviderTopology::None => "none",

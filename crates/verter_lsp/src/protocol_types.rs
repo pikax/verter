@@ -142,7 +142,7 @@ pub struct TypeProviderStatusParams {
     /// this alone cannot identify the serving engine — see `topology`.
     pub kind: String,
     /// WHICH engine is serving and who owns it: "shared-tsgo", "managed-tsgo",
-    /// "workspace-tsserver", "editor-tsserver", "extension-hosted", or "none".
+    /// "project-tsserver", "editor-tsserver", "extension-hosted", or "none".
     ///
     /// The status surface must name the topology, not the family: a working
     /// attach to the editor's own tsgo and a second Verter-spawned tsgo both

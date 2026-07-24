@@ -200,38 +200,107 @@ async fn configured_workspace_admits_then_spawns() {
     );
 }
 
-/// A TS7-family workspace install (here a 7.0.1-rc) resolved by the
-/// explicit `--type-provider=tsserver` route classifies as the native
-/// (tsgo) family BEFORE any binary lookup or spawn — the typed
-/// `NativeFamily` error is the reclassification signal the tsserver arm
-/// turns into the managed-TSGO route.
-#[tokio::test]
-async fn tsserver_route_reclassifies_ts7_family_install_before_any_spawn() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ts_dir = tmp.path().join("node_modules").join("typescript");
-    fs::create_dir_all(ts_dir.join("lib")).unwrap();
-    fs::write(ts_dir.join("lib").join("tsserver.js"), "// launcher").unwrap();
+/// Write a complete `typescript` install (launcher + at least one default
+/// library, which discovery requires) under `package/node_modules`.
+fn plant_typescript(package: &std::path::Path, version: &str) {
+    let lib = package.join("node_modules/typescript/lib");
+    fs::create_dir_all(&lib).unwrap();
+    fs::write(lib.join("tsserver.js"), "// launcher").unwrap();
+    fs::write(lib.join("lib.es5.d.ts"), "interface Array<T> {}").unwrap();
     fs::write(
-        ts_dir.join("package.json"),
-        r#"{ "name": "typescript", "version": "7.0.1-rc" }"#,
+        package.join("node_modules/typescript/package.json"),
+        format!(r#"{{ "name": "typescript", "version": "{version}" }}"#),
     )
     .unwrap();
+}
 
-    let args = CliArgs::parse_from(["--type-provider=tsserver".to_string()]);
-    let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
-    match try_spawn_tsserver(
-        args.tsdk.as_deref(),
-        args.plugin_path.as_deref(),
-        tmp.path().to_str().unwrap(),
-        &client_cell,
-    )
-    .await
-    {
-        Ok(_) => panic!("a native-family install must never spawn as tsserver"),
+fn plant_configured_project(package: &std::path::Path) {
+    fs::create_dir_all(package).unwrap();
+    fs::write(package.join("tsconfig.json"), r#"{ "include": ["src"] }"#).unwrap();
+}
+
+/// A TS7-family install (here a 7.0.1-rc) resolved by the explicit
+/// `--type-provider=tsserver` route classifies as the native (tsgo) family
+/// BEFORE any process spawn — the typed `NativeFamily` error is the
+/// reclassification signal the tsserver arm turns into the managed-TSGO route.
+#[test]
+fn tsserver_route_reclassifies_ts7_family_install_before_any_spawn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let package = tmp.path().join("packages/app");
+    plant_configured_project(&package);
+    plant_typescript(&package, "7.0.1-rc");
+
+    let root = tmp.path().to_string_lossy().into_owned();
+    let probe = project_router::probe_workspace_tsserver(&root, None);
+
+    match tsserver_route_decision(&root, &probe) {
+        Ok(_) => panic!("a native-family install must never serve as tsserver"),
         Err(err) => assert!(
             matches!(err, TsserverSpawnError::NativeFamily { major: 7 }),
             "expected NativeFamily {{ major: 7 }}, got {err:?}"
         ),
+    }
+}
+
+/// The routing bug this replaced: a pnpm monorepo installs no TypeScript at the
+/// WORKSPACE ROOT, only inside each package. A workspace-root-only lookup
+/// therefore reports "no tsserver" (or walks up onto an unrelated install) for a
+/// workspace that has several. The probe answers per configured project, so the
+/// route stays open and the serving-tier advisory names the LOWEST version that
+/// will actually serve — not whichever package happened to be found first.
+#[test]
+fn tsserver_route_serves_a_monorepo_with_no_workspace_root_typescript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy = tmp.path().join("packages/legacy");
+    let current = tmp.path().join("packages/current");
+    plant_configured_project(&legacy);
+    plant_configured_project(&current);
+    plant_typescript(&legacy, "5.8.3");
+    plant_typescript(&current, "6.0.2");
+    assert!(
+        !tmp.path().join("node_modules/typescript").exists(),
+        "the fixture must have NO workspace-root TypeScript"
+    );
+
+    let root = tmp.path().to_string_lossy().into_owned();
+    let probe = project_router::probe_workspace_tsserver(&root, None);
+
+    let advisory = tsserver_route_decision(&root, &probe)
+        .expect("a package-installed TypeScript keeps the tsserver route open")
+        .expect("a 5.8 package carries the legacy-tier advisory");
+    assert!(advisory.contains("5.8"), "advisory names 5.8: {advisory}");
+    assert_eq!(probe.lowest_servable_version, Some((5, 8)));
+}
+
+/// NEGATIVE CONTROL for the route decision: a workspace whose configured
+/// projects can resolve NO TypeScript fails closed with the actionable install
+/// message, and never claims a route it cannot serve.
+#[test]
+fn tsserver_route_fails_closed_when_no_project_resolves_typescript() {
+    let tmp = tempfile::tempdir().unwrap();
+    plant_configured_project(&tmp.path().join("packages/bare"));
+
+    let root = tmp.path().to_string_lossy().into_owned();
+    let probe = project_router::probe_workspace_tsserver(&root, None);
+    // The ancestor walk escapes the tempdir, so only assert the refusal shape
+    // when the machine genuinely has no ambient TypeScript above it.
+    if probe.servable.is_some() {
+        return;
+    }
+
+    match tsserver_route_decision(&root, &probe) {
+        Ok(_) => panic!("a workspace with no resolvable TypeScript must not claim the route"),
+        Err(TsserverSpawnError::Unavailable(reason)) => {
+            assert!(
+                reason.contains("npm install -D typescript"),
+                "the refusal carries the actionable install command: {reason}"
+            );
+            assert!(
+                reason.contains("typescript.tsdk"),
+                "the refusal names the configuration escape hatch: {reason}"
+            );
+        }
+        Err(other) => panic!("expected Unavailable, got {other:?}"),
     }
 }
 
@@ -496,7 +565,7 @@ fn the_two_tsgo_topologies_are_distinguishable_on_the_wire() {
     for topology in [
         TypeProviderTopology::SharedTsgo,
         TypeProviderTopology::ManagedTsgo,
-        TypeProviderTopology::WorkspaceTsserver,
+        TypeProviderTopology::ProjectTsserver,
         TypeProviderTopology::EditorTsserver,
         TypeProviderTopology::ExtensionHosted,
         TypeProviderTopology::None,

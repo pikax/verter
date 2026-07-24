@@ -143,7 +143,7 @@ describe("computeStatusBarState — the status names the TOPOLOGY, not the famil
   it("names the workspace tsserver and the editor plugin distinctly", () => {
     const workspace = computeStatusBarState({
       kind: "tsserver",
-      topology: "workspace-tsserver",
+      topology: "project-tsserver",
     });
     const editor = computeStatusBarState({
       kind: "editor-tsserver",

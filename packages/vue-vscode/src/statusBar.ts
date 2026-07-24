@@ -72,11 +72,11 @@ export function computeStatusBarState(
         ),
         warning: false,
       };
-    case "workspace-tsserver":
+    case "project-tsserver":
       return {
         text: "$(check) Verter: tsserver",
         tooltip: withReason(
-          "Verter type provider: a Node tsserver Verter started from the workspace TypeScript",
+          "Verter type provider: a Node tsserver per configured project, each started from that project's own TypeScript",
           params.reason,
         ),
         warning: false,

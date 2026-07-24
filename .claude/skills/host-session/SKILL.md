@@ -112,24 +112,40 @@ Both TSGO and tsserver implement `TypeProvider`. Methods: hover, completions, di
 
 ### tsserver Module (`tsserver/`)
 
-| File           | Purpose                                                                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mod.rs`       | `find_tsserver()` (tsdk -> workspace -> global), `find_node()`, `detect_ts_major_version()`                                                       |
-| `ipc.rs`       | `TsserverTypeProvider`: newline-delimited JSON transport, position conversion (byte offset <-> 1-based line/offset), all `TypeProvider` methods    |
-| `resilient.rs` | `ResilientTsserverProvider`: same crash/restart pattern as TSGO resilient wrapper                                                                 |
+| File                | Purpose                                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mod.rs`            | `find_tsserver()`, `find_node()` re-exports from `verter_type_runtime::discovery`                                                                 |
+| `project_router.rs` | `ProjectTsserverProvider` — the PRODUCTION tsserver provider: per-owning-project engine routing + `probe_workspace_tsserver` route selection      |
+| `ipc.rs`            | `TsserverTypeProvider`: newline-delimited JSON transport, position conversion (byte offset <-> 1-based line/offset), all `TypeProvider` methods    |
+| `resilient.rs`      | `ResilientTsserverProvider`: same crash/restart pattern as TSGO resilient wrapper                                                                 |
+
+### Per-Project tsserver Routing (`tsserver/project_router.rs`)
+
+The tsserver tier is served by `ProjectTsserverProvider`, NOT by one workspace-level engine. A pnpm monorepo routinely installs no TypeScript at the workspace root while each package pins its own (5.8 next to 6.0); one workspace-root resolution walks past every real install onto whatever ancestor or configured `tsdk` answers — including a library-less copy whose Program has NO default libs, so valid code reports `Cannot find name 'Math'`.
+
+- **Engine identity** is `(owning tsconfig, real canonical `tsserver.js`)`. Two projects that resolve the same install share one process; two projects on different TypeScript versions never do.
+- **Every operation is project-bound.** A provider path maps to its authored carrier source (`classify_carrier_companion`, or the publish path's registered route), then through `resolve_carrier` (`PresentSnapshotAuthoritative`) → `ProjectBinding` → `TsserverEngineBackend::ensure_project` → `BoundProject`. Discovery runs from the OWNING project's directory (`resolve_tsserver(tsdk, Some(project_dir))`), so the pnpm `node_modules/typescript` symlink canonicalizes to the real `.pnpm/typescript@<v>` install (load-bearing: tsserver finds `lib.*.d.ts` relative to its own script path).
+- **Fail-closed per project.** `NotReady` / `NoProject` / `Ambiguous` / an unresolvable or TS7+ TypeScript is a DISTINCT refusal for THAT project carrying discovery's actionable install message. It never poisons a sibling project and never borrows a sibling's engine.
+- **Lazy + singleflight.** Construction starts no process. One `tokio::sync::OnceCell` per engine identity collapses concurrent cold demands onto one spawn; a failed spawn leaves the cell uninitialized so the next demand retries. `shutdown` / `resync_open_files` / `update_workspace_folders` fan out to every started engine.
+- **Resolution caching.** Per-project engine resolution is cached under a published-snapshot generation fence (success AND refusal), so hover/completion never repeats the ancestor walk, the `read_dir` of the install's `lib/`, or discovery's `npm root -g` fallback. A project-graph republish re-resolves; a bare `node_modules` mutation that publishes no snapshot still needs a reload.
+- **`child_pid()`** returns the first started engine's PID. `$/verter/typeProviderStarted` carries exactly one PID (a single-engine wire affordance); orphan containment does not depend on it — every spawned tsserver arms its own process-group `TreeKill` and registers in the process-wide engine-tree table the client-death monitor terminates in full.
 
 ### Provider Selection (`main.rs`)
 
 CLI arg `--type-provider=auto|shared-tsgo|tsgo|tsserver|extension|off` (from VS Code `verter.typeProvider` setting):
 
-- **auto**: the managed fallback is CAPABILITY-driven (`probe_managed_engine` + `choose_managed_engine`): a supported tsgo (stable `>=7.0.2, <7.1.0`) wins; otherwise the workspace tsserver serves; `None` only when neither is obtainable. The lazy managed activation applies the same order at demand time (a candidate that fails validation — e.g. `VERTER_TSGO_BIN`/`PATH` naming a TypeScript 5.x/6.x `tsc` — falls through to tsserver, and the client is sent an updated `$/verter/typeProviderStatus`).
-- **tsgo**: explicit managed tsgo; falls back to the workspace tsserver when no supported tsgo validates, `None` only when tsserver is also unavailable.
-- **tsserver**: explicit tsserver; a TS7+ install reclassifies to the managed tsgo route (the native family is never served over the Node protocol).
+- **auto**: the managed fallback is CAPABILITY-driven (`probe_managed_engine` + `choose_managed_engine`): a supported tsgo (stable `>=7.0.2, <7.1.0`) wins; otherwise the project tsserver router serves; `None` only when neither is obtainable. The lazy managed activation applies the same order at demand time (a candidate that fails validation — e.g. `VERTER_TSGO_BIN`/`PATH` naming a TypeScript 5.x/6.x `tsc` — falls through to tsserver, and the client is sent an updated `$/verter/typeProviderStatus`).
+- **tsgo**: explicit managed tsgo; falls back to the project tsserver router when no supported tsgo validates, `None` only when tsserver is also unavailable.
+- **tsserver**: explicit tsserver; a workspace whose ONLY resolvable TypeScript is TS7+ reclassifies to the managed tsgo route (the native family is never served over the Node protocol).
 - **off**: verter-only mode
 
-Only one provider runs at a time. Provider PID is sent to the extension via `$/verter/typeProviderStarted` notification for orphan cleanup.
+One provider SHAPE runs at a time; on the tsserver tier that shape owns N engines (one per owning configured project). The route DECISION is taken at startup, before any published project graph exists, from `probe_workspace_tsserver` + `tsserver_route_decision` (`main.rs`): a filesystem-only sweep of every configured project under the root answering "can ANY of them obtain a servable install?". `native_family_only` (at least one project resolved, and every resolved install is TS7+) is the reclassification signal; `servable` supplies `ManagedEngineFacts.tsserver`. Provider PID is sent to the extension via `$/verter/typeProviderStarted` for orphan cleanup.
 
-**tsserver serving tiers** (floors live in ONE place — `verter_type_runtime::discovery`: `TSSERVER_SUPPORTED_FLOOR`/`TSSERVER_CURRENT_MAJOR`/`tsserver_serving_tier`/`tsserver_serving_advisory`): TypeScript `>=6` is served silently; `>=5.8, <6` is served WITH a one-time upgrade warning (TypeScript 6 or 7; 7 enables the native tsgo engine) delivered via `LspConfig.type_provider_advisory` and shown in `initialized()`; `<5.8` is served best-effort with a below-floor warning. A TypeScript 5.x/6.x `tsc` probed during tsgo resolution classifies as `RejectionReason::NotTsgoEngine` (the tsserver family), never as a below-floor tsgo.
+**Topology**: `TypeProviderTopology::ProjectTsserver` (wire `project-tsserver`) — "Node tsservers Verter spawned and owns, one per owning configured project, each from that project's own TypeScript". It replaced the single-engine `WorkspaceTsserver` / `workspace-tsserver`; the TS union in `packages/language-shared/src/notifications.ts` and the `packages/vue-vscode` status bar carry the same token.
+
+**tsserver serving tiers** (floors live in ONE place — `verter_type_runtime::discovery`: `TSSERVER_SUPPORTED_FLOOR`/`TSSERVER_CURRENT_MAJOR`/`tsserver_serving_tier`/`tsserver_serving_advisory`): TypeScript `>=6` is served silently; `>=5.8, <6` is served WITH a one-time upgrade warning (TypeScript 6 or 7; 7 enables the native tsgo engine) delivered via `LspConfig.type_provider_advisory` and shown in `initialized()`; `<5.8` is served best-effort with a below-floor warning. With per-project engines the advisory is computed from the LOWEST version that will actually serve (`WorkspaceTsserverProbe::lowest_servable_version`), so a workspace where one package still runs 5.8 is advised even when another runs 6.0. A TypeScript 5.x/6.x `tsc` probed during tsgo resolution classifies as `RejectionReason::NotTsgoEngine` (the tsserver family), never as a below-floor tsgo.
+
+**Discovery tiers** (`verter_type_runtime::discovery::resolve_tsserver`): `ProjectLocal` (walk UP from the OWNING project dir) → `ConfiguredTsdk` → `Global` (`npm root -g`). There is no bundled tier. Every candidate is canonicalized through package-manager symlinks and must carry at least one sibling `lib.*.d.ts`; a library-less install is REFUSED and the next explicit tier considered. When nothing is usable, `TsserverDiscoveryError` preserves every refusal and names the action (`npm install -D typescript`, or the `typescript.tsdk` setting).
 
 ### LSP Features (`features/`)
 
@@ -183,7 +199,8 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 **Key modules** (`crates/verter_lsp/src/`):
 
 - `tsgo/` -- TSGO integration (LSP client, resilient wrapper, project sync)
-- `tsserver/mod.rs` -- `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
+- `tsserver/mod.rs` -- `find_tsserver()` / `find_node()` re-exports from `verter_type_runtime::discovery`
+- `tsserver/project_router.rs` -- `ProjectTsserverProvider` (per-owning-project engines), `probe_workspace_tsserver`
 - `tsserver/ipc.rs` -- `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
 - `tsserver/resilient.rs` -- `ResilientTsserverProvider` (crash detection + auto-restart)
 - `workspace_scanner.rs` -- Async background workspace scanner with priority-based file loading

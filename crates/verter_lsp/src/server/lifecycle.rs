@@ -1328,7 +1328,7 @@ mod provider_recommendation_tests {
     use super::*;
     use crate::TypeProviderKind;
 
-    /// Serving on the workspace-tsserver route recommends the preferred TSGO
+    /// Serving on the project-tsserver route recommends the preferred TSGO
     /// provider — the tsgo-preferred flip. The payload is portable facts only:
     /// no editor-specific remediation strings in server-side content.
     #[test]

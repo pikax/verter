@@ -122,7 +122,7 @@ export type NotificationParams = {
     topology?:
       | "shared-tsgo"
       | "managed-tsgo"
-      | "workspace-tsserver"
+      | "project-tsserver"
       | "editor-tsserver"
       | "extension-hosted"
       | "none";

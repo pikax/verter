@@ -7,8 +7,7 @@ use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
 use verter_lsp::tsgo::ipc::{TsgoOwnedProvider, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
-use verter_lsp::tsserver::ipc::TsserverTypeProvider;
-use verter_lsp::tsserver::resilient as tsserver_resilient;
+use verter_lsp::tsserver::project_router::{self, ProjectTsserverProvider};
 use verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider;
 use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind, TypeProviderTopology};
@@ -490,23 +489,22 @@ async fn create_type_provider(
                     // TypeScript is the 5.x/6.x tsserver family (or whose tsgo
                     // candidate failed validation) still gets full semantics.
                     tracing::warn!(
-                        "TSGO unavailable ({tsgo_reason}); trying the workspace tsserver"
+                        "TSGO unavailable ({tsgo_reason}); trying the project tsserver router"
                     );
-                    match try_spawn_tsserver(
+                    match build_tsserver_router(
+                        host,
                         args.tsdk.as_deref(),
                         args.plugin_path.as_deref(),
                         &ws_canonical,
                         client_cell,
-                    )
-                    .await
-                    {
+                    ) {
                         Ok((tp, advisory)) => (
                             Some(tp),
                             TypeProviderKind::Tsserver,
-                            TypeProviderTopology::WorkspaceTsserver,
+                            TypeProviderTopology::ProjectTsserver,
                             Some(format!(
                                 "--type-provider=tsgo: no supported tsgo engine ({tsgo_reason}); \
-                                 falling back to the workspace tsserver"
+                                 falling back to the per-project tsserver router"
                             )),
                             advisory,
                         ),
@@ -545,18 +543,17 @@ async fn create_type_provider(
             managed_fallback_topology(args, client_cell, host, &ws_canonical).await
         }
         "tsserver" => {
-            match try_spawn_tsserver(
+            match build_tsserver_router(
+                host,
                 args.tsdk.as_deref(),
                 args.plugin_path.as_deref(),
                 &ws_canonical,
                 client_cell,
-            )
-            .await
-            {
+            ) {
                 Ok((tp, advisory)) => (
                     Some(tp),
                     TypeProviderKind::Tsserver,
-                    TypeProviderTopology::WorkspaceTsserver,
+                    TypeProviderTopology::ProjectTsserver,
                     None,
                     advisory,
                 ),
@@ -836,13 +833,19 @@ fn probe_managed_engine(workspace_root: &str, tsdk: Option<&str>) -> ManagedEngi
         Some(std::path::PathBuf::from(workspace_root)),
     );
     let enumeration = verter_tsgo_api::toolchain::discovery::enumerate_candidates(&request);
-    let workspace_tsserver = verter_lsp::tsserver::find_tsserver(tsdk, Some(workspace_root));
-    // A TS7+ workspace install is the native (tsgo) engine family: it is never
-    // served over the Node tsserver protocol, and it is what makes a project-local
-    // `.bin` shim a plausible tsgo candidate.
-    let workspace_ts_is_native_family = workspace_tsserver.as_deref().is_some_and(|path| {
-        verter_type_runtime::discovery::tsserver_native_family_major(path).is_some()
-    });
+    // The tsserver availability fact is PER CONFIGURED PROJECT, because serving is:
+    // in a pnpm monorepo the workspace root frequently installs no TypeScript at all
+    // while every package installs its own, so a workspace-root-only lookup reports
+    // "no tsserver" for a workspace that has several. The probe answers the
+    // route-selection question — can ANY configured project obtain a servable
+    // install — and the router resolves each file's engine per owning project later.
+    let probe = project_router::probe_workspace_tsserver(workspace_root, tsdk);
+    // A TS7+ install is the native (tsgo) engine family: it is never served over the
+    // Node tsserver protocol, and it is what makes a project-local `.bin` shim a
+    // plausible tsgo candidate. With per-project engines this holds only when NO
+    // project resolved a servable tsserver-family install — one 5.x/6.x package is
+    // enough to keep the tsserver route open for the workspace.
+    let workspace_ts_is_native_family = probe.native_family_only.is_some();
     choose_managed_engine(&ManagedEngineFacts {
         workspace_root: workspace_root.to_string(),
         has_configured_project: verter_workspace::config::has_configured_ts_project_anywhere(
@@ -856,9 +859,10 @@ fn probe_managed_engine(workspace_root: &str, tsdk: Option<&str>) -> ManagedEngi
             })
             .map(|c| c.path.to_string_lossy().into_owned()),
         tsgo_notes: enumeration.notes,
-        tsserver: workspace_tsserver
-            .filter(|_| !workspace_ts_is_native_family)
-            .map(|p| p.to_string_lossy().into_owned()),
+        tsserver: probe
+            .servable
+            .as_ref()
+            .map(|probed| probed.resolved.path.to_string_lossy().into_owned()),
         node: verter_lsp::tsserver::find_node(),
     })
 }
@@ -896,18 +900,17 @@ async fn managed_fallback_topology(
         }
         ManagedEngineChoice::Tsserver { detail } => {
             tracing::info!("managed fallback: {detail}");
-            match try_spawn_tsserver(
+            match build_tsserver_router(
+                host,
                 args.tsdk.as_deref(),
                 args.plugin_path.as_deref(),
                 ws_canonical,
                 client_cell,
-            )
-            .await
-            {
+            ) {
                 Ok((tp, advisory)) => (
                     Some(tp),
                     TypeProviderKind::Tsserver,
-                    TypeProviderTopology::WorkspaceTsserver,
+                    TypeProviderTopology::ProjectTsserver,
                     Some(detail),
                     advisory,
                 ),
@@ -1119,10 +1122,12 @@ fn wrap_shared_first_admission(
     let workspace_root_owned = workspace_root.to_string();
     let tsdk = args.tsdk.clone();
     let plugin_path = args.plugin_path.clone();
+    let host_for_fallback = Arc::clone(host);
     let fallback = Arc::new(LazyManagedTypeProvider::new(move || {
         let workspace_root = workspace_root_owned.clone();
         let tsdk = tsdk.clone();
         let plugin_path = plugin_path.clone();
+        let host = Arc::clone(&host_for_fallback);
         let client_cell = Arc::clone(&client_cell);
         async move {
             match try_spawn_tsgo(&workspace_root, &client_cell).await {
@@ -1130,15 +1135,15 @@ fn wrap_shared_first_admission(
                 Err(tsgo_reason) => {
                     tracing::warn!(
                         "managed tsgo activation failed ({tsgo_reason}); \
-                         trying the workspace tsserver tier"
+                         trying the per-project tsserver tier"
                     );
-                    let (provider, advisory) = try_spawn_tsserver(
+                    let (provider, advisory) = build_tsserver_router(
+                        &host,
                         tsdk.as_deref(),
                         plugin_path.as_deref(),
                         &workspace_root,
                         &client_cell,
                     )
-                    .await
                     .map_err(|error| {
                         verter_lsp::type_provider::protocol::TypeProviderError::new(format!(
                             "{tsgo_reason}; the tsserver fallback is also unavailable: {}",
@@ -1185,7 +1190,7 @@ async fn announce_demand_time_tsserver(
     client
         .send_notification::<TypeProviderStatus>(TypeProviderStatusParams {
             kind: TypeProviderKind::Tsserver.to_string().to_lowercase(),
-            topology: TypeProviderTopology::WorkspaceTsserver.wire().to_string(),
+            topology: TypeProviderTopology::ProjectTsserver.wire().to_string(),
             reason: Some(reason),
             recommendation: None,
         })
@@ -1258,88 +1263,87 @@ enum TsserverSpawnError {
     Unavailable(String),
 }
 
-/// Try to spawn tsserver.
+/// Build the PROJECT-BOUND tsserver router: one owned tsserver per
+/// `(owning tsconfig, real tsserver.js)` identity, resolved from the OWNING
+/// package rather than the workspace root.
 ///
-/// The native-family gate runs BEFORE any binary lookup or process spawn: a
-/// TS7+ (tsgo-family) candidate returns [`TsserverSpawnError::NativeFamily`]
-/// without touching node.
+/// A pnpm monorepo routinely has no `typescript` at the workspace root while
+/// each package pins its own — resolving one workspace-level engine there walks
+/// past every real install and lands on whatever ancestor or configured `tsdk`
+/// answers, including a library-less copy that type-checks with no default libs.
+/// The router resolves per owning configured project instead, so a package on
+/// TypeScript 6 and a package on TypeScript 5.8 are each served by their own.
 ///
-/// On success the pair carries the provider and the serving-tier advisory for
-/// the resolved install ([`verter_type_runtime::discovery::tsserver_serving_advisory`]):
-/// `Some` for the legacy (`>=5.8, <6`) and below-floor (`<5.8`) tiers, `None`
-/// for current-generation TypeScript (`>=6`).
-async fn try_spawn_tsserver(
+/// Construction is COLD — no tsserver starts here. What runs is the
+/// route-selection probe ([`project_router::probe_workspace_tsserver`]): a
+/// filesystem-only sweep of the workspace's configured projects that answers
+/// whether ANY of them can obtain a servable install. That question must be
+/// answered at startup, before the published project graph exists and any
+/// individual file's owner can be resolved; the per-file engine decision happens
+/// later, per operation, inside the router.
+///
+/// The native-family gate runs BEFORE any process spawn: a workspace whose only
+/// resolvable TypeScript is TS7+ returns [`TsserverSpawnError::NativeFamily`].
+///
+/// On success the pair carries the router and the serving-tier advisory computed
+/// from the LOWEST version that will actually serve
+/// ([`verter_type_runtime::discovery::tsserver_serving_advisory`]): `Some` for the
+/// legacy (`>=5.8, <6`) and below-floor (`<5.8`) tiers, `None` when every serving
+/// project is on current-generation TypeScript (`>=6`).
+fn build_tsserver_router(
+    host: &Arc<VerterHost>,
     tsdk: Option<&str>,
     plugin_path: Option<&str>,
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Result<(Arc<dyn TypeProvider>, Option<String>), TsserverSpawnError> {
-    let tsserver_path = verter_lsp::tsserver::find_tsserver(tsdk, Some(workspace_root))
-        .ok_or_else(|| {
-            TsserverSpawnError::Unavailable("TypeScript not installed in workspace".to_string())
-        })?;
-    if let Some(major) =
-        verter_type_runtime::discovery::tsserver_native_family_major(&tsserver_path)
-    {
+    let probe = project_router::probe_workspace_tsserver(workspace_root, tsdk);
+    let advisory = tsserver_route_decision(workspace_root, &probe)?;
+    let router = ProjectTsserverProvider::new(
+        Arc::clone(host),
+        tsdk.map(str::to_string),
+        plugin_path.map(str::to_string),
+        Arc::clone(client_cell),
+    )
+    .map_err(|error| TsserverSpawnError::Unavailable(error.to_string()))?;
+    Ok((Arc::new(router) as Arc<dyn TypeProvider>, advisory))
+}
+
+/// The tsserver ROUTE decision taken from a completed probe — pure: no host, no
+/// process, no filesystem beyond what the probe already read.
+///
+/// `Ok(advisory)` means the route serves and carries the serving-tier advisory
+/// for the LOWEST version that will actually serve. `Err` is the typed refusal:
+/// [`TsserverSpawnError::NativeFamily`] reclassifies the workspace to the managed
+/// TSGO route, [`TsserverSpawnError::Unavailable`] names every per-project
+/// refusal so the user can act on it.
+fn tsserver_route_decision(
+    workspace_root: &str,
+    probe: &project_router::WorkspaceTsserverProbe,
+) -> Result<Option<String>, TsserverSpawnError> {
+    if let Some(major) = probe.native_family_only {
         return Err(TsserverSpawnError::NativeFamily { major });
     }
-    let node_path = verter_lsp::tsserver::find_node().ok_or_else(|| {
-        TsserverSpawnError::Unavailable("Node.js not found on PATH or standard locations".into())
-    })?;
-
+    let Some(servable) = probe.servable.as_ref() else {
+        return Err(TsserverSpawnError::Unavailable(format!(
+            "no configured TypeScript project under {workspace_root} could resolve a usable \
+             TypeScript install — {}",
+            probe.refusal_summary()
+        )));
+    };
     tracing::info!(
-        "found tsserver: {} (node: {})",
-        tsserver_path.display(),
-        node_path
+        "project-bound tsserver routing armed: {} resolves {} ({}, {} default libraries) via {}; \
+         every other configured project resolves its own engine on first demand",
+        servable.project_dir,
+        servable.resolved.path.display(),
+        servable.version.map_or_else(
+            || "unknown version".to_string(),
+            |(major, minor)| format!("TypeScript {major}.{minor}")
+        ),
+        servable.resolved.default_lib_count,
+        project_router::probe_source_label(servable.resolved.source),
     );
-
-    let crash_notify = Arc::new(Notify::new());
-    let tsserver_str = tsserver_path.to_string_lossy().to_string();
-
-    // The carrier-publish store dir the LSP publishes carriers into — delivered to
-    // the plugin so it reads the SAME store the publish path writes. Derived from
-    // the workspace root through the shared store-dir resolver, identical to the
-    // dir `TsserverEngineBackend` computes on the publish side.
-    let carrier_store_dir =
-        verter_lsp::external_ts::default_carrier_store_dir_string(workspace_root);
-
-    match TsserverTypeProvider::spawn(
-        &node_path,
-        &tsserver_str,
-        workspace_root,
-        plugin_path,
-        Some(&carrier_store_dir),
-        // verter_lsp-internal backend: the Rust merge layer is the sole
-        // companion→source response mapper, so the plugin returns RAW responses.
-        false,
-        Some(Arc::clone(&crash_notify)),
-    )
-    .await
-    {
-        Ok(tp) => {
-            tracing::info!("tsserver type provider started (resilient mode)");
-            let resilient = tsserver_resilient::new(
-                tp,
-                crash_notify,
-                node_path,
-                tsserver_str,
-                workspace_root.to_string(),
-                plugin_path.map(str::to_string),
-                Arc::clone(client_cell),
-                3,
-            );
-            let advisory = verter_type_runtime::discovery::detect_ts_version(&tsserver_path)
-                .and_then(|version| {
-                    let tier = verter_type_runtime::discovery::tsserver_serving_tier(Some(version));
-                    verter_type_runtime::discovery::tsserver_serving_advisory(version, tier)
-                });
-            Ok((Arc::new(resilient), advisory))
-        }
-        Err(e) => Err(TsserverSpawnError::Unavailable(format!(
-            "found tsserver at {} (node: {node_path}), but spawn/initialize failed: {e}",
-            tsserver_path.display()
-        ))),
-    }
+    Ok(probe.advisory())
 }
 
 /// Convert a file path to a `file://` URI.
