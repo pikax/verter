@@ -170,16 +170,72 @@ the `component-meta` documented-but-nonexistent API.
 ## 7. Publish topology (derived, not hand-maintained)
 
 ```
-npm (12, dependency-ordered): native → proto → type-ir → typeinfo → language-shared
-                              → types → wasm → component-meta → unplugin → verter-tsc
-                              → svelte-jsx → typescript-plugin
+npm (13, dependency-ordered): native → proto → type-ir → typeinfo → language-shared
+                              → types → wasm → component-meta → unplugin → nuxt
+                              → verter-tsc → svelte-jsx → typescript-plugin
 platform packages (14):       7 × native, 7 × verter-tsc
-marketplace only:             vscode           (correctly excluded from npm)
-excluded:                     @verter/nuxt, @verter/oxc-bindings  (outside the product closure)
+marketplace only:             vscode                (correctly excluded from npm)
+excluded:                     @verter/oxc-bindings  (owner ruling — internal binding
+                                                     package, not shipped surface)
 ```
+
+`@verter/nuxt` was added to `PRODUCT_ROOTS` after end-to-end verification (§7a).
+`@verter/oxc-bindings` is published at `0.0.1-alpha.3` from an earlier release and stays
+excluded by owner decision; it simply stops being republished. That exclusion is now pinned
+by a discriminating test (`oxc-bindings is not published`), proven to fail when the root is
+re-added.
 
 `@verter/wasm` is an **optional peerDependency** of component-meta —
 `peerDependenciesMeta.optional: true` and the readme both already state this. No change needed.
+
+---
+
+## 7a. `@verter/nuxt` — end-to-end verified (Nuxt 4.5.0 / Vite 8)
+
+The package had never been exercised by anything: its `test` script is an `echo` stub, and the
+earlier smoke check only proved the tarball imports. It was verified properly before being added
+to the publish set.
+
+**Method** — a Nuxt app bootstrapped _outside_ the monorepo, installing the packed runtime
+closure (`@verter/nuxt` → `@verter/unplugin` → `@verter/native` + platform package) via
+`file:` tarballs, mimicking a registry install. `app/` srcDir layout, an SFC importing a child
+SFC using `withDefaults`, typed `defineEmits`, `computed`, and `v-for`.
+
+**Result — works.**
+
+| Check                    | Evidence                                                                                                                                                                                 |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Verter compiles the SFCs | instrumented `transform`: ran on `app/app.vue`, `components/Greeter.vue`, and Nuxt's own `nuxt-root.vue` / `error-404.vue` / `error-500.vue`, script _and_ style blocks                  |
+| Production build         | `nuxt build` exit 0                                                                                                                                                                      |
+| **Runtime correctness**  | built server rendered `<button data-t="…"><!--[--><span>Nuxt x3</span>×3<!--]--></button>` — props + `withDefaults` resolved, `v-for` produced exactly 3 nodes, correct fragment anchors |
+| Negative control         | a malformed template expression **fails the build** (exit 1); restoring it returns to green                                                                                              |
+
+**Two traps this nearly fell into, recorded because they will recur:**
+
+1. **Nuxt 4's srcDir is `app/`.** A first pass put `app.vue` at the project root, so the build
+   was green while compiling nothing of the test's. Green means nothing unless a unique marker
+   is shown to have reached the bundle.
+2. **Verter's Vite plugin is itself named `vite:vue`** (deliberately — it replaces Nuxt's). Any
+   check of the form "is `vite:vue` gone / is a `verter`-named plugin present" reports a false
+   no-op. This produced an incorrect "the module never runs" reading that took three rounds to
+   overturn. Detect Verter by _behaviour_ (did its `transform` run) — never by plugin name.
+
+**Bounded finding (not a blocker).** A malformed template expression is not reported as a Verter
+template diagnostic at the source position; it escapes into the generated render function and
+surfaces downstream as a JS parse error against generated line/column:
+
+```
+[builtin:vite-transform] Expected `,` or `)` but found `}`
+  ╭─[ app/components/Greeter.vue?vue&type=script&lang.ts:10:88 ]
+   10 │ return (_openBlock(), _createElementBlock("button", { onClick: $event => (emit('ping') }, …
+```
+
+The file is attributed correctly and the build fails closed, so this is a diagnostic-quality
+issue, not a correctness one. Post-merge backlog.
+
+**Still true:** `@verter/nuxt` has no test of its own — its `test` script remains the always-green
+`echo` stub (§9 A3). It is now a _published, verified-once_ package with _no standing coverage_.
+The verification above is a point-in-time result, not a regression gate.
 
 ---
 
@@ -283,14 +339,14 @@ The 30 landed commits were written by six agents and reviewed only by their auth
 (codex 11 · grok 11 · kimi 13). All three converged, independently, on the **release authority** —
 an area none was told was suspect. Verified:
 
-| Finding                                                                                                                                                                                                                                                                                                 | Status                                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `semverGt` compares prerelease/patch segments as STRINGS: `semverGt("0.0.1-beta.10","0.0.1-beta.9")` is `false`, `semverGt("0.0.2","0.0.10")` is `false`. Since `needsPublish = semverGt(local, published)`, **every package silently stops publishing at `beta.10`** and the release still goes green. | ✅ verified                                                            |
-| `scripts/check-versions.mjs` contains no `process.exit` — it always exits 0, so it is **not a gate**. The verify-before-tag protection does not gate.                                                                                                                                                   | ✅ verified                                                            |
-| The derived publish set **EXCLUDES `@verter/nuxt` (published 0.0.1-beta.1) and `@verter/oxc-bindings` (published 0.0.1-alpha.3)** — both live products. Adopting it as-is silently stops publishing them.                                                                                               | ✅ verified against the live registry                                  |
-| A correct `scripts/lib/semver.mjs` exists but the release-deciding script does not use it.                                                                                                                                                                                                              | reported by grok + kimi                                                |
-| An 83 MB platform binary was committed in an unrelated docs commit.                                                                                                                                                                                                                                     | ✅ verified, untracked in `aeffa1675`; **the blob remains in history** |
-| `publish-set.spec.mjs`'s `EXPECTED_NPM` asserts whatever the implementation produces, so it cannot catch a wrong root list.                                                                                                                                                                             | reported by kimi                                                       |
+| Finding                                                                                                                                                                                                                                                                                                 | Status                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `semverGt` compares prerelease/patch segments as STRINGS: `semverGt("0.0.1-beta.10","0.0.1-beta.9")` is `false`, `semverGt("0.0.2","0.0.10")` is `false`. Since `needsPublish = semverGt(local, published)`, **every package silently stops publishing at `beta.10`** and the release still goes green. | ✅ verified                                                                                                   |
+| `scripts/check-versions.mjs` contains no `process.exit` — it always exits 0, so it is **not a gate**. The verify-before-tag protection does not gate.                                                                                                                                                   | ✅ verified                                                                                                   |
+| The derived publish set **EXCLUDES `@verter/nuxt` (published 0.0.1-beta.1) and `@verter/oxc-bindings` (published 0.0.1-alpha.3)** — both live products. Adopting it as-is silently stops publishing them.                                                                                               | ✅ verified; **resolved** — nuxt verified (§7a) and added to the roots; oxc-bindings excluded by owner ruling |
+| A correct `scripts/lib/semver.mjs` exists but the release-deciding script does not use it.                                                                                                                                                                                                              | reported by grok + kimi                                                                                       |
+| An 83 MB platform binary was committed in an unrelated docs commit.                                                                                                                                                                                                                                     | ✅ verified, untracked in `aeffa1675`; **the blob remains in history**                                        |
+| `publish-set.spec.mjs`'s `EXPECTED_NPM` asserts whatever the implementation produces, so it cannot catch a wrong root list.                                                                                                                                                                             | reported by kimi                                                                                              |
 
 **What the pass could NOT break**, after direct attempts: the Project-Bound External-TS Contract in
 the new router (every op goes `resolve_carrier → ProjectBinding → ensure_bound(BoundProject)`; all
@@ -300,12 +356,18 @@ tests in the range. Those are meaningful negative results, not silence.
 
 **Three of the confirmed defects were introduced by the orchestrator, not the agents:** the 83 MB
 binary (a careless `git add -A`), a private project identifier committed into this memo, and the
-publish-set exclusion of two shipped packages. The first two are fixed; the third is open.
+publish-set exclusion of two shipped packages. All three are now fixed.
 
 ### Must fix before tagging
 
-1. `semverGt` — replace with the correct `lib/semver.mjs`, or the release breaks at `beta.10`.
-2. `check-versions.mjs` — make it exit non-zero, or nothing gates the bump.
-3. Publish-set roots — re-include `@verter/nuxt` and `@verter/oxc-bindings`, or they stop shipping.
+1. ~~Publish-set roots~~ — **done.** `@verter/nuxt` verified (§7a) and added; `@verter/oxc-bindings`
+   deliberately excluded by owner ruling and pinned by a discriminating test.
+2. `semverGt` — replace with the correct `lib/semver.mjs`. **Not urgent for `0.0.1-beta.2`**
+   (`semverGt("0.0.1-beta.2","0.0.1-beta.1")` is `true`; first breakage is `beta.10`), but it is a
+   silent-stop-publishing bug with no gate behind it.
+3. `check-versions.mjs` — make it exit non-zero, or nothing gates the bump.
 4. Re-check `710c9dd17`: codex reports surfaced tsserver hover errors are **still** converted to
    empty user results, i.e. the silent-empty fix may not be effective.
+
+At `0.0.1-beta.2` specifically, item 1 was the only one that would have shipped wrongly; 2 and 3 are
+latent, and 4 is a correctness question independent of the release mechanics.

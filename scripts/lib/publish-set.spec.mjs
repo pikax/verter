@@ -21,6 +21,7 @@ const EXPECTED_NPM = [
   "@verter/component-meta",
   "@verter/language-shared",
   "@verter/native",
+  "@verter/nuxt",
   "@verter/proto",
   "@verter/svelte-jsx",
   "@verter/type-ir",
@@ -39,10 +40,20 @@ test("derived npm set equals the expected product closure minus marketplace-only
     "@verter/typeinfo",
     "@verter/component-meta",
     "@verter/unplugin",
+    "@verter/nuxt",
     "verter-tsc",
     "vscode",
   ]);
   assert.deepEqual(MARKETPLACE_ONLY, ["vscode"]);
+});
+
+// @verter/oxc-bindings is published on npm from an earlier release but is
+// deliberately NOT a product root: it is an internal binding package, not part
+// of the shipped surface, so it stops being republished from here on.
+test("oxc-bindings is not published", () => {
+  const set = computePublishSet();
+  assert.ok(!set.npm.includes("@verter/oxc-bindings"));
+  assert.ok(!set.order.includes("@verter/oxc-bindings"));
 });
 
 test("every runtime workspace dependency of every published package is itself published", () => {

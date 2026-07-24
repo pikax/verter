@@ -24,6 +24,7 @@ export const PRODUCT_ROOTS = [
   "@verter/typeinfo",
   "@verter/component-meta",
   "@verter/unplugin",
+  "@verter/nuxt",
   "verter-tsc",
   "vscode",
 ];
