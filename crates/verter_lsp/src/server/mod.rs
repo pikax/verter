@@ -520,6 +520,10 @@ pub struct ServerCore {
     /// Selection provenance, or why no provider could be started. Sent via
     /// `$/verter/typeProviderStatus`.
     type_provider_reason: Option<String>,
+    /// Served-with-warning notice for the active provider (the tsserver
+    /// serving-tier advisory). Shown once as a client warning during
+    /// `initialized()`.
+    type_provider_advisory: Option<String>,
     /// Most-recently-used canonical IDs. Updated on did_open, did_change, and
     /// interactive reads (hover, completion, definition). Used for MRU-ordered
     /// snapshot drain — most recently interacted files reconcile first.
@@ -1060,6 +1064,7 @@ impl VerterLanguageServer {
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             mcp_port: config.mcp_port,
             type_provider_reason: config.type_provider_reason,
+            type_provider_advisory: config.type_provider_advisory,
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
             vfs_workspace,
             hover_provenance_enabled: std::sync::atomic::AtomicBool::new(false),

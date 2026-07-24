@@ -352,6 +352,15 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             };
             server.client.show_message(MessageType::WARNING, msg).await;
         }
+        // A provider that SERVES on a tier carrying an advisory (today: the
+        // tsserver legacy `>=5.8, <6` and below-floor `<5.8` tiers) surfaces
+        // its upgrade notice once — serving continues regardless.
+        if let Some(advisory) = &server.type_provider_advisory {
+            server
+                .client
+                .show_message(MessageType::WARNING, advisory.clone())
+                .await;
+        }
     }
 
     // Notify extension of MCP HTTP port (dynamic, OS-assigned).

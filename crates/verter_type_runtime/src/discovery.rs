@@ -10,6 +10,13 @@ use std::path::{Path, PathBuf};
 /// Reads `<tsserver_path>/../../package.json` to extract the `version` field.
 /// Returns `Some(major)` (e.g., `5` for TypeScript 5.x) or `None` if unreadable.
 pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
+    detect_ts_version(tsserver_path).map(|(major, _)| major)
+}
+
+/// Detect the `(major, minor)` TypeScript version of the install a
+/// `tsserver.js` belongs to (e.g. `(5, 9)` for TypeScript 5.9.3), or `None`
+/// if the install's `package.json` is unreadable or unparseable.
+pub fn detect_ts_version(tsserver_path: &Path) -> Option<(u32, u32)> {
     // tsserver.js lives in typescript/lib/ — go up twice to get typescript/
     let ts_root = tsserver_path.parent()?.parent()?;
     let pkg_json = ts_root.join("package.json");
@@ -23,8 +30,10 @@ pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
     let version_str = &after_colon[quote_start..];
     let quote_end = version_str.find('"')?;
     let version = &version_str[..quote_end];
-    let major = version.split('.').next()?;
-    major.parse::<u32>().ok()
+    let mut components = version.split('.');
+    let major = components.next()?.parse::<u32>().ok()?;
+    let minor = components.next()?.parse::<u32>().ok()?;
+    Some((major, minor))
 }
 
 /// TypeScript >= 7 is the native (tsgo) engine family. A "tsserver" launcher
@@ -33,6 +42,87 @@ pub fn detect_ts_major_version(tsserver_path: &Path) -> Option<u32> {
 /// Node tsserver protocol.
 pub fn ts_major_is_native_family(major: u32) -> bool {
     major >= 7
+}
+
+// ── The tsserver serving tiers (the ONE place the version floors live) ──────
+//
+// Verter SERVES every tsserver-family install it can spawn; the tiers below
+// differ only in the user-facing advisory, so the behaviour and the message
+// cannot drift apart:
+//
+// - tsgo >=7.0.2 <7.1.0  → the native engine (best path; owned by
+//   `verter_tsgo_api::toolchain::policy`, never routed here).
+// - TypeScript >= 6.x    → [`TsserverServingTier::Current`]: served, no
+//   upgrade advisory.
+// - TypeScript >= 5.8 <6 → [`TsserverServingTier::Legacy`]: served, WITH an
+//   advisory recommending TypeScript 6 or 7 (7 enables the native tsgo
+//   engine).
+// - below 5.8            → [`TsserverServingTier::BelowFloor`]: nothing in the
+//   tsserver stack hard-requires 5.8 (the plugin speaks the stable
+//   language-service plugin API), so Verter still SERVES — but below the
+//   supported floor the serving is best-effort and the advisory says so
+//   plainly with the upgrade path, rather than silently claiming support.
+
+/// The lowest TypeScript version Verter SUPPORTS for tsserver serving:
+/// `>=5.8, <6` is the legacy-supported tier; below it serving is best-effort.
+pub const TSSERVER_SUPPORTED_FLOOR: (u32, u32) = (5, 8);
+
+/// The first current-generation tsserver major: TypeScript `>=6` (and not the
+/// TS7+ native family) is served with NO upgrade advisory.
+pub const TSSERVER_CURRENT_MAJOR: u32 = 6;
+
+/// How a tsserver-family install is served, by its `(major, minor)` version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TsserverServingTier {
+    /// TypeScript `>=6` (below the TS7 native family): served, no advisory.
+    Current,
+    /// TypeScript `>=5.8, <6`: served, with an upgrade advisory.
+    Legacy,
+    /// TypeScript `<5.8`: served best-effort, with a plain this-is-unsupported
+    /// advisory and the upgrade path.
+    BelowFloor,
+}
+
+/// Classify a tsserver-family install into its serving tier.
+///
+/// `version` is `None` when the install's version is unreadable: fail open to
+/// [`TsserverServingTier::Current`] — exactly like
+/// [`tsserver_native_family_major`], classification requires positive
+/// evidence, and an unreadable version must never fabricate a warning.
+pub fn tsserver_serving_tier(version: Option<(u32, u32)>) -> TsserverServingTier {
+    let Some((major, minor)) = version else {
+        return TsserverServingTier::Current;
+    };
+    if major >= TSSERVER_CURRENT_MAJOR {
+        return TsserverServingTier::Current;
+    }
+    if (major, minor) >= TSSERVER_SUPPORTED_FLOOR {
+        return TsserverServingTier::Legacy;
+    }
+    TsserverServingTier::BelowFloor
+}
+
+/// The user-facing upgrade advisory for a serving tier, or `None` when the
+/// tier is served silently ([`TsserverServingTier::Current`]). The text names
+/// the tiers and the upgrade path; it is built HERE, next to the floors, so
+/// the behaviour and the message cannot drift apart.
+pub fn tsserver_serving_advisory(version: (u32, u32), tier: TsserverServingTier) -> Option<String> {
+    let (major, minor) = version;
+    match tier {
+        TsserverServingTier::Current => None,
+        TsserverServingTier::Legacy => Some(format!(
+            "Verter: this workspace is served by tsserver from TypeScript {major}.{minor}. \
+             TypeScript 5.x is supported, but upgrading to TypeScript 6 or 7 is recommended \
+             (7 enables Verter's native tsgo engine). Hover, completions, and \
+             go-to-definition are fully served in the meantime."
+        )),
+        TsserverServingTier::BelowFloor => Some(format!(
+            "Verter: this workspace's TypeScript {major}.{minor} is below the supported \
+             tsserver floor ({}.{}) — serving is best-effort. Upgrade to TypeScript 6 or 7 \
+             (7 enables Verter's native tsgo engine).",
+            TSSERVER_SUPPORTED_FLOOR.0, TSSERVER_SUPPORTED_FLOOR.1
+        )),
+    }
 }
 
 /// Classify a resolved tsserver candidate: `Some(major)` when the install it
@@ -345,6 +435,76 @@ mod tests {
     fn unreadable_version_is_not_native_family() {
         assert_eq!(
             tsserver_native_family_major(Path::new("/nonexistent/lib/tsserver.js")),
+            None
+        );
+    }
+
+    // ── DISCRIMINATING (the owner serving-tier policy): every tsserver-family
+    //    install is SERVED; only the advisory differs. The tiers and their
+    //    floors are pinned here so the behaviour and the message cannot drift
+    //    apart: >=6 silent, >=5.8 <6 served WITH an upgrade advisory, <5.8
+    //    served best-effort with a plain below-floor advisory. ───────────────
+    #[test]
+    fn tsserver_serving_tiers_follow_the_owner_floors() {
+        let cases: &[(Option<(u32, u32)>, TsserverServingTier)] = &[
+            (Some((6, 0)), TsserverServingTier::Current),
+            (Some((6, 9)), TsserverServingTier::Current),
+            // A TS7+ install never reaches this classifier (the native-family
+            // gate routes it to tsgo), but if it did it is not a legacy tier.
+            (Some((7, 0)), TsserverServingTier::Current),
+            // An unreadable version fails open — never a fabricated warning.
+            (None, TsserverServingTier::Current),
+            (Some((5, 8)), TsserverServingTier::Legacy),
+            (Some((5, 9)), TsserverServingTier::Legacy),
+            (Some((5, 7)), TsserverServingTier::BelowFloor),
+            (Some((5, 0)), TsserverServingTier::BelowFloor),
+            (Some((4, 9)), TsserverServingTier::BelowFloor),
+        ];
+        for (version, expected) in cases {
+            assert_eq!(
+                tsserver_serving_tier(*version),
+                *expected,
+                "version {version:?} mis-tiered"
+            );
+        }
+    }
+
+    // ── DISCRIMINATING: the advisory exists exactly for the advisory tiers,
+    //    names the version, and carries the 6-or-7 upgrade path. ─────────────
+    #[test]
+    fn tsserver_serving_advisory_matches_its_tier() {
+        assert!(tsserver_serving_advisory((6, 0), TsserverServingTier::Current).is_none());
+
+        let legacy = tsserver_serving_advisory((5, 9), TsserverServingTier::Legacy)
+            .expect("the legacy tier advises");
+        assert!(
+            legacy.contains("5.9"),
+            "names the serving version: {legacy}"
+        );
+        assert!(
+            legacy.contains("TypeScript 6 or 7"),
+            "carries the upgrade path: {legacy}"
+        );
+        assert!(legacy.contains("tsgo"), "names the native engine: {legacy}");
+
+        let below = tsserver_serving_advisory((5, 4), TsserverServingTier::BelowFloor)
+            .expect("the below-floor tier advises");
+        assert!(below.contains("5.4"), "names the serving version: {below}");
+        assert!(below.contains("5.8"), "names the supported floor: {below}");
+        assert!(
+            below.contains("best-effort"),
+            "says plainly the serving is best-effort: {below}"
+        );
+    }
+
+    #[test]
+    fn detect_ts_version_reads_major_and_minor() {
+        let (_tmp, tsserver_path) = fake_typescript_install("5.9.3");
+        assert_eq!(detect_ts_version(&tsserver_path), Some((5, 9)));
+        let (_tmp, tsserver_path) = fake_typescript_install("6.0.0-beta.1");
+        assert_eq!(detect_ts_version(&tsserver_path), Some((6, 0)));
+        assert_eq!(
+            detect_ts_version(Path::new("/nonexistent/lib/tsserver.js")),
             None
         );
     }

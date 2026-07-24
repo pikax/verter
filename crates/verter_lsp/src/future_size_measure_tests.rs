@@ -53,6 +53,7 @@ impl MeasureServer {
                     type_provider_topology: crate::TypeProviderTopology::ManagedTsgo,
                     mcp_port: None,
                     type_provider_reason: Some("measure".into()),
+                    type_provider_advisory: None,
                     suppress_imported_carrier_prewarm: true,
                 },
             )

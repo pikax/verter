@@ -461,6 +461,11 @@ pub struct LspConfig {
     /// Human-readable provenance for the selected provider, or the reason no provider
     /// could be started. Sent via `$/verter/typeProviderStatus` for editor status UI.
     pub type_provider_reason: Option<String>,
+    /// A served-with-warning notice for the ACTIVE provider (today: the
+    /// tsserver serving-tier advisory for the legacy `>=5.8, <6` and
+    /// below-floor `<5.8` tiers). Shown once as a client warning during
+    /// `initialized()`; `None` when the serving tier needs no advisory.
+    pub type_provider_advisory: Option<String>,
     /// TEST SEAM: when `true`, `did_open` does NOT eagerly prewarm an imported
     /// child carrier's `{carrier}.ts` PUBLIC-API surface. Production leaves this
     /// `false` (the prewarm makes hover/completion/go-to-def on `<ChildComponent>`

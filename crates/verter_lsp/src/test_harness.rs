@@ -374,6 +374,7 @@ impl TestSessionBuilder {
                         ),
                         mcp_port: None,
                         type_provider_reason: None,
+                        type_provider_advisory: None,
                         suppress_imported_carrier_prewarm,
                     },
                 )
