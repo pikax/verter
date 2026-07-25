@@ -57,7 +57,7 @@ Key API (verbatim signatures from [docs.rs `PluginServerRpcHandler`](https://doc
 ### 2.2 The `volt.toml` manifest
 
 ```toml
-name = "verter"
+name = "verter-volt"
 version = "0.1.0"
 author = "Verter authors"
 display-name = "Verter (Vue / Svelte)"
