@@ -69,23 +69,48 @@ pub enum Resolution {
     Skipped { reason: String },
 }
 
-/// Refuse a discovered tsserver.js that is not exactly `expected`.
+/// Normalise an EXTERNAL tool path to the one internal form.
 ///
-/// Both paths are canonicalized (slash/drive-case normalized) before
-/// comparison. This is the gate that rejects an ambient workspace/global-npm
-/// `tsserver.js`.
+/// Tool paths reach the bridge from outside — `expected_tsserver_js` off the
+/// `hello` wire, `discovered` out of filesystem discovery — so they are
+/// normalised here, ONCE, at ingress; everything downstream sees only the
+/// normalised form.
+///
+/// The internal form is the canonical spelling of the path's filesystem
+/// IDENTITY. String canonicalisation alone (slash/drive-case) cannot reconcile
+/// two spellings of one file: in a pnpm workspace
+/// `packages/vue-vscode/node_modules/typescript` is a SYMLINK into
+/// `node_modules/.pnpm/typescript@<v>/…`, so the harness' spelled tool root and
+/// the tsserver discovery finds by real path denote the same file under two
+/// names — a guaranteed mismatch on Linux, which Windows happened to dodge.
+///
+/// A path that does not exist has no filesystem identity, so it degrades to
+/// string canonicalisation; a missing `expected` is reported by its own
+/// `ExpectedMissing` check rather than here.
+pub fn normalize_tool_path(raw: &str) -> String {
+    match std::fs::canonicalize(raw) {
+        // `canonicalize_path` also strips the Windows `\\?\` extended-length
+        // prefix `fs::canonicalize` returns, so both arms yield one form.
+        Ok(resolved) => canonicalize_path(&resolved.to_string_lossy()),
+        Err(_) => canonicalize_path(raw),
+    }
+}
+
+/// Refuse a discovered tsserver.js that is not `expected`.
+///
+/// BOTH arguments must already be normalised by [`normalize_tool_path`] — this
+/// is a pure comparison of internal values, not a normalisation site. It stays
+/// the gate that rejects an ambient workspace/global-npm `tsserver.js`.
 pub fn enforce_tsserver_path_match(
     expected: &str,
     discovered: &str,
 ) -> Result<(), ProviderInitError> {
-    let e = canonicalize_path(expected);
-    let d = canonicalize_path(discovered);
-    if e == d {
+    if expected == discovered {
         Ok(())
     } else {
         Err(ProviderInitError::PathMismatch {
-            expected: e,
-            discovered: d,
+            expected: expected.to_string(),
+            discovered: discovered.to_string(),
         })
     }
 }
@@ -149,28 +174,35 @@ pub fn resolve_tsserver_with(
         .tsserver_tsdk
         .as_deref()
         .ok_or(ProviderInitError::MissingToolRootField("tsserverTsdk"))?;
-    let expected = tool_root.expected_tsserver_js.as_deref().ok_or(
+    // BOUNDARY: `expected_tsserver_js` arrives off the `hello` wire. Normalise
+    // it once, here; everything below compares the internal form only.
+    let expected = normalize_tool_path(tool_root.expected_tsserver_js.as_deref().ok_or(
         ProviderInitError::MissingToolRootField("expectedTsserverJs"),
-    )?;
+    )?);
 
     let node = require_node(discover_node)?;
 
     // Strict CI asserts the pinned tsserver.js exists before the bridge starts.
-    if strict && !Path::new(expected).exists() {
-        return Err(ProviderInitError::ExpectedMissing(expected.to_string()));
+    if strict && !Path::new(&expected).exists() {
+        return Err(ProviderInitError::ExpectedMissing(expected));
     }
 
-    // Pass the explicit tsdk into discovery, then refuse anything but `expected`.
+    // Pass the explicit tsdk into discovery, then refuse anything but
+    // `expected`. Discovery is the other BOUNDARY, so its result is normalised
+    // on the way in too — otherwise a symlinked spelling of the very same file
+    // reads as a mismatch.
     match discover_tsserver(tsdk, workspace_root) {
-        Some(discovered) => enforce_tsserver_path_match(expected, &discovered)?,
+        Some(discovered) => {
+            enforce_tsserver_path_match(&expected, &normalize_tool_path(&discovered))?
+        }
         None => return Err(ProviderInitError::ToolNotFound("tsserver.js")),
     }
 
     Ok((
-        canonicalize_path(expected),
+        expected.clone(),
         SpawnPlan::Tsserver {
             node,
-            tsserver_js: expected.to_string(),
+            tsserver_js: expected,
         },
     ))
 }

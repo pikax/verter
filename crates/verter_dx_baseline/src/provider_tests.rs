@@ -34,6 +34,66 @@ fn ambient_global_npm_tsserver_is_rejected() {
     assert_eq!(err.kind(), ErrorKind::BaselineToolRootMismatch);
 }
 
+// ── boundary normalisation (external path -> the one internal form) ────
+
+/// The pnpm-symlink case that failed EVERY Linux CI run: one tsserver.js
+/// reached both by its symlinked spelling and by its real path is the SAME
+/// file, so boundary normalisation must map both to one internal value.
+/// String canonicalisation alone cannot reconcile them, so before this fix the
+/// two spellings reached the comparison unequal and it reported
+/// `baseline_tool_root_mismatch`.
+///
+/// Unix-gated because it needs a real symlink: the failure is a POSIX
+/// condition, and creating symlinks on Windows is privileged.
+#[cfg(unix)]
+#[test]
+fn boundary_normalisation_collapses_a_symlinked_spelling_to_one_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_ts = tmp.path().join("store").join("typescript");
+    let real_lib = store_ts.join("lib");
+    std::fs::create_dir_all(&real_lib).unwrap();
+    let real_js = real_lib.join("tsserver.js");
+    std::fs::write(&real_js, "// tsserver").unwrap();
+
+    // `<pkg>/node_modules/typescript` -> `<store>/typescript`: the pnpm layout.
+    let link_parent = tmp.path().join("pkg").join("node_modules");
+    std::fs::create_dir_all(&link_parent).unwrap();
+    let link = link_parent.join("typescript");
+    std::os::unix::fs::symlink(&store_ts, &link).unwrap();
+
+    let spelled = normalize_tool_path(&link.join("lib").join("tsserver.js").to_string_lossy());
+    let real = normalize_tool_path(&real_js.to_string_lossy());
+    assert_eq!(
+        spelled, real,
+        "two spellings of one tsserver.js must normalise to a single internal value",
+    );
+    assert!(enforce_tsserver_path_match(&spelled, &real).is_ok());
+}
+
+/// Normalisation must NOT weaken the gate: two tsserver.js files that really
+/// are different files keep distinct internal values even when BOTH exist on
+/// disk (where `fs::canonicalize` succeeds for each and cannot collapse them).
+#[test]
+fn boundary_normalisation_keeps_distinct_files_distinct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pinned = tmp.path().join("pinned");
+    let ambient = tmp.path().join("ambient");
+    std::fs::create_dir_all(&pinned).unwrap();
+    std::fs::create_dir_all(&ambient).unwrap();
+    let pinned_js = pinned.join("tsserver.js");
+    let ambient_js = ambient.join("tsserver.js");
+    std::fs::write(&pinned_js, "// pinned").unwrap();
+    std::fs::write(&ambient_js, "// ambient").unwrap();
+
+    let e = normalize_tool_path(&pinned_js.to_string_lossy());
+    let d = normalize_tool_path(&ambient_js.to_string_lossy());
+    assert_ne!(e, d, "distinct files must not normalise to one value");
+
+    let err = enforce_tsserver_path_match(&e, &d).unwrap_err();
+    assert!(matches!(err, ProviderInitError::PathMismatch { .. }));
+    assert_eq!(err.kind(), ErrorKind::BaselineToolRootMismatch);
+}
+
 // ── strict failures ────────────────────────────────────────────────────
 
 #[test]

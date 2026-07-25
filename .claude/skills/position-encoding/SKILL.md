@@ -142,6 +142,7 @@ All file paths stored internally in **canonical ID** format. Normalization at en
 | File system / bundler path | `canonicalize_id()` | `verter_session/src/id.rs` |
 | Bundler plugin | `generateComponentId()` | `packages/unplugin/src/core/compiler.ts` |
 | CLI args | `path_to_file_uri()` | `verter_lsp/src/main.rs` |
+| Pinned tool path (same-file identity, rule 5) | `normalize_tool_path()` | `verter_dx_baseline/src/provider.rs` |
 
 ## Exit Boundaries (Canonical → External)
 
@@ -157,3 +158,12 @@ All file paths stored internally in **canonical ID** format. Normalization at en
 2. **Store only canonical**: All maps, caches, analysis types use canonical IDs as keys
 3. **Send → denormalize at the boundary**: Convert back to `file://` URIs or OS paths only when sending to external systems
 4. **Never compare raw paths**: Always compare canonical IDs, never raw OS paths or URIs
+5. **Same-file questions need IDENTITY, not spelling**: canonical-ID equality is *spelling* equality. `canonicalize_path` (`verter_span/src/path.rs`) is pure string normalization — slashes, drive case, `//?/` prefix, trailing slash — and never touches the filesystem, so it cannot reconcile two canonical spellings of ONE file. When a comparison asks "is this the SAME FILE" (tool-root pinning, artifact identity, dedup), resolve the filesystem identity **at the entry boundary** — `std::fs::canonicalize` then `canonicalize_path`, degrading to string canonicalization when the path does not exist — and keep the comparison a pure `==` on the internal form. Resolving inside the comparison instead is a rule violation: it reintroduces normalization downstream of the boundary, where rule 2 says only canonical values live.
+
+### Why rule 5 exists
+
+A pnpm workspace routinely gives one file several canonical spellings: `packages/<pkg>/node_modules/<dep>` is a **symlink** into `node_modules/.pnpm/<dep>@<ver>/…`, so the same `tsserver.js` is reachable both package-locally and through the store. Two spellings, one file, and string canonicalization equates neither.
+
+This is also a **platform-asymmetric** trap, so it fails only in CI: the DX baseline pinned its tool root by the package-local spelling while discovery reported the store realpath, and `baseline_tool_root_mismatch` fired on every Linux run while Windows passed. Anything that compares "did I get the file I pinned" is exposed — and a spelling comparison is not merely weaker, it is wrong in both directions.
+
+Identity resolution does **not** loosen a strictness gate: two genuinely different files still resolve apart. What it removes is a false negative on one file under two names. Where a gate must stay faithful to what a *shipped* component passes (e.g. the harness advertising the same `--tsdk` the VS Code extension passes), keep advertising the spelled path and resolve identity on the comparison's ingress instead — do not rewrite what is advertised.
