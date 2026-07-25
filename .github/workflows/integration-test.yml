@@ -166,7 +166,7 @@ jobs:
 
       - name: Setup pnpm
         if: steps.source.outputs.source == 'artifact'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
         if: steps.source.outputs.source == 'artifact'
@@ -428,7 +428,7 @@ jobs:
 
       - name: Setup pnpm
         if: matrix.project.package-manager == 'pnpm'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 

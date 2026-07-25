@@ -32,7 +32,7 @@ jobs:
       editors: ${{ steps.filter.outputs.editors }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -269,7 +269,7 @@ jobs:
           # `target/` that did not match their build.
           key: rust-test
           cache-directories: target/gate-runner
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -335,7 +335,7 @@ jobs:
           echo "JUnit report: $found"
       - name: Test report
         if: always() && steps.junit.outputs.path != ''
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         with:
           name: Rust Test Results
           path: ${{ steps.junit.outputs.path }}
@@ -351,7 +351,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -391,7 +391,7 @@ jobs:
           pnpm vitest run packages/vue-vscode/src/extensionTsService.autoimport.spec.ts packages/vue-vscode/src/extensionTsService.diagnostics.spec.ts
       - name: Test report
         if: always()
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         with:
           name: JS Test Results
           path: test-results/vitest-junit.xml
@@ -412,7 +412,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: svelte-oracle
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -449,7 +449,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: svelte-conformance
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -475,7 +475,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -503,7 +503,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: svelte-compiler-benchmark
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -560,7 +560,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -596,7 +596,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen-cli@0.2.122
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -670,7 +670,7 @@ jobs:
       matrix: ${{ steps.e2e-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -706,7 +706,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -747,7 +747,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -808,7 +808,7 @@ jobs:
       matrix: ${{ fromJSON(needs.build-vscode-e2e.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -859,7 +859,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-native-node
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -889,7 +889,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -927,7 +927,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -1036,7 +1036,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: editor-helix
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -1128,7 +1128,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: editor-lapce
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -1196,7 +1196,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: editor-zed
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc

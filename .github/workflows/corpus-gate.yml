@@ -74,7 +74,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -128,7 +128,7 @@ jobs:
           repository: ${{ inputs.corpus_repo }}
           ref: ${{ inputs.corpus_ref }}
           path: .corpus-gate-corpus
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -185,7 +185,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc

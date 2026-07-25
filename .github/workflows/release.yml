@@ -68,7 +68,7 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -115,7 +115,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -167,7 +167,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -484,7 +484,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen-cli@0.2.122
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -599,7 +599,7 @@ jobs:
 
       # The real-client lane is Linux-only: the pinned Helix release asset is a
       # linux-x86_64 archive.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         if: runner.os == 'Linux'
       - uses: actions/setup-node@v5
         if: runner.os == 'Linux'
@@ -725,7 +725,7 @@ jobs:
         working-directory: extensions/lapce
         run: cargo fmt --check
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         if: runner.os == 'Linux'
       - uses: actions/setup-node@v5
         if: runner.os == 'Linux'
@@ -810,7 +810,7 @@ jobs:
         working-directory: extensions/zed
         run: cargo fmt --check
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         if: runner.os == 'Linux'
       - uses: actions/setup-node@v5
         if: runner.os == 'Linux'
@@ -1027,7 +1027,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -1286,7 +1286,7 @@ jobs:
       url: https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
