@@ -1125,7 +1125,33 @@ pub(super) async fn handle_rename(
                         // locations are consumed ONLY while the captured surface is
                         // still honored and the open document still matches it.
                         Ok(mut type_locs) if server.provider_context_still_valid(uri, &ctx) => {
-                            provider_rename_complete = true;
+                            // An EMPTY location set is NOT evidence of completeness.
+                            // It is what a carrier DENIED by provider-feature
+                            // admission serves (`TsgoCompositeProvider::
+                            // get_rename_locations` answers `Ok(vec![])` on denial,
+                            // deferring to exactly this gate), and it is
+                            // indistinguishable from a provider that resolved
+                            // nothing at the cursor. Verter's own half is SAME-FILE
+                            // ONLY — it cannot see an importer of an exported
+                            // symbol, and on a Svelte carrier it does not see the
+                            // MARKUP occurrences at all (`TemplateAnalysisSnapshot::
+                            // binding_occurrences` is empty for `.svelte`). Shipping
+                            // that half as authoritative is a SUCCESSFUL rename that
+                            // leaves the source referencing a name that no longer
+                            // exists — the write-side of the same fail-open family
+                            // the multi-claimant refusal above closes. A provider
+                            // that resolves the symbol always reports at least the
+                            // occurrence under the cursor, so an empty set means the
+                            // completeness question was never answered: REFUSE.
+                            //
+                            // This only ADDS provider-backed completeness, never
+                            // revokes an exemption already established before the
+                            // query: a Verter-native CSS class/id rename has no
+                            // TypeScript correlate at all, so its provider answer is
+                            // legitimately empty and its native surface IS the
+                            // complete one.
+                            provider_rename_complete =
+                                provider_rename_complete || !type_locs.is_empty();
                             // PROVIDER-AGNOSTIC inline child-declaration synthesis. A
                             // cross-file `<Child prop=…>` rename must edit BOTH the
                             // parent usage AND the prop declaration. For an INLINE

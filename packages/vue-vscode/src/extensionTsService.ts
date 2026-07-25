@@ -33,6 +33,11 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import type * as ts from "typescript";
 
+import { VERTER_TYPES_STUB } from "@verter/typescript-plugin/verter-types-stub";
+
+/** The module every generated IDE carrier imports its type helpers from. */
+const VERTER_TYPES_MODULE = "@verter/types";
+
 /** Called once with the actionable message when no workspace TypeScript resolves. */
 export type UnavailableNotifier = (message: string) => void;
 
@@ -183,13 +188,45 @@ export class ExtensionTsService {
 
     const compilerOptions: ts.CompilerOptions = this.resolveCompilerOptions();
 
+    // `@verter/types` is where every generated carrier gets its type helpers, so
+    // a project that cannot resolve it types every template binding as `any`.
+    //
+    // The resolution host below is deliberately built on RAW `ts.sys`, not on the
+    // virtual-aware `host`: the question "does this project install the package?"
+    // must be answered by the disk alone. Answering it through a host that already
+    // claims the virtual path exists would make a hoisted or aliased real install
+    // lose to Verter's own declarations.
+    const verterTypesVirtualPath = join(
+      this.workspaceRoot,
+      "node_modules",
+      "@verter",
+      "types",
+      "index.d.ts",
+    );
+    const diskResolutionHost: ts.ModuleResolutionHost = {
+      fileExists: this.ts.sys.fileExists,
+      readFile: this.ts.sys.readFile,
+      directoryExists: this.ts.sys.directoryExists,
+      getDirectories: this.ts.sys.getDirectories,
+      realpath: this.ts.sys.realpath,
+      useCaseSensitiveFileNames: this.ts.sys.useCaseSensitiveFileNames,
+    };
+    const isVerterTypesVirtualPath = (fileName: string): boolean =>
+      this.samePath(fileName, verterTypesVirtualPath);
+    // A real file at the virtual path is served verbatim — the fallback only ever
+    // fills a hole, it never overwrites what the project installed.
+    const readVirtualAware = (fileName: string): string | undefined =>
+      isVerterTypesVirtualPath(fileName)
+        ? (this.ts.sys.readFile(fileName) ?? VERTER_TYPES_STUB)
+        : this.ts.sys.readFile(fileName);
+
     const host: ts.LanguageServiceHost = {
       getScriptFileNames: () => [...this.openFiles],
       getScriptVersion: (fileName) => String(this.fileVersions.get(fileName) ?? 0),
       getScriptSnapshot: (fileName) => {
         if (this.fileSnapshots.has(fileName)) return this.fileSnapshots.get(fileName)!;
         try {
-          const content = this.ts.sys.readFile(fileName);
+          const content = readVirtualAware(fileName);
           if (content !== undefined) {
             const snap = this.ts.ScriptSnapshot.fromString(content);
             this.fileSnapshots.set(fileName, snap);
@@ -203,15 +240,60 @@ export class ExtensionTsService {
       getCurrentDirectory: () => this.workspaceRoot,
       getCompilationSettings: () => compilerOptions,
       getDefaultLibFileName: this.ts.getDefaultLibFilePath,
-      fileExists: this.ts.sys.fileExists,
-      readFile: this.ts.sys.readFile,
+      fileExists: (fileName) =>
+        isVerterTypesVirtualPath(fileName) ? true : this.ts.sys.fileExists(fileName),
+      readFile: readVirtualAware,
       readDirectory: this.ts.sys.readDirectory,
       directoryExists: this.ts.sys.directoryExists,
       getDirectories: this.ts.sys.getDirectories,
+
+      // Ordinary resolution runs FIRST for every specifier, including
+      // `@verter/types`. Only when the project resolves nothing at all does the
+      // virtual declaration file stand in — so an installed copy always wins, and
+      // wins as a WHOLE package (a name the install does not export stays
+      // unresolved rather than being backfilled from Verter's declarations, which
+      // would silently merge two versions of the same package).
+      resolveModuleNameLiterals: (moduleLiterals, containingFile, redirectedReference, options) =>
+        moduleLiterals.map((literal) => {
+          const resolved = this.ts.resolveModuleName(
+            literal.text,
+            containingFile,
+            options,
+            diskResolutionHost,
+            undefined,
+            redirectedReference,
+          );
+          if (literal.text !== VERTER_TYPES_MODULE || resolved.resolvedModule) {
+            return resolved;
+          }
+          return {
+            ...resolved,
+            resolvedModule: {
+              extension: this.ts.Extension.Dts,
+              isExternalLibraryImport: true,
+              resolvedFileName: verterTypesVirtualPath,
+            },
+          };
+        }),
     };
 
     this.service = this.ts.createLanguageService(host, this.ts.createDocumentRegistry());
     this.initialized = true;
+  }
+
+  /**
+   * Whether two paths name the same file.
+   *
+   * Separator-insensitive (TypeScript hands back forward slashes even on Windows,
+   * while `path.join` produces backslashes there) and case-folded exactly when the
+   * host filesystem is, so a case-sensitive filesystem never conflates two files.
+   */
+  private samePath(left: string, right: string): boolean {
+    const normalize = (value: string): string => {
+      const slashed = value.replace(/\\/g, "/");
+      return this.ts.sys.useCaseSensitiveFileNames ? slashed : slashed.toLowerCase();
+    };
+    return normalize(left) === normalize(right);
   }
 
   /**

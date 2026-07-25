@@ -6113,14 +6113,37 @@ fn custom_directive_modifiers() {
         result.contains(r#"directiveAccessor["vTest"]"#),
         "should reference vTest: {result}"
     );
+    // Identifier-shaped modifiers are BARE keys: TypeScript anchors the
+    // excess-property diagnostic at the property-name node, and a quoted key would
+    // start at the synthetic quote, so the invalid-modifier squiggle would have no
+    // carrier position at all.
     assert!(
-        result.contains(r#""bar":true"#),
-        "should have bar modifier: {result}"
+        result.contains("bar:true"),
+        "should have bar modifier as a bare key: {result}"
     );
     assert!(
-        result.contains(r#""baz":true"#),
-        "should have baz modifier: {result}"
+        result.contains("baz:true"),
+        "should have baz modifier as a bare key: {result}"
     );
+    assert!(
+        !result.contains(r#""bar":true"#),
+        "an identifier-shaped modifier must not be emitted as a quoted key: {result}"
+    );
+}
+
+#[test]
+fn custom_directive_non_identifier_modifier_stays_quoted() {
+    // A modifier that is not a valid JS identifier must stay a quoted key to be
+    // legal JavaScript; its name is still individually mapped.
+    let source = r#"<template><div v-test.some-mod="val" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    assert!(
+        output.contains(r#""some-mod":true"#),
+        "a non-identifier modifier must stay a quoted key: {output}"
+    );
+    let src = source.find(".some-mod").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "some-mod", src, "non-identifier modifier");
 }
 
 #[test]
@@ -6197,7 +6220,7 @@ fn custom_directive_full_combo() {
         "should reference vTest: {result}"
     );
     assert!(
-        result.contains(r#"baz,"foo",{"bar":true}"#),
+        result.contains(r#"baz,"foo",{bar:true}"#),
         "should have value, static arg, and modifier object: {result}"
     );
 
@@ -6224,6 +6247,176 @@ fn custom_directive_on_component() {
     assert!(
         result.contains(r#"directiveAccessor["vFocus"]"#),
         "should reference vFocus: {result}"
+    );
+}
+
+// ── Custom-directive carrier mapping ───────────────────────
+//
+// A custom directive relocates its whole payload into a synthetic
+// `___VERTER___runCustomDirective(...)` call. Every AUTHORED token inside that
+// payload — the directive name, the value expression, the argument, and each
+// modifier — must carry its own mapped run back to the authored span, or the
+// resulting diagnostics/hover/definition land nowhere (an unmapped generated
+// position has no original position and a conformant consumer fails closed).
+
+/// Convert a byte offset in `s` into the 0-based `(line, col)` the source map uses.
+fn gen_line_col(s: &str, byte_off: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    for (i, b) in s.as_bytes().iter().enumerate().take(byte_off) {
+        if *b == b'\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    (line, (byte_off - line_start) as u32)
+}
+
+/// Assert `gen_token` occurs EXACTLY once in `output` and that a source-map token
+/// is anchored at its first byte pointing back to `src_offset`.
+///
+/// Asserting the PAIR (generated position ↔ source offset) is what discriminates:
+/// a `contains()` check stays green when the mapping drifts, and a bare
+/// "some token has this src_col" check stays green when the run is anchored on the
+/// wrong generated token.
+fn assert_mapped_run(
+    output: &str,
+    tokens: &[(u32, u32, u32)],
+    gen_token: &str,
+    src_offset: usize,
+    what: &str,
+) {
+    let occurrences = output.matches(gen_token).count();
+    assert_eq!(
+        occurrences, 1,
+        "{what}: expected exactly one occurrence of {gen_token:?} in the generated \
+         output so the mapping assertion is unambiguous, found {occurrences}: {output}"
+    );
+    let gen_off = output.find(gen_token).unwrap();
+    let (line, col) = gen_line_col(output, gen_off);
+    let found = tokens
+        .iter()
+        .any(|&(l, c, src)| l == line && c == col && src == src_offset as u32);
+    assert!(
+        found,
+        "{what}: generated {gen_token:?} at {line}:{col} must carry a mapped run back \
+         to authored offset {src_offset}. Tokens on that generated line: {:?}\n{output}",
+        tokens
+            .iter()
+            .filter(|&&(l, _, _)| l == line)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn custom_directive_modifier_key_maps_to_authored_modifier() {
+    // The invalid-modifier diagnostic TypeScript raises on the generated modifier
+    // key must be able to land on the authored `green` token.
+    let source = r#"<template><div v-color.green="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let green_src = source.find("green").unwrap();
+    assert_mapped_run(&output, &tokens, "green", green_src, "modifier key");
+}
+
+#[test]
+fn custom_directive_each_modifier_maps_to_its_own_authored_span() {
+    // MIXED valid + invalid modifiers: each generated key owns its OWN authored
+    // span. A single collapsed run would make the invalid-modifier diagnostic land
+    // on the wrong modifier — the failure mode a `contains()` check cannot see.
+    let source = r#"<template><div v-color.blue.green="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let blue_src = source.find(".blue").unwrap() + 1;
+    let green_src = source.find(".green").unwrap() + 1;
+    assert_ne!(blue_src, green_src);
+
+    assert_mapped_run(&output, &tokens, "blue", blue_src, "first modifier");
+    assert_mapped_run(&output, &tokens, "green", green_src, "second modifier");
+}
+
+#[test]
+fn custom_directive_reference_maps_to_authored_directive_name() {
+    // Template `v-color` ↔ script `vColor`: the generated reference must map back
+    // to the authored directive name so hover / go-to-definition / find-references
+    // bridge the kebab↔camel hop.
+    let source = r#"<template><div v-color="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let name_src = source.find("v-color").unwrap();
+    assert_mapped_run(&output, &tokens, "vColor", name_src, "directive reference");
+}
+
+#[test]
+fn custom_directive_accessor_reference_maps_to_authored_directive_name() {
+    // An UNRESOLVED directive resolves through the instance accessor; the mapped
+    // token is the directive name inside the string index.
+    let source = r#"<template><div v-focus /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[]);
+
+    let name_src = source.find("v-focus").unwrap();
+    assert_mapped_run(&output, &tokens, "vFocus", name_src, "accessor reference");
+}
+
+#[test]
+fn custom_directive_value_identifier_maps_to_authored_expression() {
+    let source = r#"<template><div v-color="msg" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("vColor", BindingType::SetupConst),
+            ("msg", BindingType::SetupRef),
+        ],
+    );
+
+    let msg_src = source.find("\"msg\"").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "msg", msg_src, "value identifier");
+}
+
+#[test]
+fn custom_directive_static_arg_maps_to_authored_arg() {
+    let source = r#"<template><div v-color:foo="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let arg_src = source.find(":foo").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "foo", arg_src, "static argument");
+}
+
+#[test]
+fn custom_directive_dynamic_arg_identifier_maps_to_authored_expression() {
+    let source = r#"<template><div v-color:[dyn]="'red'" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("vColor", BindingType::SetupConst),
+            ("dyn", BindingType::SetupRef),
+        ],
+    );
+
+    let dyn_src = source.find("[dyn]").unwrap() + 1;
+    assert_mapped_run(&output, &tokens, "dyn", dyn_src, "dynamic argument");
+}
+
+#[test]
+fn custom_directive_callback_parameter_is_explicitly_typed() {
+    // The synthetic `v-directive` callback parameter has no contextual type, so an
+    // unannotated parameter raises TS7006 (`implicitly has an 'any' type`) under
+    // `noImplicitAny` on EVERY custom directive — including correct ones. The
+    // parameter must carry an explicit annotation.
+    let result = gen_tsx_template(r#"<template><div v-focus /></template>"#);
+
+    assert!(
+        result.contains("(___VERTER___slotInstance: any)"),
+        "the v-directive callback parameter must be explicitly annotated so it does \
+         not raise TS7006 under noImplicitAny: {result}"
+    );
+    assert!(
+        !result.contains("(___VERTER___slotInstance)"),
+        "no unannotated v-directive callback parameter may remain: {result}"
     );
 }
 
@@ -8096,9 +8289,18 @@ fn vmodel_source_to_generated_selects_read_occurrence() {
 
 #[test]
 fn vmodel_modifier_maps_to_source() {
-    // <input v-model.trim="x"/> → the `trim` modifier token maps to its source span.
-    let source = r#"<template><input v-model.trim="x"/></template>"#;
-    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupRef)]);
+    // <MyComp v-model.trim="x"/> → the `trim` modifier token maps to its source span.
+    // The host is a COMPONENT because `modelModifiers` is a component prop; a native
+    // element publishes no modifiers prop at all (see
+    // `intrinsic_vmodel_does_not_emit_model_modifiers_prop`).
+    let source = r#"<template><MyComp v-model.trim="x"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
+        ],
+    );
 
     assert!(
         output.contains("Modifiers={{"),
@@ -8252,16 +8454,19 @@ fn emit_codegen_crlf_and_tabs() {
 
 #[test]
 fn vmodel_dynamic_arg_modifier_maps_and_is_valid() {
-    // <input v-model:[eventName].trim="val"/> — dynamic arg + modifier.
+    // <MyComp v-model:[eventName].trim="val"/> — dynamic arg + modifier.
     // The modifiers prop name must be the COMPUTED `[`${...}Modifiers`]` name with
     // the arg expression embedded, NOT an empty JSX attribute name (` ={{`), which
     // is invalid TSX. The embedded arg `eventName` must map back to its source span.
-    let source = r#"<template><input v-model:[eventName].trim="val"/></template>"#;
+    // The host is a COMPONENT: an argument-bearing v-model is a component-only Vue
+    // form, and `modelModifiers` is a component prop.
+    let source = r#"<template><MyComp v-model:[eventName].trim="val"/></template>"#;
     let (output, tokens) = gen_tsx_template_with_map(
         source,
         &[
             ("eventName", BindingType::SetupConst),
             ("val", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
         ],
     );
 
@@ -8854,23 +9059,85 @@ fn static_ref_emits_unmapped_string_literal() {
     );
 }
 
-/// Q4 — native v-model whose value/event generation is redundant
+/// Q4 — a v-model whose value/event generation is redundant
 /// (`has_explicit_prop && has_explicit_handler`) but which carries MODIFIERS. The
 /// modifiers prop MUST still be emitted. Pre-refactor `empty_replacement = true`
 /// suppressed the whole emission INCLUDING modifiers — the modifier was silently
 /// dropped.
+///
+/// The redundancy detection is native-element-only, and a native element no longer
+/// receives a `modelModifiers` prop at all (see
+/// `intrinsic_vmodel_does_not_emit_model_modifiers_prop`), so the surviving
+/// invariant is the COMPONENT one: modifiers are published independently of the
+/// value/event pieces.
 #[test]
 fn vmodel_redundant_still_emits_modifiers() {
-    // <input v-model.trim="x" :value="..." @input="..."> — both the value prop and
-    // the input handler are explicitly present, so value/event generation is
-    // redundant; only the `.trim` modifier prop should be emitted.
-    let source = r#"<template><input v-model.trim="x" :value="x" @input="e => x = e.target.value"/></template>"#;
-    let (output, _tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupRef)]);
+    let source = r#"<template><MyComp v-model.trim="x" :modelValue="x" @update:modelValue="v => x = v"/></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
+        ],
+    );
 
-    // The modifiers prop must survive even though value/event are suppressed.
     assert!(
         output.contains("modelModifiers={{"),
-        "redundant native v-model with modifiers MUST still emit the modifiers prop: {output}"
+        "a component v-model with modifiers MUST emit the modifiers prop: {output}"
+    );
+    assert!(
+        output.contains("trim: true"),
+        "the `.trim` modifier must be emitted as `trim: true`: {output}"
+    );
+}
+
+/// RULING — `modelModifiers` is a COMPONENT prop (the name `defineModel()`
+/// synthesizes), not a DOM attribute. Vue's own compiler handles native-element
+/// v-model modifiers inside the generated `vModelText`/`vModelDynamic` runtime
+/// directive; it never passes a `modelModifiers` prop to an intrinsic element.
+/// Emitting one made `<input v-model.number.trim="count">` — valid Vue — fail with
+/// `TS2322: Property 'modelModifiers' does not exist on type 'InputHTMLAttributes &
+/// ReservedProps'`, a red squiggle on correct code.
+///
+/// `.number` / `.trim` on a native element are compiler-level modifiers with no TS
+/// correlate, so they lower to nothing and stay unmapped — the fail-closed side of
+/// the Carrier IDE TS Surface Principle, not a silently wrong prop.
+#[test]
+fn intrinsic_vmodel_does_not_emit_model_modifiers_prop() {
+    let source = r#"<template><input v-model.number.trim="count" /></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(source, &[("count", BindingType::SetupRef)]);
+
+    assert!(
+        !output.contains("modelModifiers"),
+        "a native element must not receive the component-only `modelModifiers` prop: {output}"
+    );
+    // The value/event pieces are unaffected by the ruling.
+    assert!(
+        output.contains("value={"),
+        "native v-model must still emit the DOM value prop: {output}"
+    );
+    assert!(
+        output.contains("onInput={"),
+        "native v-model must still emit the input handler: {output}"
+    );
+}
+
+/// The control for the ruling above: a COMPONENT still publishes `modelModifiers`,
+/// because that is a real prop on a component using `defineModel`.
+#[test]
+fn component_vmodel_still_emits_model_modifiers_prop() {
+    let source = r#"<template><MyComp v-model.trim="x" /></template>"#;
+    let (output, _tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupRef),
+            ("MyComp", BindingType::SetupConst),
+        ],
+    );
+
+    assert!(
+        output.contains("modelModifiers={{"),
+        "a component v-model MUST still publish modelModifiers: {output}"
     );
     assert!(
         output.contains("trim: true"),

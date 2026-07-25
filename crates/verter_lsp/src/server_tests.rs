@@ -28705,3 +28705,262 @@ async fn shortened_budget_cuts_the_dead_tail_without_dropping_answered_requests(
          the old 15s, took {wedged_elapsed:?}"
     );
 }
+
+// ── Rename completeness: refuse a partial edit set ─────────────────────
+
+/// A JS (`@ts-check`) carrier whose binding lives in BOTH the script and the
+/// markup. `jsValue` is authored three times: the declaration, the script
+/// call argument, and the markup expression.
+const RENAME_COMPLETENESS_VUE: &str = "<script setup>\n// @ts-check\nconst jsValue = { label: \"javascript\" };\nfunction renderJs(value) {\n  return value.label;\n}\nconst jsRendered = renderJs(jsValue);\n</script>\n\n<template>\n  <p>{{ jsRendered }} {{ jsValue.label }}</p>\n</template>\n";
+
+const RENAME_COMPLETENESS_SVELTE: &str = "<script>\n// @ts-check\nlet jsValue = { label: \"javascript\" };\nfunction renderJs(value) {\n  return value.label;\n}\nlet jsRendered = renderJs(jsValue);\n</script>\n\n<p>{jsRendered} {jsValue.label}</p>\n";
+
+/// The SET of authored `token` ranges in `source`, in the document's own
+/// coordinates. Asserting against this set — never against a count — keeps a
+/// future fourth occurrence from passing silently.
+fn authored_token_ranges(
+    source: &str,
+    token: &str,
+) -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
+    let line_index = crate::documents::line_index::LineIndex::new_utf16(source);
+    let mut ranges = std::collections::BTreeSet::new();
+    let bytes = source.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut from = 0usize;
+    while let Some(found) = source[from..].find(token) {
+        let start = from + found;
+        let end = start + token.len();
+        from = start + 1;
+        if start > 0 && is_word(bytes[start - 1]) {
+            continue;
+        }
+        if end < bytes.len() && is_word(bytes[end]) {
+            continue;
+        }
+        let s = line_index
+            .offset_to_position(start as u32)
+            .expect("position");
+        let e = line_index.offset_to_position(end as u32).expect("position");
+        ranges.insert((s.line, s.character, e.line, e.character));
+    }
+    ranges
+}
+
+/// The SET of ranges a rename transaction mutates in `uri`.
+fn rename_edit_ranges(
+    edit: &WorkspaceEdit,
+    uri: &Uri,
+) -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
+    workspace_edit_triples(edit)
+        .into_iter()
+        .filter(|(edited, _, _)| {
+            verter_span::path::fs_paths_equal(
+                &crate::documents::uri_to_canonical_id(edited),
+                &crate::documents::uri_to_canonical_id(uri),
+            )
+        })
+        .map(|(_, range, _)| {
+            (
+                range.start.line,
+                range.start.character,
+                range.end.line,
+                range.end.character,
+            )
+        })
+        .collect()
+}
+
+/// A rename that cannot prove its edit set is complete must REFUSE, never ship
+/// a partial one.
+///
+/// An EMPTY provider location set is not evidence of completeness. It is what a
+/// carrier DENIED by provider-feature admission returns
+/// (`TsgoCompositeProvider::get_rename_locations` serves `Ok(vec![])` on
+/// denial), and it is indistinguishable from a provider that resolved nothing.
+/// Verter's own rename half is SAME-FILE ONLY, and for a Svelte carrier it does
+/// not even see the markup occurrences (`TemplateAnalysisSnapshot`
+/// `binding_occurrences` is empty for `.svelte` — the markup collector only
+/// gathers component usages, snippets and directives). Shipping that half as
+/// authoritative is a SUCCESSFUL rename that leaves the source referencing a
+/// name that no longer exists.
+///
+/// DISCRIMINATES: before the completeness gate, the Svelte row returned a
+/// 2-of-3 `WorkspaceEdit` — script declaration + script usage, with
+/// `{jsValue.label}` silently untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_refuses_a_partial_edit_set_when_the_provider_supplies_no_locations() {
+    // Every row is exercised before any verdict, so one carrier's failure never
+    // hides the other's.
+    let mut violations: Vec<String> = Vec::new();
+    for (extension, language_id, source) in [
+        ("vue", "vue", RENAME_COMPLETENESS_VUE),
+        ("svelte", "svelte", RENAME_COMPLETENESS_SVELTE),
+    ] {
+        let app_path = format!("src/JavaScriptCase.{extension}");
+        let (_temp, service, drain_handle, provider, workspace_id) =
+            make_definition_test_server_with_kind(
+                &[(&app_path, language_id, source)],
+                crate::TypeProviderKind::Tsgo,
+            )
+            .await;
+        let server = service.inner();
+        let uri = workspace_uri(&workspace_id, &app_path);
+        server.ensure_current_file_synced(&uri).await;
+        server.publish_import_dependencies_settled(&uri).await;
+
+        let position = find_document_position(server, &uri, "jsValue", 0);
+        let edit = super::nav_features_navigation::handle_rename(
+            server,
+            RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                new_name: "jsDatum".into(),
+                work_done_progress_params: Default::default(),
+            },
+        )
+        .await
+        .expect("an incomplete rename must fail closed, not raise a protocol error");
+
+        // The provider WAS consulted — this is a completeness refusal, not a
+        // short-circuit that never reached the provider.
+        assert!(
+            provider
+                .calls()
+                .iter()
+                .any(|call| matches!(call, MockCall::GetRenameLocations { .. })),
+            "{extension}: the handler must consult the provider before deciding completeness"
+        );
+
+        // The durable invariant, stated over the SET: a returned transaction
+        // covers EVERY authored occurrence, or there is no transaction at all.
+        if let Some(ws) = &edit {
+            let covered = rename_edit_ranges(ws, &uri);
+            let authored = authored_token_ranges(source, "jsValue");
+            if covered != authored {
+                violations.push(format!(
+                    "{extension}: SILENT PARTIAL — covered {covered:?}, authored {authored:?}"
+                ));
+            }
+            violations.push(format!(
+                "{extension}: a rename whose provider yielded no locations must refuse, got \
+                 {covered:?}"
+            ));
+        }
+
+        drain_handle.abort();
+        drop(service);
+    }
+    assert!(
+        violations.is_empty(),
+        "rename must refuse rather than ship an unproven edit set:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// The completeness gate must not have widened into a blanket refusal: a
+/// carrier whose provider DOES answer still renames, and still covers the exact
+/// authored occurrence set.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_still_covers_the_full_authored_set_when_the_provider_answers() {
+    let app_path = "src/JavaScriptCase.vue";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "vue", RENAME_COMPLETENESS_VUE)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "jsValue", 0);
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let decl_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("the declaration position maps into the IDE surface");
+    provider.set_rename_locations(
+        &ctx.tsx_path,
+        decl_offset,
+        vec![crate::type_provider::protocol::RenameLocation {
+            path: ctx.tsx_path.clone(),
+            start: decl_offset,
+            end: decl_offset + "jsValue".len() as u32,
+        }],
+    );
+
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "jsDatum".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("an answering provider must still produce a rename");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(RENAME_COMPLETENESS_VUE, "jsValue"),
+        "the rename must cover the exact authored occurrence set, got {edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+/// CSS class rename is a Verter-native surface with NO TypeScript correlate:
+/// the provider legitimately yields nothing for it, and the completeness gate
+/// must not refuse it. Proves the gate keys on the provider-backed binding
+/// route, not on "the provider returned an empty vector".
+#[tokio::test(flavor = "multi_thread")]
+async fn css_class_rename_still_serves_without_any_provider_locations() {
+    let source = "<template>\n  <div class=\"panel\"></div>\n</template>\n\n<style scoped>\n.panel {\n  color: red;\n}\n</style>\n";
+    let app_path = "src/Styled.vue";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "vue", source)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "class=\"panel\"", 7);
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "card".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("a native CSS rename must still serve without provider locations");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(source, "panel"),
+        "the CSS rename must cover the template and style occurrences, got {edit:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}

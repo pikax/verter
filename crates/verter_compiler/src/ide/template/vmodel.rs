@@ -285,15 +285,21 @@ pub(super) fn process_v_model<'alloc>(
 
     // Append the modifiers prop (each modifier name maps back to source).
     //
-    // The modifier prop is emitted whenever modifiers are present — even when
+    // COMPONENTS ONLY. `modelModifiers` is the prop name `defineModel()`
+    // synthesizes on a component — it is not a DOM attribute and Vue never passes
+    // it to an intrinsic element: native-element v-model modifiers are consumed by
+    // the runtime `vModelText`/`vModelDynamic` directive the compiler emits.
+    // Publishing it on an intrinsic made valid Vue (`<input v-model.number.trim>`)
+    // fail with `TS2322: Property 'modelModifiers' does not exist on type
+    // 'InputHTMLAttributes & ReservedProps'`. `.number` / `.trim` on a native
+    // element have no TS correlate, so they lower to nothing and stay unmapped —
+    // the fail-closed side of the carrier surface, not a silently wrong prop.
+    //
+    // On a component the prop is emitted whenever modifiers are present — even when
     // value/event generation is redundant (`empty_replacement`, i.e. the element
     // already declares both the DOM prop and its handler). `empty_replacement`
-    // suppresses ONLY the generated value/event pieces, NOT the modifier prop:
-    // `<input v-model.trim :value @input>` must still publish `modelModifiers={{
-    // trim: true }}`. (The dynamic-arg computed-name modifier path below is never
-    // reached under `empty_replacement` — that flag is set only on the native
-    // static-arg branch.)
-    if !prop.modifiers.is_empty() {
+    // suppresses ONLY the generated value/event pieces, NOT the modifier prop.
+    if !is_native && !prop.modifiers.is_empty() {
         if is_dynamic_arg {
             // Dynamic arg: the modifiers prop name is COMPUTED. A computed name is
             // NOT a valid bare JSX attribute (`[`…`]={…}` is illegal, and an empty

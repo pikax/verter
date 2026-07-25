@@ -68,6 +68,26 @@ export function materializeLibShapedNonFileWorkspaceTypeScript(root: string): st
 }
 
 /**
+ * Materialize an INSTALLED `@verter/types` under `<root>/node_modules`, with the
+ * given declaration content.
+ *
+ * The fallback the provider serves when the package is absent must never shadow
+ * a real install, so the control fixtures give the installed copy declarations
+ * that are distinguishable from Verter's own.
+ */
+export function materializeInstalledVerterTypes(root: string, declarations: string): string {
+  const pkgDir = join(root, "node_modules", "@verter", "types");
+  mkdirSync(pkgDir, { recursive: true });
+  writeFileSync(
+    join(pkgDir, "package.json"),
+    JSON.stringify({ name: "@verter/types", version: "0.0.0-fixture", types: "./index.d.ts" }),
+  );
+  const entry = join(pkgDir, "index.d.ts");
+  writeFileSync(entry, declarations);
+  return entry;
+}
+
+/**
  * Materialize a workspace TypeScript in the NATIVE-PREVIEW layout: the
  * `typescript` package is a thin launcher whose entry exposes no in-process
  * language service, and whose libraries live in a separate platform package

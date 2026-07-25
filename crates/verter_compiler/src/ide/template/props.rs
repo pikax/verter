@@ -15,7 +15,7 @@ use verter_span::{SourceByteOffset, SourceByteRange};
 use crate::ast::types::{ElementNode, TagType};
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, plan_user_expr, trim_span, EmitOp,
-    EmitText, ExprOptions, Placement,
+    EmitText, ExprOptions, ExprPlan, Placement,
 };
 use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBindings};
 use crate::template::code_gen::binding::BindingResolver;
@@ -25,18 +25,49 @@ use crate::template::code_gen::vdom::props::camelize;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
 use crate::types::NodeProp;
 
-/// A custom directive collected for `v-directive` emission in TSX output.
-pub struct CollectedDirective {
-    /// Typed directive expression. Setup-local directives use their authored
-    /// binding directly; only unresolved/global directives use the instance
-    /// accessor fallback.
-    pub reference: String,
-    /// Resolved value expression, or `"true"` for no-value directives
-    pub value: String,
-    /// Argument: `"\"foo\""` (quoted static), resolved expression (dynamic), or `"undefined"`
-    pub arg: String,
-    /// Modifiers object: `{"bar":true}` or `{}`
-    pub modifiers: String,
+/// One emission piece of a custom directive's relocated `v-directive` payload.
+///
+/// The payload is RELOCATED (the authored `v-color.blue="'red'"` attribute is
+/// deleted and re-emitted inside a synthetic `___VERTER___runCustomDirective(...)`
+/// call), so no authored byte survives in place. Every token the user can put a
+/// cursor on therefore needs its own mapped run — otherwise the generated position
+/// has no original position and every provider-backed feature (diagnostics, hover,
+/// definition, references, completion) fails closed at that column.
+pub enum DirectivePiece<'a> {
+    /// Unmapped synthetic scaffolding.
+    Syn(String),
+    /// A generated token owning `source_start`. Used for the directive name (the
+    /// kebab→camel hop `v-color` → `vColor`), a static argument, and each modifier
+    /// name. `InsertMapped` is a linear run, so a generated token longer than its
+    /// authored token maps its leading bytes only — every mapped column still lands
+    /// inside the generated identifier, which is what position-based provider
+    /// queries resolve on.
+    Mapped {
+        text: String,
+        source_start: SourceByteOffset,
+    },
+    /// A user expression, re-emitted through the relocated sink so each identifier
+    /// keeps its own mapped run and its binding accessor prefix/suffix stays
+    /// unmapped.
+    Expr(ExprPlan<'a>),
+}
+
+/// A custom directive collected for `v-directive` emission in TSX output, as the
+/// ordered piece list its element-level emitter lowers.
+pub struct CollectedDirective<'a> {
+    pub pieces: Vec<DirectivePiece<'a>>,
+}
+
+/// Whether `name` is a valid bare JavaScript object-literal key (an identifier
+/// name). Reserved words are legal property names, so only the character classes
+/// matter.
+fn is_js_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 /// Convert a directive name (without `v-` prefix) to camelCase with `v` prefix.
@@ -77,8 +108,8 @@ pub fn process_element_props<'alloc>(
     components: &TemplateComponentBindings,
     condition_guard: Option<&str>,
     is_jsx: bool,
-) -> Vec<CollectedDirective> {
-    let mut collected_directives: Vec<CollectedDirective> = Vec::new();
+) -> Vec<CollectedDirective<'alloc>> {
+    let mut collected_directives: Vec<CollectedDirective<'alloc>> = Vec::new();
     let v_if_guard = condition_guard;
 
     // Pre-scan: does this element have v-show? If so, :style will be handled
@@ -317,68 +348,145 @@ pub fn process_element_props<'alloc>(
                     // JSX mode: strip custom directives (no TS-only v-directive support)
                     remove_prop(prop, source, out);
                 } else {
-                    // Build CollectedDirective
+                    // Build the relocated payload as an ordered piece list. Each
+                    // authored token (directive name, value, argument, modifiers)
+                    // becomes its OWN mapped piece; only scaffolding is unmapped.
+                    let mut pieces: Vec<DirectivePiece<'alloc>> = Vec::new();
+
+                    pieces.push(DirectivePiece::Syn(
+                        "___VERTER___runCustomDirective(___VERTER___directiveElement,".to_string(),
+                    ));
+
+                    // Directive reference. Both forms map their generated name
+                    // token back to the authored `v-…` name span, so hover /
+                    // go-to-definition / find-references bridge the kebab→camel hop
+                    // from every template use.
                     let camel_name = directive_name_to_camel(dir_name);
-                    let reference = if resolver.get(&camel_name).is_some() {
-                        camel_name.clone()
+                    let name_start = SourceByteOffset(prop.start);
+                    if resolver.get(&camel_name).is_some() {
+                        pieces.push(DirectivePiece::Mapped {
+                            text: camel_name,
+                            source_start: name_start,
+                        });
                     } else {
-                        format!("___VERTER___directiveAccessor[\"{camel_name}\"]")
-                    };
+                        pieces.push(DirectivePiece::Syn(
+                            "___VERTER___directiveAccessor[\"".to_string(),
+                        ));
+                        pieces.push(DirectivePiece::Mapped {
+                            text: camel_name,
+                            source_start: name_start,
+                        });
+                        pieces.push(DirectivePiece::Syn("\"]".to_string()));
+                    }
 
-                    // Value — the custom-directive expression is relocated into a
-                    // synthetic `___VERTER___runCustomDirective(...)` call, so it is
-                    // resolved to a flat string via the shared `build_prefixed_expr`
-                    // helper (no in-place mapping is possible here).
-                    let value = if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-                        let raw = &source[vs as usize..ve as usize];
-                        match oxc_prop.and_then(|p| p.exp.as_ref()) {
-                            Some(exp) => build_prefixed_expr(raw, vs, exp, resolver, &[]),
-                            None => resolver.resolve_simple_expr(raw),
+                    pieces.push(DirectivePiece::Syn(
+                        ")(___VERTER___directiveElement,".to_string(),
+                    ));
+
+                    // Value.
+                    match (prop.value_start, prop.value_end) {
+                        (Some(vs), Some(ve)) => {
+                            let (tvs, tve) = trim_span(source, vs, ve);
+                            let value_bindings = oxc_prop
+                                .and_then(|p| p.exp.as_ref())
+                                .and_then(|e| e.bindings.as_ref())
+                                .map(|b| b.bindings.as_slice());
+                            pieces.push(DirectivePiece::Expr(plan_user_expr(
+                                source,
+                                SourceByteRange::new(SourceByteOffset(tvs), SourceByteOffset(tve)),
+                                value_bindings,
+                                resolver,
+                                ExprOptions::default(),
+                            )));
                         }
-                    } else {
-                        "true".to_string()
-                    };
+                        _ => pieces.push(DirectivePiece::Syn("true".to_string())),
+                    }
 
-                    // Arg
-                    let arg = if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
-                        let raw_arg = &source[as_ as usize..ae as usize];
-                        if prop.is_dynamic == Some(true) {
-                            // Dynamic arg: resolve as expression, strip brackets if present
-                            let inner = raw_arg
-                                .strip_prefix('[')
-                                .and_then(|s| s.strip_suffix(']'))
-                                .unwrap_or(raw_arg);
-                            resolver.resolve_simple_expr(inner)
-                        } else {
-                            // Static arg: quote it
-                            format!("\"{}\"", raw_arg)
-                        }
-                    } else {
-                        "undefined".to_string()
-                    };
+                    pieces.push(DirectivePiece::Syn(",".to_string()));
 
-                    // Modifiers
-                    let modifiers = if prop.modifiers.is_empty() {
-                        "{}".to_string()
-                    } else {
-                        let mut m = String::from("{");
-                        for (i, modifier) in prop.modifiers.iter().enumerate() {
-                            if i > 0 {
-                                m.push(',');
+                    // Argument.
+                    match (prop.arg_start, prop.arg_end) {
+                        (Some(as_), Some(ae)) => {
+                            let raw_arg = &source[as_ as usize..ae as usize];
+                            if prop.is_dynamic == Some(true) {
+                                // Dynamic arg: the bracketed expression is planned
+                                // so its identifiers map back individually.
+                                let inner = raw_arg
+                                    .strip_prefix('[')
+                                    .and_then(|s| s.strip_suffix(']'))
+                                    .unwrap_or(raw_arg);
+                                let inner_start = as_
+                                    + (inner.as_ptr() as usize - raw_arg.as_ptr() as usize) as u32;
+                                let (tas, tae) = trim_span(
+                                    source,
+                                    inner_start,
+                                    inner_start + inner.len() as u32,
+                                );
+                                let arg_bindings = oxc_prop
+                                    .and_then(|p| p.arg.as_ref())
+                                    .and_then(|a| a.bindings.as_ref())
+                                    .map(|b| b.bindings.as_slice());
+                                pieces.push(DirectivePiece::Expr(plan_user_expr(
+                                    source,
+                                    SourceByteRange::new(
+                                        SourceByteOffset(tas),
+                                        SourceByteOffset(tae),
+                                    ),
+                                    arg_bindings,
+                                    resolver,
+                                    ExprOptions::default(),
+                                )));
+                            } else {
+                                // Static arg: the quotes are synthetic, the name
+                                // inside them owns the authored arg span.
+                                pieces.push(DirectivePiece::Syn("\"".to_string()));
+                                pieces.push(DirectivePiece::Mapped {
+                                    text: raw_arg.to_string(),
+                                    source_start: SourceByteOffset(as_),
+                                });
+                                pieces.push(DirectivePiece::Syn("\"".to_string()));
                             }
-                            let mod_name = &source[modifier.start as usize..modifier.end as usize];
-                            m.push_str(&format!("\"{}\":true", mod_name));
                         }
-                        m.push('}');
-                        m
-                    };
+                        _ => pieces.push(DirectivePiece::Syn("undefined".to_string())),
+                    }
 
-                    collected_directives.push(CollectedDirective {
-                        reference,
-                        value,
-                        arg,
-                        modifiers,
-                    });
+                    // Modifiers. Each key is its OWN mapped run, so an
+                    // invalid-modifier diagnostic lands on exactly that authored
+                    // modifier and no valid sibling is implicated.
+                    //
+                    // The key is emitted BARE whenever the modifier is a valid JS
+                    // identifier, because TypeScript anchors the excess-property
+                    // diagnostic at the property-name node: a quoted key starts at
+                    // the quote, which is synthetic and unmapped, so the whole
+                    // diagnostic would fail closed and the user would see no
+                    // squiggle at all. A bare key puts the diagnostic anchor on the
+                    // mapped name itself. A modifier that is not a valid identifier
+                    // (`v-foo.some-mod`) must stay quoted to be legal JS; its name
+                    // is still mapped for hover/definition.
+                    pieces.push(DirectivePiece::Syn(",{".to_string()));
+                    for (i, modifier) in prop.modifiers.iter().enumerate() {
+                        let mod_name = &source[modifier.start as usize..modifier.end as usize];
+                        let bare = is_js_identifier(mod_name);
+                        pieces.push(DirectivePiece::Syn(
+                            match (i > 0, bare) {
+                                (true, true) => ",",
+                                (true, false) => ",\"",
+                                (false, true) => "",
+                                (false, false) => "\"",
+                            }
+                            .to_string(),
+                        ));
+                        pieces.push(DirectivePiece::Mapped {
+                            text: mod_name.to_string(),
+                            source_start: SourceByteOffset(modifier.start),
+                        });
+                        pieces.push(DirectivePiece::Syn(
+                            if bare { ":true" } else { "\":true" }.to_string(),
+                        ));
+                    }
+                    pieces.push(DirectivePiece::Syn("});".to_string()));
+
+                    collected_directives.push(CollectedDirective { pieces });
 
                     // Remove the directive from raw output
                     remove_prop(prop, source, out);

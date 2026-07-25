@@ -25,6 +25,12 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./verter-types-stub": {
+      "types": "./dist/helpers/verterTypesStub.d.ts",
+      "require": "./dist/helpers/verterTypesStub.js",
+      "import": "./dist/helpers/verterTypesStub.js",
+      "default": "./dist/helpers/verterTypesStub.js"
     }
   },
   "scripts": {
