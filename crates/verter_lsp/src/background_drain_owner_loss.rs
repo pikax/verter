@@ -104,6 +104,7 @@ pub(super) async fn reconcile_unowned_carrier_provider_file(
             provider_sync_states,
             provider_surfaces: documents.provider_surfaces(),
             documents: Some(documents),
+            project_sync: Some(sync),
             canonical_id,
             is_jsx,
             ide,

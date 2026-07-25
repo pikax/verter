@@ -31,14 +31,14 @@ use crate::type_provider::mock::{MockCall, MockTypeProvider};
 
 /// A test IDE companion for `provider`.
 fn ide_companion(provider: &str) -> CarrierCompanion {
-    CarrierCompanion {
-        provider_uri: Arc::from(provider),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    }
+    CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    )
 }
 
 /// Build a coordinator over a fresh backend + a mock provider, returning both so
@@ -247,14 +247,14 @@ async fn owner_loss_retracts_previously_published_carrier() {
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
 
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
 
     // 1. Publish under a resolved configured owner (ProjectBinding) through the
     //    reconciler — the production transition entry (durable store + ledger).
@@ -355,14 +355,14 @@ async fn owner_change_a_to_b_retracts_from_old_project() {
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
 
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
 
     // 1. Publish under owner A through the reconciler.
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
@@ -474,14 +474,14 @@ async fn owner_move_with_failing_prune_leaves_no_stale_or_duplicate_ready_file()
     let fs =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
 
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        "/workspace/src/App.vue",
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
 
     // 1. Publish under owner A.
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(

@@ -3,8 +3,30 @@
 Status: partially resolved. Verter now supplies `@verter/types` virtually when
 the project does not install it, and the real-provider harness stages the
 fixture's declared framework dependencies hermetically. The setup, unknown-tag,
-and custom-element contracts pass on both providers. The two Options-arm cases
-remain deferred with their test and fixture intentionally unchanged.
+and custom-element contracts pass on both providers.
+
+The two Options-arm cases remain DEFERRED and are NOT retired. Two separate
+things must not be conflated here:
+
+- **The locator is fixed.** `assert_global_component_surface` used to address the
+  Options fixture's PascalCase tag with a contiguous byte search, which cannot
+  match a tag whose attributes the fixture authors on their own lines; it panicked
+  before reaching any provider assertion. It now resolves that element through the
+  real Vue parse
+  (`RealProviderTestSession::find_template_tag_position`), so the shared body runs
+  to its provider assertions in both arms. The fixture is unchanged.
+- **The provider gap is not re-measured as OPEN — it is observed CLOSED on a
+  small sample, which is not the same as retired.** Both Options cases now
+  complete their full bodies under require mode on this tree (see Measurements),
+  so no current failure locus is claimed here. The historical
+  native-only/publication-ordering symptom diagnosed below is what the deferral
+  is about, and it was INTERMITTENT: a handful of green runs cannot distinguish
+  "fixed" from "did not reproduce today".
+
+Neither Options case may be credited as passing or retired on the sample
+recorded here. Retirement needs the intermittency itself ruled out — repeated
+require-mode runs on CI hardware, not one workstation — and a named cause for
+why the native-only hover no longer wins.
 
 ## Affected tests and observed symptoms
 
@@ -124,7 +146,12 @@ cargo test -p verter_lsp --lib global_component_unknown_tag_fails_closed -- --no
 cargo test -p verter_lsp --lib custom_element_tag_stays_fail_open -- --nocapture
 ```
 
-The full module still includes the intentionally untouched Options pair.
+The full module still includes the Options pair, which stays outside this
+resolved matrix. Their shared assertion helper now locates the PascalCase tag
+structurally rather than by byte search, so the bodies reach their provider
+assertions instead of panicking in the harness, and on the sample below both
+bodies complete. The fixture is untouched, and neither variant is credited as
+passing on that sample — the symptom this deferral tracks is intermittent.
 
 ## Measurements
 
@@ -141,8 +168,55 @@ Historical measurements that motivated the fix:
   case was intermittent; five isolated repetitions produced 4 passes / 1
   native-only hover failure.
 
-Current strict-provider verification passes the six non-Options cases. The
-Options pair remains outside this change.
+Measured on the tree carrying the structural locator (macOS workstation,
+`node_modules` present, tsgo resolved from the workspace install):
+
+```bash
+VERTER_REQUIRE_TSGO=1 VERTER_REQUIRE_TSSERVER=1 \
+  cargo test -p verter_lsp --lib global_component -- --nocapture --test-threads=1
+```
+
+- All EIGHT cases pass, including both Options cases. Every line reports
+  `RECEIPT … require_mode=1 status=body-returned`, and no `SKIPPED-WARMUP`
+  receipt or `skipping (…)` line appears — under require mode each skip path
+  panics, so the bodies ran their assertions against live providers.
+- Repetition: three consecutive `VERTER_REQUIRE_TSGO=1` runs of the same filter
+  (8/8 each) plus one run with both require flags set (8/8). No failure observed.
+- Non-vacuity control for the previously claimed failure locus: planting
+  `GlobalCountCompZZZ` into the kebab tail-column hover assertion
+  (`crates/verter_lsp/src/real_provider_tests/global_components.rs`) turns
+  `global_component_tag_typed_in_options_arm_tsgo` RED, and the panic prints the
+  live hover, which does contain the Pascal binding. So that assertion really
+  executes and really passes; the earlier "still fails at the kebab tail" claim
+  does not hold on this tree. The plant was reverted.
+
+Paired full-suite measurement, same workstation, same session — the whole
+`verter_lsp` lib surface run once on the tree WITHOUT the structural locator and
+once WITH it, comparing failure SETS rather than counts:
+
+```bash
+cargo nextest run -p verter_lsp --lib --no-fail-fast
+```
+
+- Without the locator: 2159 tests, 36 failed. Both
+  `global_component_tag_typed_in_options_arm_tsgo` and `…_tsserver` are in that
+  failure set.
+- With the locator: 2173 tests (+14 locator unit tests), 32 failed. Neither
+  Options case is in that failure set.
+
+That pairing is what the four isolated repetitions above could not give: the two
+cases move from FAIL to PASS across the locator change on one machine in one
+session. The rest of the delta is unrelated churn in both directions (three
+base-only failures, one head-only), which is exactly why the count is not the
+evidence and the set is.
+
+This still does NOT retire the deferral. The symptom recorded above was
+intermittent at 1-in-5, so a green sample on one machine is consistent with both
+"fixed" and "did not reproduce"; the FAIL→PASS pairing establishes that the
+harness locator was a real cause of the failures, not that it was the only one.
+What is established is narrower and only that: the Options bodies run to
+completion under require mode, they fail without the locator and pass with it in
+a paired full-suite run, and no specific current failure site may be asserted.
 
 ## Future fix and falsifiable predictions
 

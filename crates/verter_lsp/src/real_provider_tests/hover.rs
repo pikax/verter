@@ -13,8 +13,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
 
         // Wait for provider warmup
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
 
@@ -356,8 +355,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _mycomp_uri = session.open_fixture_file("src/MyComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
 

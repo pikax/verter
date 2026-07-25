@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
 
+use crate::carrier_provider_projection::PreparedCarrierProviderContent;
 use crate::type_provider::protocol::TypeProviderError;
 use crate::type_provider::traits::TypeProvider;
 use crate::{ProjectSyncMode, TypeProviderKind};
@@ -19,7 +20,7 @@ const VERTER_TYPES_VIRTUAL_DTS: &str = include_str!("../verter_types_stub.d.ts")
 #[derive(Clone)]
 pub(crate) struct SyncedTsxSurface {
     path: Arc<str>,
-    content: Arc<str>,
+    delivered: PreparedCarrierProviderContent,
 }
 
 impl SyncedTsxSurface {
@@ -27,13 +28,20 @@ impl SyncedTsxSurface {
         &self.path
     }
 
+    #[cfg(test)]
     pub(crate) fn content(&self) -> &Arc<str> {
-        &self.content
+        self.delivered.content()
+    }
+
+    /// The delivered bytes together with the mapper describing them — the value a
+    /// recorder must carry forward whole.
+    pub(crate) fn delivered(&self) -> &PreparedCarrierProviderContent {
+        &self.delivered
     }
 }
 
-struct PreparedTsxContent<'a> {
-    content: Cow<'a, str>,
+pub(super) struct PreparedTsxContent {
+    prepared: PreparedCarrierProviderContent,
     virtual_verter_types_path: Option<String>,
 }
 
@@ -83,7 +91,7 @@ pub struct ProjectSync {
     /// Last successfully delivered carrier bytes, keyed by provider path.
     /// Shared across clones because server/background producers must record the
     /// same immutable provider surface that the engine actually received.
-    synced_tsx_contents: Arc<DashMap<String, Arc<str>>>,
+    delivered_carrier_surfaces: Arc<DashMap<String, PreparedCarrierProviderContent>>,
     /// Adjacent provider-only `@verter/types` declaration overlays currently
     /// published for tsgo carriers.
     virtual_verter_types_paths: Arc<DashSet<String>>,
@@ -112,7 +120,7 @@ impl ProjectSync {
             // `--api` checker's configured-project `open_project`). tsserver's
             // store-publish suppression is opt-in via `new_with_kind`.
             kind: TypeProviderKind::Tsgo,
-            synced_tsx_contents: Arc::new(DashMap::new()),
+            delivered_carrier_surfaces: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
@@ -131,7 +139,7 @@ impl ProjectSync {
             provider,
             mode,
             kind,
-            synced_tsx_contents: Arc::new(DashMap::new()),
+            delivered_carrier_surfaces: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
@@ -150,39 +158,83 @@ impl ProjectSync {
             provider,
             mode,
             kind,
-            synced_tsx_contents: Arc::new(DashMap::new()),
+            delivered_carrier_surfaces: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: Some(workspace),
         }
     }
 
-    fn record_synced_tsx_content(&self, path: &str, content: &str) {
-        self.synced_tsx_contents
-            .insert(path.to_owned(), Arc::from(content));
+    fn record_delivered_carrier_surface(
+        &self,
+        path: &str,
+        delivered: PreparedCarrierProviderContent,
+    ) {
+        self.delivered_carrier_surfaces
+            .insert(path.to_owned(), delivered);
     }
 
-    fn retract_synced_tsx_content(&self, path: &str) {
-        self.synced_tsx_contents.remove(path);
+    fn retract_delivered_carrier_surface(&self, path: &str) {
+        self.delivered_carrier_surfaces.remove(path);
+    }
+
+    /// The exact bytes AND rewrite mapper from the most recent successful carrier
+    /// sync. A provider-surface snapshot must use this value rather than
+    /// independently re-running provider specialization, which could observe a
+    /// changed owner installation between the provider call and surface
+    /// publication.
+    pub(crate) fn delivered_carrier_surface(
+        &self,
+        path: &str,
+    ) -> Option<PreparedCarrierProviderContent> {
+        self.delivered_carrier_surfaces
+            .get(path)
+            .map(|entry| entry.value().clone())
     }
 
     /// Return the immutable bytes from the most recent successful carrier sync.
-    /// A provider-surface snapshot must use this value rather than independently
-    /// re-running provider specialization, which could observe a changed owner
-    /// installation between the provider call and surface publication.
+    #[cfg(test)]
     pub(crate) fn synced_tsx_content(&self, path: &str) -> Option<Arc<str>> {
-        self.synced_tsx_contents
-            .get(path)
-            .map(|entry| Arc::clone(entry.value()))
+        self.delivered_carrier_surface(path)
+            .map(|delivered| Arc::clone(delivered.content()))
+    }
+
+    /// THE single answer to "what bytes does the provider hold for this carrier
+    /// companion, and how do generated positions map into them".
+    ///
+    /// The delivered ledger wins when this sync actually published the path.
+    /// Otherwise the answer is produced by [`Self::prepare_tsx_surface`] — the
+    /// SAME function the publication runs — so a read taken before (or without)
+    /// a publication models exactly the bytes a publication would deliver. A
+    /// second, narrower re-derivation here would omit projections the delivery
+    /// applies for this engine (the adjacent `@verter/types` overlay redirect,
+    /// the managed-tsgo JSX specialization) and shift every offset past a
+    /// rewritten import.
+    ///
+    /// `None` when the buffer cannot be modelled at all — fail closed: a caller
+    /// that cannot say what the provider holds must record nothing rather than
+    /// record bytes no engine has.
+    pub(crate) fn carrier_provider_surface(
+        &self,
+        path: &str,
+        generated: &str,
+    ) -> Option<PreparedCarrierProviderContent> {
+        match self.delivered_carrier_surface(path) {
+            Some(delivered) => Some(delivered),
+            None => self
+                .prepare_tsx_surface(path, generated)
+                .ok()
+                .map(|prepared| prepared.prepared),
+        }
     }
 
     /// Mint post-open evidence only for a path whose last provider operation
     /// completed successfully and remains live in the exact-byte ledger.
     pub(crate) fn synced_tsx_surface(&self, path: &str) -> Option<SyncedTsxSurface> {
-        self.synced_tsx_content(path)
-            .map(|content| SyncedTsxSurface {
+        self.delivered_carrier_surface(path)
+            .map(|delivered| SyncedTsxSurface {
                 path: Arc::from(path),
-                content,
+                delivered,
             })
     }
 
@@ -541,6 +593,65 @@ mod tests {
         );
     }
 
+    /// A recorder that reads the carrier surface BEFORE this sync has published
+    /// anything must model the SAME provider bytes the publication will deliver.
+    ///
+    /// The two reads answer one question — "what does the provider hold for this
+    /// carrier" — so a pre-publication read that omits a projection the delivery
+    /// applies is a second, narrower model of the same edits. It shifts every
+    /// offset past a rewritten import (24 bytes for this specifier pair), so a
+    /// surface recorded from it maps positions into a buffer no engine holds.
+    #[tokio::test]
+    async fn carrier_provider_surface_is_identical_before_and_after_delivery() {
+        let owner = tempfile::tempdir().expect("temporary owner");
+        let provider_path = owner.path().join("src/App.vue.tsx");
+        std::fs::create_dir_all(provider_path.parent().expect("provider parent"))
+            .expect("provider parent directory");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        let source = "import type { GlobalComponentType } from \"@verter/types\";\n\
+                      type T = GlobalComponentType<\"X\">;\n";
+
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(mock.clone()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        let before = sync
+            .carrier_provider_surface(&provider_path, source)
+            .expect("a projectable carrier models a provider surface before publication");
+        sync.open_tsx(&provider_path, source)
+            .await
+            .expect("managed tsgo open succeeds");
+        let after = sync
+            .carrier_provider_surface(&provider_path, source)
+            .expect("the delivered surface is readable");
+
+        assert!(
+            after
+                .content()
+                .contains("from \"./App.vue.tsx.__verter_types\""),
+            "the delivered buffer redirects onto the adjacent overlay: {}",
+            after.content()
+        );
+        assert!(
+            !after.content().contains("from \"@verter/types\""),
+            "the delivered buffer keeps no unresolvable package specifier: {}",
+            after.content()
+        );
+        assert_eq!(
+            before.content(),
+            after.content(),
+            "a pre-publication read must model the delivered bytes, not a narrower projection"
+        );
+        assert_eq!(
+            before.rewrites(),
+            after.rewrites(),
+            "the mapper must describe the same rewrites in both reads"
+        );
+    }
+
     fn make_sync(mock: &MockTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
         ProjectSync::new(Arc::new(mock.clone()), mode)
     }
@@ -553,7 +664,7 @@ mod tests {
             provider: Arc::new(FailingTypeProvider::new(&provider.error_message)),
             mode,
             kind: TypeProviderKind::Tsgo,
-            synced_tsx_contents: Arc::new(DashMap::new()),
+            delivered_carrier_surfaces: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,

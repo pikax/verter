@@ -104,6 +104,14 @@ pub(crate) struct CarrierSyncRequest<'a> {
     /// The document registry, when the caller has one (the spawned background tasks
     /// resolve the carrier host/VFS-only and pass `None`).
     pub documents: Option<&'a DocumentRegistry>,
+    /// The active engine's provider sync — the SINGLE authority for the bytes that
+    /// engine holds for a carrier companion. The IDE companion is both the recorded
+    /// surface and the receipt the committed-surface gate compares against, so it
+    /// must carry the engine-shaped projection (the adjacent `@verter/types`
+    /// overlay redirect and the managed-tsgo JSX specialization included), not a
+    /// narrower re-derivation. `None` ⇒ no engine is bound and the shared carrier-
+    /// import projection is the whole answer.
+    pub project_sync: Option<&'a crate::type_provider::project_sync::ProjectSync>,
     /// The carrier source canonical id.
     pub canonical_id: &'a str,
     /// Whether the compiled IDE output is JSX (drives the `.jsx` vs `.tsx` path).
@@ -578,6 +586,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
             api.as_ref(),
             req.vfs,
             req.canonical_id,
+            req.project_sync,
         );
         // The source revision is the carrier source's AUTHORITATIVE per-canonical content
         // freshness rail (the workspace's `last_content_transition_generation`), captured
@@ -640,6 +649,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         api.as_ref(),
         req.vfs,
         req.canonical_id,
+        req.project_sync,
     );
     if companions.is_empty() {
         // The owned source produced NO companion content this pass — a genuine
@@ -786,37 +796,48 @@ fn build_carrier_companions(
     api: Option<&verter_session::TscResponse>,
     workspace: Option<&FilesystemWorkspace>,
     canonical_id: &str,
+    project_sync: Option<&crate::type_provider::project_sync::ProjectSync>,
 ) -> Vec<CarrierCompanion> {
     let mut companions: Vec<CarrierCompanion> = Vec::new();
     if let (Some(api), Some(dts_path)) = (api, next_state.api_path.as_ref()) {
-        companions.push(CarrierCompanion {
-            provider_uri: Arc::from(dts_path.as_str()),
-            content: Arc::clone(&api.code),
-            map_json: api.source_map.clone(),
-            role: SnapshotRole::CarrierApi,
-            script_kind: ScriptKind::Ts,
-            version: 0,
-        });
+        companions.push(CarrierCompanion::verbatim(
+            Arc::from(dts_path.as_str()),
+            Arc::clone(&api.code),
+            api.source_map.clone(),
+            SnapshotRole::CarrierApi,
+            ScriptKind::Ts,
+        ));
     }
     if let (Some(ide), Some(ide_path)) = (ide, next_state.ide_path.as_ref()) {
-        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
-            workspace,
-            canonical_id,
-            &ide.code,
-            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
-        );
-        companions.push(CarrierCompanion {
-            provider_uri: Arc::from(ide_path.as_str()),
-            content: prepared.content,
-            map_json: ide.source_map.clone(),
-            role: SnapshotRole::CarrierIde,
-            script_kind: if ide.is_jsx {
+        // The engine that will hold this buffer owns the answer. Falling back to the
+        // shared projection here would stamp a receipt for bytes the engine does not
+        // have, and the committed-surface gate would then refuse every capture.
+        let prepared = match project_sync {
+            Some(sync) => sync.carrier_provider_surface(ide_path, &ide.code),
+            None => Some(
+                crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                    workspace,
+                    canonical_id,
+                    &ide.code,
+                    tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+                ),
+            ),
+        };
+        // Fail closed: an unmodellable provider buffer publishes no IDE companion
+        // rather than one attesting bytes no engine holds.
+        let Some(prepared) = prepared else {
+            return companions;
+        };
+        companions.push(CarrierCompanion::carrier_ide(
+            Arc::from(ide_path.as_str()),
+            prepared,
+            ide.source_map.clone(),
+            if ide.is_jsx {
                 ScriptKind::Jsx
             } else {
                 ScriptKind::Tsx
             },
-            version: 0,
-        });
+        ));
     }
     companions
 }

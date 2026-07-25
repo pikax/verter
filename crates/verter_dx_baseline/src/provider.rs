@@ -17,6 +17,7 @@ use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::tsgo::TsgoTypeProvider;
 use verter_type_runtime::tsserver::TsserverTypeProvider;
 use verter_type_runtime::TypeProvider;
+use verter_workspace::native_fs::NativeFs;
 
 use crate::protocol::{ErrorKind, ProviderName, ToolRoot};
 
@@ -87,13 +88,16 @@ pub enum Resolution {
 /// A path that does not exist has no filesystem identity, so it degrades to
 /// string canonicalisation; a missing `expected` is reported by its own
 /// `ExpectedMissing` check rather than here.
-pub fn normalize_tool_path(raw: &str) -> String {
-    match std::fs::canonicalize(raw) {
-        // `canonicalize_path` also strips the Windows `\\?\` extended-length
-        // prefix `fs::canonicalize` returns, so both arms yield one form.
-        Ok(resolved) => canonicalize_path(&resolved.to_string_lossy()),
-        Err(_) => canonicalize_path(raw),
-    }
+///
+/// The symlink resolution goes through [`NativeFs::realpath`] — the workspace's
+/// single disk boundary — rather than a local canonicalize syscall, which the
+/// `vfs_boundary_is_authoritative` / `no_std_fs_outside_native_fs_or_allow_list`
+/// guards forbid outside that boundary. `realpath` already returns its result
+/// through the one canonical-path owner (so the Windows `\\?\` extended-length
+/// prefix is stripped on that arm too) and memoizes per path, so a repeated
+/// tool-root resolution costs no extra syscall.
+pub fn normalize_tool_path(fs: &NativeFs, raw: &str) -> String {
+    fs.realpath(raw).unwrap_or_else(|| canonicalize_path(raw))
 }
 
 /// Refuse a discovered tsserver.js that is not `expected`.
@@ -164,6 +168,7 @@ pub fn require_node(
 /// `expected_tsserver_js` exactly.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_tsserver_with(
+    fs: &NativeFs,
     tool_root: &ToolRoot,
     workspace_root: &str,
     strict: bool,
@@ -176,9 +181,12 @@ pub fn resolve_tsserver_with(
         .ok_or(ProviderInitError::MissingToolRootField("tsserverTsdk"))?;
     // BOUNDARY: `expected_tsserver_js` arrives off the `hello` wire. Normalise
     // it once, here; everything below compares the internal form only.
-    let expected = normalize_tool_path(tool_root.expected_tsserver_js.as_deref().ok_or(
-        ProviderInitError::MissingToolRootField("expectedTsserverJs"),
-    )?);
+    let expected = normalize_tool_path(
+        fs,
+        tool_root.expected_tsserver_js.as_deref().ok_or(
+            ProviderInitError::MissingToolRootField("expectedTsserverJs"),
+        )?,
+    );
 
     let node = require_node(discover_node)?;
 
@@ -193,7 +201,7 @@ pub fn resolve_tsserver_with(
     // reads as a mismatch.
     match discover_tsserver(tsdk, workspace_root) {
         Some(discovered) => {
-            enforce_tsserver_path_match(&expected, &normalize_tool_path(&discovered))?
+            enforce_tsserver_path_match(&expected, &normalize_tool_path(fs, &discovered))?
         }
         None => return Err(ProviderInitError::ToolNotFound("tsserver.js")),
     }
@@ -213,7 +221,9 @@ pub fn resolve_tsserver_with(
 /// Strict: any tool-root problem is a hard failure (`Err`). Non-strict: the same
 /// problem becomes `Ok(Resolution::Skipped { reason })`, recording why the
 /// baseline did not run — never a silent pass.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_with(
+    fs: &NativeFs,
     provider: ProviderName,
     tool_root: &ToolRoot,
     workspace_root: &str,
@@ -228,6 +238,7 @@ pub fn resolve_with(
                 .map(|bin| (canonicalize_path(&bin), SpawnPlan::Tsgo { bin }))
         }
         ProviderName::Tsserver => resolve_tsserver_with(
+            fs,
             tool_root,
             workspace_root,
             strict,
@@ -249,7 +260,11 @@ pub fn resolve_with(
 }
 
 /// Production resolution: wires the real `verter_type_runtime` discovery.
+///
+/// `fs` is the session-owned disk boundary — one `NativeFs` per bridge, so the
+/// tool-path realpath memo is shared across every resolution in the session.
 pub async fn resolve(
+    fs: &NativeFs,
     provider: ProviderName,
     tool_root: &ToolRoot,
     workspace_root: &str,
@@ -272,6 +287,7 @@ pub async fn resolve(
             .map(|resolution| resolution.path.to_string_lossy().into_owned())
     };
     resolve_with(
+        fs,
         provider,
         tool_root,
         workspace_root,

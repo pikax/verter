@@ -103,9 +103,18 @@ fn main() -> ExitCode {
         }
     };
     let shim_exit = runtime.block_on(run());
-    // Shut the runtime down BEFORE exiting: a `ShimExit::Signal` re-raises, and we want no tokio
-    // signal machinery / background threads alive when we restore the default disposition and raise.
-    drop(runtime);
+    // Shut the runtime down BEFORE exiting so no tokio driver is still turning when we restore the
+    // default signal disposition and re-raise. The shutdown MUST NOT WAIT on the blocking pool:
+    // `tokio::io::stdin()` pumps the editor side through a `spawn_blocking` `read(2)` that an idle —
+    // but still open — editor stdin never completes, and a `Drop`/`shutdown_timeout` shutdown BLOCKS
+    // on exactly that thread. Waiting for it would wedge the shim's own exit forever: the child is
+    // already reaped and the exit decided, yet `ShimExit::exit` (the signal re-raise) would never
+    // run, so a signalled shim — or one whose engine crashed — would hang instead of terminating.
+    // Nothing outstanding is worth waiting for at this point (the relay is stopped, the
+    // advertisement removed, the child reaped), so the shutdown is explicitly non-blocking and the
+    // wedged read dies with the process. This holds on every platform: the editor-stdin read is a
+    // blocking-pool read on Windows too.
+    runtime.shutdown_background();
     shim_exit.exit()
 }
 

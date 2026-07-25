@@ -21,6 +21,9 @@ use crate::type_provider::traits::TypeProvider;
 
 #[path = "test_harness_fixture_dependencies.rs"]
 mod fixture_dependencies;
+/// Document-position location: the contiguous byte-string locators and the
+/// structural template-tag locator that resolves through the SFC parse.
+mod locate;
 use crate::LspConfig;
 pub(crate) use fixture_dependencies::fixture_workspace_root;
 use fixture_dependencies::materialize_real_provider_framework_types;
@@ -46,8 +49,8 @@ fn real_provider_session_gate() -> &'static Arc<tokio::sync::Semaphore> {
 // sibling [`crate::test_harness_gating`] module.
 #[allow(unused_imports)]
 pub(crate) use crate::test_harness_gating::{
-    handle_absent_provider, provider_absence_outcome, provider_required, ProviderAbsence,
-    TestProviderKind,
+    body_receipt_line, body_receipt_status, handle_absent_provider, provider_absence_outcome,
+    provider_required, BodyReceiptStatus, ProviderAbsence, TestProviderKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -475,6 +478,7 @@ impl TestSessionBuilder {
             workspace_id,
             kind: self.kind,
             carrier_store_dir: session_carrier_store_dir,
+            skip_reason: std::sync::Mutex::new(None),
             _drain_handle: drain_handle,
             _provider_process_permit: provider_process_permit,
         };
@@ -518,6 +522,16 @@ pub(crate) struct RealProviderTestSession {
     /// [`Self::shutdown`]. Both the spawned plugin (via `VERTER_CARRIER_STORE_DIR`)
     /// and the LSP-side publish backend resolve exactly this dir.
     carrier_store_dir: std::path::PathBuf,
+    /// The session's DEGRADATION LEDGER: the reason the body stopped short of
+    /// its assertions (cold provider warmup, an empty controlled result), or
+    /// `None` when nothing degraded.
+    ///
+    /// This is what the end-of-body receipt derives its status from. Without it
+    /// the receipt attested "the generated test function reached its end", which
+    /// a body that `return`ed at a warmup guard also does — so a skipped body
+    /// minted the same `status=body-returned` line as one that actually ran its
+    /// assertions, and a receipt scan could not tell them apart.
+    skip_reason: std::sync::Mutex<Option<String>>,
     _drain_handle: tokio::task::JoinHandle<()>,
     /// Held for the entire external-provider lifetime so the Rust test runner cannot
     /// replace a completed session with another process until shutdown has finished.
@@ -548,6 +562,30 @@ impl RealProviderTestSession {
         matches!(self.kind, TestProviderKind::Tsgo)
     }
 
+    /// Record that the body stopped short of its assertions, and why.
+    ///
+    /// Every documented degradation path funnels through here, so the end-of-body
+    /// receipt derives its status from a recorded FACT rather than from control
+    /// flow reaching the end of the generated test function. The FIRST reason
+    /// wins (it is the one that ended the body).
+    fn record_skip(&self, reason: &str) {
+        let mut recorded = self
+            .skip_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if recorded.is_none() {
+            *recorded = Some(reason.to_string());
+        }
+    }
+
+    /// The recorded degradation reason, if the body degraded.
+    fn recorded_skip(&self) -> Option<String> {
+        self.skip_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Fail-closed gate for a controlled provider result that came back empty.
     ///
     /// A real-provider regression test that needs a NON-empty result from a
@@ -570,6 +608,7 @@ impl RealProviderTestSession {
                 self.kind.label(),
             );
         }
+        self.record_skip(reason);
         eprintln!("skipping ({}): {reason}", self.kind.label());
         true
     }
@@ -577,13 +616,14 @@ impl RealProviderTestSession {
     /// Fail-closed gate for a provider WARM-UP that never became ready.
     ///
     /// The sibling of [`Self::allow_empty_result_skip`] for the warm-up phase: a
-    /// test body that would `return` early because `wait_until_ready` failed is
-    /// VACUOUS — its assertions never ran. Under require-mode
+    /// test body that would `return` early because the provider never warmed up
+    /// is VACUOUS — its assertions never ran. Under require-mode
     /// (`VERTER_REQUIRE_{TSGO,TSSERVER}=1`) that vacuity is a hard FAILURE (the
-    /// non-vacuity gate); off require-mode it records a machine-greppable
-    /// `RECEIPT … status=SKIPPED-WARMUP` marker and returns `true` so the caller
-    /// can degrade gracefully (`return`). A skipped body therefore can never
-    /// masquerade as a completed one in a receipt scan.
+    /// non-vacuity gate); off require-mode it RECORDS the degradation on the
+    /// session and returns `true` so the caller can degrade gracefully
+    /// (`return`). The single end-of-body receipt then reports
+    /// `status=SKIPPED-WARMUP`, so a skipped body can never masquerade as a
+    /// completed one in a receipt scan.
     #[must_use]
     pub(crate) fn allow_warmup_skip(&self, test: &str) -> bool {
         if provider_required(self.kind) {
@@ -594,23 +634,32 @@ impl RealProviderTestSession {
                 self.kind.label(),
             );
         }
+        self.record_skip(&format!("{test}: provider never warmed up"));
         eprintln!(
-            "RECEIPT real-provider test={test} provider={} require_mode=0 status=SKIPPED-WARMUP",
+            "skipping ({}): {test} never warmed up its provider",
             self.kind.label()
         );
         true
     }
 
-    /// Emit the end-of-body non-vacuity receipt marker. Called by
-    /// `real_provider_test!` after the test body returns; paired with
-    /// require-mode (where every skip path panics instead of returning), a
-    /// `status=body-returned require_mode=1` line is machine-checkable proof
+    /// Emit the SINGLE end-of-body receipt for a generated test.
+    ///
+    /// The status is DERIVED from the session's degradation ledger, not from the
+    /// body having returned: a body that returned at a warmup guard or an
+    /// empty-result guard emits `status=SKIPPED-WARMUP reason=…`, and only a body
+    /// with nothing recorded emits `status=body-returned`. Paired with
+    /// require-mode — where every degradation path panics instead of recording —
+    /// a `status=body-returned require_mode=1` line is machine-checkable proof
     /// the body's assertions executed against a live provider.
     pub(crate) fn emit_body_receipt(&self, test: &str) {
         eprintln!(
-            "RECEIPT real-provider test={test} provider={} require_mode={} status=body-returned",
-            self.kind.label(),
-            u8::from(provider_required(self.kind)),
+            "{}",
+            body_receipt_line(
+                test,
+                self.kind.label(),
+                provider_required(self.kind),
+                self.recorded_skip().as_deref(),
+            )
         );
     }
 
@@ -711,23 +760,6 @@ impl RealProviderTestSession {
         uri
     }
 
-    /// Find a position within an open document by searching for `needle` and adding `delta`.
-    pub(crate) fn find_position(&self, uri: &Uri, needle: &str, delta: usize) -> Position {
-        let doc = self
-            .server()
-            .test_documents()
-            .get(uri)
-            .expect("document should be open");
-        let offset = doc
-            .source
-            .find(needle)
-            .unwrap_or_else(|| panic!("needle `{needle}` should exist in document"))
-            + delta;
-        doc.line_index
-            .offset_to_position(offset as u32)
-            .expect("valid position")
-    }
-
     /// The committed carrier [`crate::provider_sync::ProviderSyncState`] for an open
     /// carrier-source URI, or `None` when none has been committed.
     ///
@@ -741,41 +773,6 @@ impl RealProviderTestSession {
         uri: &Uri,
     ) -> Option<crate::provider_sync::ProviderSyncState> {
         self.server().test_provider_sync_state(uri)
-    }
-
-    /// Find the Nth (0-indexed) occurrence of `needle` and add `delta`.
-    pub(crate) fn find_nth_position(
-        &self,
-        uri: &Uri,
-        needle: &str,
-        n: usize,
-        delta: usize,
-    ) -> Position {
-        let doc = self
-            .server()
-            .test_documents()
-            .get(uri)
-            .expect("document should be open");
-        let mut start = 0;
-        let mut count = 0;
-        loop {
-            match doc.source[start..].find(needle) {
-                Some(pos) => {
-                    let abs_pos = start + pos;
-                    if count == n {
-                        return doc
-                            .line_index
-                            .offset_to_position((abs_pos + delta) as u32)
-                            .expect("valid position");
-                    }
-                    count += 1;
-                    start = abs_pos + 1;
-                }
-                None => {
-                    panic!("needle `{needle}` occurrence {n} not found (only {count} occurrences)")
-                }
-            }
-        }
     }
 
     /// Ensure the current file is synced to the type provider.
@@ -1047,14 +1044,15 @@ impl RealProviderTestSession {
         }
     }
 
-    /// Extract a filesystem path from a URI (for assertions).
-    /// Returns a forward-slash path without the `file://` scheme.
+    /// Extract a filesystem path from a URI (for assertions and fixture reads).
+    ///
+    /// Routes through the single canonical-path owner
+    /// ([`crate::documents::uri_to_canonical_id`]) so the produced path is
+    /// byte-equal to every other producer and is a REAL path a test can open:
+    /// it percent-decodes, restores the leading `/` on Unix, and lowercases the
+    /// Windows drive letter.
     pub(crate) fn uri_to_path(uri: &Uri) -> String {
-        uri.to_string()
-            .strip_prefix("file:///")
-            .unwrap_or_else(|| uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str()))
-            .replace("%3A", ":")
-            .replace("%20", " ")
+        crate::documents::uri_to_canonical_id(uri)
     }
 
     /// Retry-loop waiting for the provider to warm up.
@@ -1123,6 +1121,7 @@ impl RealProviderTestSession {
                 uri.as_str(),
             );
         }
+        self.record_skip(&format!("provider-not-warmed-up:{}", uri.as_str()));
         eprintln!(
             "skipping ({}): provider not warmed up for {}",
             self.kind.label(),

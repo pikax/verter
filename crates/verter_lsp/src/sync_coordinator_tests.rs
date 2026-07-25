@@ -1537,14 +1537,18 @@ async fn make_carrier_diagnostics_fixture() -> (
         .get(&canonical_id)
         .and_then(|state| state.ide_path.clone())
         .expect("the owner-resolved sync must commit an IDE path");
-    let profile = documents.tsx_profile.read().clone();
-    let ide = host
-        .get_ide(&canonical_id, &profile)
-        .expect("IDE output should exist");
-    let diag_start = ide
-        .code
+    // A provider reports offsets into the buffer IT holds, not into the raw
+    // compiler output: the carrier projection rewrites import specifiers, so the
+    // two buffers diverge from the first rewritten import onward. Seed the mock
+    // where a real engine would answer — inside the recorded provider surface.
+    let recorded = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful sync records the provider surface it delivered");
+    let diag_start = recorded
+        .provider_content
         .find("const msg")
-        .expect("script statement present in IDE output")
+        .expect("script statement present in the provider buffer")
         + "const ".len();
     provider.set_diagnostics(
         &ide_path,

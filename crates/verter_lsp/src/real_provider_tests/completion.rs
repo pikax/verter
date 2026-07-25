@@ -355,8 +355,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
 
         // Wait for provider warmup
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
         // This test issues a long sequence of exact completion assertions. Join
@@ -471,8 +470,7 @@ real_provider_test!(
         let js_uri = session.open_fixture_file("src/JsTemplateCases.vue").await;
 
         // Wait for warmup on App.vue
-        if !session.wait_until_ready(&app_uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&app_uri, "action.disabled", 7, "disabled").await {
             return;
         }
 

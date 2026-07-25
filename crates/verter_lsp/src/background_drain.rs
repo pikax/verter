@@ -803,18 +803,17 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
         Ok(()) => {
             // Record a fresh generation pinning the EXACT IDE bytes just synced
             // (interactive queries capture this surface).
-            let provider_code = sync
-                .synced_tsx_content(&ide_path)
-                .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-            crate::provider_surface_store::record_carrier_ide_surface(
-                provider_surfaces,
-                Some(documents),
-                documents.host(),
-                canonical_id,
-                &ide_path,
-                provider_code.as_ref(),
-                ide.source_map.as_deref(),
-            );
+            if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code) {
+                crate::provider_surface_store::record_carrier_ide_surface(
+                    provider_surfaces,
+                    Some(documents),
+                    documents.host(),
+                    canonical_id,
+                    &ide_path,
+                    &delivered,
+                    ide.source_map.as_deref(),
+                );
+            }
             true
         }
         Err(error) => {
@@ -946,6 +945,7 @@ async fn apply_owner_resolved_carrier_sync(
         provider_sync_states,
         provider_surfaces: documents.provider_surfaces(),
         documents: Some(documents),
+        project_sync: sync,
         canonical_id,
         is_jsx,
         ide,
@@ -1053,18 +1053,18 @@ async fn apply_owner_resolved_carrier_sync(
                         synced.push(ProviderPathKind::Ide);
                         // Record a fresh generation pinning the EXACT IDE bytes just
                         // synced (interactive queries capture this surface).
-                        let provider_code = sync
-                            .synced_tsx_content(&ide_path)
-                            .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                        crate::provider_surface_store::record_carrier_ide_surface(
-                            documents.provider_surfaces(),
-                            Some(documents),
-                            documents.host(),
-                            canonical_id,
-                            &ide_path,
-                            provider_code.as_ref(),
-                            ide.source_map.as_deref(),
-                        );
+                        if let Some(delivered) = sync.carrier_provider_surface(&ide_path, &ide.code)
+                        {
+                            crate::provider_surface_store::record_carrier_ide_surface(
+                                documents.provider_surfaces(),
+                                Some(documents),
+                                documents.host(),
+                                canonical_id,
+                                &ide_path,
+                                &delivered,
+                                ide.source_map.as_deref(),
+                            );
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -1200,6 +1200,7 @@ pub(super) async fn sync_api_to_provider_background_task(
             provider_sync_states: &provider_sync_states,
             provider_surfaces: &provider_surfaces,
             documents: None,
+            project_sync: Some(&sync),
             canonical_id: &canonical_id,
             is_jsx,
             ide: None,

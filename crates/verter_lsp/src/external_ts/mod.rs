@@ -32,7 +32,7 @@ pub(crate) use carrier_sync::{
     AdmitOutcome, CarrierMembershipCtx, CarrierNotOwned, CarrierProviderDelivery,
     CarrierSyncDecision, CarrierSyncRequest, CarrierTransactionCoordinator, SettleClass,
 };
-pub(crate) use publish_coordinator::resolve_carrier_ownership_over_vfs;
+pub(crate) use publish_coordinator::{resolve_carrier_ownership_over_vfs, CompanionContent};
 pub use publish_coordinator::{CarrierCompanion, CarrierPublishCoordinator, CarrierPublishError};
 pub use tsgo_backend::TsgoEngineBackend;
 pub use tsserver_backend::TsserverEngineBackend;

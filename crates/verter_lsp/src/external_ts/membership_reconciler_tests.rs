@@ -138,14 +138,25 @@ fn bound(project: &str) -> CarrierOwnershipResolution {
 
 /// A carrier companion with the given path / role / script kind.
 fn companion(provider_uri: &str, role: SnapshotRole, script_kind: ScriptKind) -> CarrierCompanion {
-    CarrierCompanion {
-        provider_uri: Arc::from(provider_uri),
-        content: Arc::from("/* carrier content */"),
-        map_json: None,
+    if role == SnapshotRole::CarrierIde {
+        return CarrierCompanion::carrier_ide_from_generated(
+            Arc::from(provider_uri),
+            "/workspace/src/App.vue",
+            "/* carrier content */",
+            None,
+            script_kind,
+            1,
+        );
+    }
+    let mut companion = CarrierCompanion::verbatim(
+        Arc::from(provider_uri),
+        Arc::from("/* carrier content */"),
+        None,
         role,
         script_kind,
-        version: 1,
-    }
+    );
+    companion.version = 1;
+    companion
 }
 
 /// The IDE `.tsx` carrier companion for a path (the common single-companion case).

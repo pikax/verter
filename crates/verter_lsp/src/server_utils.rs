@@ -502,9 +502,9 @@ pub(crate) fn compute_specifier_replacements(
     replacements
 }
 
-/// Apply the specifier replacements to `source`, producing the rewritten
-/// provider bytes. Edits are applied in descending byte order so an in-place
-/// replacement never shifts the spans of replacements earlier in the file.
+/// Apply the specifier replacements to `source` — the SELF-FILE path's AUTHORED
+/// bytes, never GENERATED code (a `CodeTransform` owns those edits). Applied in
+/// descending byte order so an edit never shifts an earlier replacement's spans.
 pub(crate) fn apply_specifier_replacements(
     source: &str,
     replacements: &[(usize, usize, String)],

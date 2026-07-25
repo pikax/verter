@@ -52,7 +52,13 @@ async fn assert_global_component_surface(
     arm: &str,
 ) {
     // --- PascalCase tag hover: the fallback const resolves the component. ---
-    let tag_pos = session.find_position(uri, "<GlobalCountComp :count=\"42\"", 3);
+    //
+    // Located STRUCTURALLY: the Options-API fixture authors this tag with its
+    // attributes on their own lines, so no contiguous byte string names it. The
+    // element is identified by tag name plus the `:count="42"` that distinguishes
+    // it from the mistyped tag further down, and the position is measured into
+    // the authored tag name.
+    let tag_pos = session.find_template_tag_position(uri, "GlobalCountComp", (":count", "42"), 2);
     let hover = hover_with_retry(session, uri, tag_pos)
         .await
         .unwrap_or_else(|| panic!("{arm}: hover on the PascalCase global tag must answer"));

@@ -67,6 +67,69 @@ pub(crate) fn provider_absence_outcome(required: bool) -> ProviderAbsence {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Body receipt status
+// ---------------------------------------------------------------------------
+
+/// The terminal status a real-provider test body EARNS.
+///
+/// A receipt is an attestation that the body's assertions ran against a live
+/// provider. Returning from the body is NOT that proof — a body that hit a
+/// documented degradation path (cold provider warmup, an empty controlled
+/// result) also returns, and returning is exactly what it does. The status is
+/// therefore derived from the session's recorded degradation ledger, never from
+/// control flow reaching the end of the generated test function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyReceiptStatus {
+    /// The body completed with NO recorded degradation: its assertions ran.
+    BodyReturned,
+    /// The body recorded a degradation and never reached its assertions.
+    SkippedWarmup,
+}
+
+impl BodyReceiptStatus {
+    /// The machine-greppable token stamped into the receipt line.
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            BodyReceiptStatus::BodyReturned => "body-returned",
+            BodyReceiptStatus::SkippedWarmup => "SKIPPED-WARMUP",
+        }
+    }
+}
+
+/// Pure derivation: a recorded degradation ALWAYS wins over "the body returned".
+/// Keeping it pure is what makes the non-vacuity property unit-testable without
+/// a live provider.
+pub(crate) fn body_receipt_status(skip_reason: Option<&str>) -> BodyReceiptStatus {
+    match skip_reason {
+        Some(_) => BodyReceiptStatus::SkippedWarmup,
+        None => BodyReceiptStatus::BodyReturned,
+    }
+}
+
+/// Render the single end-of-body receipt line for a test.
+///
+/// One receipt per generated test, whatever the outcome — a skipped body emits
+/// `status=SKIPPED-WARMUP` with its reason, never `status=body-returned`.
+pub(crate) fn body_receipt_line(
+    test: &str,
+    provider_label: &str,
+    require_mode: bool,
+    skip_reason: Option<&str>,
+) -> String {
+    let status = body_receipt_status(skip_reason);
+    let mut line = format!(
+        "RECEIPT real-provider test={test} provider={provider_label} require_mode={} status={}",
+        u8::from(require_mode),
+        status.token(),
+    );
+    if let Some(reason) = skip_reason {
+        line.push_str(" reason=");
+        line.push_str(reason);
+    }
+    line
+}
+
 /// Read the require-mode env var for a provider kind (`"1"` ⇒ required).
 pub(crate) fn provider_required(kind: TestProviderKind) -> bool {
     std::env::var(kind.require_env())

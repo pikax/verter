@@ -154,6 +154,86 @@ fn tsserver_handle_absent_provider_skips_without_require_env() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Receipt non-vacuity
+// ---------------------------------------------------------------------------
+//
+// The receipt is an attestation that a body's assertions ran against a live
+// provider. Returning from the body is NOT that proof: a body that `return`ed at
+// a warmup guard also returns. These pin the derivation that keeps the two
+// apart — the status comes from the recorded degradation, never from control
+// flow reaching the end of the generated test function.
+
+/// A recorded degradation can NEVER mint a `body-returned` receipt, and it
+/// carries its reason. Deriving the status from "the body returned" instead
+/// (the vacuity the receipts previously hid) makes both assertions fail.
+#[test]
+fn a_recorded_degradation_receipt_is_skipped_never_body_returned() {
+    let line = body_receipt_line(
+        "some_test_tsgo",
+        "tsgo",
+        true,
+        Some("provider-not-warmed-up"),
+    );
+
+    assert!(
+        line.contains("status=SKIPPED-WARMUP"),
+        "a body that degraded must report SKIPPED-WARMUP: {line}"
+    );
+    assert!(
+        !line.contains("body-returned"),
+        "a degraded body must NEVER attest body-returned — that is the vacuity: {line}"
+    );
+    assert!(
+        line.contains("reason=provider-not-warmed-up"),
+        "the receipt must carry WHY the body stopped short: {line}"
+    );
+}
+
+/// Only a body with NOTHING recorded earns `body-returned`, and the require-mode
+/// flag is stamped so a receipt scan can tell a genuinely gated run apart from a
+/// permissive local one.
+#[test]
+fn an_undegraded_body_earns_body_returned_with_the_require_flag() {
+    let required = body_receipt_line("some_test_tsgo", "tsgo", true, None);
+    assert!(
+        required.contains("status=body-returned") && required.contains("require_mode=1"),
+        "an undegraded require-mode body must attest body-returned: {required}"
+    );
+    assert!(
+        !required.contains("reason="),
+        "an undegraded body has no skip reason to report: {required}"
+    );
+
+    let permissive = body_receipt_line("some_test_tsgo", "tsgo", false, None);
+    assert!(
+        permissive.contains("require_mode=0"),
+        "the require-mode flag must reflect the run: {permissive}"
+    );
+}
+
+/// The status derivation itself is the non-vacuity rule: ANY recorded reason is
+/// a skip, and only the absence of one is a completed body. Pure, so it
+/// discriminates on every machine with no provider installed.
+#[test]
+fn body_receipt_status_is_decided_by_the_degradation_ledger() {
+    assert_eq!(
+        body_receipt_status(Some("anything at all")),
+        BodyReceiptStatus::SkippedWarmup,
+        "a recorded degradation must classify as a skip"
+    );
+    assert_eq!(
+        body_receipt_status(None),
+        BodyReceiptStatus::BodyReturned,
+        "an empty ledger is the only thing that earns body-returned"
+    );
+    assert_ne!(
+        BodyReceiptStatus::SkippedWarmup.token(),
+        BodyReceiptStatus::BodyReturned.token(),
+        "the two statuses must be distinguishable in a receipt scan"
+    );
+}
+
 /// Process-global lock so the env-mutating require-mode tests do not race each
 /// other (or any other env-reading test) within this test binary.
 fn require_env_test_lock() -> &'static std::sync::Mutex<()> {

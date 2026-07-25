@@ -18,14 +18,17 @@ name = "verter-relay-shim"
 path = "src/main.rs"
 
 # A TEST-SUPPORT fake `tsgo` child spawned by the relay-shim lifecycle tests
-# (`tests/shim_live.rs`) via `CARGO_BIN_EXE_fake_tsgo_heartbeat`. It stands in
+# (`tests/cases/shim_live.rs`) through their `bin_exe!` resolution — the runtime
+# `NEXTEST_BIN_EXE_fake_tsgo_heartbeat` under nextest, the compile-time
+# `CARGO_BIN_EXE_fake_tsgo_heartbeat` outside it. It stands in
 # for the real `tsgo` so the child-ownership/orphan tests run on every platform
 # without a real engine. It lives under `tests/support/` (a test subdir, NOT an
 # auto-discovered `tests/*.rs` target) and is NEVER shipped — this crate is
 # `publish = false`, and packaging stages ONLY `verter-relay-shim` while hard-
 # refusing any `*tsgo*`-named artifact (`packages/vue-vscode/stage-bin.mjs`). The
-# explicit `[[bin]]` keeps the bin name stable so the integration test's `env!`
-# resolves. Its test-support classification is guarded statically by
+# explicit `[[bin]]` keeps the bin name stable, so BOTH resolution arms (the
+# runtime variable nextest derives from it and the compile-time `env!`) resolve.
+# Its test-support classification is guarded statically by
 # `tests/bin_targets_guard.rs`.
 #
 # TODO(follow-up D-15): this bin is UNCONDITIONAL, so a production

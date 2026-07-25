@@ -13,8 +13,7 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("src/App.vue").await;
 
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
 
@@ -138,8 +137,7 @@ real_provider_test!(
         let _wrapped = session.open_fixture_file("src/WrappedButton.vue").await;
         let _on_event = session.open_fixture_file("src/OnEventPropComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
 
@@ -235,8 +233,7 @@ real_provider_test!(
         let _overlay = session.open_fixture_file("src/components/Overlay.vue").await;
         let _button = session.open_fixture_file("src/components/Button.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -295,8 +292,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _mycomp = session.open_fixture_file("src/components/MyComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 

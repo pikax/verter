@@ -8,8 +8,7 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_fixture_file("src/App.vue").await;
 
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "action.disabled", 7, "disabled").await {
             return;
         }
 

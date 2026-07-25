@@ -953,6 +953,7 @@ pub(crate) async fn sync_file_to_provider(
             // The background scan has no `DocumentRegistry`; the carrier source resolves
             // host/VFS-only for surface recording.
             documents: None,
+            project_sync: sync,
             canonical_id,
             is_jsx,
             ide: ide.as_ref(),
@@ -1073,18 +1074,18 @@ pub(crate) async fn sync_file_to_provider(
                         // synced (interactive queries capture this surface). The
                         // background scan has no `DocumentRegistry`; the carrier
                         // source resolves host/VFS-only.
-                        let provider_code = sync
-                            .synced_tsx_content(&tsx_path)
-                            .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                        crate::provider_surface_store::record_carrier_ide_surface(
-                            provider_surfaces,
-                            None,
-                            host,
-                            canonical_id,
-                            &tsx_path,
-                            provider_code.as_ref(),
-                            ide.source_map.as_deref(),
-                        );
+                        if let Some(delivered) = sync.carrier_provider_surface(&tsx_path, &ide.code)
+                        {
+                            crate::provider_surface_store::record_carrier_ide_surface(
+                                provider_surfaces,
+                                None,
+                                host,
+                                canonical_id,
+                                &tsx_path,
+                                &delivered,
+                                ide.source_map.as_deref(),
+                            );
+                        }
                     }
                 }
             }

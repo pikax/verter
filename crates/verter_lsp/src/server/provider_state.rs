@@ -133,28 +133,45 @@ impl VerterLanguageServer {
             }
         };
         let map_json = source_map_json.or(owned_map.as_deref());
-        let provider_code = self
-            .project_sync
-            .as_ref()
-            .and_then(|sync| sync.synced_tsx_content(ide_path))
-            .unwrap_or_else(|| std::sync::Arc::from(ide_code));
-        let workspace = self.vfs_workspace.read().clone();
-        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
-            workspace.as_deref(),
-            canonical_id,
-            ide_code,
-            self.position_encoding.read().clone(),
-        );
-        let _ = crate::provider_surface_store::record_carrier_companion_surface_with_rewrites(
+        // ONE value: the bytes the provider holds and the mapper describing them.
+        // Recording anything else — notably the raw compiler bytes, or a
+        // projection narrower than the one this engine's publication applies —
+        // makes the recorded content hash disagree with the receipt-stamped one,
+        // and the committed-surface gate then refuses every capture for this
+        // source. `ProjectSync` owns that answer for the active engine.
+        let delivered = match self.project_sync.as_ref() {
+            Some(sync) => sync.carrier_provider_surface(ide_path, ide_code),
+            None => {
+                // No provider topology is bound, so no engine holds this buffer.
+                // The shared carrier-import projection is the whole answer.
+                let workspace = self.vfs_workspace.read().clone();
+                let encoding = self.position_encoding.read().clone();
+                Some(
+                    crate::carrier_provider_projection::prepare_carrier_provider_imports(
+                        workspace.as_deref(),
+                        canonical_id,
+                        ide_code,
+                        encoding,
+                    ),
+                )
+            }
+        };
+        // Fail closed: a buffer whose provider bytes cannot be modelled is not
+        // recorded, so no request maps offsets through content no engine has.
+        let Some(delivered) = delivered else {
+            tracing::debug!(
+                "record_carrier_ide_snapshot: no modellable provider surface for {ide_path}"
+            );
+            return;
+        };
+        crate::provider_surface_store::record_carrier_ide_surface(
             store,
             Some(&self.documents),
             host,
             canonical_id,
             ide_path,
-            crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
-            provider_code.as_ref(),
+            &delivered,
             map_json,
-            Some(prepared.rewrites),
         );
     }
 
@@ -270,6 +287,20 @@ impl VerterLanguageServer {
             // tsserver store can be fully advertised while those local opens
             // are still parked, so only receipt-gated direct-open state proves
             // this provider's project graph is complete.
+            //
+            // The frontier's completeness unit is the carrier IDE companion —
+            // the buffer holding the carrier's script and template symbols, and
+            // therefore the one that must be a Program root before a
+            // project-wide references/rename answer can be proven. That is
+            // exactly what the tsserver arm below admits: `activate_published_sources`
+            // promotes `SnapshotRole::CarrierIde` members only, and counts a
+            // source as activated only when it has one. The tsgo arm mirrors
+            // that unit. The API companion is the *import target* projection
+            // consumed by files that import a carrier; the background API-sync
+            // task opens it for imported carriers, and the interactive IDE-sync
+            // path deliberately never opens it for the file under the cursor.
+            // Requiring it here would gate the frontier on a companion neither
+            // arm activates and the current file never gets.
             Ok(expected_sources
                 .iter()
                 .filter(|source| {
@@ -278,7 +309,6 @@ impl VerterLanguageServer {
                         .is_some_and(|state| {
                             state.owner_binding.owner_key() == Some(owner_key.as_str())
                                 && state.ide_background_loaded
-                                && state.api_background_loaded
                                 && state.commit_stamp.is_some()
                         })
                 })
@@ -445,6 +475,7 @@ impl VerterLanguageServer {
                 provider_sync_states: &self.provider_sync_states,
                 provider_surfaces: self.documents.provider_surfaces(),
                 documents: Some(&self.documents),
+                project_sync: self.project_sync.as_ref(),
                 canonical_id,
                 is_jsx,
                 ide,

@@ -26,6 +26,11 @@ verter_type_runtime = { path = "../verter_type_runtime" }
 verter_ffi = { path = "../verter_ffi" }
 verter_protocol = { path = "../verter_protocol" }
 verter_tsgo_api = { path = "../verter_tsgo_api" }
+# `CodeTransform` owns every edit to generated code, including the provider-side
+# carrier import-specifier projection: the transform emits the delivered bytes
+# and the geometry its position map is derived from, so the two can never
+# describe different edits.
+verter_compiler = { path = "../verter_compiler" }
 verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
@@ -70,11 +75,6 @@ path = "src/main.rs"
 [dev-dependencies]
 futures-util = "0.3.32"
 tower-service = "0.3.3"
-# Used by `tests/cases/kebab_tag_mapping_full_columns.rs` to compile a REAL SFC
-# through the production IDE codegen and assert, through the production
-# `PositionMapper`, that every letter column of a rewritten kebab component tag
-# (including the LAST column) maps into the generated TSX.
-verter_compiler = { path = "../verter_compiler" }
 verter_macro_dto = { path = "../verter_macro_dto" }
 # The wire-equivalence integration test byte-compares the ACTUAL NAPI
 # protocol encoding of the LSP route's envelope.

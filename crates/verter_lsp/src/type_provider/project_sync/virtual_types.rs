@@ -12,11 +12,11 @@ impl ProjectSync {
     /// are therefore adapted to owner-bound classic JSX namespaces in the
     /// provider buffer. Callers that record a provider surface use this method
     /// first so the recorded bytes are the exact bytes delivered to the engine.
-    fn prepare_tsx_surface<'a>(
+    pub(super) fn prepare_tsx_surface(
         &self,
         tsx_path: &str,
-        tsx_content: &'a str,
-    ) -> Result<PreparedTsxContent<'a>, TypeProviderError> {
+        tsx_content: &str,
+    ) -> Result<PreparedTsxContent, TypeProviderError> {
         let specialized = if matches!(self.kind, TypeProviderKind::Tsgo) {
             if let Some(prepared) =
                 crate::svelte_assets::prepare_managed_tsgo_svelte_carrier(tsx_path, tsx_content)
@@ -48,7 +48,10 @@ impl ProjectSync {
             verter_session::framework::descriptor::classify_carrier_companion(tsx_path)
         else {
             return Ok(PreparedTsxContent {
-                content: specialized,
+                prepared: PreparedCarrierProviderContent::unprojected(
+                    Arc::from(specialized.as_ref()),
+                    tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+                ),
                 virtual_verter_types_path: None,
             });
         };
@@ -56,35 +59,19 @@ impl ProjectSync {
             .workspace
             .as_ref()
             .and_then(|workspace| workspace.read().clone());
-        let prepared = crate::carrier_provider_projection::prepare_carrier_provider_imports(
+        // ONE preparation produces the delivered bytes AND the mapper describing
+        // them, so the ledger below can hand both to a recorder as one value.
+        let surface = crate::carrier_provider_projection::prepare_carrier_provider_surface(
             workspace.as_deref(),
             &companion.source,
+            tsx_path,
             specialized.as_ref(),
             tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+            matches!(self.kind, TypeProviderKind::Tsgo),
         );
-        let projected = if prepared.content.as_ref() == specialized.as_ref() {
-            specialized
-        } else {
-            Cow::Owned(prepared.content.to_string())
-        };
-        if matches!(self.kind, TypeProviderKind::Tsgo) {
-            if let Some(virtual_types) =
-                crate::carrier_provider_projection::prepare_tsgo_verter_types_virtual(
-                    workspace.as_deref(),
-                    &companion.source,
-                    tsx_path,
-                    projected.as_ref(),
-                )
-            {
-                return Ok(PreparedTsxContent {
-                    content: Cow::Owned(virtual_types.content.to_string()),
-                    virtual_verter_types_path: Some(virtual_types.virtual_path),
-                });
-            }
-        }
         Ok(PreparedTsxContent {
-            content: projected,
-            virtual_verter_types_path: None,
+            virtual_verter_types_path: surface.virtual_verter_types_path().map(str::to_owned),
+            prepared: surface.into_prepared(),
         })
     }
 
@@ -160,7 +147,7 @@ impl ProjectSync {
         }
 
         let result = self
-            .publish_provider_file(tsx_path, prepared.content.as_ref(), lane, verb)
+            .publish_provider_file(tsx_path, prepared.prepared.content().as_ref(), lane, verb)
             .await;
         if result.is_err() {
             // A dependency created solely for a failed carrier publication has
@@ -172,7 +159,7 @@ impl ProjectSync {
             return result;
         }
 
-        self.record_synced_tsx_content(tsx_path, prepared.content.as_ref());
+        self.record_delivered_carrier_surface(tsx_path, prepared.prepared);
 
         // When an installed package becomes available, publish the unrewritten
         // carrier first. Closing its old overlay before that update would break
@@ -196,7 +183,7 @@ impl ProjectSync {
             ProviderLane::Normal => self.provider.close_file_normal(tsx_path).await,
         };
         if result.is_ok() {
-            self.retract_synced_tsx_content(tsx_path);
+            self.retract_delivered_carrier_surface(tsx_path);
             self.close_virtual_verter_types(tsx_path, lane).await?;
         }
         result

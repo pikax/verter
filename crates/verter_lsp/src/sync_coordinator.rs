@@ -441,6 +441,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         provider_sync_states: &deps.provider_sync_states,
         provider_surfaces: deps.documents.provider_surfaces(),
         documents: Some(&deps.documents),
+        project_sync: Some(project_sync),
         canonical_id,
         is_jsx,
         ide: ide.as_ref(),
@@ -500,18 +501,19 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                             synced_kinds.push(ProviderPathKind::Ide);
                             // Record a fresh generation pinning the EXACT IDE bytes
                             // just synced (interactive queries capture this surface).
-                            let provider_code = project_sync
-                                .synced_tsx_content(&ide_path)
-                                .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                            crate::provider_surface_store::record_carrier_ide_surface(
-                                deps.documents.provider_surfaces(),
-                                Some(&deps.documents),
-                                deps.documents.host(),
-                                canonical_id,
-                                &ide_path,
-                                provider_code.as_ref(),
-                                ide.source_map.as_deref(),
-                            );
+                            if let Some(delivered) =
+                                project_sync.carrier_provider_surface(&ide_path, &ide.code)
+                            {
+                                crate::provider_surface_store::record_carrier_ide_surface(
+                                    deps.documents.provider_surfaces(),
+                                    Some(&deps.documents),
+                                    deps.documents.host(),
+                                    canonical_id,
+                                    &ide_path,
+                                    &delivered,
+                                    ide.source_map.as_deref(),
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}")
@@ -701,18 +703,18 @@ async fn preserve_open_unresolved_carrier(
                 ide_synced = true;
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (interactive queries capture this surface).
-                let provider_code = project_sync
-                    .synced_tsx_content(&ide_path)
-                    .unwrap_or_else(|| std::sync::Arc::clone(&ide.code));
-                crate::provider_surface_store::record_carrier_ide_surface(
-                    deps.documents.provider_surfaces(),
-                    Some(&deps.documents),
-                    deps.documents.host(),
-                    canonical_id,
-                    &ide_path,
-                    provider_code.as_ref(),
-                    ide.source_map.as_deref(),
-                );
+                if let Some(delivered) = project_sync.carrier_provider_surface(&ide_path, &ide.code)
+                {
+                    crate::provider_surface_store::record_carrier_ide_surface(
+                        deps.documents.provider_surfaces(),
+                        Some(&deps.documents),
+                        deps.documents.host(),
+                        canonical_id,
+                        &ide_path,
+                        &delivered,
+                        ide.source_map.as_deref(),
+                    );
+                }
             }
             Err(error) => tracing::warn!(
                 "sync_coordinator: failed to sync open unresolved IDE path {ide_path}: {error}"

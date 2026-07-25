@@ -176,7 +176,7 @@ impl ProviderReadyReceipt {
             .map(|c| CompanionFingerprint {
                 uri: Arc::clone(&c.provider_uri),
                 role: c.role,
-                content_hash: hash16_of_str(&c.content),
+                content_hash: hash16_of_str(c.content()),
                 map_hash: c
                     .map_json
                     .as_deref()
@@ -353,7 +353,7 @@ impl PendingProviderReady {
                 companion.role == SnapshotRole::CarrierIde
                     && companion.provider_uri.as_ref() == surface.path()
             }) {
-                companion.content = Arc::clone(surface.content());
+                companion.replace_with_delivered_ide_surface(surface.delivered().clone());
             }
         }
         ProviderReadyReceipt::mint(
@@ -979,7 +979,7 @@ impl MembershipReconciler {
                     .register_carrier_metadata(
                         source.as_str(),
                         &companion.provider_uri,
-                        &companion.content,
+                        companion.content(),
                         project.as_str(),
                     )
                     .await

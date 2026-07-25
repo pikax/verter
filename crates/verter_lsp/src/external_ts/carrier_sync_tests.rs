@@ -218,14 +218,14 @@ fn ide_companion(
     map_json: Option<&str>,
     version: u64,
 ) -> CarrierCompanion {
-    CarrierCompanion {
-        provider_uri: Arc::from(uri),
-        content: Arc::from(content),
-        map_json: map_json.map(Arc::from),
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
+    CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(uri),
+        "/workspace/src/App.vue",
+        content,
+        map_json.map(Arc::from),
+        verter_session::external_ts::ScriptKind::Tsx,
         version,
-    }
+    )
 }
 
 #[test]
@@ -295,6 +295,149 @@ fn commit_stamps_committed_ide_surface_and_gates_uncommitted_capture() {
     assert!(
         !committed.authorizes_carrier_ide_capture(stamp.content_hash, [9u8; 16]),
         "a surface whose source-map differs from the committed stamp must be refused"
+    );
+}
+
+/// The recorded IDE surface and the receipt-stamped committed surface are ONE
+/// identity, so the committed-surface gate can never refuse a freshly published
+/// carrier.
+///
+/// A carrier whose IDE TSX imports another carrier is projected before it reaches
+/// the provider. When a recorder stamped the RAW compiler bytes while the receipt
+/// attested the PROJECTED ones, `authorizes_carrier_ide_capture` refused
+/// permanently: the provider was never queried and every provider-backed feature
+/// fell back to Verter-native results. The two producers now carry the same
+/// indivisible value, so the identity holds by construction.
+#[test]
+fn recorded_ide_surface_hash_equals_the_receipt_stamped_committed_surface() {
+    let canonical = "/workspace/src/App.vue";
+    let ide_path = "/workspace/src/App.vue.tsx";
+    // The projection only bites when the generated buffer imports a carrier —
+    // exactly the population that failed.
+    let compiler_bytes = "import Child from './Child.vue';\nexport default {}; void Child;\n";
+    // A token on the generated import line, so a provider position to the RIGHT
+    // of the rewritten specifier has something to map back through.
+    let carrier_source =
+        "<script setup lang=\"ts\">\nimport Child from './Child.vue';\n</script>\n";
+    let map_json = {
+        let generated_semicolon = compiler_bytes.lines().next().unwrap().len() as u32 - 1;
+        let carrier_semicolon = carrier_source.lines().nth(1).unwrap().len() as u32 - 1;
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content("App.vue", carrier_source);
+        builder.add_token(0, 0, 1, 0, Some(source_id), None);
+        builder.add_token(
+            0,
+            generated_semicolon,
+            1,
+            carrier_semicolon,
+            Some(source_id),
+            None,
+        );
+        builder.into_sourcemap().to_json_string()
+    };
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(carrier_source),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+
+    // The publish path's companion: bytes + projection, prepared once.
+    let mut companions = vec![CarrierCompanion::carrier_ide(
+        Arc::from(ide_path),
+        crate::carrier_provider_projection::prepare_carrier_provider_imports(
+            None,
+            canonical,
+            compiler_bytes,
+            tower_lsp_server::ls_types::PositionEncodingKind::UTF16,
+        ),
+        Some(Arc::from(map_json.as_str())),
+        verter_session::external_ts::ScriptKind::Tsx,
+    )];
+    assert_ne!(
+        companions[0].content().as_ref(),
+        compiler_bytes,
+        "the fixture must actually exercise the projection, or the identity is vacuous"
+    );
+
+    crate::provider_surface_store::record_and_version_carrier_companions(
+        &store,
+        None,
+        &host,
+        canonical,
+        &mut companions,
+    );
+
+    let receipt = PendingProviderReady::authorize(
+        &test_binding("/workspace/tsconfig.json"),
+        1,
+        0,
+        "tsserver",
+        &companions,
+    )
+    .confirm_opened(&[ProviderPathKind::Ide]);
+
+    let states = DashMap::new();
+    commit_carrier_provider_state(&states, canonical, owned_carrier_state(), &receipt);
+    let committed = states
+        .get(canonical)
+        .map(|entry| entry.clone())
+        .expect("the receipt-gated commit installs the owned state");
+    let stamp = committed
+        .committed_ide_surface
+        .clone()
+        .expect("the commit stamps the published IDE surface identity");
+
+    let snapshot = store
+        .current_snapshot(ide_path)
+        .expect("the publish records a CarrierIde surface");
+    let recorded =
+        crate::provider_surface_store::ContentHash::of(&snapshot.provider_content).to_hash16();
+
+    assert_eq!(
+        recorded, stamp.content_hash,
+        "the recorded surface and the receipt stamp MUST be the same bytes"
+    );
+    assert_ne!(
+        recorded,
+        crate::provider_surface_store::ContentHash::of(compiler_bytes).to_hash16(),
+        "neither producer may fall back to the raw compiler bytes for a projected carrier"
+    );
+    assert!(
+        committed.authorizes_carrier_ide_capture(recorded, snapshot.stamp.map_hash),
+        "the committed-surface gate must authorize the surface this publish just \
+         recorded — refusing it strands the source with no provider results at all"
+    );
+
+    // The mapper half. A provider position to the RIGHT of a rewritten specifier
+    // sits at a shifted column, so mapping it back must subtract the rewrite
+    // delta before consulting the compiler map. Recording the projected bytes
+    // WITHOUT their mapper leaves this position mapping to the wrong source
+    // column — invisible to any query on another line, which is exactly why it
+    // needs its own assertion here.
+    let mapper = snapshot
+        .source_map
+        .as_ref()
+        .expect("the recorded surface carries a provider mapper");
+    let provider_line = companions[0].content().lines().next().unwrap().to_owned();
+    let generated_line = compiler_bytes.lines().next().unwrap();
+    let delta = provider_line.len() - generated_line.len();
+    assert!(delta > 0, "the rewrite must lengthen the import line");
+    let semicolon = provider_line.len() as u32 - 1;
+    assert_eq!(
+        mapper
+            .tsx_to_carrier(verter_span::TsPosition::new(0, semicolon))
+            .expect("a post-rewrite provider position maps back to the carrier")
+            .pos
+            .character,
+        semicolon - delta as u32,
+        "the recorded mapper must undo the rewrite shift; recording the projected \
+         bytes with no mapper (or a mapper for different bytes) lands this position \
+         {delta} columns to the right of its true source"
     );
 }
 
@@ -446,14 +589,14 @@ fn api_only_commit_preserves_prior_committed_ide_surface_stamp() {
         .expect("the first (full) commit stamps the IDE surface");
 
     // An api-only refresh: the receipt attests only an API companion (no IDE companion).
-    let api_companion = CarrierCompanion {
-        provider_uri: Arc::from("/workspace/src/App.vue.verter.ts"),
-        content: Arc::from("API V2\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierApi,
-        script_kind: verter_session::external_ts::ScriptKind::Ts,
-        version: 2,
-    };
+    let mut api_companion = CarrierCompanion::verbatim(
+        Arc::from("/workspace/src/App.vue.verter.ts"),
+        Arc::from("API V2\n"),
+        None,
+        verter_session::external_ts::SnapshotRole::CarrierApi,
+        verter_session::external_ts::ScriptKind::Ts,
+    );
+    api_companion.version = 2;
     let receipt2 = PendingProviderReady::authorize(&binding, 2, 0, "tsgo", &[api_companion])
         .confirm_opened(&[ProviderPathKind::Api]);
     commit_carrier_provider_state(
@@ -637,14 +780,14 @@ fn partial_open_api_ok_ide_fail_preserves_prior_live_ide_stamp_and_capture() {
     // 2. A NEWER pass (the higher source counter): the API buffer opened, the IDE buffer FAILED. The pending
     //    carries BOTH a new IDE companion (V2) and an API companion, but only the API opened,
     //    so `confirm_opened(&[Api])` attests ONLY the API companion.
-    let api_companion = CarrierCompanion {
-        provider_uri: Arc::from("/workspace/src/App.vue.verter.ts"),
-        content: Arc::from("API V2\n"),
-        map_json: None,
-        role: SnapshotRole::CarrierApi,
-        script_kind: verter_session::external_ts::ScriptKind::Ts,
-        version: 2,
-    };
+    let mut api_companion = CarrierCompanion::verbatim(
+        Arc::from("/workspace/src/App.vue.verter.ts"),
+        Arc::from("API V2\n"),
+        None,
+        SnapshotRole::CarrierApi,
+        verter_session::external_ts::ScriptKind::Ts,
+    );
+    api_companion.version = 2;
     let r2 = PendingProviderReady::authorize(
         &test_binding_gen(tsconfig, 5),
         2,
@@ -866,14 +1009,14 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
 
     // 1. Publish the carrier under its configured owner (a non-empty companion set)
     //    through the single membership entry — it enters the store's `ready_files`.
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 1,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
     let published = coord
         .reconcile_membership(
             &host,
@@ -914,6 +1057,7 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: false,
         ide: None,
@@ -999,6 +1143,7 @@ async fn managed_tsgo_reconcile_publishes_editor_membership_and_keeps_direct_ope
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: ide.is_jsx,
         ide: Some(&ide),
@@ -1332,6 +1477,7 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: ide.is_jsx,
         ide: Some(&ide),
@@ -1451,6 +1597,7 @@ async fn unowned_carrier_sync_is_terminal_unresolved_no_provider() {
         provider_sync_states: &states,
         provider_surfaces: &surfaces,
         documents: None,
+        project_sync: None,
         canonical_id: &source,
         is_jsx: false,
         ide: None,
@@ -1526,14 +1673,14 @@ async fn readiness_receipt_never_precedes_store_publication() {
 
     // Publish the owned carrier through the single membership entry with a non-empty
     // companion ⇒ Advertised (carries the readiness receipt).
-    let companion = CarrierCompanion {
-        provider_uri: Arc::from(provider.as_str()),
-        content: Arc::from("export default {} as any;\n"),
-        map_json: None,
-        role: verter_session::external_ts::SnapshotRole::CarrierIde,
-        script_kind: verter_session::external_ts::ScriptKind::Tsx,
-        version: 7,
-    };
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        7,
+    );
     let published = coord
         .reconcile_membership(
             &host,

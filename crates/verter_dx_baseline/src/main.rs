@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use verter_type_runtime::TypeProvider;
+use verter_workspace::native_fs::NativeFs;
 
 use crate::artifact_overlay::{ArtifactOverlay, ProbeStatus};
 use crate::protocol::{
@@ -164,12 +165,18 @@ struct ReadyProvider {
 }
 
 /// The per-session bridge state: the spawned provider (with its capabilities),
-/// the versioned artifact overlay, and the probe counter.
+/// the versioned artifact overlay, the probe counter, and the session's disk
+/// boundary.
 struct Bridge {
     ready: Option<ReadyProvider>,
     overlay: ArtifactOverlay,
     skipped: bool,
     baseline_ran: u64,
+    /// The session's single disk boundary. Tool-root normalisation resolves
+    /// symlinks through it (`NativeFs::realpath`) rather than reaching for
+    /// `std::fs` directly, so the bridge has one filesystem authority and one
+    /// shared realpath memo.
+    fs: NativeFs,
 }
 
 impl Bridge {
@@ -179,6 +186,7 @@ impl Bridge {
             overlay: ArtifactOverlay::new(),
             skipped: false,
             baseline_ran: 0,
+            fs: NativeFs::new(),
         }
     }
 
@@ -197,12 +205,18 @@ impl Bridge {
     }
 
     async fn on_hello(&mut self, h: HelloRequest) -> Response {
-        let resolution =
-            match provider::resolve(h.provider, &h.tool_root, &h.workspace_root, h.strict_ci).await
-            {
-                Ok(r) => r,
-                Err(e) => return Response::error(e.kind(), e.to_string()),
-            };
+        let resolution = match provider::resolve(
+            &self.fs,
+            h.provider,
+            &h.tool_root,
+            &h.workspace_root,
+            h.strict_ci,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => return Response::error(e.kind(), e.to_string()),
+        };
 
         let (tool_root_used, plan) = match resolution {
             Resolution::Ready {
