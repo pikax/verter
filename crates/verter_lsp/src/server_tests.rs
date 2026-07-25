@@ -5037,6 +5037,21 @@ async fn did_change_acknowledges_before_provider_refresh_for_all_carrier_modes()
     }
 }
 
+/// Liveness escape for the "does not wait for a blocked provider update" probes.
+///
+/// These tests prove a NON-BLOCKING property, and they prove it STRUCTURALLY: the
+/// blocked provider update is released only AFTER the probe's result is in hand, so
+/// any probe that genuinely waited on that update can never complete — it hangs
+/// forever, and ANY finite bound catches it. The bound therefore exists purely to
+/// turn that hang into a test failure instead of a stuck suite.
+///
+/// It is deliberately NOT a latency assertion. The previous 250ms bound read as one,
+/// and on a loaded machine it fired against completions that were correctly
+/// non-blocking but merely slow — a false failure that says nothing about the
+/// property under test. Do not tighten this into a performance budget; if request
+/// latency needs a bound, that belongs in a separate, explicitly-named latency test.
+const BLOCKED_PROVIDER_PROBE_LIVENESS: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unrelated_document_completion_does_not_wait_for_blocked_provider_update() {
     let child_source =
@@ -5085,10 +5100,12 @@ async fn unrelated_document_completion_does_not_wait_for_blocked_provider_update
             .offset_to_position(cursor as u32)
             .expect("completion position");
         let result = tokio::time::timeout(
-            std::time::Duration::from_millis(250),
+            BLOCKED_PROVIDER_PROBE_LIVENESS,
             server.completion(completion_params(&independent_uri, position, None)),
         )
         .await;
+        // Released only now: everything above ran while the provider update was
+        // still blocked, which is what makes this a non-blocking proof.
         update_release.notify_one();
         result
     };
@@ -5473,7 +5490,7 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
             },
         );
         let observe = async {
-            tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            tokio::time::timeout(BLOCKED_PROVIDER_PROBE_LIVENESS, async {
                 loop {
                     if server.documents.get(&target_uri).map(|doc| doc.version) == Some(2) {
                         break;
@@ -5489,7 +5506,7 @@ async fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_u
                 .offset_to_position(cursor as u32)
                 .expect("current completion position");
             let response = tokio::time::timeout(
-                std::time::Duration::from_millis(250),
+                BLOCKED_PROVIDER_PROBE_LIVENESS,
                 server.completion(completion_params(&target_uri, position, None)),
             )
             .await
@@ -20055,8 +20072,9 @@ async fn resync_aliased_imports_resolves_and_syncs_after_registry_built() {
     // Setup: temp dir with workspace/src/App.vue importing @/components/Child.vue
     // Use a non-dot-prefixed directory so tsconfig discovery doesn't skip it
     // (tsconfig discovery skips dot-directories).
-    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_aliased").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
 
@@ -20294,8 +20312,9 @@ async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
     // from an open root, so a bare `import B from "./B.vue"` resolves with no
     // TS2307. Cover the TRANSITIVE case: A imports B imports C — opening A opens
     // B.d.vue.ts AND C.d.vue.ts. Also pin that a cycle (C imports A) terminates.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_transitive");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_transitive").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20449,8 +20468,9 @@ async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
     // `visited` with the root and skipped it), and the main per-document sync only
     // opened the IDE `.vue.tsx` + API `.vue.verter.ts`. So a lone leaf got neither —
     // its `Leaf.d.vue.ts` was never opened.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_lone_leaf");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_lone_leaf").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20577,8 +20597,9 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
     // RED-before (no ADD gate): the older pass re-opens the overlay (the open is
     // ungated and monotonic-max re-records the edge). Post-fix: the per-root
     // high-water gate rejects it.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_stale_reopen");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_stale_reopen").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20726,8 +20747,10 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
     // RED-before (gate read + record NOT under one guard, i.e. the gate dropped from
     // `gate_and_record_root_edge`): the older open records and `open_dts` re-opens
     // Root.d.vue.ts after the advance. GREEN-after: the shared guard gates it.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_stale_open_interleave");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_stale_open_interleave")
+            .expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -20994,8 +21017,9 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
     // is never closed — a permanent leak. Instead the call site
     // RE-READS the open set after the async work, so the now-closed A is dropped
     // and its solely-A overlay is returned for close.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_close_mid_pass");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard = tempfile::TempDir::with_prefix("verter_test_decl_closure_close_mid_pass")
+        .expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -21172,8 +21196,10 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
 /// before the pass re-reads it → the edge is dropped → no leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_handler() {
-    let temp_base = std::env::temp_dir().join("verter_test_did_close_release_order_leak");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_did_close_release_order_leak")
+            .expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -21406,8 +21432,9 @@ async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_han
 /// so production carries no probe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
-    let temp_base = std::env::temp_dir().join("verter_test_decl_close_supersession");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_close_supersession").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -21805,8 +21832,9 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
     // RED-before: the closure only ever INSERTED; removal happened ONLY on
     // did_close. So `B.d.vue.ts` stayed attributed to A (and stayed open) after A
     // stopped importing B.
-    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_reconcile");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_closure_reconcile").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(
@@ -22291,8 +22319,9 @@ async fn resync_aliased_imports_retains_prior_path_when_replacement_sync_fails()
     // marked stale by the force-rebind clause; pre-fix the pass closed it BEFORE
     // syncing, so a failed sync left the artifact gone. Post-fix: a failed sync
     // closes nothing and retains the prior state.
-    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_retain");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_aliased_retain").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
     std::fs::write(
@@ -22447,8 +22476,9 @@ import Child from '@/components/Child.vue'
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resync_aliased_imports_syncs_vue_ide_artifact_for_tsgo() {
-    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_tsgo");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_aliased_tsgo").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
 
@@ -22544,8 +22574,9 @@ async fn resync_aliased_imports_syncs_barrel_and_vue_deps_for_tsgo() {
     // Setup: App.vue imports `{ Overlay }` from a barrel (./components/index.ts)
     // which re-exports `./Overlay.vue`. Both the barrel and its Vue dependency
     // must be synced eagerly so TSGO resolves the component types.
-    let temp_base = std::env::temp_dir().join("verter_test_resync_barrel_tsgo");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_resync_barrel_tsgo").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
 
@@ -22694,8 +22725,9 @@ async fn resync_aliased_already_loaded_open_vue_reconciled_when_owner_lost() {
     // committed binding still matching the live resolution, so an owner-lost open
     // file falls through to `reconcile_unowned_carrier_provider_file` → converts to
     // Unresolved + closes the dropped owner-derived `.vue.ts`.
-    let temp_base = std::env::temp_dir().join("verter_test_r24_aliased_owner_lost");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_r24_aliased_owner_lost").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
     std::fs::write(
@@ -22868,8 +22900,9 @@ async fn resync_barrel_vue_dep_reconciles_open_owned_overlay_on_owner_loss() {
     // discovery actually REACHED Overlay. If discovery regressed to a no-op, the
     // seeded `Owned` binding would survive unchanged and nothing would close, so
     // a pure state-survival + absence-of-close assertion would pass vacuously.
-    let temp_base = std::env::temp_dir().join("verter_test_barrel_open_unowned");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_barrel_open_unowned").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
     std::fs::write(
@@ -24605,8 +24638,9 @@ async fn guarded_close_is_superseded_when_generation_advanced_even_if_set_looks_
 /// concurrency; this one discriminates the GENERATION/REACHABILITY gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
-    let temp_base = std::env::temp_dir().join("verter_test_decl_close_no_resurrect");
-    let _ = std::fs::remove_dir_all(&temp_base);
+    let temp_base_guard =
+        tempfile::TempDir::with_prefix("verter_test_decl_close_no_resurrect").expect("temp dir");
+    let temp_base = temp_base_guard.path().to_path_buf();
     let workspace = temp_base.join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
     std::fs::write(

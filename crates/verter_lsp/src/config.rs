@@ -275,7 +275,8 @@ mod config_migration_tests {
 
     #[test]
     fn discover_no_config_returns_default() {
-        let tmp = std::env::temp_dir().join("verter_test_no_config");
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_no_config").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         let _ = std::fs::create_dir_all(&tmp);
         let ws = fs_workspace();
         let result = discover_lint_config(&ws, &canonical_str(&tmp));
@@ -289,7 +290,8 @@ mod config_migration_tests {
 
     #[test]
     fn discover_verterrc_json() {
-        let tmp = std::env::temp_dir().join("verter_test_verterrc");
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_verterrc").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(
             tmp.join(".verterrc.json"),
@@ -309,7 +311,8 @@ mod config_migration_tests {
 
     #[test]
     fn discover_eslintrc_json() {
-        let tmp = std::env::temp_dir().join("verter_test_eslintrc");
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_eslintrc").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(
             tmp.join(".eslintrc.json"),
@@ -1042,8 +1045,9 @@ mod tests {
 
     #[test]
     fn registry_find_project_most_specific() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_specific");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_registry_specific").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("packages/ui/src")).unwrap();
         std::fs::create_dir_all(tmp.join("packages/app/src")).unwrap();
 
@@ -1094,8 +1098,9 @@ mod tests {
 
     #[test]
     fn registry_fallback_to_workspace_root() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_fallback");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_registry_fallback").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
@@ -1114,8 +1119,9 @@ mod tests {
 
     #[test]
     fn registry_per_project_lint_config() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_lint");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_registry_lint").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("packages/strict-pkg/src")).unwrap();
         std::fs::create_dir_all(tmp.join("packages/lax-pkg/src")).unwrap();
 
@@ -1180,8 +1186,9 @@ mod tests {
     fn tsconfig_backed_project_no_vite_aliases() {
         // Tsconfig-backed projects must NOT get vite aliases merged, even when
         // vite.config.ts exists alongside and vite_config_enabled is true.
-        let tmp = std::env::temp_dir().join("verter_test_tsconfig_first_no_vite");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_tsconfig_first_no_vite").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         // Create tsconfig with path aliases
@@ -1241,8 +1248,9 @@ mod tests {
     fn fallback_project_static_vite_aliases() {
         // Fallback (no tsconfig) project with static-analyzable vite config
         // should get aliases populated.
-        let tmp = std::env::temp_dir().join("verter_test_fallback_static_vite");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_fallback_static_vite").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         // No tsconfig.json — this will be a fallback project
@@ -1306,8 +1314,9 @@ mod tests {
     fn fallback_project_complex_config_not_trusted() {
         // Fallback project with complex (function export) vite config and no trust
         // should have empty aliases and generate trust_required entry.
-        let tmp = std::env::temp_dir().join("verter_test_fallback_complex_notrusted");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_fallback_complex_notrusted")
+            .expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         std::fs::write(
@@ -1361,8 +1370,9 @@ export default defineConfig(({ mode }) => ({
     #[test]
     fn tsconfig_project_no_vite_config_path() {
         // Tsconfig-backed projects should never have vite_config_path set.
-        let tmp = std::env::temp_dir().join("verter_test_tsconfig_no_vite_path");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_tsconfig_no_vite_path").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         std::fs::write(
@@ -1412,8 +1422,9 @@ export default defineConfig(({ mode }) => ({
     #[test]
     fn disabled_vite_fallback_has_no_aliases() {
         // When vite is disabled, fallback projects should have empty aliases.
-        let tmp = std::env::temp_dir().join("verter_test_disabled_vite");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_disabled_vite").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         std::fs::write(
@@ -1608,8 +1619,9 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn registry_file_outside_all_projects() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_outside");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_registry_outside").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
 
         let root = tmp.to_string_lossy().replace('\\', "/");
@@ -1628,8 +1640,9 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn registry_solution_style_root_does_not_own_member_files() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_solution_owner");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_registry_solution_owner")
+            .expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         std::fs::create_dir_all(tmp.join("tests")).unwrap();
 
@@ -1688,8 +1701,9 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn registry_unmatched_root_file_uses_synthetic_workspace_project() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_synth_workspace");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_registry_synth_workspace")
+            .expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         std::fs::create_dir_all(tmp.join("scripts")).unwrap();
 
@@ -1725,8 +1739,9 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn registry_projects_preserve_compiler_options_through_extends() {
-        let tmp = std::env::temp_dir().join("verter_test_registry_compiler_options");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_registry_compiler_options")
+            .expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(tmp.join("src")).unwrap();
 
         std::fs::write(
@@ -1777,8 +1792,8 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn detect_ssr_nuxt_config_ts() {
-        let tmp = std::env::temp_dir().join("verter_test_ssr_nuxt");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_ssr_nuxt").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("nuxt.config.ts"), "export default {}").unwrap();
         let lint = ResolvedLintConfig::default();
@@ -1791,8 +1806,9 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn detect_ssr_nuxt_config_js() {
-        let tmp = std::env::temp_dir().join("verter_test_ssr_nuxt_js");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_ssr_nuxt_js").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("nuxt.config.js"), "export default {}").unwrap();
         let lint = ResolvedLintConfig::default();
@@ -1805,8 +1821,9 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn detect_ssr_nuxt_dir() {
-        let tmp = std::env::temp_dir().join("verter_test_ssr_nuxt_dir");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard =
+            tempfile::TempDir::with_prefix("verter_test_ssr_nuxt_dir").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::create_dir_all(tmp.join(".nuxt")).unwrap();
         let lint = ResolvedLintConfig::default();
@@ -1819,8 +1836,8 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn detect_ssr_from_lint_config() {
-        let tmp = std::env::temp_dir().join("verter_test_ssr_lint");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_ssr_lint").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
         let lint = ResolvedLintConfig {
             config: verter_diagnostics::LintConfig {
@@ -1838,8 +1855,8 @@ export default defineConfig(({ mode }) => ({
 
     #[test]
     fn no_ssr_for_plain_vite_project() {
-        let tmp = std::env::temp_dir().join("verter_test_no_ssr");
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp_guard = tempfile::TempDir::with_prefix("verter_test_no_ssr").expect("temp dir");
+        let tmp = tmp_guard.path().to_path_buf();
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("vite.config.ts"), "export default {}").unwrap();
         let lint = ResolvedLintConfig::default();
