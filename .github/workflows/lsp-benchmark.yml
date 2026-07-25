@@ -148,6 +148,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # setup-node@v5 enables package-manager caching by DEFAULT and
+          # auto-detects pnpm from the root package.json `packageManager`
+          # field, failing unless pnpm is already on PATH. This job either
+          # needs no pnpm or caches the pnpm store itself.
+          package-manager-cache: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

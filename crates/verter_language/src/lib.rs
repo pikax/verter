@@ -36,9 +36,9 @@ mod registry;
 pub use ids::{CapabilityId, FrameworkAdapterId, LanguageId};
 pub use language::{FileLanguage, JsModuleKind, ScriptFlavor, ScriptSourceType};
 pub use parse_artifact::{
-    CarrierAccessToken, CarrierParse, ExternalLink, ExternalLinkKind, FrameworkParseArtifact,
-    FrameworkParseCommon, LanguageDiagnostic, LanguageDiagnosticSeverity, ScriptRegion,
-    ScriptRegionKind, StyleRegion, TemplateRegion, __carrier_downcast_arc, __carrier_downcast_ref,
+    __carrier_downcast_arc, __carrier_downcast_ref, CarrierAccessToken, CarrierParse, ExternalLink,
+    ExternalLinkKind, FrameworkParseArtifact, FrameworkParseCommon, LanguageDiagnostic,
+    LanguageDiagnosticSeverity, ScriptRegion, ScriptRegionKind, StyleRegion, TemplateRegion,
 };
 pub use registry::{
     GatedCandidate, LanguageRegistry, LanguageRow, RowClassification, StaticClassification,

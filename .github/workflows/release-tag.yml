@@ -23,7 +23,7 @@ on:
 permissions:
   contents: write
 
-# Comment-triggered runs can stack; keep one run per issue/ref.
+# One tagging run per ref; never cancel a run that may be mid-push.
 concurrency:
   group: release-tag-${{ github.ref }}
   cancel-in-progress: false
@@ -40,6 +40,11 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # setup-node@v5 enables package-manager caching by DEFAULT and
+          # auto-detects pnpm from the root package.json `packageManager`
+          # field, which fails unless pnpm is already on PATH. This job
+          # caches the pnpm store itself (or needs no pnpm at all).
+          package-manager-cache: false
 
       - name: Detect a version commit
         id: detect

@@ -532,8 +532,8 @@ not a committed implementation language for those paths.
   repo-owned command wrappers (`*.sh`/`*.bash`/`*.ps1`/`*.cmd`/`*.bat`). Thin shell/PowerShell/cmd wrappers
   are allowed as command-entry shims but must not invoke Python; Node/TS tool scripts must not spawn Python
   transitively.
-- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin, the
-  xtask `check-four-mode-terminology` bin) or a Node script — never a committed Python script.
+- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin) or a
+  Node script — never a committed Python script.
 - Agents may use Python transiently and locally for ad-hoc analysis, but such use is never committed and
   never on a gate/build/CI/test path.
 - Committing repo-owned Python is allowed only if it is 100% necessary AND neither Rust nor JS/Node can do

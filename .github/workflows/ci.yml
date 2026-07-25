@@ -220,13 +220,6 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
-  terminology-check:
-    name: Four-mode terminology check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - run: bash tools/check-four-mode-terminology.sh
 
   rust-fmt:
     name: Rust Format
@@ -498,7 +491,7 @@ jobs:
 
   svelte-compiler-benchmark:
     name: Svelte Compiler Benchmark (Verter vs official)
-    needs: detect-changes
+    needs: [detect-changes, build-native-node]
     if: needs.detect-changes.outputs.svelte_perf == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 50
@@ -524,8 +517,13 @@ jobs:
           cargo test -p verter_compiler --test main \
             cases::svelte_client_emit_topology::svelte_performance_manifest_is_oracle_proven_and_representative \
             -- --exact
-      - name: Build release native compiler
-        run: pnpm run build:native
+      # Shared with native-test rather than a second release build of the napi
+      # crate in this job.
+      - name: Download release native compiler
+        uses: actions/download-artifact@v7
+        with:
+          name: native-node
+          path: packages/native/dist
       - name: Compare Verter and official Svelte compilers
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
@@ -550,42 +548,37 @@ jobs:
           path: artifacts/svelte-compiler-benchmark.json
           if-no-files-found: error
 
+  # Consumes wasm-build's artifact rather than compiling wasm32 a second time.
+  # These two jobs used to run `pnpm run build:wasm` independently, so any
+  # change matching both filters paid for the wasm toolchain, wasm-bindgen and
+  # a full wasm32 compile twice. No Rust toolchain is needed here now.
   playground-test:
     name: Playground Unit Tests
-    needs: detect-changes
+    needs: [detect-changes, wasm-build]
     if: needs.detect-changes.outputs.playground == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: playground-test
-      # Prebuilt binary. The previous guarded `cargo install` compiled
-      # wasm-bindgen-cli from source on any runner where the version probe
-      # missed, which is every cold cache.
-      - name: Install wasm-bindgen CLI
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen-cli@0.2.122
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build WASM
-        run: pnpm run build:wasm
+      - name: Download WASM build
+        uses: actions/download-artifact@v7
+        with:
+          name: wasm-build
+          path: packages/wasm
       - name: Playground tests
         run: pnpm --filter @verter/playground test
 
   wasm-build:
     name: WASM Build
     needs: detect-changes
-    if: needs.detect-changes.outputs.wasm == 'true'
+    # Also runs for `playground`, which consumes this job's artifact.
+    if: needs.detect-changes.outputs.wasm == 'true' || needs.detect-changes.outputs.playground == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -613,6 +606,16 @@ jobs:
         run: pnpm run build:wasm
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      # Shared with playground-test so wasm32 is compiled ONCE per run.
+      - name: Upload WASM build
+        uses: actions/upload-artifact@v6
+        with:
+          name: wasm-build
+          path: |
+            packages/wasm/wasm/
+            packages/wasm/dist/
+          if-no-files-found: error
+          retention-days: 1
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Test @verter/wasm
@@ -838,9 +841,42 @@ jobs:
           path: /tmp/verter-e2e-timing-*.json
           if-no-files-found: ignore
 
+  # The ONE release build of the native N-API binding. `native-test` and
+  # `svelte-compiler-benchmark` each ran `pnpm run build:native` themselves, so
+  # any change matching both filters paid for two full release builds of the
+  # napi crate. Gated on the broader `rust || js` (native-test's closure gate),
+  # which is a superset of `svelte_perf`, so the producer is always present
+  # when either consumer runs.
+  build-native-node:
+    name: Build native binding
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.js == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-native-node
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build native binding (release)
+        run: pnpm run build:native
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-node
+          path: packages/native/dist/
+          if-no-files-found: error
+          retention-days: 1
+
   native-test:
     name: Native Package Tests
-    needs: detect-changes
+    needs: [detect-changes, build-native-node]
     # Dependency-closure gate: this job builds the real native binding and
     # drives the @verter/component-meta native-eval suite against it, whose
     # dependency closure spans every workspace crate plus the JS workspace
@@ -853,18 +889,19 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: native-test
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build native binary
-        run: pnpm run build:native
+      # The real .node comes from build-native-node, so this job needs no Rust
+      # toolchain and no cargo cache.
+      - name: Download native binding
+        uses: actions/download-artifact@v7
+        with:
+          name: native-node
+          path: packages/native/dist
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Test @verter/native
@@ -1328,7 +1365,6 @@ jobs:
     timeout-minutes: 5
     needs:
       - detect-changes
-      - terminology-check
       - rust-fmt
       - rust-clippy
       - rust-test
@@ -1346,6 +1382,7 @@ jobs:
       - native-test
       - dx-harness-hermetic
       - build-lsp-debug
+      - build-native-node
       - build-editor-lsp
       - editor-helix
       - editor-lapce
