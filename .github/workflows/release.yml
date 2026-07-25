@@ -526,12 +526,17 @@ jobs:
           - os: ubuntu-latest
             slug: linux
             binary: verter-lsp
-          - os: macos-latest
-            slug: macos
-            binary: verter-lsp
-          - os: windows-latest
-            slug: windows
-            binary: verter-lsp.exe
+        # Verification runs on Linux ONLY. macOS and Windows runners bill at
+        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
+        # binaries users receive still come from build-native / build-tsc /
+        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # restore cross-OS verification.
+          # - os: macos-latest
+          #   slug: macos
+          #   binary: verter-lsp
+          # - os: windows-latest
+          #   slug: windows
+          #   binary: verter-lsp.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     steps:
@@ -555,14 +560,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
+        # Verification runs on Linux ONLY. macOS and Windows runners bill at
+        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
+        # binaries users receive still come from build-native / build-tsc /
+        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # restore cross-OS verification.
         include:
           - os: ubuntu-latest
             slug: linux
-          - os: macos-latest
-            slug: macos
-          - os: windows-latest
-            slug: windows
+          # - os: macos-latest
+          #   slug: macos
+          # - os: windows-latest
+          #   slug: windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -684,14 +694,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
+        # Verification runs on Linux ONLY. macOS and Windows runners bill at
+        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
+        # binaries users receive still come from build-native / build-tsc /
+        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # restore cross-OS verification.
         include:
           - os: ubuntu-latest
             slug: linux
-          - os: macos-latest
-            slug: macos
-          - os: windows-latest
-            slug: windows
+          # - os: macos-latest
+          #   slug: macos
+          # - os: windows-latest
+          #   slug: windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -770,14 +785,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
+        # Verification runs on Linux ONLY. macOS and Windows runners bill at
+        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
+        # binaries users receive still come from build-native / build-tsc /
+        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # restore cross-OS verification.
         include:
           - os: ubuntu-latest
             slug: linux
-          - os: macos-latest
-            slug: macos
-          - os: windows-latest
-            slug: windows
+          # - os: macos-latest
+          #   slug: macos
+          # - os: windows-latest
+          #   slug: windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -857,7 +877,7 @@ jobs:
       matrix:
         # Cross-platform portability: the Lua config layer must build path
         # strings and resolve the binary on all three host OSes.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         # v0.11.0 is the supported floor (`vim.lsp.config` / `vim.lsp.enable`
         # first landed in 0.11), v0.12.3 is current stable, nightly catches
         # upstream LSP-client changes before they ship.
@@ -866,12 +886,17 @@ jobs:
           - os: ubuntu-latest
             slug: linux
             binary: verter-lsp
-          - os: macos-latest
-            slug: macos
-            binary: verter-lsp
-          - os: windows-latest
-            slug: windows
-            binary: verter-lsp.exe
+        # Verification runs on Linux ONLY. macOS and Windows runners bill at
+        # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
+        # binaries users receive still come from build-native / build-tsc /
+        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # restore cross-OS verification.
+          # - os: macos-latest
+          #   slug: macos
+          #   binary: verter-lsp
+          # - os: windows-latest
+          #   slug: windows
+          #   binary: verter-lsp.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:

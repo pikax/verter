@@ -15,11 +15,25 @@ name: Release Check
 # publish jobs have no registry token, no VSCE PAT, and no write scope, so a
 # rehearsal cannot ship anything.
 
+#
+# COST: this rehearsal runs the FULL release job graph, including the twelve
+# macOS (10x) and Windows (2x) artifact-build legs. Those are the most
+# expensive minutes in the estate, so the triggers are kept deliberately
+# narrow: on demand, plus PRs that touch the release machinery ITSELF.
+#
+# Deliberately NOT triggered by:
+#   - a schedule — a weekly cron would pay for the whole paid matrix every week
+#     for a tree nobody is about to release;
+#   - lockfile/manifest churn (`Cargo.lock`, `pnpm-lock.yaml`, `package.json`,
+#     `packages/*/package.json`) — ordinary dependency work would drag the paid
+#     matrix in on routine PRs. A version bump does rewrite those manifests, but
+#     it is immediately followed by a tag, which runs the real release anyway;
+#     rehearse it by hand first via workflow_dispatch.
 on:
   # Rehearse on demand — run this before cutting a release tag.
   workflow_dispatch:
-  # Auto-rehearse whenever the release machinery itself changes, since that is
-  # exactly the change class a rehearsal exists to de-risk.
+  # Auto-rehearse when the release machinery itself changes, which is the change
+  # class a rehearsal exists to de-risk.
   pull_request:
     paths:
       - ".github/workflows/release.yml"
@@ -28,17 +42,7 @@ on:
       - "scripts/check-versions.mjs"
       - "scripts/verify-packages.mjs"
       - "scripts/bump.mjs"
-      - "packages/*/package.json"
-      - "packages/*/npm/*/package.json"
       - "packages/vue-vscode/package.mjs"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-  # Catch drift that lands without touching the paths above (a dependency
-  # float, a runner image change, an expired pinned asset).
-  schedule:
-    - cron: "0 5 * * 1"
 
 # Never let a rehearsal cancel or queue behind a real release.
 concurrency:

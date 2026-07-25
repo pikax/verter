@@ -546,14 +546,19 @@ host-target unit tests, `cargo clippy --target wasm32-wasip2 -- -D warnings`, `c
 --check`, and the production-plan semantic smoke against the shared `verter-lsp` binary
 produced once by the `build-editor-lsp` job.
 
-**Two-tier coverage.** This lane previously lived in a standalone `zed.yml` running a 3-OS
-matrix (ubuntu/macos/windows) that built `verter-lsp --release` itself on every run. The
-Cross-Platform Portability CRITICAL rule is now discharged at RELEASE time: the
-`editor-zed` job in `release.yml` runs the full ubuntu/macos/windows matrix, proving the
-`wasm32-wasip2` build and the host-target launch surface on all three host OSes. The
-`ci.yml` job above is the fast Linux-only leg run per PR. `release-check.yml` rehearses the
-full release matrix without publishing, so the cross-OS proof is available on demand before
-a tag is cut. Real-Zed UI loading remains manual because Zed has no
+**Linux-only verification.** This lane previously lived in a standalone `zed.yml` running a
+3-OS matrix (ubuntu/macos/windows) that built `verter-lsp --release` itself on every run.
+Both `ci.yml` (per PR) and `release.yml` (per tag) now run the `wasm32-wasip2` build,
+host-target tests, clippy and rustfmt on `ubuntu-latest` ONLY. macOS and Windows runners
+bill at 10x and 2x and these legs verify rather than ship, so the cost is not justified; the
+matrix entries are left commented in `release.yml` to restore.
+
+**Coverage note:** the extension build and host-target launch surface are no longer
+exercised on macOS or Windows, so the Cross-Platform Portability CRITICAL rule is NOT
+discharged for this extension by CI. The `wasm32-wasip2` target is a host-independent
+cross-compile, so the shipped artifact does not vary by build host, and the wasip1/wasip2
+mismatch this build catches is target-related rather than host-related — it is still caught
+on Linux. `verter-lsp` itself is still built natively on macOS and Windows by `build-lsp`. Real-Zed UI loading remains manual because Zed has no
 headless extension-host harness; the neutral-client lane is documented as a shipping-plan
 contract, not as GUI automation.
 
