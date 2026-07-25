@@ -59,7 +59,8 @@ pub(crate) use rune_ambient::{
 };
 pub(crate) use vue_script_extract::{
     build_position_preserving_script_source, extract_vue_script_content,
-    populate_sfc_blocks_sidecar, sfc_script_setup_type_params, template_converter_inputs,
+    indexed_script_setup_type_params, populate_sfc_blocks_sidecar, sfc_script_setup_type_params,
+    template_converter_inputs,
 };
 
 // Test-only knob: arm the compile-tier producer's fact-injection slot.

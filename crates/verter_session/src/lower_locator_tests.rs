@@ -1053,6 +1053,52 @@ fn lower_locator_constraint_binds_full_sibling_frame() {
              a BareRef; got {other:?}"
         ),
     }
+
+    // Whole-body demand: the body-binder construction consumes the SAME
+    // transient sibling list the explicit-bound demand observed — every
+    // member type that names a declared parameter binds its FINAL binder
+    // (a `TypeParam` node carrying the declared ordinal), never a BareRef
+    // and never an outer capture.
+    let bar_body = match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Bar")) {
+        QueryResult::Value(id) => id,
+        other => panic!("whole-body lower_locator must produce a value, got {other:?}"),
+    };
+    let bar_body_data = graph.node_data(bar_body);
+    let Some(SemanticNodeData::Object(view)) = bar_body_data.as_deref() else {
+        panic!(
+            "Bar's whole body must lower to its Object surface, got {:?}",
+            bar_body_data.as_deref()
+        )
+    };
+    for (member_name, expected_display, expected_ordinal) in [("x", "T", 0u16), ("y", "U", 1u16)] {
+        let member = view
+            .members
+            .iter()
+            .find(|member| member.name.as_ref() == member_name)
+            .unwrap_or_else(|| panic!("member `{member_name}` must exist on Bar's body"));
+        match graph.node_data(member.value).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                display_name,
+                param_index,
+                ..
+            }) => {
+                assert_eq!(
+                    display_name.as_ref(),
+                    expected_display,
+                    "member `{member_name}` must bind its declared parameter binder"
+                );
+                assert_eq!(
+                    *param_index, expected_ordinal,
+                    "member `{member_name}` must bind the declared ordinal-{expected_ordinal} \
+                     binder identity"
+                );
+            }
+            other => panic!(
+                "member `{member_name}` must bind a final TypeParam binder from the \
+                 transient sibling list — got {other:?}"
+            ),
+        }
+    }
 }
 
 /// Sibling shadowing: with an outer `type U = string` in the SAME file, a

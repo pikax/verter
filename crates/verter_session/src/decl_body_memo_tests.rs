@@ -14,6 +14,12 @@ use verter_type_expr::locators::{
     TypeParamVisibility,
 };
 
+// The lazily lowered TYPE-declaration memo record is fact+locator content
+// free: authored bodies and header-parameter BOUNDS are re-borrowed
+// lease-only on demand, never stored as typed IR. Compile witness: the
+// record owns no transitive `TypeExpr`.
+static_assertions::assert_impl_all!(LoweredTypeDecl: verter_no_typeexpr::NoTypeExpr);
+
 /// The canonical id every fixture memo in this module is keyed on.
 const FIXTURE_CANONICAL: &str = "/ws/fixture.ts";
 

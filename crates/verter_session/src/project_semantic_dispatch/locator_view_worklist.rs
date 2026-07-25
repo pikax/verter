@@ -13,12 +13,11 @@ use super::carrier::{CarrierArgsContinuation, CarrierResolutionPlan, CarrierReso
 use super::locator_view::{LocatorViewInputs, ViewMemo};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    may_reduce_operator, DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey,
-    MemberMergeRole, NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, QueryError, QueryResult, ReductionDemand, ResolveDeclKey,
-    ResultCompleteness, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryOutput, SurfaceMember, SurfaceView, TupleElement, TypeParamDecl,
-    ValueRootKey,
+    may_reduce_operator, FunctionParam, IndexKey, IndexSignature, MapperKey, MemberMergeRole,
+    NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ResultCompleteness, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SurfaceMember, SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 #[must_use]

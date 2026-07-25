@@ -17,61 +17,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .scope_payload
                 .and_then(|payload| payload.scope_type_bindings().get(name.as_ref()))
             {
-                let mut nested: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                let constraint = binding.constraint.as_ref().map(|constraint| {
-                    self.shallow_lower_type_expr_with_context(
-                        constraint,
-                        inputs.env,
-                        inputs.scope,
-                        inputs.name_resolution,
-                        inputs.scope_payload,
-                        inputs.shadowing,
-                        &mut nested,
-                        context,
-                    )
-                });
-                let default = binding.default.as_ref().map(|default| {
-                    self.shallow_lower_type_expr_with_context(
-                        default,
-                        inputs.env,
-                        inputs.scope,
-                        inputs.name_resolution,
-                        inputs.scope_payload,
-                        inputs.shadowing,
-                        &mut nested,
-                        context,
-                    )
-                });
-                substitutions.extend(nested);
-                let decl = match inputs.scope {
-                    NodeScopeId::Global => DeclIdentity {
-                        canonical_id: Arc::from(""),
-                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::from("<script-setup>"),
-                    },
-                    NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        whole_hash,
-                        ..
-                    } => DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
-                        owner: *owner,
-                        whole_hash: *whole_hash,
-                        decl_name: Arc::from("<script-setup>"),
-                    },
-                };
-                return ReferenceProjectionPlan::Ready(self.graph().intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl,
-                        param_index: binding.ordinal,
-                        constraint,
-                        default,
-                        display_name: Arc::clone(&binding.name),
-                    },
-                    inputs.scope.clone(),
-                ));
+                // The ONE shared script-setup `TypeParam` construction: the
+                // binding carries the content-free (name, ordinal) facts;
+                // the helper re-borrows the clause lease-only from the
+                // pinned artifact and lowers the selected parameter's
+                // bounds. A missing / stale re-borrow is its typed miss
+                // (Opaque + cache suppression), never a bound-free binder.
+                let node = self.lower_script_setup_type_param_binding(
+                    binding,
+                    inputs.env,
+                    inputs.scope,
+                    inputs.name_resolution,
+                    inputs.scope_payload,
+                    inputs.shadowing,
+                    substitutions,
+                    context,
+                );
+                return ReferenceProjectionPlan::Ready(node);
             }
         }
         let resolver_context = CarrierResolverContext::new(

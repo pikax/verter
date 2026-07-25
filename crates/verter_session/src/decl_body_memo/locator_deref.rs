@@ -15,13 +15,14 @@ use verter_semantic::analysis::framework_facts::svelte::{
 use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 use verter_semantic::analysis::type_eval_build::LoweredSignatureParts;
 use verter_semantic::analysis::MacroFieldPayloadLowering;
+use verter_type_expr::facts::NarrowTypeParam;
 use verter_type_expr::locators::{
     AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition,
     TypeBodyPathStep, TypeParamBoundPosition, TypeParamVisibility,
 };
 use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr, TypeParam};
 
-use super::{DeclBodyMemo, DemandOutcome, TransientValueParts};
+use super::{DeclBodyMemo, DemandOutcome, TransientTypeParts, TransientValueParts};
 
 /// Why a locator deref could not produce the authored typed IR. Every
 /// variant is a typed, fail-closed non-result — a deref NEVER fabricates a
@@ -358,9 +359,15 @@ impl DeclBodyMemo {
                                         })
                                         .collect();
                                     let union = TypeExpr::union(arms);
+                                    // An enum declares no header type
+                                    // parameters — keep the EMPTY parameter
+                                    // frame; never demand a lease to
+                                    // reconstruct an impossible enum-generic
+                                    // list.
                                     return navigate_type_space_body(
                                         DerefedBodyShape::Single(union),
-                                        &lowered.type_parameters,
+                                        &[],
+                                        &[],
                                         &slot.path,
                                     );
                                 }
@@ -371,19 +378,27 @@ impl DeclBodyMemo {
                         // snapshot by the lease-only transient service (the
                         // graph-tier `LowerLocator` memo owns caching the
                         // lowered product).
-                        let bodies = match aug_scope.as_ref() {
-                            None => self.transient_type_bodies_in(owner, symbol),
+                        let parts = match aug_scope.as_ref() {
+                            None => self.transient_type_parts_in(owner, symbol),
                             Some(scope) => {
-                                self.transient_augmentation_type_bodies_in(scope, owner, symbol)
+                                self.transient_augmentation_type_parts_in(scope, owner, symbol)
                             }
                         };
-                        let bodies = transient_outcome(bodies)?;
-                        let shape = transient_body_shape(&lowered, bodies)?;
+                        let parts = transient_outcome(parts)?;
+                        let shape = transient_body_shape(&lowered, &parts)?;
                         // A type-decl-header type parameter's bound (leading
                         // `TypeParamBound` step) plus any post-bound descent
                         // route through the ONE shared type-space navigator,
-                        // exactly as the augmentation type-space branch does.
-                        navigate_type_space_body(shape, &lowered.type_parameters, &slot.path)
+                        // exactly as the augmentation type-space branch does:
+                        // the mirror facts are the ordinal / presence
+                        // authority, the transient list supplies bound content
+                        // + the full sibling frame.
+                        navigate_type_space_body(
+                            shape,
+                            &lowered.narrow_type_parameters,
+                            &parts.type_parameters,
+                            &slot.path,
+                        )
                     }
                     LocatorSymbolSpace::Value => {
                         // A value-decl / function type parameter lives on the
@@ -457,20 +472,25 @@ impl DeclBodyMemo {
                                 return Err(LocatorBodyDerefError::UnknownSymbol)
                             }
                         };
-                        let bodies =
-                            transient_outcome(self.transient_augmentation_type_bodies_in(
-                                &scope_kind,
-                                aug.anchor.owner,
-                                symbol,
-                            ))?;
-                        let shape = transient_body_shape(&lowered, bodies)?;
+                        let parts = transient_outcome(self.transient_augmentation_type_parts_in(
+                            &scope_kind,
+                            aug.anchor.owner,
+                            symbol,
+                        ))?;
+                        let shape = transient_body_shape(&lowered, &parts)?;
                         // An augmentation-scoped `interface` / `type` decl is an
                         // authored type-decl-header decl, so its type-param
                         // bounds and body sub-positions navigate through the
-                        // SAME shared type-space navigator as a top-level decl.
-                        // An empty `path` preserves the whole-body Single/Merged
-                        // behavior unchanged.
-                        navigate_type_space_body(shape, &lowered.type_parameters, &aug.path)
+                        // SAME shared type-space navigator as a top-level decl
+                        // (mirror authority + transient content / sibling
+                        // frame). An empty `path` preserves the whole-body
+                        // Single/Merged behavior unchanged.
+                        navigate_type_space_body(
+                            shape,
+                            &lowered.narrow_type_parameters,
+                            &parts.type_parameters,
+                            &aug.path,
+                        )
                     }
                     LocatorSymbolSpace::Value | LocatorSymbolSpace::Namespace => {
                         Err(LocatorBodyDerefError::AugmentationBodySpaceUnrouted)
@@ -555,9 +575,9 @@ fn transient_outcome<T>(outcome: DemandOutcome<T>) -> Result<Arc<T>, LocatorBody
 /// symbol is a statement-drift shape mismatch — fail closed.
 fn transient_body_shape(
     lowered: &super::LoweredTypeDecl,
-    bodies: Arc<Vec<TypeExpr>>,
+    parts: &TransientTypeParts,
 ) -> Result<DerefedBodyShape, LocatorBodyDerefError> {
-    let mut bodies = bodies.as_ref().clone();
+    let mut bodies = parts.bodies.clone();
     if lowered.body.is_merged() {
         if bodies.is_empty() {
             return Err(LocatorBodyDerefError::PathUnresolved);
@@ -606,11 +626,13 @@ fn validate_type_param_bound_placement(
 /// ambient-augmentation type-space deref branches so the two never diverge
 /// into a second navigation engine.
 ///
-/// A leading `TypeParamBound` step is served from the declaration's type
-/// parameters (which live on the header, not in the body expression): it
-/// selects the constraint / default bound of the parameter at `ordinal`, and
-/// the remaining steps navigate over the selected bound. The returned
-/// `type_parameters` are ALWAYS the FULL sibling list; the returned
+/// A leading `TypeParamBound` step addresses a type parameter on the
+/// declaration HEADER: the content-free mirror facts
+/// (`narrow_type_parameters`) are the ordinal / name / bound-presence
+/// AUTHORITY, and the lease-reborrowed transient typed-IR list
+/// (`transient_type_parameters`, name-validated at the same ordinal) supplies
+/// the bound CONTENT plus the FULL sibling frame the returned
+/// [`DerefedAuthoredBody`] carries — never pre-truncated. The returned
 /// [`TypeParamVisibility`] says which of them the derefed position may
 /// reference — a constraint sees every sibling (TS constraints may reference
 /// later siblings and self), a default sees prior siblings only with self /
@@ -623,15 +645,32 @@ fn validate_type_param_bound_placement(
 /// [`navigate_expr`] still fails closed there as defense-in-depth.
 fn navigate_type_space_body(
     body: DerefedBodyShape,
-    type_parameters: &[TypeParam],
+    narrow_type_parameters: &[NarrowTypeParam],
+    transient_type_parameters: &[TypeParam],
     path: &[TypeBodyPathStep],
 ) -> Result<DerefedAuthoredBody, LocatorBodyDerefError> {
     if let Some(TypeBodyPathStep::TypeParamBound { ordinal, position }) = path.first() {
         let ordinal = *ordinal;
         let position = *position;
-        let tp = type_parameters
+        // The mirror fact decides the ordinal range and the bound's
+        // PRESENCE — identical to what the producer minted the locator from.
+        let narrow = narrow_type_parameters
             .get(ordinal as usize)
             .ok_or(LocatorBodyDerefError::TypeParamOrdinalOutOfRange { ordinal })?;
+        let bound_present = match position {
+            TypeParamBoundPosition::Constraint => narrow.constraint.is_some(),
+            TypeParamBoundPosition::Default => narrow.default.is_some(),
+        };
+        if !bound_present {
+            return Err(LocatorBodyDerefError::TypeParamBoundAbsent { ordinal, position });
+        }
+        // The transient re-borrow supplies the bound CONTENT: the parameter
+        // at the same ordinal, name-validated against the mirror — a drifted
+        // re-borrow fails closed, never a mis-bound body.
+        let tp = transient_type_parameters
+            .get(ordinal as usize)
+            .filter(|tp| tp.name == narrow.name)
+            .ok_or(LocatorBodyDerefError::PathUnresolved)?;
         let bound = match position {
             TypeParamBoundPosition::Constraint => tp.constraint.as_ref(),
             TypeParamBoundPosition::Default => tp.default.as_ref(),
@@ -646,7 +685,7 @@ fn navigate_type_space_body(
             // pre-truncated prefix could not express a constraint's
             // later-sibling / self references nor a default's
             // present-but-forbidden shadow entries.
-            type_parameters: type_parameters.to_vec(),
+            type_parameters: transient_type_parameters.to_vec(),
             visibility: match position {
                 TypeParamBoundPosition::Constraint => TypeParamVisibility::Constraint { ordinal },
                 TypeParamBoundPosition::Default => TypeParamVisibility::Default { ordinal },
@@ -656,7 +695,7 @@ fn navigate_type_space_body(
     let shape = navigate_type_body(body, path)?;
     Ok(DerefedAuthoredBody {
         shape,
-        type_parameters: type_parameters.to_vec(),
+        type_parameters: transient_type_parameters.to_vec(),
         visibility: TypeParamVisibility::Body,
     })
 }

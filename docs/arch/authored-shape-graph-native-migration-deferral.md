@@ -1,8 +1,8 @@
 # Authored-Shape & Graph-Free Declaration-Body Readers — Final-State Note (deferral CLOSED)
 
-**Status:** the reader-class deferral is closed; the terminal storage invariant is not closed because the two memoized type-parameter-bound pockets below remain.
+**Status:** the reader-class deferral is closed, and the two memoized type-parameter-bound pockets are CLOSED (the type-parameter-bound confinement block landed): `LoweredTypeDecl` is wholly `NoTypeExpr` and `TypeParamBinding` is the content-free `(name, ordinal)` fact pair.
 
-**Terminal invariant (target, not yet satisfied):** zero stored/hot `TypeExpr` and zero post-lowering semantic decisions over `TypeExpr`. Permanent producer boundaries may transiently consume lease-only authored `TypeExpr` to mint graph, fact, or locator outputs, but may not retain it. Two live violations remain: memoized `LoweredTypeDecl.type_parameters: Vec<TypeParam>` in `DeclBodyMemo`, whose constraint/default fields own `TypeExpr`, and `TypeParamBinding.constraint/default` (`crates/verter_session/src/resolver_core/prepared_decl.rs:185` (fields `:193-194`)), which keeps `Arc<TypeExpr>` bounds inside cached prepared decl bundles and is read by query-time lowering (`project_semantic_dispatch/lower.rs:328`); the type-parameter-bound confinement block must replace that storage with `NarrowTypeParam` facts and locators.
+**Terminal invariant (target, satisfied on this surface):** zero stored/hot `TypeExpr` and zero post-lowering semantic decisions over `TypeExpr`. Permanent producer boundaries may transiently consume lease-only authored `TypeExpr` to mint graph, fact, or locator outputs, but may not retain it. The two former violations are CLOSED: the memoized `LoweredTypeDecl.type_parameters: Vec<TypeParam>` storage is deleted — the `narrow_type_parameters` mirror (name + ordinal + content-free bound locators) is the sole stored authority, the locator/binder deref re-borrows bound CONTENT + the full sibling frame lease-only via `transient_type_parts`, and the external frontier derives its narrow output from the mirror with a content-free re-anchor of bound slots to the frontier symbol (`export default` behavior preserved); and `TypeParamBinding` is shrunk to `(name, ordinal)` (`NoTypeExpr`), its `<script setup generic="…">` bounds re-borrowed at query time through ONE artifact-local transient producer over the pinned `IndexedReady` and lowered by ONE dispatch helper shared by both content readers — a missing/stale re-borrow is a typed cache-suppressed miss, never a bound-free fabricated binder.
 
 **Open question — DECIDED.** The earlier recorded question (whether the authored-shape readers are
 PERMANENT split-carrier compat vs eventual full graph-native migration) is decided: **permanent
@@ -41,13 +41,13 @@ inventory/ratchet, NOT terminal confinement): 1 `GraphBackedMigrated` + 6 `Produ
   core), `resolver_core/external_type_frontier.rs::{resolve_through_export, resolve_one}`, and
   `host_manage/eval_env.rs::{peel_value_decl_alias_graph_native,
   dependency_value_symbol_graph_native}`. One-line status: they live below the session
-  `SemanticGraphStore` and read content-free facts/locators — EXCEPT the two external-frontier
-  rows, which read the stored type-parameter pocket (`LoweredTypeDecl.type_parameters:
-  Vec<TypeParam>`, constraint/default presence → bound-slot locators,
-  `external_type_frontier.rs:152`) until the type-parameter-bound confinement block replaces
-  that storage; any other authored-body traffic is lease-only fact minting at the provider edge.
+  `SemanticGraphStore` and read content-free facts/locators — the two external-frontier rows
+  included, whose former read of the stored type-parameter pocket is CLOSED (the frontier now
+  derives its narrow output from the memo's `narrow_type_parameters` mirror with a content-free
+  re-anchor of the bound slots to the frontier symbol); any other authored-body traffic is
+  lease-only fact minting at the provider edge.
   Forcing them through the session graph would
   be a layering inversion — they stay as the below-graph residual and remain named until the
   separate producer-boundary-confinement cutover (ledger retirement is owned by the
-  type-parameter-bound confinement + producer-boundary-confinement blocks), not a closure
+  producer-boundary-confinement block), not a closure
   condition of anything landed.

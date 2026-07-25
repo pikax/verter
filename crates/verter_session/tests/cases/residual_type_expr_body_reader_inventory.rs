@@ -41,15 +41,19 @@
 //! residual debt, NOT on a path to zero), and the `GraphFreeDto` class is the
 //! remaining below-graph residual. The terminal invariant is zero stored/hot
 //! `TypeExpr` and zero post-lowering semantic decisions over `TypeExpr` — not
-//! zero body readers. It is a TARGET, not yet satisfied: the memoized
-//! `LoweredTypeDecl.type_parameters: Vec<TypeParam>` pocket
-//! (`decl_body_memo.rs:104`) retains constraint/default `Arc<TypeExpr>`,
-//! feeding locator/binder lowering (`decl_body_memo/locator_deref.rs:363`) and
-//! the external frontier (`resolver_core/external_type_frontier.rs:152`), and
-//! the `TypeParamBinding.constraint/default` pocket keeps `Arc<TypeExpr>`
-//! bounds in cached prepared decl bundles (`resolver_core/prepared_decl.rs:185` (fields `:193-194`)),
-//! read by query-time lowering (`project_semantic_dispatch/lower.rs:328`) —
-//! both owned by the type-parameter-bound confinement block.
+//! zero body readers. The two former stored type-parameter pockets are CLOSED
+//! (the type-parameter-bound confinement block): the memoized
+//! `LoweredTypeDecl.type_parameters: Vec<TypeParam>` storage is deleted
+//! (`LoweredTypeDecl` is wholly `NoTypeExpr`; the `narrow_type_parameters`
+//! mirror is the sole stored authority, the locator/binder deref re-borrows
+//! bound content + the full sibling frame lease-only via
+//! `transient_type_parts`, and the external frontier derives its narrow
+//! output from the mirror with a content-free re-anchor of the bound slots to
+//! the frontier symbol), and `TypeParamBinding` is shrunk to the content-free
+//! `(name, ordinal)` fact pair (`NoTypeExpr`), its script-setup bounds
+//! re-borrowed at query time through ONE artifact-local transient producer
+//! over the pinned `IndexedReady` and lowered by ONE dispatch helper shared
+//! by both content readers.
 //!
 //! ## scanner records (durable guard-local record — Structural-Confinement-First)
 //!
@@ -126,13 +130,13 @@
 //! imported-registry facts carrier, and the locator-native `named_decl_body`);
 //! the `ProducerLowering` class is PERMANENT (the producer bridge above, not on
 //! a path to zero); and the `GraphFreeDto` class is the remaining residual —
-//! below-graph readers whose carriers are content-free facts/locators, EXCEPT
-//! the two external-frontier rows, which read the stored type-parameter pocket
-//! (`LoweredTypeDecl.type_parameters`, constraint/default presence →
-//! bound-slot locators) until the type-parameter-bound confinement block
-//! replaces that storage (a `HotTypeRef` there would invert the below-graph
-//! layering). This guard stays as the curated ratchet over that final
-//! partition; it is not deleted.
+//! below-graph readers whose carriers are content-free facts/locators, the
+//! two external-frontier rows included (their former read of the stored
+//! type-parameter pocket is CLOSED — the frontier derives its narrow output
+//! from the memo's `narrow_type_parameters` mirror with a content-free
+//! re-anchor of the bound slots to the frontier symbol; a `HotTypeRef` there
+//! would invert the below-graph layering). This guard stays as the curated
+//! ratchet over that final partition; it is not deleted.
 //!
 //! This guard pins, structurally:
 //!   1. PRESENCE — every enumerated reader is defined at its `(file, impl/mod,
@@ -1194,18 +1198,18 @@ enum ReaderClass {
     /// eval-env value-decl peel) and cannot carry a `HotTypeRef` without making a
     /// below-graph DTO depend on the session graph. DECISION inputs are
     /// content-free facts/locators on every row; `TypeExpr` contact is limited
-    /// to two named shapes: `route_closure`'s key-source mint — TRANSIENT
+    /// to ONE named shape: `route_closure`'s key-source mint — TRANSIENT
     /// producer ingress (`mint_key_source_fact`, `shallow_file_state.rs:2609`,
     /// hands lease-reborrowed contributor bodies as `&[TypeExpr]` to
     /// `produce_key_source_fact`,
     /// `verter_semantic/src/facts/route_facts.rs:220`; authored bodies, never
     /// stored — the memo stores only the content-free `KeySourceFact`
-    /// outcome) — and the two external-frontier rows' read of the STORED
-    /// `LoweredTypeDecl.type_parameters` pocket (`Vec<TypeParam>`,
-    /// constraint/default presence → bound-slot locators,
-    /// `external_type_frontier.rs:152`), the terminal-storage violation owned
-    /// by the type-parameter-bound confinement block until it replaces that
-    /// storage.
+    /// outcome). The two external-frontier rows' former read of the STORED
+    /// `LoweredTypeDecl.type_parameters` pocket is CLOSED (the
+    /// type-parameter-bound confinement block): the frontier now derives its
+    /// narrow type-parameter output from the memo's `narrow_type_parameters`
+    /// mirror with a content-free re-anchor of the bound slots to the
+    /// frontier symbol.
     ///
     /// ```text
     /// scanner_invariant: carriage of a declaration body as TypeExpr on a below-graph
@@ -1517,9 +1521,9 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         required_hot_route: &[],
         reason: "mints the graph-free NarrowFrontierBody::Resolvable locator + narrowed \
                  type-param facts from the local decl (resolve_local_frontier_body) — reads the \
-                 STORED LoweredTypeDecl.type_parameters pocket (Vec<TypeParam> constraint/default \
-                 presence → bound-slot locators; terminal-storage violation owned by the \
-                 type-parameter-bound confinement block); decision inputs stay content-free \
+                 memo's content-free narrow_type_parameters mirror, re-anchoring each bound \
+                 slot to the frontier symbol (the former STORED LoweredTypeDecl.type_parameters \
+                 pocket read is CLOSED); decision inputs stay content-free \
                  locators/facts. No .body field read remains; anchored by the enumeration, not \
                  the tripwire",
     },
@@ -1533,7 +1537,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         reason: "re-clones a frontier-produced ResolvedSymbol.frontier_body / type_parameters \
                  (existing.frontier_body.clone() + existing.type_parameters.clone() — graph-free \
                  NarrowFrontierBody locator + NarrowTypeParam facts derived earlier from the \
-                 STORED LoweredTypeDecl.type_parameters pocket at resolve_local_frontier_body) \
+                 memo's narrow_type_parameters mirror at resolve_local_frontier_body) \
                  when rebuilding from an already-resolved chain entry; decision inputs stay \
                  content-free. No .body field read remains; anchored by the enumeration, not the \
                  tripwire",
@@ -1629,7 +1633,7 @@ const COMPAT_BODY_READERS: &[CompatRow] = &[
         fn_name: "compat_type_contributors_for_typeinfo",
         method_chain: false,
         reason: "typeinfo-oracle contributor read — re-borrows the per-contributor TypeExpr view \
-                 lease-only from the retained snapshot (transient_type_bodies); the record stores \
+                 lease-only from the retained snapshot (transient_type_parts); the record stores \
                  content-free contributor locators, so no .body.<method> chain read remains",
     },
     // ── The consumer call-site fns that route through the helpers ───────

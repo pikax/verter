@@ -7,6 +7,12 @@ use verter_semantic::analysis::type_eval::ValueDeclKind;
 
 use super::*;
 
+// The prepared-bundle script-setup binding is a name + ordinal FACT pair —
+// bound content is re-borrowed lease-only from the pinned artifact at
+// query time, never stored as typed IR. Compile witness: the binding owns
+// no transitive `TypeExpr`.
+static_assertions::assert_impl_all!(TypeParamBinding: verter_no_typeexpr::NoTypeExpr);
+
 /// Shared test pool: prepare fns intern identities through it.
 fn test_interner() -> Arc<crate::identity_interner::IdentityInterner> {
     Arc::new(crate::identity_interner::IdentityInterner::with_default_budget())
@@ -1285,8 +1291,6 @@ interface Shared { instance: InstanceOnly }
         TypeParamBinding {
             name: Arc::from("SetupGeneric"),
             ordinal: 0,
-            constraint: None,
-            default: None,
         },
     );
 

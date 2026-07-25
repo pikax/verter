@@ -80,8 +80,12 @@ pub(crate) mod locator_deref;
 pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 
 /// The lazily lowered body of one TYPE declaration group (all same-name
-/// contributors folded, exactly as the whole-env walk would fold them).
-#[derive(Debug, Clone)]
+/// contributors folded, exactly as the whole-env walk would fold them). No
+/// `TypeExpr` is stored (compile-witnessed by the `NoTypeExpr` derive):
+/// authored contributor bodies and header-parameter BOUNDS are re-borrowed
+/// lease-only from the retained snapshot on demand; the memo stores the
+/// content-free mirror facts only.
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct LoweredTypeDecl {
     pub kind: TypeDeclKind,
     /// Content-free facts retained per exact source contributor. Member return
@@ -99,9 +103,6 @@ pub struct LoweredTypeDecl {
     /// ([`DeclBodyMemo::compat_type_body_hash_input`]) return this stored
     /// fact — no locator deref, no query-time re-lowering.
     pub body_hash: HashOutcome,
-    /// Generic type parameters, unioned across contributors in source
-    /// order.
-    pub type_parameters: Vec<TypeParam>,
     /// Semantic declaration-dependency segment identities. The root local
     /// binding and member path remain separate through classification.
     pub dependency_paths: FxHashSet<TypeDependencyPathFact>,
@@ -121,8 +122,10 @@ pub struct LoweredTypeDecl {
     pub typeof_root_names: Vec<String>,
     /// The NARROW type-parameter facts (name + ordinal + content-free bound
     /// locators), unioned first-seen-by-name across contributors in source
-    /// order — the fact mirror of [`type_parameters`](Self::type_parameters)
-    /// the prepared-decl builder copies (`PreparedTypeDecl.type_parameters`).
+    /// order — the content-free mirror of the transient typed-IR parameter
+    /// union (the lease-only re-borrow serves bound CONTENT on demand). The
+    /// prepared-decl builder copies this mirror
+    /// (`PreparedTypeDecl.type_parameters`).
     pub narrow_type_parameters: Vec<NarrowTypeParam>,
     /// Exact typed `@vue-ignore` heritage identities copied from the shallow
     /// declaration header. Consumers apply them only under an explicit Vue
@@ -168,8 +171,9 @@ pub struct LoweredTypeDecl {
 }
 
 /// The memo-owned VALUE-body fingerprint FACT — the [`HashOutcome`] fields
-/// carried NoTypeExpr-witnessed (the lower-crate outcome struct predates the
-/// witness derive and cannot be annotated from the session). Lossless
+/// carried NoTypeExpr-witnessed. ([`HashOutcome`] now derives the witness
+/// itself; this memo-local record stays the VALUE-side storage so the
+/// record shape and its budget-bit doc convention do not move.) Lossless
 /// bijection with [`HashOutcome`] via
 /// [`from_outcome`](Self::from_outcome) / [`to_outcome`](Self::to_outcome).
 #[derive(Debug, Clone, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
@@ -1757,25 +1761,51 @@ pub(crate) struct TransientValueParts {
     pub(crate) type_parameters: Vec<TypeParam>,
 }
 
+/// Owned TRANSIENT type-declaration parts of one demanded symbol, re-lowered
+/// from the retained snapshot by [`DeclBodyMemo::transient_type_parts_in`]
+/// for the locator-deref worker: the ordered contributor bodies (source /
+/// binder order, a JSDoc-`@typedef` payload appended) plus the header type
+/// parameters unioned first-seen-by-name across contributors in that same
+/// order — the SAME union the demanded lowering folded. Fact-production
+/// intermediates — returned owned, never stored.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TransientTypeParts {
+    pub(crate) bodies: Vec<TypeExpr>,
+    pub(crate) type_parameters: Vec<TypeParam>,
+}
+
+/// Union one contributor's header type parameters into the transient list,
+/// first-seen by name — the shared fold the file-scope, augmentation, and
+/// `export default` alias branches all apply so the re-borrowed union can
+/// never drift from the demanded lowering's.
+fn union_type_params_first_seen(type_parameters: &mut Vec<TypeParam>, params: &[TypeParam]) {
+    for param in params {
+        if !type_parameters.iter().any(|p| p.name == param.name) {
+            type_parameters.push(param.clone());
+        }
+    }
+}
+
 impl DeclBodyMemo {
-    /// TYPE-space transient contributor BODIES of one demanded file-scope
-    /// symbol (source order; a JSDoc-`@typedef` name appends its re-derived
-    /// payload body), re-lowered from the retained snapshot in a LEASE-ONLY
-    /// job for the locator-deref worker. The demand cells are NOT touched and
+    /// TYPE-space transient contributor parts of one demanded file-scope
+    /// symbol (bodies in source order — a JSDoc-`@typedef` name appends its
+    /// re-derived payload body — plus the unioned header type parameters),
+    /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
+    /// locator-deref worker. The demand cells are NOT touched and
     /// nothing is committed — the graph-tier `LowerLocator` memo owns caching
     /// the lowered product per `(locator, content)`; this service is its
     /// authored-body borrow. `Ready(None)` = not inventoried / no service /
     /// fatal parse (genuine, cacheable); `LeaseMiss` = broken lease pin
     /// (transient ReturnOnly).
-    pub(crate) fn transient_type_bodies(&self, name: &str) -> DemandOutcome<Vec<TypeExpr>> {
-        self.transient_type_bodies_in(TopLevelOwnerId::ordinary_file(), name)
+    pub(crate) fn transient_type_parts(&self, name: &str) -> DemandOutcome<TransientTypeParts> {
+        self.transient_type_parts_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    pub(crate) fn transient_type_bodies_in(
+    pub(crate) fn transient_type_parts_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> DemandOutcome<Vec<TypeExpr>> {
+    ) -> DemandOutcome<TransientTypeParts> {
         let Some((contributors, jsdoc_typedef)) = self
             .header_index
             .type_header_in(owner, name)
@@ -1783,7 +1813,7 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(
+        self.transient_type_parts_for(
             DeclBindingKey::new(owner, name),
             &contributors,
             jsdoc_typedef,
@@ -1791,13 +1821,13 @@ impl DeclBodyMemo {
         )
     }
 
-    /// Augmentation-scoped sibling of [`Self::transient_type_bodies_in`].
-    pub(crate) fn transient_augmentation_type_bodies_in(
+    /// Augmentation-scoped sibling of [`Self::transient_type_parts_in`].
+    pub(crate) fn transient_augmentation_type_parts_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> DemandOutcome<Vec<TypeExpr>> {
+    ) -> DemandOutcome<TransientTypeParts> {
         let Some(contributors) = self
             .header_index
             .augmentation_type_header_in(scope, owner, name)
@@ -1805,7 +1835,7 @@ impl DeclBodyMemo {
         else {
             return DemandOutcome::Ready(None);
         };
-        self.transient_type_bodies_for(
+        self.transient_type_parts_for(
             DeclBindingKey::new(owner, name),
             &contributors,
             None,
@@ -1817,13 +1847,13 @@ impl DeclBodyMemo {
     /// contributing statements. `aug_scope` selects the augmentation-scoped
     /// parts vector; `None` reads the file-scope parts (plus the
     /// `export default interface/class` mirror and the JSDoc-typedef payload).
-    fn transient_type_bodies_for(
+    fn transient_type_parts_for(
         &self,
         key: DeclBindingKey,
         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
         jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
         aug_scope: Option<&AugmentationScopeKind>,
-    ) -> DemandOutcome<Vec<TypeExpr>> {
+    ) -> DemandOutcome<TransientTypeParts> {
         let Some(service) = self.service.as_ref() else {
             // Seeded memo: locator-only groups retain no authored source to
             // re-borrow — a genuine, cacheable body-less miss.
@@ -1837,7 +1867,7 @@ impl DeclBodyMemo {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
-            let mut bodies: Vec<TypeExpr> = Vec::new();
+            let mut parts_out = TransientTypeParts::default();
             for contributor in &contributors {
                 let Some(stmt) = program
                     .body
@@ -1850,25 +1880,38 @@ impl DeclBodyMemo {
                     Some(scope) => {
                         for (part_scope, decl) in &parts.aug_type_decls {
                             if part_scope == scope && decl.name == key.name.as_ref() {
-                                bodies.push(decl.body.clone());
+                                parts_out.bodies.push(decl.body.clone());
+                                union_type_params_first_seen(
+                                    &mut parts_out.type_parameters,
+                                    &decl.type_parameters,
+                                );
                             }
                         }
                     }
                     None => {
                         for decl in &parts.type_decls {
                             if decl.name == key.name.as_ref() {
-                                bodies.push(decl.body.clone());
+                                parts_out.bodies.push(decl.body.clone());
+                                union_type_params_first_seen(
+                                    &mut parts_out.type_parameters,
+                                    &decl.type_parameters,
+                                );
                             }
                         }
                         // `export default interface I` / `export default
                         // class C` mirrors the declared-name symbol under
-                        // `default` — mirror the transient bodies the same
-                        // way (see the demanded-lowering path).
+                        // `default` — mirror the transient bodies AND the
+                        // unioned header parameters the same way (see the
+                        // demanded-lowering path).
                         if key.name.as_ref() == "default" {
                             if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
                                 for decl in &parts.type_decls {
                                     if decl.name == alias_from {
-                                        bodies.push(decl.body.clone());
+                                        parts_out.bodies.push(decl.body.clone());
+                                        union_type_params_first_seen(
+                                            &mut parts_out.type_parameters,
+                                            &decl.type_parameters,
+                                        );
                                     }
                                 }
                             }
@@ -1887,10 +1930,10 @@ impl DeclBodyMemo {
                     &build_ctx,
                     &mut scratch,
                 ) {
-                    bodies.push(typedef.body);
+                    parts_out.bodies.push(typedef.body);
                 }
             }
-            Some(bodies)
+            Some(parts_out)
         });
         match outcome {
             // Broken lease pin: the job ran nothing — transient ReturnOnly.
@@ -1904,14 +1947,14 @@ impl DeclBodyMemo {
             }
             // Fatal parse: a genuine, cacheable body-less miss.
             Some(None) => DemandOutcome::Ready(None),
-            Some(Some(bodies)) => DemandOutcome::Ready(Some(Arc::new(bodies))),
+            Some(Some(parts)) => DemandOutcome::Ready(Some(Arc::new(parts))),
         }
     }
 
     /// The re-derived JSDoc-`@typedef` payload body of one demanded typedef
     /// alias — the [`AuthoredBodyLocator::JsdocTypedefBody`] deref source.
     /// Lease-only; same outcome semantics as
-    /// [`Self::transient_type_bodies`]. Serves ONLY the typedef payload
+    /// [`Self::transient_type_parts`]. Serves ONLY the typedef payload
     /// (never a same-name TS declaration's statement body — the typedef
     /// locator addresses the comment-derived payload specifically).
     pub(crate) fn transient_jsdoc_typedef_body_in(
@@ -1968,7 +2011,7 @@ impl DeclBodyMemo {
     /// The re-derived `$props()` binding-annotation payload at one demanded
     /// macro ordinal — the [`MacroPayloadPosition::TypeAnnotation`] deref
     /// source. Lease-only; same outcome semantics as
-    /// [`Self::transient_type_bodies`].
+    /// [`Self::transient_type_parts`].
     ///
     /// The position replays the capture's shared macro-ordinal walk
     /// ([`lower_props_annotation_at`]) over THIS memo's retained snapshot;
@@ -2074,7 +2117,7 @@ impl DeclBodyMemo {
     /// The re-derived authored PER-FIELD macro payload at one demanded
     /// `(macro ordinal, field ordinal)` — the
     /// [`MacroPayloadPosition::Field`] deref source. Lease-only; same
-    /// outcome semantics as [`Self::transient_type_bodies`].
+    /// outcome semantics as [`Self::transient_type_parts`].
     ///
     /// The position replays the analyzer's OWN macro assembly
     /// ([`verter_semantic::analysis::lower_macro_field_payload_at`] — one
@@ -2195,7 +2238,7 @@ impl DeclBodyMemo {
     /// (last-wins annotation / object shape; GROUP-ordered signature IR),
     /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
     /// locator-deref worker. Same outcome semantics as
-    /// [`Self::transient_type_bodies`].
+    /// [`Self::transient_type_parts`].
     pub(crate) fn transient_value_parts_in(
         &self,
         owner: TopLevelOwnerId,
@@ -2616,7 +2659,6 @@ fn lowered_type_decl_from_group(
         contributor_facts: Arc::from(group.contributors().to_vec().into_boxed_slice()),
         body,
         body_hash,
-        type_parameters: retained.type_parameters.clone(),
         dependency_paths: dependencies.full.clone(),
         structural_dependency_paths: dependencies.structural.clone(),
         declaration_carrier_paths: dependencies.declaration_carrier.clone(),

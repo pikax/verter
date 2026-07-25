@@ -150,6 +150,118 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(|entry| enum_scalar_type_expr(&entry.value))
     }
 
+    /// The ONE script-setup generic `TypeParam` node construction. BOTH
+    /// query-time content readers route here — the eager shallow-lower
+    /// `TypeExpr::Ref` arm below and the locator-view worklist projection
+    /// (`locator_view_worklist/finish.rs`) — so the binder's identity and
+    /// bound lowering can never diverge.
+    ///
+    /// The identity tuple is EXACTLY the historical one: the lowering
+    /// scope's canonical / owner / whole hash, the `"<script-setup>"`
+    /// sentinel, the stored clause ordinal, and the display name.
+    ///
+    /// Bound CONTENT is never stored: the full
+    /// `<script setup generic="…">` clause is re-borrowed lease-only from
+    /// the pinned `IndexedReady` through the ONE artifact-local transient
+    /// producer
+    /// ([`crate::host_resolve::indexed_script_setup_type_params`]), and the
+    /// binding's stored `(ordinal, name)` selects + validates the transient
+    /// parameter. Canonical / owner / whole-hash coherence with the
+    /// lowering scope is required: a missing serve (a `Global` scope has no
+    /// file to re-borrow from), a superseded artifact (hash drift), or a
+    /// stale clause (ordinal / name mismatch) is a TYPED MISS with cache
+    /// suppression — NEVER a bound-free fabricated binder.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::project_semantic_dispatch) fn lower_script_setup_type_param_binding(
+        &self,
+        binding: &crate::resolver_core::prepared_decl::TypeParamBinding,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let decl = match scope {
+            NodeScopeId::Global => DeclIdentity {
+                canonical_id: Arc::from(""),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("<script-setup>"),
+            },
+            NodeScopeId::File {
+                canonical_id,
+                owner,
+                whole_hash,
+                ..
+            } => DeclIdentity {
+                canonical_id: Arc::clone(canonical_id),
+                owner: *owner,
+                whole_hash: *whole_hash,
+                decl_name: Arc::from("<script-setup>"),
+            },
+        };
+        let transient_param = match scope {
+            NodeScopeId::Global => None,
+            NodeScopeId::File {
+                canonical_id,
+                whole_hash,
+                ..
+            } => self
+                .ctx
+                .ensure_indexed_ready_serve(canonical_id.as_ref())
+                .filter(|serve| serve.indexed.whole_hash == *whole_hash)
+                .and_then(|serve| {
+                    crate::host_resolve::indexed_script_setup_type_params(&serve.indexed)
+                        .into_iter()
+                        .nth(binding.ordinal as usize)
+                        .filter(|param| param.name == binding.name.as_ref())
+                }),
+        };
+        let Some(param) = transient_param else {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            );
+            return self.opaque(QueryError::Miss);
+        };
+        let constraint = param.constraint.as_ref().map(|constraint| {
+            self.shallow_lower_type_expr_with_context(
+                constraint,
+                env,
+                scope,
+                name_resolution,
+                scope_payload,
+                shadowing,
+                substitutions,
+                reduction_context,
+            )
+        });
+        let default = param.default.as_ref().map(|default| {
+            self.shallow_lower_type_expr_with_context(
+                default,
+                env,
+                scope,
+                name_resolution,
+                scope_payload,
+                shadowing,
+                substitutions,
+                reduction_context,
+            )
+        });
+        graph.intern_node_with_scope(
+            SemanticNodeData::TypeParam {
+                decl,
+                param_index: binding.ordinal,
+                constraint,
+                default,
+                display_name: Arc::clone(&binding.name),
+            },
+            scope.clone(),
+        )
+    }
+
     /// Shallow-lower a [`TypeExpr`] under `env` (type-parameter bindings)
     /// into a [`SemanticNodeId`]. "Shallow" means one structural level:
     /// object members, union/intersection arms, and function / conditional
@@ -310,9 +422,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // same-file type decls.
             //
             // The binding store is
-            // [`crate::resolver_core::prepared_decl::TypeParamBinding`],
-            // which carries the unlowered constraint / default
-            // expressions directly — this arm reads them without an
+            // [`crate::resolver_core::prepared_decl::TypeParamBinding`]
+            // (the content-free name + ordinal fact pair); the ONE
+            // shared helper re-borrows the clause lease-only from the
+            // pinned artifact and constructs the node — never an
             // intermediate `PreparedTypeDecl` wrapper.
             TypeExpr::Ref {
                 name,
@@ -325,67 +438,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let binding = scope_payload
                     .and_then(|payload| payload.scope_type_bindings().get(name.as_ref()))
                     .expect("matched on scope_type_bindings.contains_key above");
-                let constraint = binding.constraint.as_ref().map(|c| {
-                    self.shallow_lower_type_expr_with_context(
-                        c,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    )
-                });
-                let default = binding.default.as_ref().map(|d| {
-                    self.shallow_lower_type_expr_with_context(
-                        d,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    )
-                });
-                let display_name = Arc::clone(&binding.name);
-                // Script-setup type parameters get a
-                // `decl_name = "<script-setup>"` sentinel with the
-                // file's `canonical_id` + `whole_hash` taken from the
-                // current lowering scope. `param_index` is the
-                // binder's 0-based position in the
-                // `<script setup generic="...">` clause (carried on
-                // `TypeParamBinding.ordinal`), disambiguating
-                // multiple script-setup parameters in the same file.
-                let decl = match scope {
-                    NodeScopeId::Global => DeclIdentity {
-                        canonical_id: Arc::from(""),
-                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        whole_hash: HashValue::default(),
-                        decl_name: Arc::from("<script-setup>"),
-                    },
-                    NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        whole_hash,
-                        ..
-                    } => DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
-                        owner: *owner,
-                        whole_hash: *whole_hash,
-                        decl_name: Arc::from("<script-setup>"),
-                    },
-                };
-                graph.intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl,
-                        param_index: binding.ordinal,
-                        constraint,
-                        default,
-                        display_name,
-                    },
-                    scope.clone(),
+                self.lower_script_setup_type_param_binding(
+                    binding,
+                    env,
+                    scope,
+                    name_resolution,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                    reduction_context,
                 )
             }
             // Named type reference (`type Foo<T> = { y: Other<T> }` ->

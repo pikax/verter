@@ -1146,13 +1146,13 @@ fn lower_args(
 /// to a later one's constraint (`generic="T, U extends T">`) per TS scoping.
 ///
 /// The `<script setup generic="…">` clause is re-sourced from the owner's
-/// ROUTE-FREE local [`IndexedReady`] data (`raw_source` + `framework_parse`)
-/// through [`sfc_script_setup_type_params`](crate::host_resolve::sfc_script_setup_type_params)
-/// — the SAME route-free extraction `host_manage` uses to populate the
-/// prepared-decl bundle's `script_setup_type_bindings`, so the seed binder
-/// shape is identical. The helper does NOT read the prepared-decl bundle
-/// (whose cold path can route-resolve imports) — that would make the producer
-/// impure.
+/// ROUTE-FREE local [`IndexedReady`] data (raw source + framework parse)
+/// through the ONE artifact-local transient producer
+/// [`indexed_script_setup_type_params`](crate::host_resolve::indexed_script_setup_type_params)
+/// — the same clause ingress the dispatch's script-setup `TypeParam`
+/// node construction uses, so the seed binder shape is identical. The
+/// helper does NOT read the prepared-decl bundle (whose cold path can
+/// route-resolve imports) — that would make the producer impure.
 ///
 /// PRIVATE (no visibility modifier): an internal helper of
 /// [`build_macro_hot_ref`], confined to this module. Each binder's constraint
@@ -1165,13 +1165,11 @@ fn build_script_setup_seed_frames(
     scope: &NodeScopeId,
 ) -> Vec<BinderScope> {
     // Re-source the `<script setup generic="…">` clause from the owner's local
-    // route-free parse artifact. The clause-position index IS the ordinal (the
-    // same `param_index` the eager path / prepared-decl bundle assigns), so the
-    // interned `TypeParam` identity tuple matches.
-    let params = crate::host_resolve::sfc_script_setup_type_params(
-        indexed.raw_source.as_ref(),
-        indexed.framework_parse.as_deref(),
-    );
+    // route-free parse artifact through the ONE transient producer. The
+    // clause-position index IS the ordinal (the same `param_index` the eager
+    // path / prepared-decl bundle assigns), so the interned `TypeParam`
+    // identity tuple matches.
+    let params = crate::host_resolve::indexed_script_setup_type_params(indexed);
     if params.is_empty() {
         return Vec::new();
     }

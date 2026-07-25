@@ -35,11 +35,11 @@ impl VerterHost {
     ///
     /// The result type is `FxHashMap<String, TypeParamBinding>` —
     /// script-setup parameters are stored directly rather than
-    /// wrapped in a `PreparedTypeDecl`. Constraint / default lowering
-    /// threads its own `name_resolution` table through
-    /// `shallow_lower_type_expr`, so a separate wrapper-side
-    /// `name_resolution` table on the binding would be dead
-    /// allocation.
+    /// wrapped in a `PreparedTypeDecl`. The clause is parsed TRANSIENTLY
+    /// here to collect the two facts the binding stores (name + ordinal);
+    /// the constraint / default typed IR is dropped — at query time the
+    /// ONE dispatch helper re-borrows the clause lease-only from the
+    /// pinned `IndexedReady` and lowers the selected parameter's bounds.
     pub(super) fn build_script_setup_type_bindings(
         &self,
         canonical_id: &str,
@@ -69,8 +69,6 @@ impl VerterHost {
                     // `<script setup generic="T, U">` params get
                     // distinct identity tuples.
                     ordinal: u16::try_from(idx).unwrap_or(u16::MAX),
-                    constraint: param.constraint.clone(),
-                    default: param.default.clone(),
                 },
             );
         }

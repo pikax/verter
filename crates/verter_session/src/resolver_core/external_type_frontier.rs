@@ -27,10 +27,8 @@ use super::shallow_file_state::{
 };
 use verter_type_expr::facts::{NarrowFrontierBody, NarrowTypeParam};
 use verter_type_expr::locators::{
-    AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator, TypeBodyPathStep, TypeBodySlot,
-    TypeParamBoundPosition,
+    AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator, TypeBodySlot,
 };
-use verter_type_expr::TypeParam;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -149,7 +147,29 @@ fn resolve_local_frontier_body(
                 symbol: Arc::from(symbol_name),
                 space: LocatorSymbolSpace::Type,
             };
-            let type_parameters = narrow_frontier_type_params(&lowered.type_parameters, &anchor);
+            // The memo's content-free mirror facts are the type-parameter
+            // authority. Their bound slots anchor at the DECLARED symbol —
+            // for an `export default` mirror the declared name differs from
+            // the frontier symbol (`default`), so each present bound slot is
+            // re-anchored CONTENT-FREE to the frontier anchor (the path —
+            // the parameter ordinal + bound position — is unchanged). A raw
+            // clone would move `default` locators back to the declared name.
+            let type_parameters = lowered
+                .narrow_type_parameters
+                .iter()
+                .map(|param| {
+                    let reanchor = |slot: &TypeBodySlot| TypeBodySlot {
+                        anchor: anchor.clone(),
+                        path: Arc::clone(&slot.path),
+                    };
+                    NarrowTypeParam {
+                        name: param.name.clone(),
+                        ordinal: param.ordinal,
+                        constraint: param.constraint.as_ref().map(reanchor),
+                        default: param.default.as_ref().map(reanchor),
+                    }
+                })
+                .collect();
             (
                 Some(NarrowFrontierBody::Resolvable(SymbolBodyLocator {
                     anchor: anchor.clone(),
@@ -158,39 +178,6 @@ fn resolve_local_frontier_body(
             )
         })
         .unwrap_or_else(|| (None, Vec::new()))
-}
-
-/// Narrow the defining symbol's authored type parameters to graph-free
-/// [`NarrowTypeParam`] facts: the name + declaration ordinal are carried
-/// directly, and each present constraint / default bound becomes a body-slot
-/// locator addressing its authored position (never an embedded `TypeExpr`).
-fn narrow_frontier_type_params(
-    type_params: &[TypeParam],
-    anchor: &AuthoredAnchor,
-) -> Vec<NarrowTypeParam> {
-    type_params
-        .iter()
-        .enumerate()
-        .map(|(index, tp)| {
-            let ordinal = index as u32;
-            let bound_slot = |position: TypeParamBoundPosition| TypeBodySlot {
-                anchor: anchor.clone(),
-                path: Arc::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
-            };
-            NarrowTypeParam {
-                name: tp.name.clone(),
-                ordinal,
-                constraint: tp
-                    .constraint
-                    .as_ref()
-                    .map(|_| bound_slot(TypeParamBoundPosition::Constraint)),
-                default: tp
-                    .default
-                    .as_ref()
-                    .map(|_| bound_slot(TypeParamBoundPosition::Default)),
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +775,7 @@ mod tests {
     use super::*;
     use crate::resolver_core::ShallowImportResolver;
     use verter_semantic::analysis::Hash16;
+    use verter_type_expr::locators::{TypeBodyPathStep, TypeParamBoundPosition};
 
     /// Mock host for testing the frontier engine.
     struct MockHost {
@@ -1714,6 +1702,58 @@ mod tests {
             "narrowed type params must carry the authored name + declaration ordinal, a \
              constraint/default body-slot locator exactly where a bound is authored, and \
              None exactly where it is not"
+        );
+
+        // A NAMED default-export generic (`export default interface Defaults<T …>`)
+        // resolves through the `default` route: the memo mirrors the declared-name
+        // group under `default` whose content-free mirror facts keep the DECLARED
+        // symbol anchor, so a raw mirror clone would move the bound slots back to
+        // `Defaults`. The frontier output must stay anchored to the FRONTIER symbol
+        // (`default`) — the content-free re-anchor preserves the exported
+        // behavior exactly.
+        let mut default_host = MockHost::new();
+        let default_state = ShallowFileState::service_backed_for_test(
+            "export default interface Defaults<T extends string = number> { label: T }",
+        );
+        default_host.add_file("/src/defaults.ts", default_state);
+
+        let mut default_frontier = ExternalTypeFrontier::new();
+        default_frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/defaults.ts".to_string(),
+            exported_name: "default".to_string(),
+            route: None,
+        }]);
+        default_frontier.run(&default_host).unwrap();
+
+        let default_resolved = default_frontier
+            .get_resolved("/src/defaults.ts", "default")
+            .expect("a named default-export generic should resolve through the default route");
+        assert_eq!(
+            default_resolved.status,
+            ResolvedSymbolStatus::Resolved,
+            "the local default-export definition with an eval env should fully resolve"
+        );
+        let default_anchor = AuthoredAnchor {
+            canonical_id: Arc::from("/src/defaults.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("default"),
+            space: LocatorSymbolSpace::Type,
+        };
+        let default_bound_slot = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
+            anchor: default_anchor.clone(),
+            path: Arc::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+        };
+        assert_eq!(
+            default_resolved.type_parameters,
+            vec![NarrowTypeParam {
+                name: "T".to_string(),
+                ordinal: 0,
+                constraint: Some(default_bound_slot(0, TypeParamBoundPosition::Constraint)),
+                default: Some(default_bound_slot(0, TypeParamBoundPosition::Default)),
+            }],
+            "a default-export generic's frontier bound slots must stay anchored to the \
+             `\"default\"` frontier symbol — never re-anchored back to the declared name \
+             by a raw clone of the memo's mirror facts"
         );
     }
 

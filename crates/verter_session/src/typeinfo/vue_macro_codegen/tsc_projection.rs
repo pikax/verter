@@ -432,19 +432,19 @@ fn inferred_class_members(
             value_dependencies: BTreeSet::new(),
         });
     }
-    let contributors = match inventory
+    let contributor_parts = match inventory
         .shallow_state
         .decl_bodies()
-        .transient_type_bodies_in(owner, name)
+        .transient_type_parts_in(owner, name)
     {
-        crate::decl_body_memo::DemandOutcome::Ready(Some(contributors)) => contributors,
+        crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => parts,
         _ => {
             return Err(ClassInferenceFailure::Unresolved(
                 UnresolvedReason::MissingDependency,
             ));
         }
     };
-    let Some(body) = contributors.get(contributor_ordinal) else {
+    let Some(body) = contributor_parts.bodies.get(contributor_ordinal) else {
         return Err(ClassInferenceFailure::Unresolved(
             UnresolvedReason::MissingDependency,
         ));

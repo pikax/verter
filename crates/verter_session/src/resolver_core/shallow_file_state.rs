@@ -1650,10 +1650,8 @@ impl ShallowFileState {
         // contract anticipated). A header miss stays `None`; a body-less
         // re-borrow (broken lease / seeded state) is a conservative `None`.
         self.type_decl(name)?;
-        match self.decl_bodies.transient_type_bodies(name) {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(bodies)) => {
-                Some(bodies.as_ref().clone())
-            }
+        match self.decl_bodies.transient_type_parts(name) {
+            crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => Some(parts.bodies.clone()),
             _ => None,
         }
     }
@@ -2615,11 +2613,13 @@ impl SfsRouteFactProvider<'_> {
         match self
             .state
             .decl_bodies()
-            .transient_type_bodies_in(self.owner, name)
+            .transient_type_parts_in(self.owner, name)
         {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(bodies)) if !bodies.is_empty() => {
+            crate::decl_body_memo::DemandOutcome::Ready(Some(parts))
+                if !parts.bodies.is_empty() =>
+            {
                 Some(verter_semantic::facts::produce_key_source_fact(
-                    bodies.as_ref(),
+                    &parts.bodies,
                     lens,
                 ))
             }
