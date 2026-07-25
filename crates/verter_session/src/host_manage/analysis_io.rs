@@ -228,45 +228,13 @@ impl VerterHost {
 
         // Convert RawTemplateData â†’ TemplateAnalysisSnapshot using existing converter
         if let Some(raw) = raw {
-            // Build converter inputs from snapshot (already computed, not stale entry)
-            let imports: Vec<(String, String)> = snapshot
-                .imports
-                .iter()
-                .flat_map(|imp| {
-                    imp.bindings
-                        .iter()
-                        .map(|b| (b.name.clone(), imp.source.clone()))
-                })
-                .collect();
-
-            // Build binding_class_unions + props_binding_name from snapshot
-            let mut unions: Vec<(String, Vec<String>)> = Vec::new();
-            let define_props = snapshot
-                .macros
-                .iter()
-                .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps);
-            if let Some(dp) = define_props {
-                for field in &dp.prop_fields {
-                    if let Some(type_ann) = &field.type_annotation {
-                        let classes =
-                            verter_semantic::analysis::parse_string_literal_union(type_ann);
-                        if !classes.is_empty() {
-                            unions.push((field.name.clone(), classes));
-                        }
-                    }
-                }
-            }
-            for binding in &snapshot.bindings {
-                if let Some(type_ann) = &binding.type_annotation {
-                    let effective = verter_semantic::analysis::unwrap_reactive_type(type_ann)
-                        .unwrap_or(type_ann);
-                    let classes = verter_semantic::analysis::parse_string_literal_union(effective);
-                    if !classes.is_empty() {
-                        unions.push((binding.name.clone(), classes));
-                    }
-                }
-            }
-            let props_name = define_props.and_then(|dp| dp.binding_name.clone());
+            // Converter inputs come from the ONE shared projection (type-only
+            // imports excluded, static async-component carriers linked).
+            let (imports, unions, props_name) = crate::host_resolve::template_converter_inputs(
+                &snapshot.imports,
+                &snapshot.macros,
+                &snapshot.bindings,
+            );
 
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.macros,

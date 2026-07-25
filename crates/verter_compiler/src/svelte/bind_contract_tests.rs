@@ -1,8 +1,6 @@
 //! Tests for the CLOSED Svelte `bind:` contract table (`bind_contract.rs`), extracted to a
 //! sibling to keep the contract module under the file-size guard.
 
-#![cfg(test)]
-
 use crate::svelte::bind_contract::*;
 use crate::svelte::bind_contract_data::SVELTE_BIND_CONTRACTS;
 

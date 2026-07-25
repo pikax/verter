@@ -3153,3 +3153,75 @@ declare module '@nuxt/schema' {
         "`declare module` containing unrelated interfaces must NOT set the flag"
     );
 }
+
+// =====================================================================
+// Props-root binding selection arms the macro-usage pass
+// (`const props = withDefaults(defineProps<T>(), { … })`)
+// =====================================================================
+
+#[test]
+fn with_defaults_bound_props_member_reads_are_collected() {
+    let result = analyze(
+        "const props = withDefaults(defineProps<{ title: string }>(), { title: 'x' });\nconsole.log(props.title);",
+    );
+    let usage = result
+        .macro_usage
+        .as_ref()
+        .expect("macros present and parse clean => usage facts");
+    assert!(
+        usage.props_member_reads.iter().any(|m| m == "title"),
+        "`props.title` read must be attributed when the root is bound through \
+         withDefaults, got: {:?}",
+        usage.props_member_reads
+    );
+    assert!(
+        !usage.props_escapes,
+        "a pure member read must not record an escape"
+    );
+}
+
+#[test]
+fn with_defaults_bound_props_whole_object_spread_escapes() {
+    let result = analyze(
+        "const props = withDefaults(defineProps<{ title: string }>(), { title: 'x' });\nconst all = { ...props };",
+    );
+    let usage = result
+        .macro_usage
+        .as_ref()
+        .expect("macros present and parse clean => usage facts");
+    assert!(
+        usage.props_escapes,
+        "spreading the bound props root whole must record an escape (fail-open suppression)"
+    );
+}
+
+#[test]
+fn with_defaults_bound_props_genuinely_unused_member_records_no_read_while_armed() {
+    // The fixture reads `props.count` and never reads `props.title`. An ARMED
+    // pass (the props root selected off the outer `WithDefaults` macro)
+    // attributes exactly the bounded read; a DISARMED pass (root not
+    // selected) records no reads at all — the `count` assertion separates
+    // the two, while the `title` assertion keeps the negative half.
+    let result = analyze(
+        "const props = withDefaults(defineProps<{ title: string; count: number }>(), { title: 'x', count: 0 });\nconsole.log(props.count);",
+    );
+    let usage = result
+        .macro_usage
+        .as_ref()
+        .expect("macros present and parse clean => usage facts");
+    assert!(
+        usage.props_member_reads.iter().any(|m| m == "count"),
+        "arming proof: the `props.count` read must be attributed — a disarmed \
+         pass records nothing, got: {:?}",
+        usage.props_member_reads
+    );
+    assert!(
+        !usage.props_member_reads.iter().any(|m| m == "title"),
+        "the genuinely-unused `title` member must record NO read, got: {:?}",
+        usage.props_member_reads
+    );
+    assert!(
+        !usage.props_escapes,
+        "an armed pass over a bounded member read must not fail open: no escape"
+    );
+}

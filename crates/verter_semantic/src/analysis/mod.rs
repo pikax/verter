@@ -87,6 +87,7 @@ pub use file_usage::{
 };
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;
+pub use macros::props_root_binding;
 pub use project_index::{
     ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,

@@ -1235,4 +1235,94 @@ mod unused_declaration_population {
         );
         assert!(tpl.prop_definitions.is_empty(), "no facts => fail open");
     }
+
+    /// `const props = withDefaults(defineProps<{ title: string; dead: number }>(), …)`
+    /// as the analyzer actually records it: the INNER `DefineProps` (binding
+    /// `None`, carrying the prop fields) is pushed BEFORE the OUTER
+    /// `WithDefaults` (binding `Some("props")`).
+    fn bound_with_defaults_macros() -> Vec<AnalyzedMacro> {
+        let mut inner = macro_of(AnalyzedMacroKind::DefineProps);
+        inner.prop_fields = vec![prop_field("title", 10), prop_field("dead", 20)];
+        let mut outer = macro_of(AnalyzedMacroKind::WithDefaults);
+        outer.binding_name = Some("props".to_string());
+        vec![inner, outer]
+    }
+
+    #[test]
+    fn with_defaults_bound_root_template_member_read_marks_prop_used() {
+        // The props root lives on the OUTER `WithDefaults` macro; selecting it
+        // must skip the inner `DefineProps`' `None` binding.
+        let macros = bound_with_defaults_macros();
+        let usage = MacroUsageFacts::default();
+        let raw = RawTemplateData {
+            binding_occurrences: vec![RawBindingOccurrence {
+                name: "props".to_string(),
+                span: Span::new(100, 105),
+                is_in_bindings_map: true,
+                usage_kind: 0,
+            }],
+            member_reads: vec![RawMemberRead {
+                root: "props".to_string(),
+                member: "title".to_string(),
+                root_span: Span::new(100, 105),
+            }],
+            ..Default::default()
+        };
+        let tpl = convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+        let by_name = |n: &str| tpl.prop_definitions.iter().find(|p| p.name == n).unwrap();
+        assert!(
+            by_name("title").used_in_template,
+            "`{{ props.title }}` must attribute to the bound withDefaults root"
+        );
+        assert!(
+            !by_name("dead").used_in_template && !by_name("dead").used_in_script,
+            "the unread member still surfaces — the fix must not fail open"
+        );
+    }
+
+    #[test]
+    fn with_defaults_bound_root_bare_template_use_escapes() {
+        // `v-bind="props"` — an UNCONSUMED root occurrence is a whole-object
+        // escape: suppress every prop diagnostic.
+        let macros = bound_with_defaults_macros();
+        let usage = MacroUsageFacts::default();
+        let raw = RawTemplateData {
+            binding_occurrences: vec![RawBindingOccurrence {
+                name: "props".to_string(),
+                span: Span::new(200, 205),
+                is_in_bindings_map: true,
+                usage_kind: 1,
+            }],
+            ..Default::default()
+        };
+        let tpl = convert_raw_to_analysis(&raw, &[], &[], None, Some(&ctx(&macros, Some(&usage))));
+        assert!(
+            tpl.prop_definitions.is_empty(),
+            "a bare template use of the bound withDefaults root must suppress, got: {:?}",
+            tpl.prop_definitions
+        );
+    }
+
+    #[test]
+    fn with_defaults_bound_root_used_in_style_is_detected() {
+        // `<style> .x { color: v-bind(props.color) } </style>` — the root
+        // binding referenced from style must arm the whole-kind suppression.
+        let macros = bound_with_defaults_macros();
+        let bindings = vec![verter_semantic::analysis::types::AnalyzedBinding {
+            name: "props".to_string(),
+            kind: verter_semantic::analysis::types::AnalyzedBindingKind::Const,
+            is_reactive: false,
+            reactivity_kind: verter_semantic::analysis::types::ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(6, 11),
+            used_in_script: true,
+            used_in_style: true,
+        }];
+        let context = UnusedDeclarationContext::from_analysis(&macros, None, &[], &bindings, &[]);
+        assert!(
+            context.props_root_used_in_style,
+            "the bound withDefaults root referenced from style must be detected"
+        );
+    }
 }

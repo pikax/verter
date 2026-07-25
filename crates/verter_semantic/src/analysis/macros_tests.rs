@@ -2734,3 +2734,67 @@ mod field_payload_deref_replay {
         ));
     }
 }
+
+// =====================================================================
+// props_root_binding — the ONE props-root selection accessor
+// =====================================================================
+
+#[test]
+fn props_root_binding_plain_bound_define_props() {
+    let alloc = Allocator::new();
+    let macros = parse_and_extract(&alloc, "const props = defineProps<{ a: string }>();");
+    assert_eq!(props_root_binding(&macros), Some("props"));
+}
+
+#[test]
+fn props_root_binding_skips_inner_none_binding_of_with_defaults() {
+    let alloc = Allocator::new();
+    // Analyzer order: the INNER `DefineProps` (binding `None`, carrying the
+    // fields) is pushed BEFORE the OUTER `WithDefaults` (binding
+    // `Some("props")`) — first-match-wins would observe the inner `None`.
+    let macros = parse_and_extract(
+        &alloc,
+        "const props = withDefaults(defineProps<{ a: string }>(), { a: 'x' });",
+    );
+    assert_eq!(
+        macros
+            .iter()
+            .filter(|m| matches!(
+                m.kind,
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+            ))
+            .count(),
+        2,
+        "fixture must contain the inner/outer pair"
+    );
+    assert_eq!(props_root_binding(&macros), Some("props"));
+}
+
+#[test]
+fn props_root_binding_expression_statement_form_yields_none() {
+    let alloc = Allocator::new();
+    let macros = parse_and_extract(
+        &alloc,
+        "withDefaults(defineProps<{ a: string }>(), { a: 'x' });",
+    );
+    assert_eq!(
+        macros
+            .iter()
+            .filter(|m| matches!(
+                m.kind,
+                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
+            ))
+            .count(),
+        2,
+        "fixture must contain the inner/outer pair"
+    );
+    assert_eq!(props_root_binding(&macros), None);
+}
+
+#[test]
+fn props_root_binding_without_props_macro_yields_none() {
+    let alloc = Allocator::new();
+    let macros = parse_and_extract(&alloc, "const emit = defineEmits<{ save: [] }>();");
+    assert_eq!(props_root_binding(&macros), None);
+    assert_eq!(props_root_binding(&[]), None);
+}

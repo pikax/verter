@@ -92,7 +92,8 @@ pub(crate) fn template_converter_inputs(
         }
     }
 
-    let props_binding_name = define_props.and_then(|dp| dp.binding_name.clone());
+    let props_binding_name =
+        verter_semantic::analysis::props_root_binding(macros).map(str::to_owned);
 
     (all_imports, unions, props_binding_name)
 }
@@ -582,4 +583,78 @@ pub(crate) fn populate_sfc_blocks_sidecar(
             custom,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    /// `const props = withDefaults(defineProps<T>(), …)`: the props-root
+    /// binding lives on the OUTER `WithDefaults` macro — the converter input
+    /// projection must surface it, while the prop fields (and their string
+    /// literal unions) stay on the INNER `DefineProps`.
+    #[test]
+    fn template_converter_inputs_surfaces_bound_with_defaults_props_root() {
+        let alloc = oxc_allocator::Allocator::new();
+        let snapshot = verter_semantic::analysis::build_script_analysis(
+            "const props = withDefaults(defineProps<{ variant: 'primary' | 'secondary' }>(), { variant: 'primary' });",
+            oxc_span::SourceType::ts(),
+            &alloc,
+        );
+        let (_imports, unions, props_binding_name) = super::template_converter_inputs(
+            &snapshot.imports,
+            &snapshot.macros,
+            &snapshot.bindings,
+        );
+        assert_eq!(
+            props_binding_name.as_deref(),
+            Some("props"),
+            "the props-root binding bound through withDefaults must surface"
+        );
+        assert!(
+            unions.iter().any(|(name, classes)| name == "variant"
+                && classes.iter().any(|c| c == "primary")
+                && classes.iter().any(|c| c == "secondary")),
+            "union classes must still be read off the inner defineProps fields, got: {unions:?}"
+        );
+    }
+
+    /// The expression-statement form has NO declarator — the root correctly
+    /// stays unnamed (no binding to attribute `props.x` reads to). The bound
+    /// form in the same test is the arming half: selection must reach the
+    /// OUTER `WithDefaults` macro (which carries the declarator's binding),
+    /// not stop at the inner `DefineProps`' `None`.
+    #[test]
+    fn template_converter_inputs_expression_statement_with_defaults_has_no_root() {
+        let alloc = oxc_allocator::Allocator::new();
+        let snapshot = verter_semantic::analysis::build_script_analysis(
+            "withDefaults(defineProps<{ variant: string }>(), { variant: 'x' });",
+            oxc_span::SourceType::ts(),
+            &alloc,
+        );
+        let (_imports, _unions, props_binding_name) = super::template_converter_inputs(
+            &snapshot.imports,
+            &snapshot.macros,
+            &snapshot.bindings,
+        );
+        assert_eq!(
+            props_binding_name, None,
+            "the expression-statement form has no declarator — no root to surface"
+        );
+
+        // Arming proof: the SAME projection surfaces the root exactly when a
+        // declarator binds the `withDefaults` result.
+        let alloc = oxc_allocator::Allocator::new();
+        let bound = verter_semantic::analysis::build_script_analysis(
+            "const props = withDefaults(defineProps<{ variant: string }>(), { variant: 'x' });",
+            oxc_span::SourceType::ts(),
+            &alloc,
+        );
+        let (_imports, _unions, bound_name) =
+            super::template_converter_inputs(&bound.imports, &bound.macros, &bound.bindings);
+        assert_eq!(
+            bound_name.as_deref(),
+            Some("props"),
+            "arming proof: the bound form must surface the root — selection that \
+             stops at the inner defineProps' None binding yields None here"
+        );
+    }
 }

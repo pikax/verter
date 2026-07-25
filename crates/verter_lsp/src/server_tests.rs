@@ -16466,6 +16466,338 @@ fn unused_declaration_diagnostics_fail_open_on_escapes_destructure_and_use_slots
     );
 }
 
+/// Props-root binding through `withDefaults`: the analyzer stores the root
+/// binding on the OUTER `WithDefaults` macro while the INNER `DefineProps`
+/// carries the prop fields with no binding of its own. Acceptance: a prop
+/// read in `<script setup>` (`props.title`) and a prop read in the template
+/// (`{{ props.count }}`) must NOT be flagged.
+#[test]
+fn with_defaults_bound_props_script_and_template_reads_are_not_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; count: number }>(), { title: 'x', count: 0 });\n\
+                  console.log(props.title);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div>{{ props.count }}</div>\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsUsed.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "props read via the bound withDefaults root (script `props.title`, template \
+         `{{ props.count }}`) must NOT be flagged, got: {diags:?}"
+    );
+}
+
+/// The discriminator: under bound `withDefaults` a GENUINELY unused prop must
+/// STILL be reported — the fix arms the analysis, it must not silence it.
+#[test]
+fn with_defaults_bound_props_genuinely_unused_prop_is_still_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; unusedProp: number }>(), { title: 'x', unusedProp: 0 });\n\
+                  console.log(props.title);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsUnused.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    let unused_props = diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unused_props.len(),
+        1,
+        "a genuinely-unused prop under bound withDefaults must STILL surface exactly \
+         one diagnostic, got: {diags:?}"
+    );
+    assert!(unused_props[0].message.contains("unusedProp"));
+    assert!(
+        !unused_props
+            .iter()
+            .any(|diag| diag.message.contains("title")),
+        "the read member must stay silent, got: {diags:?}"
+    );
+}
+
+/// The escape machinery must now be ARMED: spreading the bound `withDefaults`
+/// root whole (`{ ...props }`) is a whole-object escape and suppresses every
+/// unused-prop diagnostic (fail-open).
+#[test]
+fn with_defaults_bound_props_whole_object_spread_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string }>(), { title: 'x' });\n\
+                  const all = { ...props };\n\
+                  console.log(all);\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsSpread.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "whole-object spread of the bound withDefaults root must suppress (fail-open), \
+         got: {diags:?}"
+    );
+}
+
+/// Template whole-object binding under bound `withDefaults`: `<div
+/// v-bind="props">` is an unconsumed occurrence of the bound root — a
+/// whole-object escape that suppresses every unused-prop diagnostic
+/// (fail-open). The escape is kind-wide by design, so the anti-silencing
+/// control is the paired file opened in the same host below: the SAME
+/// component without the escape must still flag its genuinely-unused props.
+#[test]
+fn with_defaults_bound_props_template_whole_object_bind_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; unusedProp: number }>(), { title: 'x', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div v-bind=\"props\" />\n\
+                  </template>\n";
+    let file = dir.path().join("WithDefaultsTemplateBind.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "template whole-object `v-bind=\"props\"` on the bound withDefaults root is an \
+         escape and must suppress every unused-prop diagnostic, got: {diags:?}"
+    );
+
+    // Anti-silencing control: the SAME component without the escape — no prop
+    // is read anywhere, so BOTH must surface. Proves the zero above is the
+    // escape, not a silent diagnostic pipeline.
+    let control_source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ title: string; unusedProp: number }>(), { title: 'x', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div />\n\
+                  </template>\n";
+    let control_file = dir.path().join("WithDefaultsTemplateBindControl.vue");
+    std::fs::write(&control_file, control_source).unwrap();
+    let control_uri =
+        crate::uri::path_to_file_uri(&control_file.to_string_lossy().replace('\\', "/"))
+            .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: control_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: control_source.to_string(),
+    });
+    let control_diags = compute_verter_diagnostics_for_with_views(
+        &documents,
+        &control_uri,
+        &cached_verter_diags,
+        None,
+    );
+    let control_unused: Vec<_> = control_diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect();
+    assert_eq!(
+        control_unused.len(),
+        2,
+        "anti-silencing control: without the escape both genuinely-unused props must \
+         STILL be flagged, got: {control_diags:?}"
+    );
+    assert!(
+        control_unused.iter().any(|d| d.message.contains("title"))
+            && control_unused
+                .iter()
+                .any(|d| d.message.contains("unusedProp")),
+        "control must flag exactly `title` and `unusedProp`, got: {control_diags:?}"
+    );
+}
+
+/// Style root access under bound `withDefaults`: `<style>` `v-bind(props.color)`
+/// references the bound props ROOT — member-level liveness cannot be bounded,
+/// so the whole unused-prop kind suppresses (fail-open). The anti-silencing
+/// control is the paired file without the `<style>` trigger: the SAME
+/// component must still flag its genuinely-unused props.
+#[test]
+fn with_defaults_bound_props_style_root_vbind_suppresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ color: string; unusedProp: number }>(), { color: 'red', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div class=\"x\">t</div>\n\
+                  </template>\n\
+                  \n\
+                  <style>\n\
+                  .x { color: v-bind(props.color); }\n\
+                  </style>\n";
+    let file = dir.path().join("WithDefaultsStyleVBind.vue");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+        )),
+        "style `v-bind(props.color)` on the bound withDefaults root must suppress every \
+         unused-prop diagnostic (root liveness cannot be bounded), got: {diags:?}"
+    );
+
+    // Anti-silencing control: the SAME component without the `<style>`
+    // trigger — neither prop is read anywhere, so BOTH must surface.
+    let control_source = "<script setup lang=\"ts\">\n\
+                  const props = withDefaults(defineProps<{ color: string; unusedProp: number }>(), { color: 'red', unusedProp: 0 });\n\
+                  </script>\n\
+                  \n\
+                  <template>\n\
+                  <div class=\"x\">t</div>\n\
+                  </template>\n";
+    let control_file = dir.path().join("WithDefaultsStyleVBindControl.vue");
+    std::fs::write(&control_file, control_source).unwrap();
+    let control_uri =
+        crate::uri::path_to_file_uri(&control_file.to_string_lossy().replace('\\', "/"))
+            .expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: control_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: control_source.to_string(),
+    });
+    let control_diags = compute_verter_diagnostics_for_with_views(
+        &documents,
+        &control_uri,
+        &cached_verter_diags,
+        None,
+    );
+    let control_unused: Vec<_> = control_diags
+        .iter()
+        .filter(|diag| {
+            matches!(
+                diag.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+            )
+        })
+        .collect();
+    assert_eq!(
+        control_unused.len(),
+        2,
+        "anti-silencing control: without the style trigger both genuinely-unused props \
+         must STILL be flagged, got: {control_diags:?}"
+    );
+    assert!(
+        control_unused.iter().any(|d| d.message.contains("color"))
+            && control_unused
+                .iter()
+                .any(|d| d.message.contains("unusedProp")),
+        "control must flag exactly `color` and `unusedProp`, got: {control_diags:?}"
+    );
+}
+
 /// A legacy Svelte `<slot>` has NO declaration site — the unused-declaration
 /// diagnostics apply only to explicit type-level declarations and must never
 /// invent one for Svelte markup.

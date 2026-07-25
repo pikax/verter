@@ -732,31 +732,27 @@ pub(crate) async fn build_real_tsserver_plugin(
     std::os::unix::fs::symlink(&workspace_dependencies, &dependency_link)
         .expect("create plugin dependency symlink");
 
-    let esbuild = repo_root.join("node_modules/esbuild/bin/esbuild");
-    let plugin_source = repo_root.join("packages/typescript-plugin/src/index.ts");
-    let language_shared_source = repo_root.join("packages/language-shared/src/index.ts");
-    let alias = format!(
-        "--alias:@verter/language-shared={}",
-        language_shared_source.to_string_lossy().replace('\\', "/")
+    // The shared builder drives esbuild's JavaScript API; the workspace
+    // `esbuild/bin/esbuild` file is the platform native executable and node
+    // cannot parse it as JavaScript.
+    let plugin_builder = repo_root
+        .join("scripts")
+        .join("build-test-typescript-plugin.mjs");
+    assert!(
+        plugin_builder.is_file(),
+        "shared test-plugin builder missing at {}",
+        plugin_builder.display()
     );
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::new(node_path)
-            .arg(esbuild)
-            .arg(plugin_source)
-            .args([
-                "--bundle",
-                "--platform=node",
-                "--format=cjs",
-                "--target=node18",
-            ])
-            .arg(alias)
-            .arg(format!("--outfile={}", plugin_entry.to_string_lossy()))
+            .arg(&plugin_builder)
+            .arg(&plugin_entry)
             .output(),
     )
     .await
     .expect("source plugin build exceeded 30 seconds")
-    .expect("run workspace esbuild");
+    .expect("run shared test-plugin builder");
     assert!(
         output.status.success(),
         "build production plugin source: stdout={} stderr={}",

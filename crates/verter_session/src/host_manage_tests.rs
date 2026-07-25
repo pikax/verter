@@ -5616,6 +5616,38 @@ fn template_slots_persisted_across_calls() {
     );
 }
 
+/// `:class="props.variant"` union resolution through the lazy template lane:
+/// the props-root binding of `const props = withDefaults(defineProps<T>(), …)`
+/// lives on the OUTER `WithDefaults` macro (the inner `DefineProps` records
+/// `None`) and must reach the converter.
+#[test]
+fn with_defaults_bound_props_root_drives_dynamic_class_resolution() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{ variant: 'primary' | 'secondary' }>(), { variant: 'primary' });
+</script>
+<template><div :class="props.variant" /></template>"#,
+    );
+
+    let analysis = host.get_analysis("/Comp.vue").unwrap();
+    let tpl = analysis
+        .template
+        .expect("template analysis should be populated");
+    let classes: Vec<&str> = tpl
+        .elements
+        .iter()
+        .flat_map(|e| e.dynamic_classes.iter().map(String::as_str))
+        .collect();
+    assert!(
+        classes.contains(&"primary") && classes.contains(&"secondary"),
+        "`:class=\"props.variant\"` must resolve through the bound withDefaults root, \
+         got: {classes:?}"
+    );
+}
+
 /// @ai-generated - template slots computed even when type deps are unresolved
 #[test]
 fn template_slots_with_unresolved_type_deps() {
@@ -5639,6 +5671,82 @@ defineProps<Foo>()
         tpl.defined_slots.len(),
         1,
         "should detect the <slot> despite unresolved type dep"
+    );
+}
+
+/// CF3-A1-LAZY-VALUE-IMPORTS — a type-only import is NOT a runtime value
+/// binding, so the lazy template lane (upsert → `get_analysis`, no
+/// `compile_entry`) must NEVER carrier-link a `<X/>` tag to it. Covers both
+/// the declaration-level (`import type { X }`) and the per-specifier
+/// (`import { type X }`) form.
+#[test]
+fn cf3_lazy_template_excludes_type_only_component_links() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/DeclTypeOnly.vue",
+        r#"<script setup lang="ts">
+import type { X } from './X.vue'
+</script>
+<template><X /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/SpecifierTypeOnly.vue",
+        r#"<script setup lang="ts">
+import { type X } from './X.vue'
+</script>
+<template><X /></template>"#,
+    );
+
+    for canonical in ["/DeclTypeOnly.vue", "/SpecifierTypeOnly.vue"] {
+        let analysis = host.get_analysis(canonical).unwrap();
+        let tpl = analysis
+            .template
+            .expect("template analysis should be populated");
+        let usage = tpl
+            .components
+            .iter()
+            .find(|c| c.name == "X")
+            .expect("<X/> usage should be recorded");
+        assert_eq!(
+            usage.import_source, None,
+            "a type-only import must not carrier-link <X/> ({canonical})"
+        );
+    }
+}
+
+/// CF3-A2-LAZY-ASYNC-CARRIER — `const X = defineAsyncComponent(() =>
+/// import('./X.vue'))` declares a component whose carrier is the dynamically
+/// imported `.vue`; the analyzer captures the static loader specifier on the
+/// binding, so the lazy template lane (upsert → `get_analysis`, no
+/// `compile_entry`) must link `<X/>` to that carrier.
+#[test]
+fn cf3_lazy_template_links_static_define_async_component_carrier() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/Comp.vue",
+        r#"<script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
+const X = defineAsyncComponent(() => import('./X.vue'))
+</script>
+<template><X /></template>"#,
+    );
+
+    let analysis = host.get_analysis("/Comp.vue").unwrap();
+    let tpl = analysis
+        .template
+        .expect("template analysis should be populated");
+    let usage = tpl
+        .components
+        .iter()
+        .find(|c| c.name == "X")
+        .expect("<X/> usage should be recorded");
+    assert_eq!(
+        usage.import_source.as_deref(),
+        Some("./X.vue"),
+        "a static defineAsyncComponent loader must carrier-link <X/>"
     );
 }
 
