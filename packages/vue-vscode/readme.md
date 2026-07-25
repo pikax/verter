@@ -58,13 +58,11 @@ graph TD
     EXT["verter-vscode<br/><i>VS Code extension</i>"]
     LSP["verter-lsp<br/><i>Rust LSP binary (stdio)</i>"]
     TSP["@verter/typescript-plugin<br/><i>.vue import resolution</i>"]
-    OXC["@verter/oxc-bindings<br/><i>OXC binary management</i>"]
     LSH["@verter/language-shared<br/><i>Shared protocol types</i>"]
     VLC["vscode-languageclient<br/><i>LSP client library</i>"]
 
     EXT --> LSP
     EXT --> TSP
-    EXT --> OXC
     EXT --> LSH
     EXT --> VLC
 ```
@@ -213,7 +211,6 @@ The completion benchmark writes per-run and summary JSON files under
 | `verter-lsp` (Rust binary)  | LSP server providing completions, diagnostics, hover, go-to-definition (stdio) |
 | `@verter/language-shared`   | Shared custom protocol types between extension and LSP binary                  |
 | `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files                  |
-| `@verter/oxc-bindings`      | Platform-specific OXC parser binary management                                 |
 | `vscode-languageclient`     | VS Code LSP client library                                                     |
 
 ## License

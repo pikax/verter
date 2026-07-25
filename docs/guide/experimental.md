@@ -62,7 +62,7 @@ Complex conditions fall back to the standard union type (no narrowing). When the
 
 If the component already uses `<script setup generic="T extends string">`, narrowing generics are appended after the existing ones:
 
-```typescript
+```text
 new<T extends string, T_show extends boolean = boolean>(): { ... }
 ```
 

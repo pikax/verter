@@ -112,6 +112,14 @@ Verter supports all Vue script setup macros with full type inference:
 
 All macros work with both inline type literals and imported types. Cross-file type resolution is supported -- you can define your prop types in a separate `.ts` file and import them into `defineProps<Props>()`.
 
+```ts
+// types.ts
+export interface UserProps {
+  name: string;
+  role?: string;
+}
+```
+
 ```vue
 <script setup lang="ts">
 import type { UserProps } from "./types";

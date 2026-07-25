@@ -185,6 +185,12 @@ excluded by owner decision; it simply stops being republished. That exclusion is
 by a discriminating test (`oxc-bindings is not published`), proven to fail when the root is
 re-added.
 
+> **Superseded.** `@verter/oxc-bindings` has since been deleted from the workspace: it had zero
+> dependents, and its job (resolving/downloading OXC bindings) is owned natively by the Rust side.
+> With the package gone the exclusion is structural rather than pinned, so the `oxc-bindings is not
+> published` test — which would now pass vacuously — was removed with it. The versions published to
+> npm from earlier releases are unaffected.
+
 `@verter/wasm` is an **optional peerDependency** of component-meta —
 `peerDependenciesMeta.optional: true` and the readme both already state this. No change needed.
 

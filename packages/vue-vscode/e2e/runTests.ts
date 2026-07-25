@@ -133,7 +133,7 @@ function selectRoutes(options: {
  * package has an install and which does not.
  */
 function materializeOutOfTreeWorkspace(fixture: string, templateDir: string): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `verter-e2e-ws-${fixture}-`));
+  const root = fs.mkdtempSync(path.join(HARNESS_TEMP_ROOT, `verter-e2e-ws-${fixture}-`));
   fs.cpSync(templateDir, root, {
     recursive: true,
     filter: (src) => path.basename(src) !== "node_modules",
@@ -143,15 +143,8 @@ function materializeOutOfTreeWorkspace(fixture: string, templateDir: string): st
 }
 
 function removeOutOfTreeWorkspace(root: string): void {
-  const target = path.resolve(root);
-  const tempRoot = path.resolve(os.tmpdir());
-  if (
-    !target.startsWith(`${tempRoot}${path.sep}`) ||
-    !path.basename(target).startsWith("verter-e2e-ws-")
-  ) {
-    throw new Error(`Refusing to remove unexpected E2E workspace path: ${target}`);
-  }
-  fs.rmSync(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  assertRemovablePath(root, "verter-e2e-ws-", "workspace");
+  fs.rmSync(path.resolve(root), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 /**
@@ -175,6 +168,92 @@ function installFixtureDeps(fixtureDir: string): void {
   });
 }
 
+/**
+ * The shortest REAL (symlink-free) system temp root available on this platform.
+ *
+ * Two independent constraints make this a real decision rather than `os.tmpdir()`:
+ *
+ * 1. SYMLINK. The Unix control-socket bind rejects a `--control-dir` grandparent that
+ *    is ITSELF a symlink (`crates/verter_tsgo_api/src/control/transport.rs` →
+ *    `prepare_unix_socket_parent`). On macOS `/tmp` IS a symlink to `/private/tmp`, so a
+ *    `TMPDIR=/tmp` run silently loses the shared-tsgo rail and degrades to managed-tsgo —
+ *    a route change that reads as a product failure. Resolving through `realpathSync`
+ *    makes the harness independent of how the operator spelled `TMPDIR`.
+ * 2. LENGTH. The control socket falls back to `<temp>/vr-ctl-<16 hex>/ctl.sock`, i.e.
+ *    the temp root plus 34 bytes, against a 100-byte `sockaddr_un` budget. macOS's
+ *    per-user `os.tmpdir()` (`/var/folders/<a>/<b>/T`) realpaths to ~55 bytes, leaving
+ *    under 11 bytes for the per-run segment — so a per-run directory rooted there is at
+ *    the edge of unbindable. `/private/tmp` is 12 bytes and leaves the budget untouched.
+ */
+function computeRealSystemTempRoot(): string {
+  const candidates = process.platform === "darwin" ? ["/private/tmp"] : [];
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isDirectory() && fs.realpathSync(candidate) === candidate) {
+        return candidate;
+      }
+    } catch {
+      /* fall through to the platform default */
+    }
+  }
+  return fs.realpathSync(os.tmpdir());
+}
+
+/**
+ * The one temp root every harness-owned directory hangs off — profiles, logs, timing
+ * reports, out-of-tree workspaces, and the per-route isolated roots.
+ *
+ * It is NOT `os.tmpdir()`. On macOS the default per-user temp dir is long enough that VS
+ * Code's OWN control socket under an E2E profile
+ * (`<profile>/user-data/<version>-main.sock`) blows the 103-byte `sockaddr_un` limit and
+ * the editor refuses to start with `listen EINVAL`. Runs only ever succeeded there because
+ * the operator happened to export a short `TMPDIR`; an environment-dependent harness is
+ * exactly the nondeterminism this lane cannot afford, so the root is derived, not inherited.
+ */
+const HARNESS_TEMP_ROOT = computeRealSystemTempRoot();
+
+/** Guard a harness-owned path before recursive removal. */
+function assertRemovablePath(target: string, prefix: string, kind: string): void {
+  const resolved = path.resolve(target);
+  if (
+    !resolved.startsWith(`${path.resolve(HARNESS_TEMP_ROOT)}${path.sep}`) ||
+    !path.basename(resolved).startsWith(prefix)
+  ) {
+    throw new Error(`Refusing to remove unexpected E2E ${kind} path: ${resolved}`);
+  }
+}
+
+/**
+ * Create the per-route TEMP root handed to the extension host.
+ *
+ * The LSP derives its on-disk carrier store from `std::env::temp_dir()`:
+ * `<temp>/verter-carrier-store/<lsp-package-version>/<blake3(workspace root)>/`
+ * (`crates/verter_lsp/src/external_ts/carrier_publish_store.rs`). Both key components are
+ * STABLE across runs, so with a shared temp root every run inherits the previous run's
+ * blobs and manifest — runs are not independent, and the same tree yields different
+ * verdicts depending on what ran before it. Handing each route a fresh temp root makes the
+ * store (and every other temp-derived artifact: shim dirs, control dirs, sockets) belong to
+ * exactly one route of one run.
+ *
+ * This makes runs INDEPENDENT. It does NOT make the warm store correct: a real user's
+ * second editor session still opens a populated store, and that path currently loses
+ * template occurrences from rename/references (see `docs`-side report). Do not read a green
+ * isolated run as evidence that the warm path works.
+ */
+function createIsolatedTempRoot(label: string, index: number): string {
+  const safeLabel = label.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8);
+  const root = fs.mkdtempSync(path.join(HARNESS_TEMP_ROOT, `vt${index}${safeLabel}-`));
+  // Owner-only, matching `mkdtemp`'s own 0700 — the control-socket grandparent ceiling
+  // accepts a directory we own with no group/other write bits.
+  fs.chmodSync(root, 0o700);
+  return root;
+}
+
+function removeIsolatedTempRoot(root: string): void {
+  assertRemovablePath(root, "vt", "temp root");
+  fs.rmSync(path.resolve(root), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+}
+
 interface E2eProfile {
   root: string;
   extensionsDir: string;
@@ -183,7 +262,10 @@ interface E2eProfile {
 
 function createE2eProfile(label: string, index: number): E2eProfile {
   const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "-");
-  const root = path.join(os.tmpdir(), `verter-e2e-profile-${process.pid}-${index}-${safeLabel}`);
+  const root = path.join(
+    HARNESS_TEMP_ROOT,
+    `verter-e2e-profile-${process.pid}-${index}-${safeLabel}`,
+  );
   const profile = {
     root,
     extensionsDir: path.join(root, "extensions"),
@@ -195,18 +277,11 @@ function createE2eProfile(label: string, index: number): E2eProfile {
 }
 
 function removeE2eProfile(profile: E2eProfile): void {
-  const target = path.resolve(profile.root);
-  const tempRoot = path.resolve(os.tmpdir());
-  if (
-    !target.startsWith(`${tempRoot}${path.sep}`) ||
-    !path.basename(target).startsWith("verter-e2e-profile-")
-  ) {
-    throw new Error(`Refusing to remove unexpected E2E profile path: ${target}`);
-  }
+  assertRemovablePath(profile.root, "verter-e2e-profile-", "profile");
   // Electron reports the extension-host exit before Windows has necessarily
   // released every log-file handle. Let Node's recursive remover retry EBUSY /
   // EPERM instead of turning a fully green product run into a harness failure.
-  fs.rmSync(target, {
+  fs.rmSync(path.resolve(profile.root), {
     recursive: true,
     force: true,
     maxRetries: 20,
@@ -295,8 +370,14 @@ async function main() {
       }
     }
 
-    const logFile = path.join(os.tmpdir(), `verter-e2e-${label}.log`);
+    // Deliberately OUTSIDE the per-route isolated root: the runner reads this log and the
+    // run summary beside it AFTER the route's root is removed.
+    const logFile = path.join(HARNESS_TEMP_ROOT, `verter-e2e-${label}.log`);
     const profile = createE2eProfile(label, index);
+    // Isolate every temp-derived LSP artifact — above all the carrier store — to THIS
+    // route of THIS run, so a run's verdict never depends on what ran before it.
+    const tempRoot = createIsolatedTempRoot(label, index);
+    console.log(`  Isolated temp root: ${tempRoot}`);
     // Delete any stale run summary before the run so a prior-run summary can
     // never false-green a current zero-exit crash that writes no fresh summary.
     clearRunArtifacts(logFile);
@@ -311,6 +392,18 @@ async function main() {
         // provider-only hot path.
         "verter.analysis.enabled": exercisesNativeSemanticSurface,
         "verter.hover.nativeSemantics": exercisesNativeSemanticSurface,
+        // The extension spawns the LSP with `VERTER_LOG` set from THIS setting, which
+        // OVERWRITES the `VERTER_LOG=debug` the runner puts in `extensionTestsEnv`
+        // (`extension.ts` → `buildServerOptions`). Without it the server runs at `info`
+        // and the fail-closed signal a test needs to distinguish "the provider gave a
+        // wrong answer" from "Verter refused to answer" — the workspace-symbol frontier's
+        // `activated N/M carriers` line — is never emitted at all.
+        //
+        // The value is a `tracing_subscriber` EnvFilter directive, not a bare level:
+        // blanket `debug` is 6x the log volume, and every line is mirrored SYNCHRONOUSLY
+        // to both the output channel and the E2E log file, which measurably slows the
+        // extension host. Raise exactly the one module that owns the signal.
+        "verter.server.logLevel": "info,verter_lsp::server::provider_state=debug",
       });
       if (typeProvider === "shared-tsgo") {
         const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
@@ -352,11 +445,18 @@ async function main() {
         launchArgs,
         extensionTestsEnv: {
           ...process.env,
+          // Every temp-derived artifact the extension host and the LSP it spawns create —
+          // the carrier store above all — lands under this route's own root. `TMPDIR` is
+          // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
+          // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
+          TMPDIR: tempRoot,
+          TMP: tempRoot,
+          TEMP: tempRoot,
           VERTER_E2E_TEST: "1",
           VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
           VERTER_E2E_LOG_FILE: logFile,
           VERTER_E2E_FIXTURE: fixture,
-          VERTER_E2E_TIMING_FILE: path.join(os.tmpdir(), `verter-e2e-timing-${label}.json`),
+          VERTER_E2E_TIMING_FILE: path.join(HARNESS_TEMP_ROOT, `verter-e2e-timing-${label}.json`),
           VERTER_LOG: "debug",
           ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
           ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
@@ -405,9 +505,11 @@ async function main() {
     } finally {
       if (readE2eEnv("KEEP_PROFILE") === "1") {
         console.log(`  Preserved E2E profile: ${profile.root}`);
+        console.log(`  Preserved E2E temp root: ${tempRoot}`);
         if (outOfTreeWorkspace) console.log(`  Preserved E2E workspace: ${outOfTreeWorkspace}`);
       } else {
         removeE2eProfile(profile);
+        removeIsolatedTempRoot(tempRoot);
         if (outOfTreeWorkspace) removeOutOfTreeWorkspace(outOfTreeWorkspace);
       }
     }

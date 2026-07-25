@@ -127,7 +127,11 @@ ws.configureProjects([
   {
     root: "/project",
     workspaceRoot: "/project",
-    compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+    compilerOptions: {
+      baseUrl: ".",
+      // NOTE: an ordered array of { pattern, targets } — not a tsconfig-style object map.
+      paths: [{ pattern: "@/*", targets: ["src/*"] }],
+    },
   },
 ]);
 
@@ -135,118 +139,118 @@ ws.configureProjects([
 const host = VerterHost.withWorkspace({ devMode: true }, ws);
 ```
 
-### `compile(input, options?): CodegenResult`
+### `host.compileMany(files, options?): CompileBatchEntry[]`
 
-Compiles a Vue SFC template to JavaScript. Accepts `string` or `Buffer` input. Despite the NAPI-RS async signature, compilation is CPU-bound and executes synchronously on the Rust side.
+Compiles a batch of Vue SFC inputs through the host's shared compile path
+(scheduler + dispatch + compile cache). This is the single compile entry point —
+there are no standalone `compile` / `compileSync` / `compileForVite` exports.
 
-```typescript
-import { compile } from "@verter/native";
+Returns one entry per input, **in input order**. Per-input panic isolation: if
+codegen fails for one input, only that input's entry carries the error; the rest
+of the batch completes normally.
 
-const result = compile("<template><div>{{ msg }}</div></template>", {
-  filename: "App.vue",
-  isProduction: false,
-});
+Two lanes are available via `target`:
 
-const bufferResult = compile(Buffer.from("<template><div>{{ msg }}</div></template>"));
-
-console.log(result.code);
-console.log(result.sourceMap); // Source map as JSON string
-console.log(result.codeWithSourceMap); // Code with inline source map appended
-```
-
-### `compileSync(input, options?): CodegenResult`
-
-Synchronous version of `compile`. Identical behavior, provided for API symmetry (accepts `string` or `Buffer`).
+- `"host-backed"` (default) — the full session wrapper, used for IDE/analysis work.
+- `"runtime-render"` — the render-only bundler lane. **Requires `compileProfile`.**
 
 ```typescript
-import { compileSync } from "@verter/native";
+import { VerterHost, Workspace } from "@verter/native";
 
-const result = compileSync("<template><div>Hello</div></template>");
+const ws = new Workspace(["/project"]);
+ws.configureProjects([{ root: "/project", workspaceRoot: "/project" }]);
+const host = VerterHost.withWorkspace({ devMode: true }, ws);
+
+const [entry] = host.compileMany(
+  [
+    {
+      canonicalId: "/project/src/App.vue",
+      source: "<template><div>{{ msg }}</div></template>",
+    },
+  ],
+  {
+    target: "runtime-render",
+    compileProfile: {
+      filename: "/project/src/App.vue",
+      isProduction: false,
+      customElement: false,
+      ssr: false,
+      forceJs: false,
+      forceVapor: false,
+      sourceMap: true,
+      hmrStrategy: "none",
+    },
+  },
+);
+
+if (entry.errors.length > 0) throw new Error(entry.errors.join("\n"));
+
+console.log(entry.code); // compiled Main module
+console.log(entry.sourceMap); // source map, when `sourceMap: true`
+console.log(entry.lang); // "ts" | "js" | "jsx"
+console.log(entry.cacheHit); // served from a warm cache slot?
 ```
 
-### `compileForVite(input, options?): ViteCodegenResult`
-
-Vite-optimized compilation that returns split blocks instead of a single output string. Each block includes its own code, source map, and import metadata with UTF-16 offsets for JavaScript interop.
-
-```typescript
-import { compileForVite } from "@verter/native";
-
-const result = compileForVite(vueSfcSource, {
-  filename: "App.vue",
-  isProduction: false,
-  ssr: false,
-  componentId: "abc12345",
-  sourcemap: true,
-});
-
-// result.script  - JsBlockOutput | null (component definition)
-// result.template - JsBlockOutput | null (render function)
-// result.styles  - JsStyleBlock[]       (CSS blocks)
-// result.duration_ms - number           (compilation time)
-```
+`source` accepts a `string` or a `Buffer` (UTF-8 bytes). Every field on
+`compileProfile` above is required except `filename`, `comments`, and the
+optional module/delimiter overrides — `comments` is deliberately tri-state
+(omit it to keep the compiler default of `!isProduction`).
 
 ### Types
 
-All compile entry points accept `input` as `string | Buffer`.
+`source` accepts `string | Buffer` on every compile input.
 
 ```typescript
-interface CodegenOptions {
-  filename?: string;
-  includeSourceContent?: boolean;
-  ssr?: boolean;
-  isProduction?: boolean;
+interface CompileBatchInput {
+  canonicalId: string;
+  source: string | Buffer;
+  /** Compile cache mode; omit to inherit the batch `defaultMode`. */
+  requestedMode?: "stateless" | "content" | "session";
+  /** Per-component scoped-style / HMR id; `"runtime-render"` lane only. */
   componentId?: string;
-  features?: FeatureFlags;
 }
 
-interface FeatureFlags {
-  optionsApi?: boolean; // default: true
-  propsDestructure?: boolean; // default: true
+interface CompileBatchOptions {
+  priority?: "interactive" | "background";
+  defaultMode?: "stateless" | "content" | "session";
+  target?: "host-backed" | "runtime-render";
+  /** Required by the `"runtime-render"` lane, ignored by `"host-backed"`. */
+  compileProfile?: CompileBatchRenderProfile;
 }
 
-interface CodegenResult {
+interface CompileBatchRenderProfile {
+  filename?: string;
+  isProduction: boolean;
+  customElement: boolean;
+  ssr: boolean;
+  forceJs: boolean;
+  forceVapor: boolean;
+  sourceMap: boolean;
+  hmrStrategy: "none" | "vite" | "webpack";
+  /** Tri-state: omit to keep the compiler default (`!isProduction`). */
+  comments?: boolean;
+  runtimeModuleName?: string;
+  typesModuleName?: string;
+  delimiterOpen?: string;
+  delimiterClose?: string;
+  customElements?: string[];
+}
+
+interface CompileBatchEntry {
+  canonicalId: string;
   code: string;
-  sourceMap: string;
-  codeWithSourceMap: string;
-}
-
-interface ViteCodegenOptions {
-  filename?: string;
-  ssr?: boolean;
-  isProduction?: boolean;
-  componentId?: string;
-  sourcemap?: boolean;
-}
-
-interface ViteCodegenResult {
-  script: JsBlockOutput | null;
-  template: JsBlockOutput | null;
-  styles: JsStyleBlock[];
+  sourceMap?: string;
+  /** "ts" | "js" | "jsx", or undefined on an error outcome. */
+  lang?: string;
+  /** Fatal compilation errors. Empty on success. */
+  errors: string[];
+  /** Non-fatal warnings surfaced on a successful compile. */
+  diagnostics: HostDiagnostic[];
   durationMs: number;
-}
-
-interface JsBlockOutput {
-  code: string;
-  sourceMap: string | null;
-  imports: JsBlockImport[];
-  bodyStartUtf16: number;
-}
-
-interface JsBlockImport {
-  source: string;
-  specifiers: string[];
-  startUtf16: number;
-  endUtf16: number;
-}
-
-interface JsStyleBlock {
-  code: string;
-  sourceMap: string | null;
-  scoped: boolean;
-  isModule: boolean;
-  lang: string | null;
-  moduleName: string | null;
-  moduleClasses: string[][];
+  cacheHit: boolean;
+  requestedMode: "stateless" | "content" | "session";
+  actualMode: "stateless" | "content" | "session";
+  downgradeReason?: DowngradeReason;
 }
 ```
 

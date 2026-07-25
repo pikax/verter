@@ -804,6 +804,51 @@ export function readTestLog(): string {
   return fs.readFileSync(LOG_FILE, "utf-8");
 }
 
+/**
+ * A byte offset into the E2E log, used to scope a log query to one request window.
+ * Taken BEFORE the request under test so warm-up noise is never attributed to it.
+ */
+export function logMark(): number {
+  return readTestLog().length;
+}
+
+/**
+ * The workspace-symbol frontier refusals recorded since {@link logMark}.
+ *
+ * `prepare_workspace_symbol_frontier` (`crates/verter_lsp/src/server/provider_state.rs`)
+ * requires EVERY carrier in the owning configured project to be provider-loaded before it
+ * will let references or rename claim a project-wide answer. When it refuses, those
+ * features fail closed and the user sees a MISSING result, not an error — which at the
+ * test boundary is indistinguishable from "the provider computed a wrong answer". The
+ * server records the refusal; this reads it back so a test can NAME the cause instead of
+ * reporting a bare count mismatch.
+ *
+ * Requires the server to be running at debug level; the runner sets
+ * `verter.server.logLevel: "debug"` for exactly this reason.
+ */
+export function frontierRefusalsSince(mark: number): string[] {
+  const since = readTestLog().slice(mark);
+  return [
+    ...since.matchAll(/workspace-symbol frontier not ready: activated (\d+)\/(\d+) carriers/g),
+  ].map((match) => `activated ${match[1]}/${match[2]} carriers`);
+}
+
+/**
+ * Annotate a failure with the fail-closed cause when one was recorded.
+ *
+ * Returns the message unchanged when the frontier was ready, so a genuine provider defect
+ * still reads as a provider defect. When the frontier refused, the message is prefixed so
+ * the two failure modes are never confused for one another again.
+ */
+export function withFrontierDiagnosis(mark: number, message: string): string {
+  const refusals = frontierRefusalsSince(mark);
+  if (refusals.length === 0) return message;
+  return (
+    `FRONTIER-REFUSED (Verter failed closed; this is NOT a provider answer defect) ` +
+    `[${refusals.join("; ")}]: ${message}`
+  );
+}
+
 export function assertLogContains(needle: string, message?: string): void {
   const log = readTestLog();
   assert.ok(

@@ -243,7 +243,11 @@ ws.configureProjects([
   {
     root: "/path/to/project",
     workspaceRoot: "/path/to/project",
-    compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } },
+    compilerOptions: {
+      baseUrl: ".",
+      // NOTE: an ordered array of { pattern, targets } — not a tsconfig-style object map.
+      paths: [{ pattern: "@/*", targets: ["src/*"] }],
+    },
   },
 ]);
 

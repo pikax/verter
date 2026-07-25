@@ -79,6 +79,11 @@ This works for native HTML elements (via `HTMLElementEventMap`), Vue components 
 
 ```vue
 <script setup lang="ts">
+import type { Directive } from "vue";
+import { ref } from "vue";
+
+const count = ref(0);
+
 const vColor: Directive<HTMLElement, string, "red" | "blue"> = (el, binding) => {
   el.style.color = binding.value;
 };
@@ -441,10 +446,9 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 <details>
 <summary>Internal packages (not intended for direct use)</summary>
 
-| Package                | Description                                               |
-| ---------------------- | --------------------------------------------------------- |
-| `@verter/types`        | TypeScript utility types used by the compilation pipeline |
-| `@verter/oxc-bindings` | OXC parser binary download helper                         |
+| Package         | Description                                               |
+| --------------- | --------------------------------------------------------- |
+| `@verter/types` | TypeScript utility types used by the compilation pipeline |
 
 </details>
 

@@ -4,7 +4,7 @@ Type-safe helpers for rendering Vue slots with strict type validation based on [
 
 ## Overview
 
-`StrictRenderSlot` provides compile-time validation that slot content matches the expected return type. It enforces:
+`strictRenderSlot` provides compile-time validation that slot content matches the expected return type. It enforces:
 
 - **Array slots**: Accept arrays of the expected component/type
 - **Single slots**: Require single-element tuples (wraps single values)
@@ -15,10 +15,10 @@ Type-safe helpers for rendering Vue slots with strict type validation based on [
 
 ## API
 
-```ts
-import { StrictRenderSlot } from '@verter/types/slots';
+```text
+import { strictRenderSlot } from '@verter/types';
 
-declare function StrictRenderSlot<T, U>(
+declare function strictRenderSlot<T, U>(
   slot: T,
   children: /* inferred based on slot return type */
 ): any;
@@ -37,7 +37,7 @@ For slots returning arrays of components:
 
 ```ts
 import { defineComponent, SlotsType } from "vue";
-import { StrictRenderSlot } from "@verter/types/slots";
+import { strictRenderSlot } from "@verter/types";
 
 const TabItem = defineComponent({
   props: { id: { type: String, required: true } },
@@ -52,16 +52,16 @@ const Tabs = defineComponent({
 const tabs = new Tabs();
 
 // ✅ Valid: array of TabItem
-StrictRenderSlot(tabs.$slots.default, [TabItem, TabItem]);
+strictRenderSlot(tabs.$slots.default, [TabItem, TabItem]);
 
 // ✅ Valid: empty array
-StrictRenderSlot(tabs.$slots.default, []);
+strictRenderSlot(tabs.$slots.default, []);
 
 // ✅ Valid: single item
-StrictRenderSlot(tabs.$slots.default, [TabItem]);
+strictRenderSlot(tabs.$slots.default, [TabItem]);
 
 // ❌ Error: wrong component type
-StrictRenderSlot(tabs.$slots.default, [OtherComponent]);
+strictRenderSlot(tabs.$slots.default, [OtherComponent]);
 ```
 
 ### Single-Value Slots
@@ -78,10 +78,10 @@ const Panel = defineComponent({
 const panel = new Panel();
 
 // ✅ Valid: single element in tuple
-StrictRenderSlot(panel.$slots.header, [HeaderComponent]);
+strictRenderSlot(panel.$slots.header, [HeaderComponent]);
 
 // ❌ Error: multiple elements not allowed
-StrictRenderSlot(panel.$slots.header, [HeaderComponent, HeaderComponent]);
+strictRenderSlot(panel.$slots.header, [HeaderComponent, HeaderComponent]);
 ```
 
 ### Non-Empty Slots (Advanced Pattern)
@@ -99,11 +99,11 @@ const List = defineComponent({
 const list = new List();
 
 // ✅ Valid: one or more items
-StrictRenderSlot(list.$slots.items, [ListItem]);
-StrictRenderSlot(list.$slots.items, [ListItem, ListItem, ListItem]);
+strictRenderSlot(list.$slots.items, [ListItem]);
+strictRenderSlot(list.$slots.items, [ListItem, ListItem, ListItem]);
 
 // ❌ Error: empty array not allowed
-StrictRenderSlot(list.$slots.items, []);
+strictRenderSlot(list.$slots.items, []);
 ```
 
 **Why this pattern is useful:**
@@ -127,13 +127,13 @@ const Dialog = defineComponent({
 const dialog = new Dialog();
 
 // ✅ Valid: exactly two buttons in order
-StrictRenderSlot(dialog.$slots.actions, [CancelButton, ConfirmButton]);
+strictRenderSlot(dialog.$slots.actions, [CancelButton, ConfirmButton]);
 
 // ❌ Error: wrong number of elements
-StrictRenderSlot(dialog.$slots.actions, [CancelButton]);
+strictRenderSlot(dialog.$slots.actions, [CancelButton]);
 
 // ❌ Error: wrong order
-StrictRenderSlot(dialog.$slots.actions, [ConfirmButton, CancelButton]);
+strictRenderSlot(dialog.$slots.actions, [ConfirmButton, CancelButton]);
 ```
 
 ### Literal Type Slots
@@ -150,10 +150,10 @@ const Badge = defineComponent({
 const badge = new Badge();
 
 // ✅ Valid: literal value in tuple
-StrictRenderSlot(badge.$slots.status, ["success"]);
+strictRenderSlot(badge.$slots.status, ["success"]);
 
 // ❌ Error: wrong literal
-StrictRenderSlot(badge.$slots.status, ["invalid"]);
+strictRenderSlot(badge.$slots.status, ["invalid"]);
 ```
 
 ### Literal Arrays (With Limitation)
@@ -170,16 +170,16 @@ const Tags = defineComponent({
 const tags = new Tags();
 
 // ✅ Valid: array of valid literals
-StrictRenderSlot(tags.$slots.categories, ["tech", "design"]);
-StrictRenderSlot(tags.$slots.categories, []);
+strictRenderSlot(tags.$slots.categories, ["tech", "design"]);
+strictRenderSlot(tags.$slots.categories, []);
 
 // ⚠️ Limitation: Cannot reject wrong literals without `as const`
 // TypeScript widens ["invalid"] to string[] before type checking
-StrictRenderSlot(tags.$slots.categories, ["invalid"]); // Accepted (type widening)
+strictRenderSlot(tags.$slots.categories, ["invalid"]); // Accepted (type widening)
 
 // ✅ Use `as const` for strict literal checking
 // @ts-expect-error wrong literal
-StrictRenderSlot(tags.$slots.categories, ["invalid" as const]);
+strictRenderSlot(tags.$slots.categories, ["invalid" as const]);
 ```
 
 **Limitation explanation:**
@@ -203,16 +203,16 @@ const Container = defineComponent({
 const container = new Container();
 
 // ✅ Valid: correct element type
-StrictRenderSlot(container.$slots.icon, [document.createElement("span") as HTMLSpanElement]);
+strictRenderSlot(container.$slots.icon, [document.createElement("span") as HTMLSpanElement]);
 
 // ❌ Error: wrong element type (despite structural compatibility)
-StrictRenderSlot(container.$slots.icon, [document.createElement("div") as HTMLDivElement]);
+strictRenderSlot(container.$slots.icon, [document.createElement("div") as HTMLDivElement]);
 
 // ✅ Valid: array of correct elements
-StrictRenderSlot(container.$slots.icons, [document.createElement("span") as HTMLSpanElement]);
+strictRenderSlot(container.$slots.icons, [document.createElement("span") as HTMLSpanElement]);
 
 // ❌ Error: array of wrong elements
-StrictRenderSlot(container.$slots.icons, [document.createElement("div") as HTMLDivElement]);
+strictRenderSlot(container.$slots.icons, [document.createElement("div") as HTMLDivElement]);
 ```
 
 **Note:** HTMLElement discrimination uses exact type equality checking to prevent structural typing issues where `HTMLDivElement` would otherwise be compatible with `HTMLSpanElement`.
@@ -235,13 +235,13 @@ const Card = defineComponent({
 const card = new Card();
 
 // ✅ Valid: string
-StrictRenderSlot(card.$slots.content, ["Hello"]);
+strictRenderSlot(card.$slots.content, ["Hello"]);
 
 // ✅ Valid: component
-StrictRenderSlot(card.$slots.content, [TextBlock]);
+strictRenderSlot(card.$slots.content, [TextBlock]);
 
 // ✅ Valid: literal + component tuple
-StrictRenderSlot(card.$slots.header, ["title", IconComponent]);
+strictRenderSlot(card.$slots.header, ["title", IconComponent]);
 ```
 
 ## Type Checking Behavior
@@ -272,7 +272,7 @@ StrictRenderSlot(card.$slots.header, ["title", IconComponent]);
 
 ## Implementation Details
 
-The `StrictRenderSlot` function uses TypeScript's conditional types and generic inference:
+The `strictRenderSlot` function uses TypeScript's conditional types and generic inference:
 
 1. **First Overload** (Single Values):
    - Filters out array types (returns `never`)
@@ -302,14 +302,18 @@ When slot content has a specific structure:
 
 ```ts
 // ✅ Good: Explicit tuple type
-slots: {} as SlotsType<{
-  toolbar: () => [typeof BackButton, typeof Title, typeof MenuButton];
-}>
+defineComponent({
+  slots: {} as SlotsType<{
+    toolbar: () => [typeof BackButton, typeof Title, typeof MenuButton];
+  }>,
+});
 
 // ❌ Less clear: Array type
-slots: {} as SlotsType<{
-  toolbar: () => (typeof BackButton | typeof Title | typeof MenuButton)[];
-}>
+defineComponent({
+  slots: {} as SlotsType<{
+    toolbar: () => (typeof BackButton | typeof Title | typeof MenuButton)[];
+  }>,
+});
 ```
 
 ### Use Non-Empty Tuples for Required Content
@@ -318,14 +322,18 @@ When at least one element is mandatory:
 
 ```ts
 // ✅ Good: Non-empty tuple enforces presence
-slots: {} as SlotsType<{
-  items: () => [typeof Item, ...Array<typeof Item>];
-}>
+defineComponent({
+  slots: {} as SlotsType<{
+    items: () => [typeof Item, ...Array<typeof Item>];
+  }>,
+});
 
 // ⚠️ Less safe: Empty array allowed
-slots: {} as SlotsType<{
-  items: () => (typeof Item)[];
-}>
+defineComponent({
+  slots: {} as SlotsType<{
+    items: () => (typeof Item)[];
+  }>,
+});
 ```
 
 ### Use `as const` for Literal Validation
@@ -335,10 +343,10 @@ When you need strict literal checking in arrays:
 ```ts
 // With as const
 const tags = ["tag1", "tag2"] as const;
-StrictRenderSlot(slot, [...tags]); // Preserves literal types
+strictRenderSlot(slot, [...tags]); // Preserves literal types
 
 // Without as const
-StrictRenderSlot(slot, ["tag1", "tag2"]); // Widened to string[]
+strictRenderSlot(slot, ["tag1", "tag2"]); // Widened to string[]
 ```
 
 ### Document Limitations
@@ -347,9 +355,11 @@ When using literal arrays without `as const`, document the widening behavior:
 
 ```ts
 // Note: Without `as const`, wrong literals won't be caught at compile time
-slots: {} as SlotsType<{
-  tags: () => ("tag1" | "tag2" | "tag3")[];
-}>
+defineComponent({
+  slots: {} as SlotsType<{
+    tags: () => ("tag1" | "tag2" | "tag3")[];
+  }>,
+});
 ```
 
 ## Testing

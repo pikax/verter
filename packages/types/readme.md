@@ -318,7 +318,7 @@ import type { vOnModifiers, vModelModifiers, vBindModifiers } from "@verter/type
 
 // Type-safe v-on modifier checking
 // Returns which modifiers are valid for a given event on a given element
-type ClickMods = vOnModifiers<HTMLButtonElement, "onclick">;
+type ClickMods = vOnModifiers<HTMLButtonElement, "onClick">;
 // Partial<{ stop: true; prevent: true; self: true; ctrl: true; ... }>
 
 // v-model modifiers
@@ -334,19 +334,19 @@ type BindMods = vBindModifiers<HTMLDivElement, "class">;
 
 The `./tsx` export augments the JSX namespace with Verter-specific attributes:
 
-```typescript
+```tsx
 // Automatically available when @verter/types/tsx is imported
 // These are added to JSX.IntrinsicClassAttributes<T>:
 
 // v-slot: retrieve component instance type in TSX
-<MyComponent v-slot={(instance) => instance.$slots} />
+const a = <MyComponent v-slot={(instance) => instance.$slots} />;
 
 // v-directive: retrieve component instance for directive typing
-<MyComponent v-directive={(instance) => instance} />
+const b = <MyComponent v-directive={(instance) => instance} />;
 
 // onVue:* lifecycle hooks on any component
-<MyComponent onVue:mounted={(vnode) => console.log(vnode)} />
-<MyComponent onVue:before-unmount={(vnode, old) => cleanup()} />
+const c = <MyComponent onVue:mounted={(vnode) => console.log(vnode)} />;
+const d = <MyComponent onVue:before-unmount={(vnode, old) => cleanup()} />;
 ```
 
 ### String Export (for Language Servers)

@@ -65,15 +65,6 @@ test("every binary family's platform dirs are in the platform publish set", () =
   }
 });
 
-// @verter/oxc-bindings is published on npm from an earlier release but is
-// deliberately NOT a product root: it is an internal binding package, not part
-// of the shipped surface, so it stops being republished from here on.
-test("oxc-bindings is not published", () => {
-  const set = computePublishSet();
-  assert.ok(!set.npm.includes("@verter/oxc-bindings"));
-  assert.ok(!set.order.includes("@verter/oxc-bindings"));
-});
-
 test("every runtime workspace dependency of every published package is itself published", () => {
   const set = computePublishSet();
   const workspace = scanWorkspacePackages(join(ROOT, "packages"));
