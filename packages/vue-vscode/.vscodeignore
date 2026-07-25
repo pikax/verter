@@ -1,10 +1,12 @@
 # Source files (bundled by esbuild)
 src/**
 **/*.ts
+**/*.mts
 **/*.map
 tsconfig.json
 tsconfig.tsbuildinfo
 esbuild.mjs
+esbuild.config.mjs
 package.mjs
 stage-bin.mjs
 stage-deps.mjs

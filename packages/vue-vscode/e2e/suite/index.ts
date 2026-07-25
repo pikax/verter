@@ -151,7 +151,21 @@ export async function run(): Promise<void> {
         if (TYPE_PROVIDER) {
           await ensureTypeProviderSynced();
         }
-        await openReadyCached(getAppVuePath());
+        // The shared warmup waits for a carrier to answer a typed completion.
+        // The extension-hosted provider registers as `TypeProviderKind::Tsserver`
+        // and carrier publication is suppressed for that kind, so no `.vue.tsx`
+        // companion ever reaches the extension host and a carrier never gets a
+        // typed answer — the warmup cannot settle on that route, and its suite
+        // skips at `suiteSetup` naming the same defect. Guarding the warmup here
+        // lets that suite reach its own fixture-premise checks and report the
+        // defect, instead of dying in shared infrastructure 20s earlier. It
+        // asserts nothing, so no other route loses anything: every provider that
+        // does serve carriers keeps the warmup as its readiness gate. Delete this
+        // guard when carrier publication is connected for the extension-hosted
+        // topology.
+        if (TYPE_PROVIDER !== "extension") {
+          await openReadyCached(getAppVuePath());
+        }
       } catch (err) {
         rootHookError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
         throw err;

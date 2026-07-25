@@ -232,6 +232,50 @@ fn child_model_names(child: &FileAnalysisSnapshot) -> HashSet<String> {
         .collect()
 }
 
+/// Get the set of declared event names from a child's analysis.
+///
+/// Sources: `macros[DefineEmits].emit_fields` (type-based and runtime) plus
+/// `template.emit_definitions`. The template projection drops self-consuming
+/// `defineModel` events and is suppressed entirely when the emit binding
+/// escapes, so neither source subsumes the other.
+fn child_emit_names(child: &FileAnalysisSnapshot) -> HashSet<String> {
+    let mut names: HashSet<String> = child
+        .macros
+        .iter()
+        .filter(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+        .flat_map(|m| m.emit_fields.iter().map(|f| f.name.clone()))
+        .collect();
+    if let Some(t) = &child.template {
+        names.extend(t.emit_definitions.iter().map(|e| e.event_name.clone()));
+    }
+    names
+}
+
+/// Check whether the child declares the model `name` used by `v-model:name`.
+///
+/// `v-model:foo` is sugar for the pair `foo` prop + `update:foo` emit;
+/// `defineModel` is itself sugar over that same pair. Both spellings are
+/// therefore declarations of the model — recognising only the macro would
+/// flag every classically-written model as unknown.
+fn child_declares_model(
+    name: &str,
+    defined_models: &HashSet<String>,
+    defined_props: &HashSet<String>,
+    defined_emits: &HashSet<String>,
+) -> bool {
+    if defined_models.contains(name) {
+        return true;
+    }
+
+    // Template arguments are authored in either casing (`v-model:my-value`
+    // binds the `myValue` prop), so compare on the camelCase normalization
+    // used for prop matching and accept either authored emit spelling.
+    let camel_name = kebab_to_camel(name);
+    defined_props.contains(&camel_name)
+        && (defined_emits.contains(&format!("update:{camel_name}"))
+            || defined_emits.contains(&format!("update:{name}")))
+}
+
 /// Find unknown v-models across all component usages.
 pub fn find_unknown_models(
     analysis: &FileAnalysisSnapshot,
@@ -260,9 +304,16 @@ pub fn find_unknown_models(
         };
 
         let defined_models = child_model_names(&child);
+        let defined_props = child_prop_names(&child);
+        let defined_emits = child_emit_names(&child);
 
         for vmodel in &comp.v_models {
-            if !defined_models.contains(&vmodel.binding_name) {
+            if !child_declares_model(
+                &vmodel.binding_name,
+                &defined_models,
+                &defined_props,
+                &defined_emits,
+            ) {
                 results.push(UnknownModelInfo {
                     component_name: comp.name.clone(),
                     model_name: vmodel.binding_name.clone(),

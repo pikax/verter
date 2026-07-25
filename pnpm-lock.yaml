@@ -732,9 +732,6 @@ importers:
       '@verter/typescript-plugin':
         specifier: workspace:^
         version: link:../typescript-plugin
-      typescript:
-        specifier: ^6.0.3
-        version: 6.0.3
     devDependencies:
       '@types/chai':
         specifier: ^4.3.20
@@ -787,6 +784,9 @@ importers:
       source-map:
         specifier: ^0.7.6
         version: 0.7.6
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
       vite:
         specifier: ^8.0.14
         version: 8.0.14(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(less@4.6.4)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.8.2)

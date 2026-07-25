@@ -1755,18 +1755,29 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     }
 
     /**
-     * A selected non-editor provider still needs this plugin's project-membership
-     * and module-resolution hooks, but it is the sole owner of semantic features
-     * on the visible framework source. Returning the raw TypeScript service's
-     * answer would register a second provider against `.vue`; VS Code merges that
-     * answer with Verter's managed/shared provider and leaks globals, generated
-     * helpers, and non-actionable completion items. Source-feature wrappers must
-     * therefore fail closed while membership remains enabled.
+     * Whether this project must yield carrier source features to another
+     * provider. Returning the raw TypeScript service's answer for a carrier that
+     * another provider already owns registers a SECOND provider against `.vue`;
+     * VS Code merges the two and the user sees duplicated or conflicting results
+     * with no way to tell which is authoritative. An abstain is a clean single
+     * answer from the other provider, so this arbiter decides from a POSITIVE
+     * ownership signal and yields whenever ownership cannot be established.
+     *
+     * Only carrier subjects are arbitrated; a plain `.ts`/`.js` request is always
+     * this project's to answer. For a carrier subject exactly two configurations
+     * claim this project as the owner: an editor surface that also SELECTED it
+     * (`editorOwnsMembership && editorOwnsSourceFeatures`), and the
+     * verter_lsp-internal tsserver (no editor ownership, but a resolved carrier
+     * store), which is the sole provider on its surface. Everything else yields —
+     * an editor surface that selected another provider (managed/shared tsgo); a
+     * project no Verter host has configured, where the surface is unknown; and a
+     * source-feature claim without membership, which no integration produces and
+     * so signals a partial or stale configuration.
      */
     const editorYieldsCarrierSourceFeatures = (fileName: string): boolean => {
-      if (!editorOwnsMembership || editorOwnsSourceFeatures) return false;
-      if (usesEditorCarrierRouting(fileName)) return true;
-      return isCarrierCompanionPath(store, fileName);
+      if (!isVue(fileName) && !isCarrierCompanionPath(store, fileName)) return false;
+      if (editorOwnsMembership) return !editorOwnsSourceFeatures;
+      return editorOwnsSourceFeatures || storeDir === undefined;
     };
 
     function editorCarrierSelection(

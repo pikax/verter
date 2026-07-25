@@ -1,0 +1,5 @@
+{
+  "name": "e2e-out-of-tree-monorepo",
+  "private": true,
+  "comment": "The workspace ROOT deliberately installs NO TypeScript and declares NO tsconfig: the only configured project in this workspace is packages/app, and the only TypeScript is the one that package installs. Launched from an OS temp directory (see OUT_OF_TREE_FIXTURES in e2e/runTests.ts), so nothing above the root can supply one either."
+}

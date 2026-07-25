@@ -12,7 +12,7 @@ const require = createRequire(import.meta.url);
 const { buildParityTestInventory } = require(
   join(packageRoot, "out-test", "e2e", "lib", "parityTestInventory.js"),
 );
-const ACCEPTED_SUITE_COUNT = 75;
+const ACCEPTED_SUITE_COUNT = 76;
 const ACCEPTED_PARITY_LITERAL_COUNT = 258;
 const ACCEPTED_MATRIX_CASE_COUNT = 73;
 

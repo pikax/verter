@@ -2083,6 +2083,97 @@ describe("editor-owned source diagnostic routing", () => {
     ).toBe(true);
   });
 
+  // The carrier source-feature arbiter must decide from a POSITIVE ownership
+  // signal. These two cases differ in exactly one variable — whether a Verter
+  // host has configured this project's carrier store — and pin both directions:
+  // an unconfigured (unknown) surface must abstain so it never registers a
+  // second provider beside the selected one, while the configured non-editor
+  // surface (the verter_lsp-internal tsserver, the sole provider there) must
+  // keep answering.
+  const carrierArbiterProbe = (storeDir: string | undefined) => {
+    const sourcePath = "d:/ws/src/A.vue";
+    const plainPath = "d:/ws/src/real.ts";
+    const info = createInfo(storeDir, {
+      diskFiles: { [sourcePath]: "const foo = 1;\n", [plainPath]: "const bar = 2;\n" },
+    });
+    const requests: string[] = [];
+    const quickInfo = {
+      kind: ts.ScriptElementKind.constElement,
+      kindModifiers: "",
+      textSpan: { start: 6, length: 3 },
+      displayParts: [{ kind: "text", text: "const foo: number" }],
+    };
+    const definitions = [
+      { fileName: sourcePath, textSpan: { start: 6, length: 3 }, kind: "const", name: "foo" },
+    ];
+    const completions = { entries: [], isGlobalCompletion: false, isMemberCompletion: false };
+    info.languageService.__lsImpl = {
+      getQuickInfoAtPosition: (fileName: string) => {
+        requests.push(`quickInfo:${fileName}`);
+        return quickInfo;
+      },
+      getDefinitionAtPosition: (fileName: string) => {
+        requests.push(`definition:${fileName}`);
+        return definitions;
+      },
+      getCompletionsAtPosition: (fileName: string) => {
+        requests.push(`completions:${fileName}`);
+        return completions;
+      },
+    };
+    init({ typescript: ts } as any).create(info);
+    return {
+      sourcePath,
+      plainPath,
+      info,
+      requests,
+      expected: { quickInfo, definitions, completions },
+    };
+  };
+
+  it("abstains from carrier source features when no Verter host has configured this project", () => {
+    const probe = carrierArbiterProbe(undefined);
+
+    // The carrier subject is NOT this project's to answer: no configuration has
+    // told the plugin which surface it is in, so another provider may already be
+    // serving this file. Fail closed rather than produce a duplicate answer.
+    expect(probe.info.languageService.getQuickInfoAtPosition(probe.sourcePath, 6)).toBeUndefined();
+    expect(probe.info.languageService.getDefinitionAtPosition(probe.sourcePath, 6)).toBeUndefined();
+    expect(
+      probe.info.languageService.getCompletionsAtPosition(probe.sourcePath, 6, {}),
+    ).toBeUndefined();
+    expect(probe.requests.filter((entry) => entry.endsWith(probe.sourcePath))).toEqual([]);
+
+    // Abstaining is scoped to carrier subjects: a plain TypeScript file in the
+    // same unconfigured project is still answered normally.
+    expect(probe.info.languageService.getQuickInfoAtPosition(probe.plainPath, 6)).toEqual(
+      probe.expected.quickInfo,
+    );
+    expect(probe.requests).toContain(`quickInfo:${probe.plainPath}`);
+  });
+
+  it("still answers carrier source features for the configured non-editor host it owns", () => {
+    const dir = track(writeStore(mappableManifest(), mappableBlobs()));
+    const probe = carrierArbiterProbe(dir);
+
+    // The verter_lsp-internal tsserver is the SOLE provider on this surface; the
+    // arbiter must not mistake "no editor ownership flags" for "unknown".
+    expect(probe.info.languageService.getQuickInfoAtPosition(probe.sourcePath, 6)).toEqual(
+      probe.expected.quickInfo,
+    );
+    expect(probe.info.languageService.getDefinitionAtPosition(probe.sourcePath, 6)).toEqual(
+      probe.expected.definitions,
+    );
+    expect(probe.info.languageService.getCompletionsAtPosition(probe.sourcePath, 6, {})).toEqual(
+      probe.expected.completions,
+    );
+    // Every feature reached the underlying service under the carrier identity —
+    // the exact evidence an abstain would erase.
+    expect(probe.requests).toContain(`quickInfo:${probe.sourcePath}`);
+    expect(probe.requests).toContain(`definition:${probe.sourcePath}`);
+    expect(probe.requests).toContain(`completions:${probe.sourcePath}`);
+  });
+
   it("queries the ready companion and maps its diagnostic onto the source file", () => {
     const dir = track(writeStore(mappableManifest(), mappableBlobs()));
     const sourcePath = "d:/ws/src/A.vue";

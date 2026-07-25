@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ExtensionTsService } from "./extensionTsService.js";
+import { materializeWorkspaceTypeScript } from "./extensionTsService.testUtils.js";
 
 interface WireDiagnostic {
   start?: { line: number; offset: number };
@@ -39,6 +40,9 @@ afterEach(() => {
 function makeProject(fileName: string, source: string): { root: string; filePath: string } {
   const root = mkdtempSync(join(tmpdir(), "ext-diag-"));
   tmps.push(root);
+  // The service serves ONLY from a workspace TypeScript — materialize one the
+  // way a real workspace's install would.
+  materializeWorkspaceTypeScript(root);
   writeFileSync(
     join(root, "tsconfig.json"),
     JSON.stringify({

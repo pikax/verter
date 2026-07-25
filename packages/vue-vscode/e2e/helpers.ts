@@ -331,6 +331,9 @@ export async function waitForOnTypeReady(
 export function getAppVuePath(): string {
   switch (FIXTURE_NAME) {
     case "monorepo":
+    // The out-of-tree workspace has no root project at all: its only carrier
+    // lives in the nested package that owns it.
+    case "out-of-tree-monorepo":
       return "packages/app/src/App.vue";
     case "no-config":
     case "single-file":
@@ -775,7 +778,8 @@ function isE2eTypeProviderRoute(value: string): value is E2eTypeProviderRoute {
     value === "tsserver" ||
     value === "tsgo" ||
     value === "shared-tsgo" ||
-    value === "editor-tsserver"
+    value === "editor-tsserver" ||
+    value === "extension"
   );
 }
 

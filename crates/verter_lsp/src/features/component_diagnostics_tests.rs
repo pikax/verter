@@ -660,6 +660,206 @@ fn dynamic_component_vmodel_skipped() {
     );
 }
 
+/// Helper to build a child that declares a v-model the classic way: a
+/// `defineProps` field plus the matching `defineEmits` `update:` event.
+fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysisSnapshot {
+    fn macro_shell(kind: AnalyzedMacroKind) -> AnalyzedMacro {
+        AnalyzedMacro {
+            kind,
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            is_type_based: true,
+            type_references: vec![],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: vec![],
+            emit_fields: vec![],
+            slot_fields: vec![],
+            default_keys: vec![],
+            expose_fields: vec![],
+            default_values: Vec::new(),
+            resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
+            span: verter_span::Span::new(0, 30),
+        }
+    }
+
+    let mut define_props = macro_shell(AnalyzedMacroKind::DefineProps);
+    define_props.prop_fields = props
+        .iter()
+        .map(|name| verter_semantic::analysis::AnalyzedPropField {
+            name: (*name).to_string(),
+            span: verter_span::Span::new(0, 0),
+            type_annotation: Some("string".into()),
+            is_optional: false,
+            description: None,
+            tags: vec![],
+            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+            resolution_error: None,
+            payload: None,
+            type_expr_scope: None,
+            declared_in_macro_type_arg: true,
+        })
+        .collect();
+
+    let mut define_emits = macro_shell(AnalyzedMacroKind::DefineEmits);
+    define_emits.emit_fields = emits
+        .iter()
+        .map(|name| verter_semantic::analysis::AnalyzedEmitField {
+            name: (*name).to_string(),
+            span: verter_span::Span::new(0, 0),
+            payload_type: None,
+            description: None,
+            tags: vec![],
+            payload: None,
+            payload_expr_scope: None,
+        })
+        .collect();
+
+    FileAnalysisSnapshot {
+        macros: vec![define_props, define_emits].into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn default_vmodel_declared_as_prop_and_emit_pair_no_diagnostic() {
+    // <Child v-model="val" />; Child:
+    //   defineProps<{ modelValue: string }>()
+    //   defineEmits<{ 'update:modelValue': [v: string] }>()
+    // `defineModel` is sugar over exactly this pair, so the pair must be
+    // recognised as a declared model.
+    let parent = make_parent_analysis(vec![make_component_with_vmodels(
+        "Child",
+        "./Child.vue",
+        vec![TemplateComponentVModel {
+            binding_name: "modelValue".to_string(),
+            span: verter_span::Span::new(10, 25),
+        }],
+    )]);
+    let child = make_child_with_prop_emit_pair(&["modelValue"], &["update:modelValue"]);
+
+    let unknowns = find_unknown_models(&parent, &|_| Some(child.clone()));
+    assert!(
+        unknowns.is_empty(),
+        "prop + update: emit pair must count as a declared v-model, got {:?}",
+        unknowns.iter().map(|u| &u.model_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn named_vmodel_declared_as_prop_and_emit_pair_no_diagnostic() {
+    // <Child v-model:title="val" />; Child:
+    //   defineProps<{ title: string }>()
+    //   defineEmits<{ 'update:title': [v: string] }>()
+    let parent = make_parent_analysis(vec![make_component_with_vmodels(
+        "Child",
+        "./Child.vue",
+        vec![TemplateComponentVModel {
+            binding_name: "title".to_string(),
+            span: verter_span::Span::new(10, 30),
+        }],
+    )]);
+    let child = make_child_with_prop_emit_pair(&["title"], &["update:title"]);
+
+    let unknowns = find_unknown_models(&parent, &|_| Some(child.clone()));
+    assert!(
+        unknowns.is_empty(),
+        "named prop + update: emit pair must count as a declared v-model, got {:?}",
+        unknowns.iter().map(|u| &u.model_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn kebab_named_vmodel_matches_camel_case_pair_no_diagnostic() {
+    // <Child v-model:my-value="val" />; Child:
+    //   defineProps<{ myValue: string }>()
+    //   defineEmits<{ 'update:myValue': [v: string] }>()
+    let parent = make_parent_analysis(vec![make_component_with_vmodels(
+        "Child",
+        "./Child.vue",
+        vec![TemplateComponentVModel {
+            binding_name: "my-value".to_string(),
+            span: verter_span::Span::new(10, 30),
+        }],
+    )]);
+    let child = make_child_with_prop_emit_pair(&["myValue"], &["update:myValue"]);
+
+    let unknowns = find_unknown_models(&parent, &|_| Some(child.clone()));
+    assert!(
+        unknowns.is_empty(),
+        "kebab v-model arg must match the camelCase prop + emit pair, got {:?}",
+        unknowns.iter().map(|u| &u.model_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn vmodel_with_neither_prop_nor_emit_still_warns() {
+    // CONTROL — the rule must stay discriminating. Child declares a full
+    // `other` model pair but nothing for `bar`, so `v-model:bar` still warns.
+    let parent = make_parent_analysis(vec![make_component_with_vmodels(
+        "Child",
+        "./Child.vue",
+        vec![TemplateComponentVModel {
+            binding_name: "bar".to_string(),
+            span: verter_span::Span::new(10, 30),
+        }],
+    )]);
+    let child = make_child_with_prop_emit_pair(&["other"], &["update:other"]);
+
+    let unknowns = find_unknown_models(&parent, &|_| Some(child.clone()));
+    assert_eq!(unknowns.len(), 1, "unknown v-model must still be reported");
+    assert_eq!(unknowns[0].model_name, "bar");
+    // Negative: the declared `other` model is not flagged.
+    assert!(!unknowns.iter().any(|u| u.model_name == "other"));
+}
+
+#[test]
+fn vmodel_with_prop_but_no_update_emit_still_warns() {
+    // CONTROL — half a model is not a model: prop `title` with no
+    // `update:title` emit is not a writable v-model target.
+    let parent = make_parent_analysis(vec![make_component_with_vmodels(
+        "Child",
+        "./Child.vue",
+        vec![TemplateComponentVModel {
+            binding_name: "title".to_string(),
+            span: verter_span::Span::new(10, 30),
+        }],
+    )]);
+    let child = make_child_with_prop_emit_pair(&["title"], &["change"]);
+
+    let unknowns = find_unknown_models(&parent, &|_| Some(child.clone()));
+    assert_eq!(
+        unknowns.len(),
+        1,
+        "prop without the matching update: emit must still warn"
+    );
+    assert_eq!(unknowns[0].model_name, "title");
+}
+
+#[test]
+fn vmodel_with_update_emit_but_no_prop_still_warns() {
+    // CONTROL — the other half: `update:title` emit with no `title` prop.
+    let parent = make_parent_analysis(vec![make_component_with_vmodels(
+        "Child",
+        "./Child.vue",
+        vec![TemplateComponentVModel {
+            binding_name: "title".to_string(),
+            span: verter_span::Span::new(10, 30),
+        }],
+    )]);
+    let child = make_child_with_prop_emit_pair(&["other"], &["update:title"]);
+
+    let unknowns = find_unknown_models(&parent, &|_| Some(child.clone()));
+    assert_eq!(
+        unknowns.len(),
+        1,
+        "update: emit without the matching prop must still warn"
+    );
+    assert_eq!(unknowns[0].model_name, "title");
+}
+
 // ── data-*/aria-* fallthrough tests ─────────────────────────────
 
 use verter_semantic::analysis::template::TemplateElement;

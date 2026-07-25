@@ -29,6 +29,20 @@ import {
 } from "./lib/routeInventory";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
+const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
+/**
+ * Fixtures whose workspace must be launched from OUTSIDE this repository.
+ *
+ * The extension-hosted provider resolves each project's TypeScript with
+ * `createRequire` anchored at the project root the LSP DECLARES, and Node walks
+ * ancestors. Under `e2e/fixtures/*` every ancestor chain ends in the repo's own
+ * `node_modules/typescript`, so a wrongly-declared root (the workspace folder
+ * instead of the owning package) still resolves a compiler and the fixture
+ * passes against the defect it exists to catch. Materialized into an OS temp
+ * directory the chain ends at the filesystem root with no TypeScript, so only
+ * the correctly-declared nested package can serve.
+ */
+const OUT_OF_TREE_FIXTURES: ReadonlySet<string> = new Set([EXTENSION_ACCEPTANCE_FIXTURE]);
 const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
 const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework; only: string }>> =
   {
@@ -110,6 +124,34 @@ function selectRoutes(options: {
     fixture: options.fixtureArg ?? options.envFixture,
     typeProvider: options.envTypeProvider,
   });
+}
+
+/**
+ * Copy an out-of-tree fixture template into a fresh OS temp workspace.
+ *
+ * `node_modules` is never copied: the whole point of the workspace is which
+ * package has an install and which does not.
+ */
+function materializeOutOfTreeWorkspace(fixture: string, templateDir: string): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `verter-e2e-ws-${fixture}-`));
+  fs.cpSync(templateDir, root, {
+    recursive: true,
+    filter: (src) => path.basename(src) !== "node_modules",
+  });
+  console.log(`  Materialized out-of-tree workspace: ${root}`);
+  return root;
+}
+
+function removeOutOfTreeWorkspace(root: string): void {
+  const target = path.resolve(root);
+  const tempRoot = path.resolve(os.tmpdir());
+  if (
+    !target.startsWith(`${tempRoot}${path.sep}`) ||
+    !path.basename(target).startsWith("verter-e2e-ws-")
+  ) {
+    throw new Error(`Refusing to remove unexpected E2E workspace path: ${target}`);
+  }
+  fs.rmSync(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 /**
@@ -212,7 +254,11 @@ async function main() {
   for (const [index, route] of routesToRun.entries()) {
     const { fixture, typeProvider } = route;
     const label = e2eRouteLabel(route);
-    const fixtureDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
+    const templateDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
+    const outOfTreeWorkspace = OUT_OF_TREE_FIXTURES.has(fixture)
+      ? materializeOutOfTreeWorkspace(fixture, templateDir)
+      : undefined;
+    const fixtureDir = outOfTreeWorkspace ?? templateDir;
 
     console.log(`\n${"=".repeat(60)}`);
     console.log(`Running E2E tests for fixture: ${label}`);
@@ -220,8 +266,19 @@ async function main() {
     if (typeProvider) console.log(`Type provider override: ${typeProvider}`);
     console.log("=".repeat(60));
 
-    // Install fixture dependencies if needed (for Vue type resolution)
-    installFixtureDeps(fixtureDir);
+    // Install fixture dependencies if needed (for Vue type resolution).
+    // An out-of-tree workspace installs ONLY inside its packages: its root must
+    // stay TypeScript-less, which is the condition under test.
+    if (outOfTreeWorkspace) {
+      const packagesDir = path.join(fixtureDir, "packages");
+      if (fs.existsSync(packagesDir)) {
+        for (const pkg of fs.readdirSync(packagesDir)) {
+          installFixtureDeps(path.join(packagesDir, pkg));
+        }
+      }
+    } else {
+      installFixtureDeps(fixtureDir);
+    }
     // For monorepo, also install workspace package deps
     if (fixture === "monorepo") {
       const packagesDir = path.join(fixtureDir, "packages");
@@ -308,16 +365,18 @@ async function main() {
             : {}),
           ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
             ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
-            : CONTRACT_FIXTURES[fixture]
-              ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
-              : fixture in PARITY_FIXTURE_CONFIGS
-                ? {
-                    VERTER_E2E_ONLY:
-                      onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
-                  }
-                : onlyPattern
-                  ? { VERTER_E2E_ONLY: onlyPattern }
-                  : {}),
+            : fixture === EXTENSION_ACCEPTANCE_FIXTURE
+              ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
+              : CONTRACT_FIXTURES[fixture]
+                ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+                : fixture in PARITY_FIXTURE_CONFIGS
+                  ? {
+                      VERTER_E2E_ONLY:
+                        onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                    }
+                  : onlyPattern
+                    ? { VERTER_E2E_ONLY: onlyPattern }
+                    : {}),
         },
       });
       // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
@@ -346,8 +405,10 @@ async function main() {
     } finally {
       if (readE2eEnv("KEEP_PROFILE") === "1") {
         console.log(`  Preserved E2E profile: ${profile.root}`);
+        if (outOfTreeWorkspace) console.log(`  Preserved E2E workspace: ${outOfTreeWorkspace}`);
       } else {
         removeE2eProfile(profile);
+        if (outOfTreeWorkspace) removeOutOfTreeWorkspace(outOfTreeWorkspace);
       }
     }
   }

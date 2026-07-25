@@ -81,7 +81,10 @@ import {
   shouldConfigureTypeScriptPluginForLanguageId,
 } from "./frameworkWiring";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
-import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
+import {
+  buildLspLaunchArgs,
+  shouldRestartLanguageServerForConfigurationChange,
+} from "./languageServerConfig";
 import { createTypeScriptPluginRefreshScheduler } from "./typescriptPluginRefreshScheduler";
 import { clientProcessLifetimeArg } from "./clientProcessLifetime";
 import { addShowRecentAuditRecordsCommand } from "./audit";
@@ -612,23 +615,91 @@ function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
   return `verter-lsp${ext}`;
 }
 
+interface LanguageServerActivationOptions {
+  onReady?: () => void;
+  /**
+   * Called with the LSP-reported per-workspace carrier-store dir (the
+   * `CarrierStoreReady` notification). The extension forwards it to VS Code's
+   * own TS server via `configurePlugin`.
+   */
+  onCarrierStoreReady?: (carrierStoreDir: string) => void;
+  /** Select exactly one editor-facing TypeScript owner for carrier features. */
+  onEditorCarrierSourceFeatureOwnership?: (ownsSourceFeatures: boolean) => void;
+  /** Refresh the editor plugin after a durable carrier-store publication pass. */
+  onTypeProviderSyncComplete?: () => void;
+}
+
+/**
+ * Everything ONE language-server start attempt creates.
+ *
+ * A start attempt registers event subscriptions, a status bar item, external
+ * process state and the heartbeat watchdog timer. All of it belongs to that
+ * attempt: on success the scope stays registered with the extension context so
+ * deactivation tears it down, and on failure the attempt disposes its own scope
+ * so the next attempt starts from nothing. Registering this state directly on
+ * `context.subscriptions` instead ties it to deactivation, which is why a server
+ * that could not launch multiplied its status bar item and left an uncancellable
+ * restart timer running on every retry.
+ */
+class StartAttemptScope implements Disposable {
+  private items: Disposable[] = [];
+  private disposed = false;
+
+  add(...items: Disposable[]): void {
+    for (const item of items) {
+      if (this.disposed) {
+        item.dispose();
+        continue;
+      }
+      this.items.push(item);
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    // Reverse order: later registrations may depend on earlier ones.
+    for (const item of this.items.splice(0).reverse()) {
+      try {
+        item.dispose();
+      } catch {
+        // One faulty disposer must not strand the rest of the attempt.
+      }
+    }
+  }
+}
+
 export async function activateVueLanguageServer(
   context: ExtensionContext,
   log: LogOutputChannel,
   startupProbe?: StartupProbe,
-  options?: {
-    onReady?: () => void;
-    /**
-     * Called with the LSP-reported per-workspace carrier-store dir (the
-     * `CarrierStoreReady` notification). The extension forwards it to VS Code's
-     * own TS server via `configurePlugin`.
-     */
-    onCarrierStoreReady?: (carrierStoreDir: string) => void;
-    /** Select exactly one editor-facing TypeScript owner for carrier features. */
-    onEditorCarrierSourceFeatureOwnership?: (ownsSourceFeatures: boolean) => void;
-    /** Refresh the editor plugin after a durable carrier-store publication pass. */
-    onTypeProviderSyncComplete?: () => void;
-  },
+  options?: LanguageServerActivationOptions,
+) {
+  const attempt = new StartAttemptScope();
+  context.subscriptions.push(attempt);
+  try {
+    return await startVueLanguageServer(attempt, context, log, startupProbe, options);
+  } catch (error) {
+    // The attempt failed. Release everything it created now rather than leaving
+    // it for deactivation, and unregister the scope so a retry cannot stack a
+    // spent entry onto the extension's subscription list.
+    attempt.dispose();
+    const registered = context.subscriptions.indexOf(attempt);
+    if (registered !== -1) {
+      context.subscriptions.splice(registered, 1);
+    }
+    throw error;
+  }
+}
+
+async function startVueLanguageServer(
+  attempt: StartAttemptScope,
+  context: ExtensionContext,
+  log: LogOutputChannel,
+  startupProbe?: StartupProbe,
+  options?: LanguageServerActivationOptions,
 ) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
@@ -647,12 +718,12 @@ export async function activateVueLanguageServer(
     effectiveTypeProvider,
     log,
   );
-  context.subscriptions.push({ dispose: () => sharedTsgo.dispose() });
+  attempt.add({ dispose: () => sharedTsgo.dispose() });
   const editorTsserver =
     sharedTsgo.lspArgs.length === 0
       ? await establishEditorTsserverPlugin(effectiveTypeProvider, rootPath, log)
       : NO_EDITOR_TSSERVER;
-  context.subscriptions.push({ dispose: () => editorTsserver.dispose() });
+  attempt.add({ dispose: () => editorTsserver.dispose() });
   options?.onEditorCarrierSourceFeatureOwnership?.(
     editorTsserverOwnsCarrierSourceFeatures(editorTsserver.lspArgs),
   );
@@ -668,7 +739,7 @@ export async function activateVueLanguageServer(
     return cssService;
   };
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
-  context.subscriptions.push(cssDiagnostics);
+  attempt.add(cssDiagnostics);
   const hasStyleBlockAtPosition = (source: string, line: number, character: number) =>
     findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
   const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
@@ -928,7 +999,7 @@ export async function activateVueLanguageServer(
   workspace.textDocuments.forEach((document) => {
     plainScriptSync.observeOpen(snapshotPlainScriptDocument(document));
   });
-  context.subscriptions.push(
+  attempt.add(
     workspace.onDidOpenTextDocument((document) => {
       plainScriptSync.observeOpen(snapshotPlainScriptDocument(document));
     }),
@@ -939,23 +1010,26 @@ export async function activateVueLanguageServer(
       plainScriptSync.observeClose(snapshotPlainScriptDocument(document));
     }),
   );
+  // The state listener follows the CURRENT client. A restart replaces it rather
+  // than stacking another listener onto a client that is already gone.
+  let plainScriptStateSubscription: Disposable | undefined;
+  attempt.add({ dispose: () => plainScriptStateSubscription?.dispose() });
   const bindPlainScriptSync = (targetClient: LanguageClient) => {
     const sender = {
       sendNotification(method: string, params: unknown) {
         void targetClient.sendNotification(method, params);
       },
     };
-    context.subscriptions.push(
-      targetClient.onDidChangeState(({ newState }) => {
-        const state =
-          newState === LanguageClientState.Running
-            ? "running"
-            : newState === LanguageClientState.Stopped
-              ? "stopped"
-              : "starting";
-        plainScriptSync.observeClientState(state, sender);
-      }),
-    );
+    plainScriptStateSubscription?.dispose();
+    plainScriptStateSubscription = targetClient.onDidChangeState(({ newState }) => {
+      const state =
+        newState === LanguageClientState.Running
+          ? "running"
+          : newState === LanguageClientState.Stopped
+            ? "stopped"
+            : "starting";
+      plainScriptSync.observeClientState(state, sender);
+    });
   };
   bindPlainScriptSync(client);
 
@@ -997,6 +1071,7 @@ export async function activateVueLanguageServer(
   // We register it with VS Code's MCP provider API so Copilot Chat discovers it,
   // and update .mcp.json for Claude Code CLI.
   let mcpProviderDisposable: Disposable | undefined;
+  attempt.add({ dispose: () => mcpProviderDisposable?.dispose() });
   function registerMcpListener(lc: LanguageClient) {
     lc.onNotification(NotificationType.McpReady, (params: { port: number }) => {
       log.info(`MCP HTTP server ready on port ${params.port}`);
@@ -1014,7 +1089,6 @@ export async function activateVueLanguageServer(
             ];
           },
         });
-        context.subscriptions.push(mcpProviderDisposable);
         log.info("Registered MCP server with VS Code MCP provider API");
       } catch (e) {
         log.warn(`Failed to register MCP server with VS Code: ${e}`);
@@ -1083,7 +1157,7 @@ export async function activateVueLanguageServer(
   typeProviderStatusBar.text = "$(sync~spin) Verter";
   typeProviderStatusBar.tooltip = "Verter: waiting for type provider status...";
   typeProviderStatusBar.show();
-  context.subscriptions.push(typeProviderStatusBar);
+  attempt.add(typeProviderStatusBar);
 
   // Provider recommendation (tsgo-preferred): the server sends structured
   // facts on $/verter/typeProviderStatus; this client renders them once per
@@ -1209,24 +1283,49 @@ export async function activateVueLanguageServer(
     }
   }
 
+  // The watchdog timer is armed by `registerHeartbeatMonitor`, so it is
+  // cancellable from exactly one place: a failed attempt, a superseding retry
+  // (which re-arms through the same monitor) and deactivation all disarm it.
+  attempt.add({ dispose: stopHeartbeatTimer });
   registerHeartbeatMonitor(client);
 
   // ── Extension-hosted TypeScript language service (Experiment E) ──
   // When --type-provider=extension is used, the Rust LSP sends $/verter/tsQuery
-  // requests back to the extension. We lazily create the in-process TS service.
-  let tsService: import("./extensionTsService").ExtensionTsService | undefined;
+  // requests back to the extension. Resolution is PROJECT-BOUND: the LSP sends
+  // the owning project root with each `open`, and the registry routes every
+  // later query for that file to that project's own TypeScript — so a monorepo
+  // package with its own install is served from it, and a project that cannot
+  // serve fails closed alone, without disabling its siblings.
+  let tsQueryHandler:
+    | ReturnType<typeof import("./extensionTsServiceRegistry").createTsQueryHandler>
+    | undefined;
   function registerTsQueryHandler(lc: LanguageClient) {
     lc.onRequest(
       "$/verter/tsQuery",
       (params: { command: string; arguments: Record<string, unknown> }) => {
-        if (!tsService) {
-          const { ExtensionTsService } =
-            require("./extensionTsService") as typeof import("./extensionTsService");
-          const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
-          if (!wsRoot) throw new Error("No workspace root for extension TS service");
-          tsService = new ExtensionTsService(wsRoot);
+        if (!tsQueryHandler) {
+          const { ExtensionTsServiceRegistry, createTsQueryHandler } =
+            require("./extensionTsServiceRegistry") as typeof import("./extensionTsServiceRegistry");
+          const registry = new ExtensionTsServiceRegistry({
+            // No owner fallback is wired, deliberately. The LSP declares the
+            // owning project root on every open, resolved from the workspace
+            // snapshot's configured owner; a VS Code workspace FOLDER is not
+            // that root (a monorepo has one folder and many projects), so
+            // answering from folder ownership would reintroduce the very
+            // wrong-root defect the declared binding exists to fix. A file the
+            // LSP never bound fails closed.
+            //
+            // A project whose TypeScript is missing or library-less is
+            // user-actionable: surface the one-shot notification, and let the
+            // thrown error propagate so the LSP request fails closed too
+            // (typed provider error).
+            onUnavailable: (message) => {
+              void window.showErrorMessage(message);
+            },
+          });
+          tsQueryHandler = createTsQueryHandler(registry);
         }
-        return tsService.handleQuery(params.command, params.arguments);
+        return tsQueryHandler(params);
       },
     );
   }
@@ -1234,6 +1333,14 @@ export async function activateVueLanguageServer(
 
   // CSS validation diagnostics — update on document change (debounced per URI)
   const cssDiagTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  attempt.add({
+    dispose: () => {
+      for (const timer of cssDiagTimers.values()) {
+        clearTimeout(timer);
+      }
+      cssDiagTimers.clear();
+    },
+  });
   const updateCssDiagnostics = async (document: TextDocument) => {
     if (!isFrameworkCarrierLanguageId(document.languageId)) return;
     try {
@@ -1281,7 +1388,7 @@ export async function activateVueLanguageServer(
     );
   };
 
-  context.subscriptions.push(
+  attempt.add(
     workspace.onDidChangeTextDocument((e) => {
       if (isFrameworkCarrierLanguageId(e.document.languageId)) {
         debouncedCssDiag(e.document);
@@ -1302,7 +1409,7 @@ export async function activateVueLanguageServer(
     workspace.textDocuments.forEach((document) => {
       startupProbe?.maybeTrackDocument(document);
     });
-    context.subscriptions.push(
+    attempt.add(
       window.onDidChangeActiveTextEditor((editor) => {
         if (editor) {
           startupProbe.maybeTrackDocument(editor.document);
@@ -1340,7 +1447,7 @@ export async function activateVueLanguageServer(
           registerMcpListener(client);
           registerViteConfigTrustHandler(client);
           registerTypeProviderStatusHandler(client);
-          tsService = undefined; // Reset TS service on restart
+          tsQueryHandler = undefined; // Drop every project's TS service on restart
           registerTsQueryHandler(client);
           await client.start();
         },
@@ -1714,29 +1821,25 @@ function buildServerOptions(
   const typeProvider =
     readE2eEnv("TYPE_PROVIDER") || verterConfig.get<string>("typeProvider", "auto");
   const userTsdk = verterConfig.get<string>("typescript.tsdk", "");
-  // Always pass --tsdk: user setting → bundled TypeScript (fallback for pnpm strict mode etc.)
-  const bundledTsdk = join(extensionPath, "node_modules", "typescript", "lib");
-  const tsdk = userTsdk || bundledTsdk;
 
   const mcpEnabled = verterConfig.get<boolean>("mcp.enabled", true);
   const mcpLintPreset = verterConfig.get<string>("mcp.lintPreset", "recommended");
 
-  const args: string[] = [];
-  args.push(clientProcessLifetimeArg(process.pid));
-  args.push(`--type-provider=${typeProvider}`);
-  args.push(`--tsdk=${tsdk}`);
-  args.push(`--plugin-path=${join(extensionPath, "node_modules")}`);
-  if (mcpEnabled) {
-    args.push(`--mcp-port=0`);
-    args.push(`--mcp-lint-preset=${mcpLintPreset}`);
-  }
-  // Pass only attested editor-serving facts. These are --prefixed flags, so they
-  // precede the positional workspace-root argument the LSP parses last.
-  args.push(...sharedLspArgs);
-  if (rootPath) args.push(rootPath);
+  // --tsdk comes ONLY from the user's setting. The LSP's own discovery searches
+  // project-local installs first and fails closed with an actionable error when
+  // nothing resolves; the extension no longer injects its own TypeScript.
+  const args = buildLspLaunchArgs({
+    clientProcessLifetimeArg: clientProcessLifetimeArg(process.pid),
+    typeProvider,
+    userTsdk,
+    pluginPath: join(extensionPath, "node_modules"),
+    mcp: mcpEnabled ? { port: 0, lintPreset: mcpLintPreset } : undefined,
+    sharedLspArgs,
+    rootPath,
+  });
 
   log?.info(
-    `[buildServerOptions] typeProvider=${typeProvider}, tsdk=${tsdk}${userTsdk ? "" : " (bundled)"}, args=${JSON.stringify(args)}`,
+    `[buildServerOptions] typeProvider=${typeProvider}, tsdk=${userTsdk || "<unset>"}, args=${JSON.stringify(args)}`,
   );
 
   return {

@@ -82,6 +82,10 @@ struct PublishedWorkspaceBuild {
     root: verter_workspace::PublishedRoot,
     trust_required: Vec<verter_workspace::ViteConfigTrustInfo>,
     configured_projects: Vec<(String, String)>,
+    /// The exact snapshot, retained so init can install the configured-owner
+    /// authority a provider stamps per-file project roots from. Workspace
+    /// FOLDERS cannot answer that question in a monorepo.
+    ownership: Arc<crate::configured_owner::SnapshotOwnerAuthority>,
 }
 
 fn build_published_workspace(
@@ -124,10 +128,15 @@ fn build_published_workspace(
         })
         .collect();
 
+    let ownership = Arc::new(crate::configured_owner::SnapshotOwnerAuthority::new(
+        Arc::clone(&snapshot),
+    ));
+
     PublishedWorkspaceBuild {
         root: verter_workspace::PublishedRoot::with_ext(snapshot, Box::new(views)),
         trust_required,
         configured_projects,
+        ownership,
     }
 }
 
@@ -226,6 +235,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         root: published_root,
         trust_required,
         configured_projects,
+        ownership,
     } = match published_build {
         Ok(build) => build,
         Err(e) => {
@@ -250,6 +260,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
     // 3. Type provider: workspace folder sync + path config (async, non-blocking)
     if let Some(tp) = &type_provider {
+        // Ownership FIRST, before any folder sync or file re-open: a provider
+        // that stamps a per-file `projectRootPath` must have the configured
+        // owner available before it stamps one, or every file opened in the
+        // meantime carries a folder-derived root and a monorepo package is
+        // resolved against the wrong `node_modules`.
+        tp.set_project_ownership(Arc::clone(&ownership)
+            as Arc<dyn verter_type_runtime::traits::ConfiguredOwnerAuthority>);
+
         let added: Vec<serde_json::Value> = roots
             .iter()
             .map(|uri| {

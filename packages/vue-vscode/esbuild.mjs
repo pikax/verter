@@ -3,6 +3,8 @@ import { fileURLToPath } from "url";
 import { cpSync, mkdirSync, existsSync, readdirSync, lstatSync, rmSync, statSync } from "fs";
 import path from "path";
 
+import { productionBundleConfig } from "./esbuild.config.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
@@ -112,19 +114,7 @@ function prepareLspBinary() {
 }
 
 /** @type {import('esbuild').BuildOptions} */
-const config = {
-  entryPoints: [path.join(__dirname, "src", "extension.ts")],
-  bundle: true,
-  outfile: path.join(__dirname, "dist", "extension.js"),
-  external: ["vscode", "@verter/typescript-plugin"],
-  format: "cjs",
-  platform: "node",
-  target: "node18",
-  mainFields: ["module", "main"],
-  sourcemap: !production,
-  minify: production,
-  treeShaking: true,
-};
+const config = productionBundleConfig({ production });
 
 if (!watch) {
   prepareDeps();

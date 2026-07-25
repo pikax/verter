@@ -6,11 +6,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   EDITOR_ACCEPTANCE_ROUTES,
+  EXTENSION_ACCEPTANCE_ROUTES,
+  NON_REQUIRED_E2E_ROUTES,
   SHARED_TSGO_INAPPLICABLE_FIXTURES,
   STANDARD_E2E_FIXTURES,
   TYPE_PROVIDER_ROUTES,
   buildE2eRouteInventory,
   buildGitHubActionsMatrix,
+  buildRequiredE2eRouteInventory,
   parseE2eRouteLabel,
   selectE2eRoutes,
 } from "./routeInventory";
@@ -21,20 +24,52 @@ describe("VS Code E2E route inventory", () => {
     const labels = routes.map(({ fixture, typeProvider }) => `${fixture}@${typeProvider}`);
     const matrix = buildGitHubActionsMatrix();
 
-    expect(routes).toHaveLength(48);
+    expect(routes).toHaveLength(49);
     expect(routes.filter((route) => route.typeProvider === "tsserver")).toHaveLength(16);
     expect(routes.filter((route) => route.typeProvider === "tsgo")).toHaveLength(16);
     expect(routes.filter((route) => route.typeProvider === "shared-tsgo")).toHaveLength(15);
     // The editor-owned tier is never selected automatically, so it appears
     // exactly once — on the fixture that exists to exercise it.
     expect(routes.filter((route) => route.typeProvider === "editor-tsserver")).toHaveLength(1);
+    // Same for the extension-hosted tier: one acceptance route, on the
+    // out-of-tree workspace that is the only layout able to discriminate its
+    // project-bound TypeScript resolution.
+    expect(routes.filter((route) => route.typeProvider === "extension")).toHaveLength(1);
     expect(new Set(labels).size).toBe(labels.length);
     expect(matrix.include).toEqual(
-      routes.map(({ fixture, typeProvider }) => ({
+      buildRequiredE2eRouteInventory().map(({ fixture, typeProvider }) => ({
         fixture,
         type_provider: typeProvider,
       })),
     );
+  });
+
+  it("keeps a deselected route selectable while excluding it from the required matrix", () => {
+    const required = buildRequiredE2eRouteInventory();
+    const inventory = buildE2eRouteInventory();
+
+    expect(NON_REQUIRED_E2E_ROUTES).toHaveLength(1);
+    const [deselected] = NON_REQUIRED_E2E_ROUTES;
+    expect(deselected.route).toEqual({
+      fixture: "out-of-tree-monorepo",
+      typeProvider: "extension",
+    });
+    expect(deselected.reason).toMatch(/TypeProviderKind::Tsserver/);
+
+    // Every deselected route is a declared route: the required set is the
+    // inventory minus exactly those, never a set that drops a route silently.
+    for (const { route } of NON_REQUIRED_E2E_ROUTES) {
+      expect(inventory).toContainEqual(route);
+      expect(required).not.toContainEqual(route);
+    }
+    expect(required).toHaveLength(inventory.length - NON_REQUIRED_E2E_ROUTES.length);
+
+    // The default (unselected) run is the required matrix.
+    expect(selectE2eRoutes({})).toEqual(required);
+    // An explicit selector still reaches it, by label and by fixture.
+    expect(parseE2eRouteLabel("out-of-tree-monorepo@extension")).toEqual(deselected.route);
+    expect(selectE2eRoutes({ fixture: "out-of-tree-monorepo" })).toEqual([deselected.route]);
+    expect(selectE2eRoutes({ typeProvider: "extension" })).toEqual([deselected.route]);
   });
 
   it("runs every project-bound standard fixture on all three provider routes", () => {
@@ -59,6 +94,21 @@ describe("VS Code E2E route inventory", () => {
       expect(routes).toContainEqual(required);
     }
     expect(routes).not.toContainEqual({ fixture: "editor-owned-project", typeProvider: "tsgo" });
+  });
+
+  it("retains the extension-hosted acceptance route on its out-of-tree workspace", () => {
+    const routes = buildE2eRouteInventory();
+    for (const required of EXTENSION_ACCEPTANCE_ROUTES) {
+      expect(routes).toContainEqual(required);
+    }
+    // The extension provider is never selected by the standard matrix: its
+    // resolution model needs a workspace outside this repository, and an in-repo
+    // fixture would pass against the very defect the route exists to catch.
+    expect(routes).not.toContainEqual({ fixture: "monorepo", typeProvider: "extension" });
+    expect(routes).not.toContainEqual({
+      fixture: "out-of-tree-monorepo",
+      typeProvider: "tsserver",
+    });
   });
 
   it("expands fixture-only selectors and fails closed when a selector matches no route", () => {

@@ -56,8 +56,7 @@
     "package:darwin-arm64": "node package.mjs --target darwin-arm64"
   },
   "dependencies": {
-    "@verter/typescript-plugin": "workspace:^",
-    "typescript": "^6.0.3"
+    "@verter/typescript-plugin": "workspace:^"
   },
   "devDependencies": {
     "@types/chai": "^4.3.20",
@@ -77,6 +76,7 @@
     "minimatch": "^10.2.5",
     "mocha": "^11.7.6",
     "source-map": "^0.7.6",
+    "typescript": "^6.0.3",
     "vite": "^8.0.14",
     "vscode-css-languageservice": "^6.3.10",
     "vscode-jsonrpc": "^8.2.1",
@@ -302,7 +302,7 @@
             "Use a separately managed TSGO process (operator override)",
             "Use workspace TypeScript version (tsserver)",
             "Serve carriers from Verter's plugin inside VS Code's own tsserver instead of a Verter-managed engine. Avoids a second TypeScript process, but only serves when your tsserver keeps each carrier in a configured project",
-            "Host TypeScript language service in the extension process (experimental)",
+            "Host TypeScript language service in the extension process (experimental). Each project is served from the TypeScript it installed, so a monorepo package uses its own version. There is no bundled fallback: a project with no resolvable TypeScript, one whose install carries no lib.*.d.ts default libraries, or one on the native (7.x/tsgo) TypeScript this service cannot drive, is not served — Verter tells you what to install or which provider to pick, and sibling projects keep working",
             "Disable TypeScript type checking"
           ],
           "description": "TypeScript type provider for Vue files. Changing this setting restarts the server."
