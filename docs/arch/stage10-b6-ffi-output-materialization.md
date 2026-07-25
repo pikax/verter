@@ -2,7 +2,8 @@
 
 Owning decision for the NAPI/WASM/LSP component-meta wire boundary after the
 `*Analysis` carriers were narrowed from eager `TypeExpr` to the content-free
-`SemanticTypeSource` locator. Linked from the Stage-10 design (§5.7 census). This
+`SemanticTypeSource` locator. Linked from the terminal-`TypeExpr`-removal
+design lineage (not carried on this branch). This
 is the single canonical output-boundary decision; do not duplicate competing
 versions.
 
@@ -101,15 +102,19 @@ ZERO `Published(Expanded)` projection contexts.
 
 ## Absence / failure semantics (session-owned, never ffi)
 
-- `type_source: None` → one CENTRALIZED missing-source output policy emits the
-  canonical typed `TypeExpr::Unknown`; preserve any legacy raw display text where
-  the pre-narrowing converter did (pin with byte/shape goldens). `raw_type` stays
-  opaque display metadata; never reparsed.
+- `type_source: None` / `SourcePosition::Absent` → one CENTRALIZED missing-source
+  output policy returns a VALID wire output: `TypeExpr::Unknown(UnknownValue::missing_output())`
+  (`missing_source_output_type_expr` via `envelope.rs`); this is honest schema absence,
+  not a QueryError degradation sidecar. Preserve any legacy raw display text where the
+  pre-narrowing converter did (pin with byte/shape goldens). `raw_type` stays opaque
+  display metadata; never reparsed.
 - `Some(source)` that the live sink cannot raise / shell-materialize → typed
   `ComponentMetaOutputError` refusing the payload and suppressing encoded/output
-  cache admission. If partial output is mandated, emit typed `Unknown` ONLY while
-  marking the result partial + output-cache-suppressed + recording a diagnostic.
-  FFI NEVER collapses an unraisable source to `Unknown`.
+  cache admission; torn/partial output notes `OutputMaterializationLoss` on the
+  non-cacheable read channel. If partial output is mandated, project through the
+  typed sidecar ONLY while marking the result partial + output-cache-suppressed
+  + recording a diagnostic. FFI NEVER collapses an unraisable source to a silent
+  `Unknown`.
 
 ## View-fence integration (ALL entry paths)
 
@@ -210,8 +215,8 @@ delete the degradation guard
 add a focused exact-source discriminator proving
 `Closed(Tuple(.. FactOrLocator::LeafUnion ..))` → demanded `Tuple([Union(String,
 Number)])` with no `Unknown` / `Authored` / ad-hoc `Synthesized` fallback. Update
-`docs/arch/stage10-b6-p4b-debt-rows.md` DEBT ROW #1 to closed and
-`docs/arch/stage10-fact-schema-field-maps.md` for the new resolved emit payload
+`docs/arch/stage10-b6-p4b-debt-rows.md` (not carried on this branch) DEBT ROW #1 to closed and
+`docs/arch/stage10-fact-schema-field-maps.md` (not carried on this branch) for the new resolved emit payload
 carrier + shared nested union arm.
 
 CLOSED (amendment): steps 1–6 landed (the leaf-union closure), and the two
@@ -225,7 +230,7 @@ instantiated generics), and `define_emits_shape` publishes the normalized
 `ResolvedEmitField.payload_source` as the SOLE emit payload authority (the
 flat evaluated field contributes exactness/status/diagnostics metadata only;
 the flat-lane REQUIRED-payload residue arm is deleted). Closure evidence and
-the executable rails live on `docs/arch/stage10-b6-p4b-debt-rows.md` DEBT ROW
+the executable rails live on `docs/arch/stage10-b6-p4b-debt-rows.md` (not carried on this branch) DEBT ROW
 #1 (CLOSED); the member-value analogue is DEBT ROW #3 (open).
 
 ## Non-negotiable invariants

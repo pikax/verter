@@ -5,7 +5,7 @@
 //! `TemplateLiteral` / `Infer` / `Rest` operator leaves at any nested
 //! position EXCEPT under three documented exceptions:
 //!
-//! - (a) The operator is replaced by `TypeExpr::Unknown { raw }` —
+//! - (a) The operator is replaced by `TypeExpr::Unknown(UnknownValue)` —
 //!   represented by the absence of the operator from the tree, since `Unknown`
 //!   does not carry nested `TypeExpr`.
 //! - (b) Inside the `type_arguments` / `conditional_context` of a
@@ -197,7 +197,7 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
 /// each prefixed with `prop_name :: path`.
 ///
 /// The walker honors the three documented exception classes:
-/// - (a) `Unknown { raw }` is a sink (no recursion).
+/// - (a) `TypeExpr::Unknown(UnknownValue)` is a sink (no recursion).
 /// - (b) `RecursiveRef.type_arguments` / `conditional_context` are NOT
 ///   recursed into (the recursive context is allowed to retain operator
 ///   forms — they encode the cycle).

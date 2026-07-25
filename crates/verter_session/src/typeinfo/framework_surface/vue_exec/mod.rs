@@ -249,7 +249,7 @@ impl VueMacroSurface {
     /// instantiates a generic emit interface
     /// (`Emits extends TabsRootEmits<string | number>`): the call signature is
     /// declared in the package, and the SFC-supplied generic argument is encoded
-    /// in the typed `payload_expr` (a `Tuple` whose element types carry their
+    /// in the raised payload type (a `Tuple` whose element types carry their
     /// own scope), NOT by re-anchoring the whole signature's scope to the SFC.
     ///
     /// Falls back to the SFC owner when the signature carries no span (a

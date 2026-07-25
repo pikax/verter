@@ -1565,23 +1565,23 @@ pub(crate) fn publish_merged_bindings(
     // `tests/cases/g_misc0/slot_binding_shallow_publication_tests.rs` characterises
     // the carrier-vs-expansion boundary.
     //
-    // The producer-shallow contract here is variant-dispatched on the
-    // availability of a parser-path binding for the `(slot, binding)`
-    // key:
+    // Live publication authority for a slot binding (verified):
+    // analyzer assembly leaves `AnalyzedSlotFieldBinding.payload: None`
+    // because the flat `macros[i].slot_fields[j]` locator vocabulary
+    // cannot address a nested `(slot, binding)` position. Display text
+    // may ride on `type_annotation` (paired scope when present); typed
+    // demand is host-raised from the graph-native value node.
+    // Publication selects among, in order:
     //
-    //   - Parser path available: the authored payload POSITION
-    //     (`AnalyzedSlotFieldBinding.payload`) is the typed authority.
-    //     The published `r#type` is that authored source; the demand
-    //     side re-raises it through the one shared dispatch.
+    //   1. CLOSED symbolic indexed-access route → `Closed(IndexedAccess)`
+    //   2. ARGUMENT-BEARING named-reference use-site → `Authored(DeclBody)`
+    //   3. NAMED reference head → shallow closed `Ref` carrier
+    //   4. OTHERWISE → first-class `SyntheticSlotBinding` carrier
     //
-    //   - No parser path: a SESSION-RAISED row — the published source
-    //     is the PRODUCING macro TYPE-ARGUMENT payload position (the
-    //     lower-neutral carrier of a session-raised value). The
-    //     deepening route for a session-raised binding is the
-    //     content-free synthetic-binding identity
-    //     (`ShapeCacheKey::synthetic_binding_whole`, consulted through
-    //     `ShapeCacheDb`). The `binding_name` is NOT a registry-lookup
-    //     target.
+    // Deepening a synthetic row routes through the content-free
+    // synthetic-binding identity (`ShapeCacheKey::synthetic_binding_whole`,
+    // consulted through `ShapeCacheDb`). The `binding_name` is NOT a
+    // registry-lookup target.
     //
     // Downstream consumers (`reduce_published_field_types`,
     // `collect_component_meta_registry_public_field_refs`) recognise
@@ -1599,19 +1599,21 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
 
-        // Consult the parser-path index BEFORE deciding publication
-        // shape — the parser-lowered annotation is the syntactic
-        // truth. Removing here also drives the parser-only fallback
-        // loop below (which iterates the residual).
+        // Consult the parser-path index for display `type_annotation`
+        // only — analyzer assembly never stamps a nested binding
+        // `payload` (see module contract above). Removing here also
+        // drives the parser-only fallback loop below (residual keys).
         let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
 
         let (r#type, shallow_source, is_session_raised) = match parser_path
             .and_then(|pb| pb.payload.as_ref())
         {
             Some(payload) => {
-                // Parser-path branch — the authored payload position is the
-                // typed authority; the demand side re-raises it through the
-                // one shared dispatch.
+                // Residual arm: a stamped nested payload is theoretically
+                // addressable, but live analyzer assembly leaves
+                // `payload: None`. Keep the Authored re-raise if a
+                // producer ever stamps one; production always falls
+                // through to the selection below.
                 let locator =
                     verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload.clone());
                 (
@@ -1621,9 +1623,10 @@ pub(crate) fn publish_merged_bindings(
                 )
             }
             None => {
-                // No-parser branch — a SESSION-RAISED binding row (the graph
-                // walk off the macro payload's Shallow surface produced
-                // `gb.value_node`). Differentiated source selection:
+                // Live production path — SESSION-RAISED binding row (the
+                // graph walk off the macro payload's Shallow surface
+                // produced `gb.value_node`). Differentiated source
+                // selection:
                 //
                 //   - A CLOSED symbolic indexed-access route (a literal
                 //     string index path over a named declaration body slot)
@@ -1732,13 +1735,13 @@ pub(crate) fn publish_merged_bindings(
     }
 
     // Publish parser-path-only bindings (those without a graph-native
-    // counterpart). Parser-path bindings keep `ExactConcrete`
-    // exactness — the source-text annotation is the authority.
-    //
-    // Parser-path-only bindings NEVER mint a synthetic carrier —
-    // their `binding_expr` is the OXC-lowered authoritative form, not
-    // a symbolic stand-in. Their published `r#type` is therefore
-    // never a `TypeExpr::SyntheticSlotBinding` variant.
+    // counterpart). Live truth: analyzer assembly leaves
+    // `AnalyzedSlotFieldBinding.payload: None` (flat locators cannot
+    // address nested `(slot, binding)` positions). These rows keep
+    // `ExactConcrete` exactness from the display `type_annotation` when
+    // present; the published source is either a residual stamped
+    // MacroPayload position or the centralized unannotated
+    // schema-absence — never a synthetic carrier.
     let mut parser_only_keys: Vec<(Arc<str>, Arc<str>)> = parser_index.keys().cloned().collect();
     parser_only_keys.sort();
     for key in parser_only_keys {
@@ -1752,13 +1755,12 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
         let raw_type = pb.type_annotation.clone();
-        // Typed-IR-Only Resolver Rule: `binding.payload` is the authoritative
-        // typed position when a producer stamped one; the demand side
-        // re-raises it through the one shared dispatch. No reparse of
-        // `type_annotation`. A payload-less parser row is a PROVEN
-        // unannotated schema absence (the parser saw no annotation) —
-        // rendered as the centralized typed `unknown`, never a fabricated
-        // reference and never a failure.
+        // Live analyzer assembly leaves `payload: None` for nested
+        // bindings; a residual stamped payload (if ever present) is
+        // re-raised through the one shared dispatch. No reparse of
+        // `type_annotation`. A payload-less parser-only row is a PROVEN
+        // unannotated schema absence — centralized typed `unknown`,
+        // never a fabricated reference and never a failure.
         let shallow_source = pb
             .payload
             .clone()

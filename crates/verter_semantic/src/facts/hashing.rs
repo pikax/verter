@@ -831,7 +831,7 @@ impl<'a> Walker<'a> {
         self.exit_frame();
     }
 
-    /// Reproduce `walk_node(TypeExpr::Unknown { raw })` byte-for-byte WITHOUT
+    /// Reproduce `walk_node(TypeExpr::Unknown(value))` byte-for-byte WITHOUT
     /// allocating the node: enter a synthetic frame keyed by the same identity
     /// the legacy `Unknown` node carries (`0xBF` + raw), emit the `Unknown` body
     /// bytes, then exit.

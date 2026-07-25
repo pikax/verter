@@ -12078,16 +12078,18 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 //          aliasing/renaming identity residual; the universal invariant is
 //          closed structurally by removing materialized `TypeExpr` from hot
 //          inputs.
-//       3. Macro-body blindness (FN4): decisions hidden inside arbitrary
+//       3. Macro-body blindness: decisions hidden inside arbitrary
 //          expression-macro bodies (beyond the handled `matches!` / `vec!`
 //          forms) are not syntactically caught.
-//       4. Trait-default / typed-degradation (FN5): the Unknown-control-flow
-//          fence's trait-default scan is RECONCILED — it scans trait-default
-//          bodies with the same `#[cfg(test)]` exclusion + per-fn frame + fn
-//          attribution as a free / impl fn within that scanner; the only
-//          remaining FN5 residual is the typed-degradation end-state, a
-//          downstream typed-state refinement that replaces the
-//          `TypeExpr::Unknown` control sentinel (recorded in the deferral doc).
+//       4. Trait-default / typed-degradation: CLOSED. The typed-degradation
+//          end-state LANDED — typed degradation (a typed `QueryError` +
+//          per-leaf sidecar across the materialize fold) replaced the
+//          sentinel-`Unknown` control flow, and the global
+//          Unknown-control-flow fence
+//          (`no_new_semantic_unknown_control_flow_outside_owner`) is DELETED
+//          with the control-flow shape it scanned for; its deferral doc is
+//          deleted. The trait-default scan facet had already been reconciled
+//          before the fence's deletion.
 //     More generally, any callee or identity this syntactic tripwire cannot
 //     statically resolve is out of reach and accepted — including
 //     receiver-dispatched method-call identity (approximated by scope
@@ -12109,11 +12111,12 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 // NARROWINGS stay welcome (they remove false flags); false-negative BROADENINGS
 // are refused (the gaps close structurally via the conversions that remove a
 // materialized `TypeExpr` from hot inputs, leaving nothing for a macro body or
-// trait default to hide). The named residuals (arbitrary expression-macro bodies;
-// the typed-degradation end-state of the Unknown control-flow fence — its
-// trait-default scan facet is RECONCILED, not a standing residual) and their
-// structural-closure path are recorded in
-// `docs/arch/hot-materialize-tripwire-residual-deferral.md`.
+// trait default to hide). The named residuals are CLOSED: arbitrary
+// expression-macro body blindness is mooted by the structural rail (no
+// materialized `TypeExpr` remains on hot inputs for a macro body to hide), and
+// the Unknown control-flow fence's typed-degradation end-state LANDED with
+// the fence itself deleted; the residual-deferral doc that tracked them
+// (`docs/arch/hot-materialize-tripwire-residual-deferral.md`) is deleted.
 //
 // SC-first record (structured, machine-greppable):
 //   scanner_invariant: hot_materialize_syntactic_tripwire_residual_backstop
@@ -12671,7 +12674,10 @@ struct AliasFrame {
     binds: std::collections::HashMap<String, AliasBind>,
 }
 
-/// A lexical stack of `use`-alias frames, SHARED by both fences. Resolution walks
+/// A lexical stack of `use`-alias frames for the hot-materialize syntactic
+/// tripwire (the Unknown-control-flow fence it was once shared with is
+/// DELETED — the typed-degradation cutover removed the sentinel control-flow
+/// shape that fence scanned for). Resolution walks
 /// innermost-first so an inner `use … as TE` shadows an outer binding and a
 /// block-local alias is invisible to sibling scopes. The canonical `TypeExpr`
 /// ident is seeded in a permanent base frame. The merged current sets
@@ -16351,11 +16357,6 @@ fn hot_materialize_fence_return_type_alias_lexically_scoped() {
     );
 }
 
-/// Discrimination self-test for the Unknown-fence trait-DEFAULT reconciliation: a
-/// `#[cfg(test)]` trait-default sentinel `Unknown` construction MUST NOT fire (the
-/// cfg-test exclusion now gates the trait-default scan, killing the FP from syn's
-/// accidental default-visitor descent); a NON-test trait-default sentinel IS caught
-/// with proper fn attribution (not `<file-scope>`); and a raw-tainted field
 /// Discrimination self-test for the VALUE-SCOPED self-policing exemption: the
 /// `lowers_param` exemption is PER-PARAMETER. A lowering terminal that ALSO
 /// decides on a fresh mint (or reads one, or decides on a SEPARATE un-lowered

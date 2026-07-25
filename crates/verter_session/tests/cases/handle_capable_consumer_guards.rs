@@ -30,18 +30,16 @@
 //!   `hot_path_never_calls_materialize_type_expr` is enabled and green at
 //!   zero offenders.
 //!
-//! - **G-B: per-inventory ordering.** Each listed hot carrier has a
-//!   handle-native consumer present in the production tree BEFORE the
-//!   producer is converted to emit handles. Deferred carriers (the
-//!   `verter_semantic` prepared-wrapper payloads, which have no session
-//!   resolution-input consumer and cannot gain a `HotTypeRef` without
-//!   violating the crate boundary) are recorded as such and backed by a
-//!   short-lived absence-of-direct-reference tripwire: non-test
-//!   production `verter_session` source must not directly NAME the
-//!   deferred prepared-wrapper payload API (the four payload type names
-//!   or the `.target_args` field). This is an ordering tripwire, NOT a
-//!   semantic dataflow proof — it does not prove no possible consumer
-//!   exists, only that none directly references the API yet.
+//! - **G-B: per-inventory regression rail.** Each listed hot carrier has a
+//!   handle-native consumer present in the production tree. The prepared-
+//!   wrapper inventory row (`Stage5Deferred`) records the landed narrowing:
+//!   the legacy TypeExpr-carrying prepared-wrapper payload APIs are DELETED
+//!   and must remain absent. The absence-of-direct-reference tripwire is a
+//!   REGRESSION guard against reintroducing those deleted names: non-test
+//!   production `verter_session` source must not directly NAME the legacy
+//!   prepared-wrapper payload API (the four payload type names or the
+//!   `.target_args` field). It is a regression tripwire, NOT a semantic
+//!   dataflow proof and NOT an open deferral awaiting producer wiring.
 //!
 //! Both guards are mechanical source scans with paired self-tests that
 //! prove they discriminate (fire on a synthetic violation, pass on the
@@ -874,14 +872,19 @@ fn raise_and_reduce_subsystem_confined_self_test_discriminates() {
 enum SeamStatus {
     /// A real session seam: the handle-native consumer must be PRESENT.
     HandleNative,
-    /// The carrier's payload is read only inside `verter_semantic`
-    /// (no `verter_session` resolution-input consumer); it cannot gain
-    /// a `HotTypeRef` without a `verter_semantic -> verter_session` dep (the reverse of the existing direction, forbidden by `no_verter_semantic_to_verter_session_dep`)
-    /// reversal. Deferred until the producer is wired to emit handles. A
-    /// short-lived absence-of-direct-reference tripwire asserts non-test
-    /// `verter_session` production source does not directly NAME the
-    /// deferred payload API (the four payload type names / `.target_args`)
-    /// — an ordering tripwire, not a semantic dataflow proof.
+    /// The carrier's payload lives in `verter_semantic` and is read only
+    /// inside it (no `verter_session` resolution-input consumer). NARROWED to
+    /// the landed truth: the prepared-wrapper payloads are the locator-based
+    /// `*Fact` forms (`PreparedKeyFilterShapeFact` /
+    /// `PreparedKeyRemapShapeFact` / `PreparedValueRuleShapeFact` /
+    /// `PreparedForwardPayloadFact` / `PreparedWrapperShapeFact`,
+    /// `verter_type_expr/src/facts.rs:2106-2281`) — `Opaque(TypeExpr)` became
+    /// a `TypeBodySlot` locator; the `TypeExpr`-carrying forms are DELETED and
+    /// nothing remains open or deferred. The absence-of-direct-reference
+    /// tripwire stays as a REGRESSION rail: non-test `verter_session`
+    /// production source must not directly NAME the legacy payload API (the
+    /// four payload type names / `.target_args`) — an ordering tripwire, not
+    /// a semantic dataflow proof.
     Stage5Deferred,
 }
 
@@ -953,9 +956,10 @@ const STAGE4_CARRIER_INVENTORY: &[InventoryRow] = &[
     InventoryRow {
         seam: "PreparedWrapperShape Opaque/Transform + PreparedForwardPayload.target_args",
         status: SeamStatus::Stage5Deferred,
-        // The deferred prepared-wrapper payload API names this row covers
-        // — the four payload TYPE names (whole-identifier exact) plus the
-        // forward payload's `.target_args` field access. The deferred
+        // The legacy prepared-wrapper payload API names this row bans —
+        // the four payload TYPE names (whole-identifier exact; the narrowed
+        // `*Fact` forms carry a `Fact` suffix and do NOT match) plus the
+        // forward payload's `.target_args` field access. The regression
         // check below asserts NONE of these is directly referenced in
         // non-test verter_session production source.
         witness: &[
@@ -968,13 +972,16 @@ const STAGE4_CARRIER_INVENTORY: &[InventoryRow] = &[
             ("verter_session src", ".target_args"),
         ],
         reason:
-            "these prepared-wrapper payloads live in verter_semantic and are read ONLY by \
-                 the verter_semantic solver; verter_session has no resolution-input consumer, so \
-                 they cannot carry a HotTypeRef without the forbidden reverse `verter_semantic -> verter_session` dep. \
-                 Deferred until the producer is wired to emit handles; the producer stays dormant. \
-                 A short-lived absence-of-direct-reference tripwire asserts non-test verter_session \
-                 production source does not directly name this payload API — an ordering tripwire, \
-                 not a semantic dataflow proof.",
+            "these prepared-wrapper payloads live in verter_semantic as NARROWED locator-based \
+                 `*Fact` forms (`PreparedKeyFilterShapeFact` / `PreparedKeyRemapShapeFact` / \
+                 `PreparedValueRuleShapeFact` / `PreparedForwardPayloadFact` / \
+                 `PreparedWrapperShapeFact`, `verter_type_expr/src/facts.rs:2106-2281` — \
+                 `Opaque(TypeExpr)` became a `TypeBodySlot` locator); the TypeExpr-carrying \
+                 forms are DELETED and nothing remains open or deferred. The \
+                 absence-of-direct-reference tripwire stays as a REGRESSION rail: non-test \
+                 verter_session production source must not directly name the legacy payload API \
+                 (the four type names / `.target_args`) — an ordering tripwire, not a semantic \
+                 dataflow proof.",
     },
 ];
 
@@ -1105,10 +1112,10 @@ fn stage4_deferred_carriers_have_no_session_resolution_consumer() {
     // it does not prove no possible consumer exists, only that none directly
     // NAMES the API yet.
     //
-    // Every `Stage5Deferred` row asserts the deferral is still
-    // legitimate via a short-lived absence-of-direct-reference tripwire:
-    // non-test verter_session production source must not directly NAME
-    // the deferred prepared-wrapper payload API. The check scans the
+    // Every `Stage5Deferred` row keeps the landed narrowing regression-free
+    // via the absence-of-direct-reference tripwire: non-test verter_session
+    // production source must not directly NAME the legacy prepared-wrapper
+    // payload API. The check scans the
     // WHOLE of each production `src/` file (not function windows) for a
     // direct reference to one of the four payload type names (whole
     // identifier) or the `.target_args` field access — so an aliased
@@ -1116,9 +1123,9 @@ fn stage4_deferred_carriers_have_no_session_resolution_consumer() {
     // fn, lower in another) are both caught, since the NAME appears
     // regardless of which function or alias surrounds it. This is an
     // ORDERING tripwire, NOT a semantic dataflow proof: it does not prove
-    // no possible consumer exists. If a direct reference appears, the
-    // producer wiring has begun — flip the inventory row to HandleNative
-    // and add a handle arm.
+    // no possible consumer exists. If a direct reference appears, it is a
+    // regression against the locator-based `*Fact` forms — route through
+    // the locators; do not reintroduce the `TypeExpr`-carrying API.
     let payload_patterns = deferred_payload_patterns();
     // Anti-vacuity: the patterns must include the four named payload
     // type names plus the forward payload's `.target_args` field, so the
@@ -1144,9 +1151,9 @@ fn stage4_deferred_carriers_have_no_session_resolution_consumer() {
     }
     assert!(
         violations.is_empty(),
-        "G-B: non-test verter_session production source directly NAMES a deferred prepared-wrapper \
-         payload API — the producer wiring has begun, so the deferral is no longer legitimate. \
-         Flip the inventory row to HandleNative and add a handle arm.\n{}",
+        "G-B: non-test verter_session production source directly NAMES a deleted legacy \
+         prepared-wrapper payload API — the TypeExpr-carrying forms are DELETED and must remain \
+         absent. Do not reintroduce them; route through the locator-based `*Fact` forms.\n{}",
         violations.join("\n")
     );
 }
@@ -1303,7 +1310,8 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
     );
     assert!(
         deferred >= 1,
-        "self-test: the inventory must record the deferred prepared-wrapper carriers; got \
+        "self-test: the inventory must record the narrowed prepared-wrapper carriers' \
+         regression row; got \
          {deferred}"
     );
 

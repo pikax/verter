@@ -115,8 +115,9 @@ pub(crate) use slots::project_slots;
 // boundary — `MetaResolveProjectorsOutputCap` mint + carrier unwrap).
 // `output_sink` exposes ONLY policy-complete publication operations (returning
 // `ExpandedField` / mutating the published surface), never a bare `TypeExpr`
-// or a raw boundary helper; the per-field `reduce_field_type_expr_with_mode`
+// or a raw boundary helper; the per-field `reduce_field_value_node`
 // reducer stays sink-private (callers use `reduce_published_field_types`).
+// (The former TypeExpr helper `reduce_field_type_expr_with_mode` is deleted.)
 //
 // `project_model` is re-exported for the local `project_evaluated_types`
 // driver; `reduce_published_field_types` is re-exported at the stable

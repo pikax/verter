@@ -1231,11 +1231,12 @@ pub struct AnalyzedSlotFieldBinding {
     /// Type annotation text extracted from source (e.g., `"string"`, `"MyItem"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
-    /// Content-free locator of the binding's authored type payload (the slot
-    /// function's parameter member position). Parser/analyzer producers emit
-    /// the authored position; an unraisable resolver value is an honest
-    /// `None`. Consumers demand the typed body through the shared dispatch —
-    /// `type_annotation` is display-only.
+    /// Content-free locator of the binding's authored type payload, when one
+    /// can be addressed. Analyzer assembly leaves this `None`: the live
+    /// stamper (`stamp_macro_payload_locators`) only addresses flat
+    /// field-index positions (`macros[i].slot_fields[j]`), and the flat
+    /// vocabulary cannot address nested `(slot, binding)` positions. Typed
+    /// binding demand is host-raised; `type_annotation` is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<MacroPayloadLocator>,
     /// Resolution scope of the published binding: canonical_id of the file

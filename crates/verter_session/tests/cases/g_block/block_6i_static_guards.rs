@@ -1004,7 +1004,8 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
     // free-standing helper). The published-surface field-type driver
     // `reduce_published_field_types` is the HIGH-LEVEL publication API and lives
     // in the terminal `output_sink` sink module alongside the now-sink-private
-    // per-field reducer it wraps (`reduce_field_type_expr_with_mode`) — the sink
+    // per-field reducer it wraps (`reduce_field_value_node`; the deleted
+    // TypeExpr helper `reduce_field_type_expr_with_mode` is gone) — the sink
     // is the ONLY module that touches the reverse-materialization boundary.
     let reducer_src = read_workspace_file(
         "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",

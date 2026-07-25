@@ -54,7 +54,7 @@ pub(crate) const NORMALIZER_VERSION: u32 = 1;
 /// than producing a possibly-false-diverging comparison value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NormalizeReject {
-    /// `TypeExpr::Unknown { raw }` — the lowering could not represent the type;
+    /// `TypeExpr::Unknown(UnknownValue)` — the lowering could not represent the type;
     /// a comparison value can never be derived from it (step 7).
     UnknownNode,
     /// `TypeExpr::SyntheticSlotBinding` — a display-only carrier with no

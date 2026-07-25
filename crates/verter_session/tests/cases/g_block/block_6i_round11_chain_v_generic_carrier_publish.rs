@@ -3,9 +3,10 @@
 //!
 //! Closes a residual Chain V leak. A SIMPLE
 //! `defineProps<{ editorOptions: Partial<EditorOptions> }>()` shape:
-//! the per-prop publication path enters
-//! `reduce_field_type_expr_with_mode(... Navigate)` carrying a single
-//! Mapped TypeExpr for `Partial<EditorOptions>`. Propagating
+//! the per-prop publication path enters the node-domain finalize
+//! (`reduce_published_field_types` / sink-private `reduce_field_value_node`
+//! under Navigate) carrying a Mapped carrier for `Partial<EditorOptions>`.
+//! Propagating
 //! `publish_mode` into `materialize_component_meta_type_expr_until_stable`'s
 //! mode parameter closes that fixture: the `dispatch.shallow_lower_type_expr(...
 //! Navigate)` + `dispatch.raise_and_reduce(_, Navigate)` legs both run
@@ -27,9 +28,10 @@
 //!
 //! The per-prop publication path then iterates each inherited prop
 //! (`editable`, `textDirection`, `tabindex`, …). Each inherited prop's
-//! `field.r#type` enters `reduce_field_type_expr_with_mode(Navigate)`
-//! as the substituted-then-projected value carrier — a generic-bearing
-//! `Omit<Partial<EditorOptions>, ...>` expression after the macro-
+//! `field.r#type` (`SourcePosition`, not a stored `TypeExpr`) enters the
+//! node-domain finalize under Navigate as the substituted-then-projected
+//! value carrier — a generic-bearing `Omit<Partial<EditorOptions>, ...>`
+//! after the macro-
 //! publication layer routes `EditorProps<T, H>` to its declaration body.
 //!
 //! The materialiser then lowers the carrier under `Published(Navigate)`
@@ -93,8 +95,8 @@ export interface EditorHandlersConfig {
 // Mirrors the corpus Editor shape: a generic interface extending
 // `Omit<Partial<EditorOptions>, …>` consumed by `defineProps<X<T,H>>()`
 // through `<script setup generic>`. The per-prop publication path
-// iterates each inherited member name and enters
-// `reduce_field_type_expr_with_mode(... Navigate)` for the carrier-
+// iterates each inherited member name and enters the node-domain
+// finalize (`reduce_field_value_node` / Navigate) for the carrier-
 // substituted value. A materialiser that lowered the
 // carrier under `Published(Navigate)` would emit per-member edges
 // on the Mapped reduction.

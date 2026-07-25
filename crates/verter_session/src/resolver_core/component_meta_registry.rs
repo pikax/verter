@@ -696,9 +696,10 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
 
     // When the post-expansion source carries no actionable route (no
     // reference / utility / indexed-access head the registry can route on),
-    // fall back to the analyzer-populated authored SHALLOW locator — the
-    // bare annotation the user wrote. A deep indexed member path (len > 1)
-    // recovers only when the resolved source is an explicit object surface.
+    // fall back to the authored SHALLOW locator (content-free
+    // `MacroPayloadLocator` / `AuthoredBodyLocator`) — the bare annotation
+    // the user wrote. A deep indexed member path (len > 1) recovers only
+    // when the resolved source is an explicit object surface.
     let shallow_node = (!type_node
         .is_some_and(|node| component_meta_registry_node_has_actionable_route(ctx, node)))
     .then(|| {

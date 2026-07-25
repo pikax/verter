@@ -573,9 +573,10 @@ mod carrier {
         /// always readable, NOT the laundering surface). Part of the carrier's
         /// documented readable-metadata contract, read in production by the
         /// publication pipeline off the reduced-output carrier: the no-poison
-        /// root-sentinel gate in `reduce_field_type_expr_with_mode` and the
+        /// root-sentinel gate in sink-private `reduce_field_value_node` and the
         /// node-domain shape comparison in `reduce_published_field_types` read
         /// node facts off this id instead of re-materialising a `TypeExpr`.
+        /// (The former TypeExpr helper `reduce_field_type_expr_with_mode` is deleted.)
         pub(crate) fn node_id(&self) -> Option<SemanticNodeId> {
             self.node_id
         }

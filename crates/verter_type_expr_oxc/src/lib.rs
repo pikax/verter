@@ -14,7 +14,7 @@
 //! # Contract
 //!
 //! - Every well-formed OXC `TSType` node produces a valid `TypeExpr`.
-//! - Unsupported or unrecognized syntax produces `TypeExpr::Unknown { raw }`.
+//! - Unsupported or unrecognized syntax produces `TypeExpr::Unknown(UnknownValue::unsupported_syntax(...))`.
 //! - No partial parses — each node is fully consumed.
 //! - Source text is required for `Unknown` fallback and literal extraction.
 

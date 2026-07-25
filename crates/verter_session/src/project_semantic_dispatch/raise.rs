@@ -323,7 +323,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// graph node they want to materialise (typically the demanded terminal of
     /// a navigate-driven walk) and want it raised AS-IS. It is a thin wrapper
     /// over the shell-only [`Self::raise_node_to_type_expr`] primitive, so every
-    /// carrier round-trips here (raw-fallback text → `Unknown { raw }`, the
+    /// carrier round-trips here (raw-fallback text → `TypeExpr::Unknown(UnknownValue)`, the
     /// synthetic binding, the constructor carrier, the `RecursiveRef` back-edge
     /// via `Opaque(QueryError::RecursiveRef)`); tuple-element rest fidelity
     /// rides on the `Tuple` arm's `TupleElement.rest`.
@@ -953,7 +953,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   under whole-surface `Published(Expanded)` (demand rule)
     ///   — so non-whole-surface contexts return the parent verbatim.
     /// - `TemplateLiteral` / `Infer` hard-stops have no dispatch
-    ///   variant and become `Unknown { raw: "<…>" }`.
+    ///   variant and become `TypeExpr::Unknown(UnknownValue)` (raw text
+    ///   payload carries the hard-stop message).
     /// - Terminals (`Primitive` / `Literal` / `TypeParam` / `Opaque(…)`)
     ///   return `node` as-is.
     #[allow(dead_code)] // wired by reduce_graph_node_iterative above.
@@ -4476,10 +4477,12 @@ pub(crate) fn node_root_is_published_operator_with_dispatch(
 /// running a raised-string walk.
 //
 // Production consumer: the publication reducer's input-side no-poison gate
-// (`meta_resolve::projectors::output_sink::reduce_field_type_expr_with_mode`),
-// which seals the INPUT as the published carrier only when the input is
-// CONFIDENTLY miss-free (`Some(false)`). The parity suite additionally
-// exercises it as the node-vs-`TypeExpr` equivalence proof.
+// (`meta_resolve::projectors::output_sink::reduce_field_value_node` /
+// `reduce_published_field_types` — the deleted TypeExpr helper
+// `reduce_field_type_expr_with_mode` is gone), which seals the INPUT as the
+// published carrier only when the input is CONFIDENTLY miss-free
+// (`Some(false)`). The parity suite additionally exercises it as the
+// node-vs-`TypeExpr` equivalence proof.
 #[must_use]
 pub(crate) fn node_contains_semantic_miss_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -4937,7 +4940,8 @@ mod tests {
 
     /// FAIL-FIRST: hard-stop for `TemplateLiteral` —
     /// no dispatch variant exists, so the reducer must convert to
-    /// `Unknown { raw: "<unresolved template literal type>" }`.
+    /// `TypeExpr::Unknown(UnknownValue)` whose raw mentions the template
+    /// literal operator.
     #[test]
     fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
         use crate::semantic_query::ProjectionMode;

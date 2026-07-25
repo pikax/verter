@@ -564,14 +564,14 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
 // ---------------------------------------------------------------------------
 // (3c) Emit call-signature `payload_type` (display-only `rawType`) renders the
 //      STRIPPED payload TUPLE (`[label: T, ...]`) — the `emit('name', ...)` args
-//      after the leading event-name parameter — mirroring the typed
-//      `payload_expr`, for BOTH local and cross-file signatures.
+//      after the leading event-name parameter — mirroring the raised typed
+//      payload tuple, for BOTH local and cross-file signatures.
 //
 //      Discriminating: a `payload_type` equal to the whole call-signature
 //      source slice (`(e: 'change', value: number): void`) — the pre-fix
 //      behavior — FAILS this; so does a `None`. The bracketed tuple
 //      (`[value: number]`) is the only value that passes, and it is byte-
-//      identical to what `render_type_expr_display(payload_expr)` would produce.
+//      identical to what `render_type_expr_display` of that raised tuple would produce.
 // ---------------------------------------------------------------------------
 
 #[test]

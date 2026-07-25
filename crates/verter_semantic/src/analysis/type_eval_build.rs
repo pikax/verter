@@ -4872,10 +4872,11 @@ where
     for (macro_index, m) in macros.iter().enumerate() {
         // Expand prop field type annotations.
         //
-        // The analyzer producer (`extract_fields_from_interface_body_like`)
-        // lowers each prop's TS annotation directly from the OXC `TSType<'_>`
-        // AST node and stores the result on `AnalyzedPropField.type_expr`.
-        // Consumers read the typed form authoritatively — no string parsing.
+        // The analyzer stamps a content-free `MacroPayloadLocator` on
+        // `AnalyzedPropField.payload: Option<MacroPayloadLocator>` when the
+        // field has an authored annotation (scope pairing present); consumers
+        // demand the typed body through the shared dispatch from that locator
+        // — display `type_annotation` is never re-parsed.
         for field in &m.prop_fields {
             if let Some(ref payload) = field.payload {
                 {
@@ -4931,7 +4932,10 @@ where
         // production is owned by the query-engine phase in meta_resolve.rs.
         // This function handles field-level work only.
 
-        // Expand emit payload types via the analyzer-populated typed form.
+        // Expand emit payload types from the content-free `MacroPayloadLocator`
+        // stamped on `AnalyzedEmitField.payload` (when scope pairing is present);
+        // consumers demand the typed body through the shared dispatch — display
+        // `payload_type` is never re-parsed.
         for field in &m.emit_fields {
             if let Some(ref payload) = field.payload {
                 {
@@ -4979,13 +4983,13 @@ where
                         shallow_source,
                         // `AnalyzedEmitField` is the upstream type at this
                         // layer. It carries `name`, `payload_type`, and
-                        // `payload_expr` — not own-body-vs-heritage
-                        // provenance. The published-surface policies
-                        // (`Refined` etc.) consult the bit only on the
-                        // `props` axis; the emit surface does not gate on
-                        // it. `false` is the structural truth at the emit
-                        // ExpandedField layer because the producer type
-                        // does not encode the distinction.
+                        // `payload: Option<MacroPayloadLocator>` — not
+                        // own-body-vs-heritage provenance. The published-
+                        // surface policies (`Refined` etc.) consult the bit
+                        // only on the `props` axis; the emit surface does
+                        // not gate on it. `false` is the structural truth
+                        // at the emit ExpandedField layer because the
+                        // producer type does not encode the distinction.
                         declared_in_macro_type_arg: false,
                     });
                 }
@@ -4993,8 +4997,11 @@ where
         }
 
         // Slot binding expansion is not needed for fallthrough-only meta.
-        // Read the authored payload position emitted by the analyzer producer
-        // in `extract_slot_bindings_from_oxc_type`.
+        // Analyzer assembly leaves `AnalyzedSlotFieldBinding.payload` as `None`
+        // — `stamp_macro_payload_locators` only addresses flat field-index
+        // positions, and the flat vocabulary cannot address nested
+        // `(slot, binding)` positions. Typed binding demand is host-raised;
+        // this branch is defensive only if a locator is ever present.
         if scope == MacroExpansionScope::Full {
             for slot in &m.slot_fields {
                 for binding in &slot.bindings {

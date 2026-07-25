@@ -241,7 +241,7 @@ fn materialize_raw_fallback_round_trips_to_unknown() {
     );
     match &expr {
         // The raw-fallback carrier is the ONLY carrier that holds raw text;
-        // it round-trips verbatim to `Unknown { raw }`.
+        // it round-trips verbatim to `TypeExpr::Unknown(UnknownValue)`.
         TypeExpr::Unknown(value) => assert_eq!(value.raw(), "Weird<& Type>"),
         other => panic!("expected Unknown, got {other:?}"),
     }

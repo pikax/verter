@@ -2,9 +2,11 @@
 //!
 //! # Why this module exists
 //!
-//! The component-meta publication boundary publishes member `TypeExpr`s into
-//! `ExpandedField` DTOs (consumers read `ExpandedField.r#type` by design). The
-//! invariant this module enforces is INPUT AUTHORITY, not DTO readability:
+//! The component-meta publication boundary publishes content-free member
+//! sources into `ExpandedField` DTOs (`ExpandedField.r#type` is a
+//! `SourcePosition`, not a stored `TypeExpr`; consumers read the position and
+//! the output sink materializes `TypeExpr` on demand). The invariant this
+//! module enforces is INPUT AUTHORITY, not DTO readability:
 //! outside the terminal publication sink, non-sink production code must NOT be
 //! able to choose a raw semantic-graph subject ([`SemanticNodeId`]), forge a
 //! surface/member wrapper ([`SurfaceMember`]), pair it with its own
