@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  # Callable so a release REHEARSAL runs this exact job graph with publishing
+  # switched off, rather than a parallel copy that drifts. See
+  # release-check.yml, which is a thin caller passing dry_run: true.
+  workflow_call:
+    inputs:
+      dry_run:
+        description: >-
+          Run validation, the full test matrix and every build, but skip all
+          publishing (crates.io, npm, Marketplace, GitHub Release) and the
+          post-release integration tests.
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,15 +33,25 @@ jobs:
   validate:
     name: Validate Tag
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     outputs:
       is-prerelease: ${{ steps.check.outputs.is-prerelease }}
       dist-tag: ${{ steps.check.outputs.dist-tag }}
+      dry-run: ${{ steps.check.outputs.dry-run }}
     steps:
       - uses: actions/checkout@v5
       - id: check
         run: |
           TAG="${GITHUB_REF_NAME}"
           echo "Tag: $TAG"
+
+          # `inputs` is empty on a tag push, so this is false unless a caller
+          # (release-check.yml) explicitly asked for a rehearsal.
+          DRY_RUN="${{ inputs.dry_run == true }}"
+          echo "dry-run=${DRY_RUN}" >> $GITHUB_OUTPUT
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "::notice::DRY RUN — full validation, tests and builds will run; nothing will be published"
+          fi
 
           if [[ "$TAG" == *"-alpha"* ]]; then
             echo "is-prerelease=true" >> $GITHUB_OUTPUT
@@ -49,7 +71,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
@@ -82,14 +104,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # Test
   # ---------------------------------------------------------------------------
-  # Runs for visibility on every release. Non-blocking by explicit owner
-  # decision: the test baseline is known-red for pre-existing failures that
-  # are not a release blocker. Remove `continue-on-error` once the baseline
-  # is green.
+  # BLOCKING. This job gates publish-crates, publish-npm and publish-vscode:
+  # a red suite stops the release rather than shipping past it.
   test:
     name: Test
     runs-on: ubuntu-latest
-    continue-on-error: true
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -98,11 +118,9 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Prewarm tsgo cache
-        run: npx -y @typescript/native-preview@latest --version
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Rust gate
@@ -146,25 +164,38 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # build-native was the ONLY build matrix with no cargo cache at all —
+      # build-tsc, build-lsp and build-mcp-server all had one — so every
+      # release recompiled the full napi dependency graph from scratch on
+      # all seven target legs.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-native-${{ matrix.target }}
       - name: Setup Zig
         if: matrix.use-cross
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
+      # Prebuilt binary rather than `cargo install cargo-zigbuild --locked`,
+      # which compiled it from source in EVERY cross matrix leg of every build
+      # job (8 legs per release).
       - name: Install cargo-zigbuild
         if: matrix.use-cross
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Build native
         working-directory: packages/native
         run: |
@@ -240,28 +271,28 @@ jobs:
             npm-pkg: win32-x64-msvc
             binary: verter-tsc.exe
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-tsc-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-tsc-${{ matrix.target }}-
+          key: build-tsc-${{ matrix.target }}
       - name: Setup Zig
         if: matrix.use-cross
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
+      # Prebuilt binary rather than `cargo install cargo-zigbuild --locked`,
+      # which compiled it from source in EVERY cross matrix leg of every build
+      # job (8 legs per release).
       - name: Install cargo-zigbuild
         if: matrix.use-cross
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Build verter-tsc binary
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
@@ -315,28 +346,28 @@ jobs:
             binary: verter-lsp.exe
             shim-binary: verter-relay-shim.exe
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lsp-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lsp-${{ matrix.target }}-
+          key: build-lsp-${{ matrix.target }}
       - name: Setup Zig
         if: matrix.use-cross
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
+      # Prebuilt binary rather than `cargo install cargo-zigbuild --locked`,
+      # which compiled it from source in EVERY cross matrix leg of every build
+      # job (8 legs per release).
       - name: Install cargo-zigbuild
         if: matrix.use-cross
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Build editor binaries
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
@@ -394,28 +425,28 @@ jobs:
             asset-target: win32-x64
             binary: verter-mcp-server.exe
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-mcp-server-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-mcp-server-${{ matrix.target }}-
+          key: build-mcp-server-${{ matrix.target }}
       - name: Setup Zig
         if: matrix.use-cross
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
+      # Prebuilt binary rather than `cargo install cargo-zigbuild --locked`,
+      # which compiled it from source in EVERY cross matrix leg of every build
+      # job (8 legs per release).
       - name: Install cargo-zigbuild
         if: matrix.use-cross
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Build verter-mcp-server binary
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
@@ -437,30 +468,26 @@ jobs:
     name: Build WASM
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-wasm-
+          key: build-wasm
+      # Prebuilt binary. The previous guarded `cargo install` compiled
+      # wasm-bindgen-cli from source on any runner where the version probe
+      # missed, which is every cold cache.
       - name: Install wasm-bindgen CLI
-        run: |
-          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
-            exit 0
-          fi
-          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.122
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Build WASM
@@ -476,12 +503,473 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Editor-client integration — FULL matrix
+  #
+  # ci.yml runs a single fast Linux leg of each of these on every PR. The
+  # release runs the full cross-OS matrix, which is where the Cross-Platform
+  # Portability CRITICAL rule is actually discharged for the editor clients:
+  # the Lapce/Zed volt builds, the Helix config contract, and the Neovim Lua
+  # path-handling layer are all proven on macOS and Windows here.
+  #
+  # The three `build-editor-lsp` legs produce the ONLY release builds of
+  # verter-lsp used by this section; every editor leg below downloads the
+  # binary for its OS rather than rebuilding it (the retired standalone
+  # workflows rebuilt it twelve times, uncached).
+  # ---------------------------------------------------------------------------
+  build-editor-lsp:
+    name: Build editor LSP (${{ matrix.slug }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux
+            binary: verter-lsp
+          - os: macos-latest
+            slug: macos
+            binary: verter-lsp
+          - os: windows-latest
+            slug: windows
+            binary: verter-lsp.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-editor-lsp-${{ matrix.slug }}
+      - name: Build verter-lsp (release)
+        run: cargo build -p verter_lsp --release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: editor-lsp-${{ matrix.slug }}
+          path: target/release/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 1
+
+  editor-helix:
+    name: Editor matrix — Helix (${{ matrix.os }})
+    needs: [validate, build-editor-lsp]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            slug: linux
+          - os: macos-latest
+            slug: macos
+          - os: windows-latest
+            slug: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-editor-helix-${{ matrix.slug }}
+
+      # Cross-platform portability: the contract resolves the snippet path and
+      # parses it on all three host OSes. `shell: bash` keeps one script under
+      # Git-bash on the Windows runner.
+      - name: Run the Helix config-contract test
+        shell: bash
+        run: cargo test -p verter-editor-client --test main cases::helix_config_contract
+
+      - name: Run the whole verter-editor-client suite
+        shell: bash
+        run: cargo test -p verter-editor-client
+
+      - name: Test the exported rootless Helix shipping plan
+        shell: bash
+        run: cargo test -p verter-editor-client --example helix_plan
+
+      - name: Clippy
+        shell: bash
+        run: cargo clippy -p verter-editor-client -- -D warnings
+
+      - name: Rustfmt check
+        shell: bash
+        run: cargo fmt -p verter-editor-client --check
+
+      # The real-client lane is Linux-only: the pinned Helix release asset is a
+      # linux-x86_64 archive.
+      - uses: pnpm/action-setup@v4
+        if: runner.os == 'Linux'
+      - uses: actions/setup-node@v5
+        if: runner.os == 'Linux'
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Download shared verter-lsp
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@v7
+        with:
+          name: editor-lsp-${{ matrix.slug }}
+          path: target/release
+
+      - name: Install pinned Helix with checksum verification
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helix-25.07.1-x86_64-linux.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            https://github.com/helix-editor/helix/releases/download/25.07.1/helix-25.07.1-x86_64-linux.tar.xz
+          echo "3f08e63ecd388fff657ad39722f88bb03dcf326f1f2da2700d99e1dc40ab2e8b  $archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          echo "${RUNNER_TEMP}/helix-25.07.1-x86_64-linux" >> "$GITHUB_PATH"
+          echo "HELIX_RUNTIME=${RUNNER_TEMP}/helix-25.07.1-x86_64-linux/runtime" >> "$GITHUB_ENV"
+
+      - name: Provision the shipped Helix configuration and server
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          config="${RUNNER_TEMP}/helix-config/helix"
+          mkdir -p "$config" "${RUNNER_TEMP}/verter-bin"
+          cp editors/helix/languages.toml "$config/languages.toml"
+          cp target/release/verter-lsp "${RUNNER_TEMP}/verter-bin/verter-lsp"
+          chmod +x "${RUNNER_TEMP}/verter-bin/verter-lsp"
+          echo "XDG_CONFIG_HOME=${RUNNER_TEMP}/helix-config" >> "$GITHUB_ENV"
+          echo "${RUNNER_TEMP}/verter-bin" >> "$GITHUB_PATH"
+
+      - name: Prove Vue and Svelte select only the executable Verter server
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          hx --version | grep -F "helix 25.07.1"
+          for language in vue svelte; do
+            output=$(NO_COLOR=1 hx --health "$language" 2>&1)
+            printf '%s\n' "$output"
+            printf '%s\n' "$output" | grep -F "verter-lsp"
+            if printf '%s\n' "$output" | grep -Eiq 'vue-language-server|svelteserver|svelte-language-server'; then
+              echo "::error::$language has a second framework language server configured"
+              exit 1
+            fi
+          done
+
+      - name: Install neutral-client fixture dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+          pnpm --filter @verter/lsp-test-client build
+
+      - name: Drive the parsed Helix shipping plan over stdio
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test scripts/editor-contracts/plan-contract.test.mjs
+          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
+          bin="${RUNNER_TEMP}/verter-bin/verter-lsp"
+          plan="${RUNNER_TEMP}/helix-launch-plan.json"
+          cargo run --quiet -p verter-editor-client --example helix_plan -- "$bin" > "$plan"
+          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
+
+  editor-lapce:
+    name: Editor matrix — Lapce volt (${{ matrix.os }})
+    needs: [validate, build-editor-lsp]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            slug: linux
+          - os: macos-latest
+            slug: macos
+          - os: windows-latest
+            slug: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-editor-lapce-${{ matrix.slug }}
+
+      # extensions/lapce is a SEPARATE cargo manifest, not a workspace member,
+      # so none of this is covered by the workspace `test` job above. The
+      # portability rule mandates the volt build and host launch surface pass
+      # on macOS, Windows AND Linux, so these run on all three.
+      - name: Build the volt (wasm32-wasip1)
+        shell: bash
+        run: cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release
+
+      - name: Run host-target unit tests
+        shell: bash
+        run: cargo test --manifest-path extensions/lapce/Cargo.toml
+
+      - name: Clippy (wasm32-wasip1)
+        shell: bash
+        run: cargo clippy --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 -- -D warnings
+
+      - name: Rustfmt check
+        shell: bash
+        working-directory: extensions/lapce
+        run: cargo fmt --check
+
+      - uses: pnpm/action-setup@v4
+        if: runner.os == 'Linux'
+      - uses: actions/setup-node@v5
+        if: runner.os == 'Linux'
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Download shared verter-lsp
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@v7
+        with:
+          name: editor-lsp-${{ matrix.slug }}
+          path: target/release
+      - name: Make verter-lsp executable
+        if: runner.os == 'Linux'
+        run: chmod +x target/release/verter-lsp
+
+      - name: Install JavaScript test dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+          pnpm --filter @verter/lsp-test-client build
+
+      - name: Drive the exact Lapce launch plan over stdio
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test scripts/editor-contracts/plan-contract.test.mjs
+          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
+          bin="${GITHUB_WORKSPACE}/target/release/verter-lsp"
+          plan="${RUNNER_TEMP}/lapce-launch-plan.json"
+          cargo run --quiet --manifest-path extensions/lapce/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
+          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
+
+  editor-zed:
+    name: Editor matrix — Zed extension (${{ matrix.os }})
+    needs: [validate, build-editor-lsp]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            slug: linux
+          - os: macos-latest
+            slug: macos
+          - os: windows-latest
+            slug: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-editor-zed-${{ matrix.slug }}
+
+      # extensions/zed is a SEPARATE cargo manifest, not a workspace member. A
+      # wasip1/wasip2 mismatch yields a `__wasi_init_tp` load error in Zed,
+      # which only this build catches.
+      - name: Build the extension (wasm32-wasip2)
+        shell: bash
+        run: cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release
+
+      - name: Run host-target unit tests
+        shell: bash
+        run: cargo test --manifest-path extensions/zed/Cargo.toml
+
+      - name: Clippy (wasm32-wasip2)
+        shell: bash
+        run: cargo clippy --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 -- -D warnings
+
+      - name: Rustfmt check
+        shell: bash
+        working-directory: extensions/zed
+        run: cargo fmt --check
+
+      - uses: pnpm/action-setup@v4
+        if: runner.os == 'Linux'
+      - uses: actions/setup-node@v5
+        if: runner.os == 'Linux'
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Download shared verter-lsp
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@v7
+        with:
+          name: editor-lsp-${{ matrix.slug }}
+          path: target/release
+      - name: Make verter-lsp executable
+        if: runner.os == 'Linux'
+        run: chmod +x target/release/verter-lsp
+
+      - name: Install JavaScript test dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm ci --ignore-scripts --prefix editors/nvim/tests/fixtures/real-client
+          pnpm --filter @verter/lsp-test-client build
+
+      - name: Drive the exact Zed launch plan over stdio
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test scripts/editor-contracts/plan-contract.test.mjs
+          root="${GITHUB_WORKSPACE}/editors/nvim/tests/fixtures/real-client"
+          bin="${GITHUB_WORKSPACE}/target/release/verter-lsp"
+          plan="${RUNNER_TEMP}/zed-launch-plan.json"
+          cargo run --quiet --manifest-path extensions/zed/Cargo.toml --example contract_plan -- "$root" "$bin" > "$plan"
+          node scripts/editor-contracts/run-plan-smoke.mjs --plan="$plan" --root="$root"
+
+  editor-neovim:
+    name: Editor matrix — nvim ${{ matrix.neovim }} (${{ matrix.os }})
+    needs: [validate, build-editor-lsp]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross-platform portability: the Lua config layer must build path
+        # strings and resolve the binary on all three host OSes.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # v0.11.0 is the supported floor (`vim.lsp.config` / `vim.lsp.enable`
+        # first landed in 0.11), v0.12.3 is current stable, nightly catches
+        # upstream LSP-client changes before they ship.
+        neovim: [v0.11.0, v0.12.3, nightly]
+        include:
+          - os: ubuntu-latest
+            slug: linux
+            binary: verter-lsp
+          - os: macos-latest
+            slug: macos
+            binary: verter-lsp
+          - os: windows-latest
+            slug: windows
+            binary: verter-lsp.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download shared verter-lsp
+        uses: actions/download-artifact@v7
+        with:
+          name: editor-lsp-${{ matrix.slug }}
+          path: target/release
+
+      - name: Install the pinned real-client fixture toolchain
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: editors/nvim/tests/fixtures/real-client/package-lock.json
+
+      - name: Provision tsgo and framework types
+        working-directory: editors/nvim/tests/fixtures/real-client
+        run: npm ci --ignore-scripts
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim }}
+
+      - name: Checkout plenary.nvim
+        uses: actions/checkout@v5
+        with:
+          repository: nvim-lua/plenary.nvim
+          ref: 74b06c6c75e4eeb3108ec01852001636d85a932b
+          path: .ci/plenary.nvim
+
+      - name: Run plenary busted suite
+        shell: bash
+        env:
+          PLENARY_PATH: ${{ github.workspace }}/.ci/plenary.nvim
+        run: |
+          set -euo pipefail
+          # `smoke_spec.lua` drives a REAL stdio attach and fails closed if
+          # $VERTER_LSP_BIN is missing.
+          VERTER_LSP_BIN="${GITHUB_WORKSPACE}/target/release/${{ matrix.binary }}"
+          chmod +x "${VERTER_LSP_BIN}" 2>/dev/null || true
+          if [ ! -x "${VERTER_LSP_BIN}" ]; then
+            echo "::error::shared verter-lsp not found/executable at ${VERTER_LSP_BIN}"
+            exit 1
+          fi
+          export VERTER_LSP_BIN
+          VERTER_TSGO_BIN=$(node --input-type=module -e \
+            "import getExePath from './editors/nvim/tests/fixtures/real-client/node_modules/typescript/lib/getExePath.js'; console.log(getExePath().replaceAll('\\\\', '/'))")
+          if [ ! -x "${VERTER_TSGO_BIN}" ]; then
+            echo "::error::fixture TypeScript 7 engine not found/executable at ${VERTER_TSGO_BIN}"
+            exit 1
+          fi
+          export VERTER_TSGO_BIN
+          echo "using VERTER_LSP_BIN=${VERTER_LSP_BIN}"
+          echo "using VERTER_TSGO_BIN=${VERTER_TSGO_BIN}"
+          # Load minimal_init.lua into the PARENT nvim with `-u` so the
+          # `PlenaryBustedDirectory` command exists (it is defined by plenary,
+          # which minimal_init prepends to the rtp). Without `-u` the parent
+          # nvim has no plenary and the command is a no-op, so the suite would
+          # silently fail to run.
+          #
+          # Capture output so we can fail the job even on plenary builds that do
+          # not propagate a nonzero exit code on test failure.
+          out=$(nvim --headless --noplugin \
+            -u editors/nvim/tests/minimal_init.lua \
+            -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
+            -c "qa!" 2>&1) || rc=$?
+          rc=${rc:-0}
+          echo "$out"
+          # Whitespace-tolerant failure tokens. plenary prints `Failed : <n>`
+          # and `Errors : <n>` (ONE space, variable padding), so a two-space
+          # pattern never matches and the gate could go green on a real failure.
+          if printf '%s\n' "$out" | grep -Eq 'Tests Failed|Schedule Error|Failed[[:space:]]*:[[:space:]]*[1-9]|Errors?[[:space:]]*:[[:space:]]*[1-9]'; then
+            echo "::error::Neovim plenary suite reported failures"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Neovim exited non-zero ($rc)"
+            exit "$rc"
+          fi
+          if ! printf '%s\n' "$out" | grep -Eq 'Success(es)?[[:space:]]*:[[:space:]]*[1-9]|[1-9][0-9]*[[:space:]]+success'; then
+            echo "::error::Neovim test output did not prove that any assertion-bearing test ran"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # Publish Rust crates
   # ---------------------------------------------------------------------------
   publish-crates:
     name: Publish Crates
-    needs: [validate, test]
+    needs: [validate, test, editor-helix, editor-lapce, editor-zed, editor-neovim]
+    if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     environment:
       name: crates-io
       url: https://crates.io/crates/verter_compiler
@@ -527,8 +1015,10 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-npm:
     name: Publish npm
-    needs: [validate, test, build-native, build-tsc, build-wasm]
+    needs: [validate, test, editor-helix, editor-lapce, editor-zed, editor-neovim, build-native, build-tsc, build-wasm]
+    if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     environment:
       name: npm
       url: https://www.npmjs.com/package/@verter/native
@@ -540,7 +1030,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
@@ -788,7 +1278,9 @@ jobs:
   publish-vscode:
     name: Publish VS Code Extension
     needs: [validate, test, build-lsp, build-native, publish-npm]
+    if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     environment:
       name: vscode-marketplace
       url: https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
@@ -797,7 +1289,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
@@ -898,7 +1390,7 @@ jobs:
             echo "  VSIX: /tmp/${VSIX_NAME} ($(du -h "/tmp/${VSIX_NAME}" | cut -f1))"
 
             # --- Publish to VS Code Marketplace ---
-            npx @vscode/vsce publish --packagePath "/tmp/${VSIX_NAME}" $PRE_RELEASE_FLAG
+            pnpm exec vsce publish --packagePath "/tmp/${VSIX_NAME}" $PRE_RELEASE_FLAG
 
             # --- Clean up for next platform ---
             rm -rf packages/vue-vscode/bin
@@ -931,7 +1423,9 @@ jobs:
         publish-npm,
         publish-vscode,
       ]
+    if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     environment:
       name: github-releases
       url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
@@ -941,8 +1435,12 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
 
+      # Prebuilt binary rather than a from-source `cargo install`, which added
+      # several minutes of compile to every release for a changelog generator.
       - name: Install git-cliff
-        run: cargo install git-cliff --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
 
       - name: Generate changelog
         run: git-cliff --latest --strip header > /tmp/RELEASE_NOTES.md
@@ -954,11 +1452,32 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # CHANGELOG.md was generated above from the TAG checkout, which is a
+          # DETACHED HEAD at the tagged commit. Pushing that ref straight at
+          # main (`git push origin HEAD:main`) is a non-fast-forward the moment
+          # main has advanced past the tag — and it fails HERE, after npm,
+          # crates.io and the Marketplace have already published, leaving a
+          # shipped release whose changelog never landed. Replay the generated
+          # file onto live main instead of pushing the tag's history at it.
+          cp CHANGELOG.md "${RUNNER_TEMP}/CHANGELOG.release.md"
+          git fetch origin main
+          git checkout -B changelog-main origin/main
+          cp "${RUNNER_TEMP}/CHANGELOG.release.md" CHANGELOG.md
+
           git add CHANGELOG.md
-          if ! git diff --cached --quiet; then
-            git commit -m "release: ${GITHUB_REF_NAME}"
-            git push origin HEAD:main
+          if git diff --cached --quiet; then
+            echo "CHANGELOG.md on main is already current"
+            exit 0
           fi
+
+          git commit -m "release: ${GITHUB_REF_NAME}"
+          git push origin HEAD:main || {
+            echo "push raced with a concurrent commit to main; retrying on refreshed main"
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          }
 
       - uses: actions/download-artifact@v7
         with:
@@ -1038,6 +1557,8 @@ jobs:
   integration-test:
     name: Run Integration Tests
     needs: [validate, publish-npm]
+    # Consumes the PUBLISHED npm packages, so it cannot run in a rehearsal.
+    if: needs.validate.outputs.dry-run != 'true'
     permissions:
       contents: read
       checks: write

@@ -55,6 +55,7 @@ jobs:
   check-trigger:
     name: Check Trigger
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: github.event_name == 'issue_comment'
     outputs:
       should-run: ${{ steps.check.outputs.should-run }}
@@ -131,6 +132,7 @@ jobs:
   setup:
     name: Setup Verter
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: |
       always() &&
       (github.event_name != 'issue_comment' || 
@@ -170,7 +172,7 @@ jobs:
         if: steps.source.outputs.source == 'artifact'
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install Rust
@@ -433,7 +435,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
 
       - name: Configure hoist pattern for Verter
         if: matrix.project.package-manager == 'pnpm'
@@ -1128,6 +1130,7 @@ jobs:
   summary:
     name: Generate Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [test-project]
     if: always()
     steps:

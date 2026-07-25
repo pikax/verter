@@ -23,9 +23,15 @@ on:
 permissions:
   contents: write
 
+# Comment-triggered runs can stack; keep one run per issue/ref.
+concurrency:
+  group: release-tag-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,7 +39,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
 
       - name: Detect a version commit
         id: detect

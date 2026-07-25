@@ -540,11 +540,20 @@ checklist in the README, not an automated gate (mirrors the Lapce/neovim posture
 
 ## 7. CI
 
-`.github/workflows/zed.yml` runs a 3-OS matrix (ubuntu/macos/windows, `shell: bash`,
-`dtolnay/rust-toolchain@stable` with `targets: wasm32-wasip2` + clippy/rustfmt): the
-`wasm32-wasip2` release build, the host-target unit tests, `cargo clippy --target
-wasm32-wasip2 -- -D warnings`, and `cargo fmt --check`. The Linux lane additionally runs the
-production-plan semantic smoke. Real-Zed UI loading remains manual because Zed has no
+The `editor-zed` job in `.github/workflows/ci.yml` (`dtolnay/rust-toolchain@stable` with
+`targets: wasm32-wasip2` + clippy/rustfmt) runs the `wasm32-wasip2` release build, the
+host-target unit tests, `cargo clippy --target wasm32-wasip2 -- -D warnings`, `cargo fmt
+--check`, and the production-plan semantic smoke against the shared `verter-lsp` binary
+produced once by the `build-editor-lsp` job.
+
+**Two-tier coverage.** This lane previously lived in a standalone `zed.yml` running a 3-OS
+matrix (ubuntu/macos/windows) that built `verter-lsp --release` itself on every run. The
+Cross-Platform Portability CRITICAL rule is now discharged at RELEASE time: the
+`editor-zed` job in `release.yml` runs the full ubuntu/macos/windows matrix, proving the
+`wasm32-wasip2` build and the host-target launch surface on all three host OSes. The
+`ci.yml` job above is the fast Linux-only leg run per PR. `release-check.yml` rehearses the
+full release matrix without publishing, so the cross-OS proof is available on demand before
+a tag is cut. Real-Zed UI loading remains manual because Zed has no
 headless extension-host harness; the neutral-client lane is documented as a shipping-plan
 contract, not as GUI automation.
 

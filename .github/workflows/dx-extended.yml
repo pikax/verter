@@ -46,12 +46,13 @@ jobs:
   extension-host-dx:
     name: Extension-host DX (unit)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Build DX harness
@@ -70,28 +71,21 @@ jobs:
   corpus-sweep-dx:
     name: Raw-LSP corpus sweep (record-only)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          key: corpus-sweep-dx
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # The sweep drives verter-lsp + the baseline bridge against a real tsgo (the
       # gold standard), so tsgo must be discoverable — prewarm its cache.
-      - name: Prewarm tsgo cache
-        run: npx -y @typescript/native-preview@latest --version
       - name: Build differential-baseline bridge
         run: cargo build -p verter_dx_baseline
       - name: Build verter-lsp
@@ -124,6 +118,7 @@ jobs:
     name: External-corpus DX
     if: github.event_name == 'workflow_dispatch' && inputs.external_corpus_repo != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Checkout external corpus
@@ -133,19 +128,13 @@ jobs:
           ref: ${{ inputs.external_corpus_ref }}
           path: .dx-external-corpus
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          key: external-corpus-dx
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Build differential-baseline bridge
