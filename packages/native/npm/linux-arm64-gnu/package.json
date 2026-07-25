@@ -21,6 +21,6 @@
   ],
   "main": "verter-native.linux-arm64-gnu.node",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

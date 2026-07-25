@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Verter! This guide will help you 
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 26 (the version pinned in `.nvmrc`; `nvm use` / `fnm use` picks it up)
 - pnpm 10+
 - Rust stable toolchain with `rustfmt`, `clippy`, and `cargo-nextest`
 - VS Code (for extension development)

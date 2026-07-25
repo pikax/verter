@@ -36,6 +36,6 @@
     "@verter/tsc-win32-x64-msvc": "workspace:*"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

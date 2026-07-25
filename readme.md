@@ -293,7 +293,7 @@ source "$HOME/.cargo/env"
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.122 --locked
 
-# 3. Install pnpm (if not already installed, requires Node.js 18+)
+# 3. Install pnpm (if not already installed, requires Node.js 26 — see .nvmrc)
 corepack enable
 corepack prepare pnpm@latest --activate
 

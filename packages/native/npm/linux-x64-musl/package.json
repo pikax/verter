@@ -21,6 +21,6 @@
   ],
   "main": "verter-native.linux-x64-musl.node",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }
