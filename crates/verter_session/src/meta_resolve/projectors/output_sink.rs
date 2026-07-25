@@ -40,11 +40,11 @@ use std::sync::Arc;
 use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
 use verter_semantic::analysis::type_expand::{ExpandedField, ExpansionExecutionStatus};
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{TypeExpr, UnknownValue};
 
 use crate::meta_resolve::exactness::classify_node;
 use crate::project_semantic_dispatch::output_materialization::{
-    wrap_output_type_expr, MaterializedOutputTypeExpr, OutputProjector,
+    wrap_degraded_output, wrap_output_type_expr, MaterializedOutputTypeExpr, OutputProjector,
 };
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
@@ -101,7 +101,18 @@ fn raise_node_to_sealed_carrier(
     let cap = MetaResolveProjectorsOutputCap::new(dispatch);
     let sealed = match cap.materialize_output_type_expr(node) {
         Some(sealed) => sealed,
-        None => wrap_output_type_expr(&cap, TypeExpr::Unknown { raw: String::new() }),
+        None => {
+            if crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).is_none() {
+                // GENUINE absence (no typed payload minted for this id): the
+                // exact `missing_output` — NON-partial.
+                wrap_output_type_expr(&cap, TypeExpr::Unknown(UnknownValue::missing_output()))
+            } else {
+                // PRESENT-BUT-UNRAISABLE (the node minted but a required child
+                // failed): degrade as the typed unmaterialized `Miss` carrier —
+                // PARTIAL at the choke point, never admitted complete.
+                wrap_degraded_output(&cap, crate::semantic_query::QueryError::Miss)
+            }
+        }
     };
     MaterializedOutputTypeExpr::from_parts(Some(node), sealed, dep_signature, false)
 }
@@ -1120,7 +1131,7 @@ pub(crate) fn project_model(
 /// source through THIS function — absence semantics are session-owned and
 /// decided in exactly one place, never re-derived per lane or at the wire.
 fn missing_source_output_type_expr() -> TypeExpr {
-    TypeExpr::Unknown { raw: String::new() }
+    TypeExpr::Unknown(UnknownValue::missing_output())
 }
 
 /// Materialize ONE present output source to its wire `TypeExpr` at this

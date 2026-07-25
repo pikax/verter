@@ -1098,9 +1098,9 @@ impl StructuralEncoder<'_> {
                 self.buf.push(VariantTag::Infer as u8);
                 self.push_str(name);
             }
-            SemanticNodeData::RawFallback { raw } => {
+            SemanticNodeData::RawFallback { value } => {
                 self.buf.push(VariantTag::RawFallback as u8);
-                self.push_str(raw);
+                self.push_str(value.raw());
             }
             SemanticNodeData::DeclRef { identity } => {
                 self.buf.push(VariantTag::DeclRef as u8);

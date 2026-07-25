@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, LiteralValue, MappedModifier, ObjectExpr, ObjectMember,
     ObjectProperty, PrimitiveName, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
-    ValueRef,
+    UnknownProvenance, UnknownValue, ValueRef,
 };
 
 use super::{
@@ -220,12 +220,17 @@ fn lowers_unknown_to_raw_fallback_verbatim() {
     // Unsupported raw syntax → `RawFallback { raw }` with the exact text
     // preserved. RawFallback is display/compat only, never a miss signal.
     let host = VerterHost::new_standalone(Default::default());
-    let expr = TypeExpr::Unknown {
-        raw: "Weird<& Type>".to_string(),
-    };
+    let expr = TypeExpr::Unknown(UnknownValue::unsupported_syntax("Weird<& Type>"));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::RawFallback { raw } => assert_eq!(raw.as_ref(), "Weird<& Type>"),
+        SemanticNodeData::RawFallback { value } => {
+            assert_eq!(value.raw(), "Weird<& Type>");
+            assert_eq!(
+                value.provenance(),
+                UnknownProvenance::UnsupportedSyntax,
+                "the lowered RawFallback keeps the typed provenance"
+            );
+        }
         other => panic!("expected RawFallback, got {other:?}"),
     }
 }

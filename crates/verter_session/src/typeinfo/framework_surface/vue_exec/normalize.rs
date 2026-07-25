@@ -14,7 +14,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
 use verter_semantic::analysis::types::{AnalyzedEmitField, AnalyzedPropField};
 use verter_semantic::analysis::AnalyzedMacroKind;
-use verter_type_expr::{TypeExpr, TypeExprScope};
+use verter_type_expr::{TypeExpr, TypeExprScope, UnknownValue};
 
 use super::{member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans};
 use crate::meta_resolve::callable_view::CallableNodeView;
@@ -858,14 +858,16 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tupl
         .iter()
         .map(|param| {
             // Position-preserving: mint the param's `ty` node ONCE; a node that
-            // does not materialize keeps its tuple SLOT with the opaque `Unknown`
-            // raise-miss value (the `output_sink::raise_node_to_sealed_carrier`
-            // convention) so subsequent payload params never shift. A declared
-            // param's `ty` always mints, so the fallback is robustness only.
+            // does not materialize keeps its tuple SLOT with an exact empty
+            // `Unknown` (DISPLAY robustness only — the seam notes a
+            // present-but-unraisable failure as an `OutputMaterializationLoss`
+            // non-cacheable read, so the payload is never admitted complete). A
+            // declared param's `ty` always mints, so the fallback is robustness
+            // only.
             let ty = cap
                 .materialize_output_type_expr(param.ty)
                 .map(|raised| raised.into_type_expr(&cap))
-                .unwrap_or_else(|| TypeExpr::Unknown { raw: String::new() });
+                .unwrap_or_else(|| TypeExpr::Unknown(UnknownValue::missing_output()));
             verter_type_expr::TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
                 // display-facing tuple `label` (`Option<String>`).

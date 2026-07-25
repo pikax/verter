@@ -11,3 +11,4 @@ mod member_visibility_json_roundtrip;
 mod source_self_anchoring;
 mod synthetic_slot_binding_discrimination;
 mod type_expr_display;
+mod unknown_wire_preservation;

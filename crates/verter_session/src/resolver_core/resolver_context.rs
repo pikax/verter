@@ -1296,6 +1296,13 @@ pub(crate) enum NonCacheableReadReason {
     /// failed slot remains vacant and any Option-shaped caller may serve the
     /// failure only as ReturnOnly; it must never publish it as real absence.
     PreparationFailure,
+    /// A terminal output-materialization LOST typed degradation: a
+    /// present-but-unraisable fold (`None`) or a non-empty degradation
+    /// sidecar discarded at the capability-gated terminal unwrap. The
+    /// compat tree may still be published for display, but the compute must
+    /// never be warm-admitted as a complete result. Orthogonal to
+    /// completeness: the result is NOT partial, it is non-cacheable.
+    OutputMaterializationLoss,
 }
 
 impl NonCacheableReadReason {
@@ -1310,7 +1317,10 @@ impl NonCacheableReadReason {
             | Self::UnrootableRoute
             | Self::UnobservableSource
             | Self::InferenceBudgetExceeded
-            | Self::PreparationFailure => super::fact_read_set::NonCacheablePropagation::Transitive,
+            | Self::PreparationFailure
+            | Self::OutputMaterializationLoss => {
+                super::fact_read_set::NonCacheablePropagation::Transitive
+            }
         }
     }
 }

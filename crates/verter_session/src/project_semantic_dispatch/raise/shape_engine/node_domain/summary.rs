@@ -8,10 +8,7 @@
 //! `root_kind` rules can never drift across the consumers. The functions take
 //! ONLY the child facts they fold (never a key or interner).
 
-use super::{
-    FactShapeTag, RaisedRootKind, RaisedShapeFacts, RaisedShapeSummary, SEMANTIC_MISS,
-    SEMANTIC_OBJECT_SURFACE,
-};
+use super::{FactShapeTag, RaisedRootKind, RaisedShapeFacts, RaisedShapeSummary};
 
 /// Assemble a summary from the three facts + tag. `can_shell_raise` is
 /// ALWAYS `true` for any value the fold produces (a `Some(result)`).
@@ -54,24 +51,15 @@ pub(super) fn reference_leaf() -> RaisedShapeSummary {
     s
 }
 
-/// `Unknown { raw }`: materialized iff the raw is NOT an unmaterialized
-/// sentinel; an expanded leaf; tagged `ObjectSurfaceSentinel` iff the raw is
-/// exactly the object-surface sentinel (dropped from an intersection).
-pub(super) fn unknown(raw: &str) -> RaisedShapeSummary {
-    let materialized =
-        !crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw);
-    let tag = if raw == SEMANTIC_OBJECT_SURFACE {
-        FactShapeTag::ObjectSurfaceSentinel
-    } else {
-        FactShapeTag::Other
-    };
-    let mut s = summary(materialized, true, tag);
-    // The ROOT term IS this `Unknown { raw }`, so it is a root sentinel iff the
-    // raw reads unmaterialised (`!materialized`), and the NARROWER miss-root iff
-    // the raw is EXACTLY the `semanticMiss` spelling.
-    s.root_unmaterialized_sentinel = !materialized;
-    s.root_semantic_miss_sentinel = raw == SEMANTIC_MISS;
-    s
+/// A GENUINE [`UnknownValue`](verter_type_expr::UnknownValue) (unrepresentable
+/// authored/raw syntax — the `RawFallback` carrier): ALWAYS a materialized,
+/// expanded leaf with no special tag and no root-sentinel flags. There is NO
+/// raw sentinel classification anywhere in the node domain — resolver
+/// degradation reaches the fold ONLY as a typed [`QueryError`] through
+/// [`opaque_sentinel`], never as a spelling, so an unknown leaf can never be
+/// a sentinel (even one spelled identically to a legacy sentinel).
+pub(super) fn unknown(_value: &verter_type_expr::UnknownValue) -> RaisedShapeSummary {
+    materialized_expanded_leaf()
 }
 
 /// A TYPED resolver-control sentinel (`Opaque(QueryError)` reaching the
@@ -81,14 +69,10 @@ pub(super) fn unknown(raw: &str) -> RaisedShapeSummary {
 /// re-spelling a raw string. `materialized` comes from the domain-neutral
 /// `query_error_is_unmaterialized_sentinel`; the `tag` is mapped HERE — this
 /// is where [`FactShapeTag`] lives — from the domain-neutral
-/// `query_error_is_object_surface_sentinel` predicate, exactly mirroring the
-/// `raw == SEMANTIC_OBJECT_SURFACE` tag rule [`unknown`] applies (the
-/// `UnrepresentableSurface` carrier round-trips to that spelling natively, and
-/// a text-bearing `Other("semanticObjectSurface")` payload round-trips to it
-/// via the predicate's delegation — both tag `ObjectSurfaceSentinel`, exactly
-/// as the raw rule would). Both predicates are held byte-for-byte in agreement
-/// with the raw recogniser `unknown` uses (the no-drift contract), so this
-/// path and the raw-string path classify a sentinel identically.
+/// `query_error_is_object_surface_sentinel` predicate — ONLY the typed
+/// `UnrepresentableSurface` carrier tags `ObjectSurfaceSentinel` (a
+/// text-bearing `Other("semanticObjectSurface")` payload is inert and tags
+/// `Other`, exactly like any genuine [`unknown`] leaf, which never tags).
 /// `expanded_surface` is always `true`, exactly as `unknown` passes.
 pub(super) fn opaque_sentinel(err: &crate::semantic_query::QueryError) -> RaisedShapeSummary {
     use crate::project_semantic_dispatch::raise_sentinel::{
@@ -202,9 +186,9 @@ pub(super) fn conditional(
 /// `Mapped`: materialized iff source + value (+ name_type, when present)
 /// are; NOT an expanded surface. `value_root_semantic_miss` is the mapped
 /// VALUE's OWN raised-root `semanticMiss` fact, carried into the root class so
-/// the published-operator classifier suppresses EXACTLY the
-/// `value == Unknown { raw == "semanticMiss" }` carrier the `TypeExpr`
-/// predicate suppresses (publishing for any other value).
+/// the published-operator classifier suppresses EXACTLY the typed
+/// `QueryError::Miss` carrier (whose terminal projection spells
+/// `semanticMiss`), publishing for any other value.
 pub(super) fn mapped(
     source: RaisedShapeFacts,
     value: RaisedShapeFacts,

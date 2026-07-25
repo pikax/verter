@@ -2,7 +2,7 @@ use oxc_ast::{Comment, CommentContent};
 
 use verter_span::Span;
 use verter_type_expr::facts::TypeDependencyPathFact;
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{TypeExpr, UnknownValue};
 
 use super::decl_dependencies::{collect_type_dependency_facts, DeclDependencyNames};
 use crate::analysis::types::JsdocTag;
@@ -74,9 +74,7 @@ fn parse_jsdoc_tag_type_payload_with_dependencies(
 
     if input.trim().is_empty() {
         return (
-            TypeExpr::Unknown {
-                raw: input.to_string(),
-            },
+            TypeExpr::Unknown(UnknownValue::jsdoc_parse_fallback(input)),
             DeclDependencyNames::default(),
         );
     }
@@ -113,9 +111,7 @@ fn parse_jsdoc_tag_type_payload_with_dependencies(
     }
 
     (
-        TypeExpr::Unknown {
-            raw: input.to_string(),
-        },
+        TypeExpr::Unknown(UnknownValue::jsdoc_parse_fallback(input)),
         DeclDependencyNames::default(),
     )
 }

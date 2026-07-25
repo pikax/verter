@@ -134,6 +134,7 @@ impl TypeResolutionRequestError {
             | QueryError::RaiseAliasCycle
             | QueryError::TypeParamCycle
             | QueryError::RaiseMiss
+            | QueryError::OpenSurface
             | QueryError::UnrepresentableSurface
             | QueryError::UnrepresentableSurfaceMember => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {

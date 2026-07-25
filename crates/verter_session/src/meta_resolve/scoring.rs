@@ -196,7 +196,7 @@ mod node_scoring_differential_tests {
             // current-Unknown clause: a concrete string beats Unknown.
             (
                 TypeExpr::Primitive(PrimitiveName::String),
-                TypeExpr::Unknown { raw: String::new() },
+                TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
             ),
             // fewer-symbolic-carriers clause: a bare `Foo` (1) beats `Pick<Foo,'a'>` (2).
             (

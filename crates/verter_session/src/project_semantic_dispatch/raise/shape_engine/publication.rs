@@ -27,13 +27,14 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 #[cfg(test)]
 use verter_type_expr::TypeExpr;
-use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName};
+use verter_type_expr::{
+    LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, UnknownValue,
+};
 
 use super::super::ProjectSemanticDispatch;
 use super::{
     FactShapeTag, FoldedFunction, FoldedTupleElement, PublicationScore, RaisedShapeAlgebra,
 };
-use crate::resolver_core::component_meta_query_engine::SEMANTIC_OBJECT_SURFACE;
 use crate::semantic_query::{QueryError, SemanticNodeId};
 
 // The [`PublicationScore`] facts type is defined in the parent `shape_engine`
@@ -410,24 +411,20 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
             tag: FactShapeTag::Other,
         }
     }
-    fn unknown(&mut self, raw: Arc<str>) -> ScoredOut {
-        // Tag the object-surface sentinel exactly as the materializer's
-        // `is_object_surface_sentinel` does so the intersection arm-drop matches.
-        let tag = if raw.as_ref() == SEMANTIC_OBJECT_SURFACE {
-            FactShapeTag::ObjectSurfaceSentinel
-        } else {
-            FactShapeTag::Other
-        };
+    fn unknown(&mut self, _value: UnknownValue) -> ScoredOut {
+        // A genuine `UnknownValue` is NEVER the object-surface sentinel —
+        // only the typed `QueryError::UnrepresentableSurface` carrier (via
+        // `opaque_sentinel`) tags it, so the intersection arm-drop matches.
         ScoredOut {
             score: combine::unknown_leaf(),
-            tag,
+            tag: FactShapeTag::Other,
         }
     }
     fn opaque_sentinel(&mut self, err: &QueryError) -> ScoredOut {
-        // Every `Opaque` reaching this arm materialises to `Unknown { raw }`
+        // Every `Opaque` reaching this arm projects to an `Unknown` leaf
         // (`RecursiveRef` / `DeclPlaceholder` are routed by separate fold arms).
-        // Tag the object-surface sentinel from the typed variant, the same class
-        // the materializer recognises via the raw spelling.
+        // Tag the object-surface sentinel from the typed variant — the same
+        // class the materializer recognises via its typed root-degradation check.
         let tag = if crate::project_semantic_dispatch::raise_sentinel::query_error_is_object_surface_sentinel(err) {
             FactShapeTag::ObjectSurfaceSentinel
         } else {
@@ -705,7 +702,7 @@ fn fold_node_publication(
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<ScoredOut> {
-    super::fold_node(alg, dispatch, node, active)
+    super::fold::fold_node(alg, dispatch, node, active)
 }
 
 /// The [`PublicationScore`] of an existing `&TypeExpr` — the TypeExpr front of
@@ -723,7 +720,7 @@ pub(in crate::project_semantic_dispatch) fn type_expr_publication_score(
         TypeExpr::Infer { .. } | TypeExpr::TypeOf(_) | TypeExpr::SyntheticSlotBinding(_) => {
             combine::symbolic_leaf()
         }
-        TypeExpr::Unknown { .. } => combine::unknown_leaf(),
+        TypeExpr::Unknown(_) => combine::unknown_leaf(),
         TypeExpr::RecursiveRef { type_arguments, .. } => {
             combine::recursive_ref(type_arguments.iter().map(type_expr_publication_score))
         }

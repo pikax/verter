@@ -422,11 +422,11 @@ pub fn render_type_expr_display(
                         work.push(Frame::Text("typeof "));
                     }
                 }
-                TypeExpr::Unknown { raw } => {
-                    if raw.trim().is_empty() {
+                TypeExpr::Unknown(value) => {
+                    if value.is_empty() {
                         return Err(TypeExprDisplayError::EmptyUnknownSource);
                     }
-                    work.push(Frame::Borrowed(raw));
+                    work.push(Frame::Borrowed(value.raw()));
                 }
             },
             Frame::ObjectMember(member) => match member {
@@ -583,7 +583,7 @@ fn expression_precedence(expression: &TypeExpr) -> Precedence {
         TypeExpr::IndexedAccess { .. } => Precedence::Postfix,
         // The raw carrier can contain any authored type expression. Treat it
         // as the loosest form so embedding contexts preserve its parse tree.
-        TypeExpr::Unknown { .. } => Precedence::Lowest,
+        TypeExpr::Unknown(_) => Precedence::Lowest,
         _ => Precedence::Primary,
     }
 }

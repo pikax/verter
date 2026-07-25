@@ -134,7 +134,7 @@ fn drain_children(node: &mut TypeExpr, worklist: &mut Vec<TypeExpr>) {
         | TypeExpr::Literal(_)
         | TypeExpr::Infer { .. }
         | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => {}
+        | TypeExpr::Unknown(_) => {}
 
         // `typeof C.make<string>` — the instantiation-expression arguments are
         // owned recursive children (a plain `Vec`, no shared-`Arc` gate).
@@ -417,7 +417,7 @@ fn type_expr_discriminant(node: &TypeExpr) -> isize {
         TypeExpr::Parenthesized(_) => 18,
         TypeExpr::RecursiveRef { .. } => 19,
         TypeExpr::SyntheticSlotBinding(_) => 20,
-        TypeExpr::Unknown { .. } => 21,
+        TypeExpr::Unknown(_) => 21,
         TypeExpr::ConstructorType(_) => 22,
         // Added after the original derive: a new variant takes the next free
         // discriminant (NOT its declaration-order index) so 0..=22 stay frozen.
@@ -444,7 +444,7 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
         }
         TypeExpr::Infer { name } => name.hash(state),
         TypeExpr::SyntheticSlotBinding(carrier) => carrier.hash(state),
-        TypeExpr::Unknown { raw } => raw.hash(state),
+        TypeExpr::Unknown(value) => value.hash(state),
 
         // -- `Arc<[TypeExpr]>`: len (usize) then each element --
         TypeExpr::Union(items) | TypeExpr::Intersection(items) => {

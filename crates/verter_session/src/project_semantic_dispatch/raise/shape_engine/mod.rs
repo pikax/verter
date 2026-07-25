@@ -33,21 +33,26 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
-use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
+use verter_type_expr::{
+    LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr, UnknownValue,
+};
 
 use super::super::ProjectSemanticDispatch;
-use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
+use crate::semantic_query::{QueryError, SemanticNodeId};
 
 // Algebra impls + leaf conversions split into child files for file-size (the
 // fold + the algebra trait + the interned term stay here, in the parent module).
 mod conversions;
+mod fold;
 mod materialize;
 mod node_domain;
 mod publication;
 
 pub(crate) use conversions::semantic_primitive_to_primitive_name;
-use conversions::{mapped_modifier_for_optionality, mapped_modifier_for_readonly};
-pub(in crate::project_semantic_dispatch) use materialize::fold_to_type_expr;
+use fold::{fold_node, FoldedFunction, FoldedTupleElement};
+pub(in crate::project_semantic_dispatch) use materialize::{
+    fold_to_type_expr, DegradedLeaf, MaterializedTypeExpr,
+};
 pub(in crate::project_semantic_dispatch) use node_domain::node_is_unknown_materializing_failure;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
 pub(in crate::project_semantic_dispatch) use publication::project_node_publication_score;
@@ -163,9 +168,11 @@ enum RaisedTerm {
         typeof_query: bool,
         type_arguments: Vec<RaisedShapeKey>,
     },
-    Unknown {
-        raw: Arc<str>,
-    },
+    /// The interned unknown leaf: a genuine [`UnknownValue`] (raw-only
+    /// identity) OR the terminal compatibility projection of a typed
+    /// [`QueryError`] degradation — both intern by RAW ONLY, so the key space
+    /// is unchanged and `NodeShapeEq` stays exact key equality.
+    Unknown(UnknownValue),
 }
 
 /// Tuple element mirror — label/optional/rest carried verbatim, the element
@@ -345,8 +352,8 @@ pub(crate) struct RaisedShapeFacts {
     /// `can_shell_raise == true`.
     can_shell_raise: bool,
     /// `dispatch_route_expr_is_materialized(raise(node))`: the structural AND
-    /// over all value-bearing children, `Unknown { raw }` materialized iff
-    /// `!raw_is_unmaterialized_sentinel(raw)`.
+    /// over all value-bearing children, classified on typed `QueryError`
+    /// variants only (a genuine `UnknownValue` is always materialized).
     materialized: bool,
     /// `type_expr_is_expanded_surface(raise(node))`: `false` only when the
     /// raised root (recursing through `Union`/`Intersection`) is an open
@@ -438,8 +445,8 @@ pub(in crate::project_semantic_dispatch) enum FactShapeTag {
     /// constructor rewrap reads the SIGNATURE child, never the constructor
     /// itself, so a constructor tags `Other`).
     Function,
-    /// The `Unknown { raw == SEMANTIC_OBJECT_SURFACE }` sentinel arm (dropped
-    /// from an intersection).
+    /// The typed `QueryError::UnrepresentableSurface` degradation arm
+    /// (dropped from an intersection).
     ObjectSurfaceSentinel,
     /// The representable empty object `{}` (`{} & X ≡ X`).
     EmptyObject,
@@ -511,10 +518,10 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     /// [`SEMANTIC_MISS`](crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS)
     /// sentinel — strictly NARROWER than [`Self::root_unmaterialized_sentinel`]
     /// (which is also `true` for the object-surface / surface-member / budget /
-    /// cycle / … spellings). Set ONLY by the two sentinel-leaf constructors
-    /// (`unknown` / `opaque_sentinel`) when the raw / `QueryError` reads as the miss
-    /// spelling, so it is the node-domain equivalent of `matches!(raise(node),
-    /// TypeExpr::Unknown { raw } if raw == "semanticMiss")` applied to the ROOT term.
+    /// cycle / … carriers). Set ONLY by `opaque_sentinel` when the typed
+    /// `QueryError` IS the miss carrier, so it is the node-domain equivalent
+    /// of `matches!(raise(node), TypeExpr::Unknown(v) if v.raw() == "semanticMiss")`
+    /// applied to the ROOT term's terminal projection.
     /// Read by the `mapped` [`summary`](node_domain) constructor off the mapped
     /// VALUE's summary and folded into [`RaisedRootKind::Mapped`]'s
     /// `value_is_semantic_miss`, which the published-operator classifier
@@ -631,10 +638,10 @@ impl NodeShapeEq {
 // ===========================================================================
 
 /// Per-arm node construction for [`fold_node`]. The fold owns ALL control flow
-/// (the `?` aborts, `filter_map` drops, the Intersection arm-drop + collapse,
-/// the Object empty-vs-surface split, the carrier `<raise miss>` defaults, the
-/// cycle guards); the algebra only constructs a node `Out` from already-folded
-/// children + leaf data. The two compound arms that must INSPECT a folded child
+/// (the `?` aborts, the presence-aware whole-composite failures, the
+/// Intersection arm-drop + collapse, the Object empty-vs-surface split, the
+/// typed surface-member carrier-arg fallbacks, the cycle guards); the algebra
+/// only constructs a node `Out` from already-folded children + leaf data. The two compound arms that must INSPECT a folded child
 /// (the Intersection drop rules) use [`Self::is_object_surface_sentinel`] /
 /// [`Self::is_empty_object`].
 trait RaisedShapeAlgebra {
@@ -654,7 +661,7 @@ trait RaisedShapeAlgebra {
     fn primitive(&mut self, kind: PrimitiveName) -> Self::Out;
     fn literal(&mut self, value: LiteralValue) -> Self::Out;
     fn infer(&mut self, name: Arc<str>) -> Self::Out;
-    fn unknown(&mut self, raw: Arc<str>) -> Self::Out;
+    fn unknown(&mut self, value: UnknownValue) -> Self::Out;
     /// A TYPED resolver-control sentinel reaching the reverse boundary (an
     /// alias / type-param cycle, a sub-result raise miss, an unrepresentable
     /// surface or surface member) — AND every
@@ -672,7 +679,7 @@ trait RaisedShapeAlgebra {
     fn recursive_ref(&mut self, name: Arc<str>) -> Self::Out;
     /// A bare `Ref { name, type_arguments }` shell (also the `DeclPlaceholder`
     /// / `DeclRef` shell with empty args, and the `BareRef`/`InstantiationRef`
-    /// carriers with raised-or-`<raise miss>` args).
+    /// carriers with raised-or-surface-member-fallback args).
     fn reference(&mut self, name: Arc<str>, type_arguments: Vec<Self::Out>) -> Self::Out;
     fn synthetic_slot_binding(
         &mut self,
@@ -766,499 +773,21 @@ trait RaisedShapeAlgebra {
     fn object_from_members(&mut self, members: Vec<Self::Member>) -> Self::Out;
 
     // -- Intersection arm-drop inspection (on a FOLDED child) --
-    /// `true` when `out` is the `Unknown { raw == SEMANTIC_OBJECT_SURFACE }`
-    /// sentinel (dropped from an intersection).
+    /// `true` when `out` is a TYPED ROOT `QueryError::UnrepresentableSurface`
+    /// degradation (dropped from an intersection). Genuine `UnknownValue`s —
+    /// even identically-spelled ones — are never dropped.
     fn is_object_surface_sentinel(&self, out: &Self::Out) -> bool;
     /// `true` when `out` is the representable empty object (`{} & X ≡ X`).
     fn is_empty_object(&self, out: &Self::Out) -> bool;
-}
-
-/// A folded tuple element awaiting algebra construction.
-struct FoldedTupleElement<O> {
-    label: Option<String>,
-    ty: O,
-    optional: bool,
-    rest: bool,
-}
-
-/// A folded function shape awaiting algebra construction.
-struct FoldedFunction<O> {
-    parameters: Vec<FoldedFunctionParam<O>>,
-    return_type: Option<O>,
-    type_parameters: Vec<FoldedTypeParam<O>>,
-    signature_span: Option<Span>,
-    return_type_span: Option<Span>,
-}
-
-struct FoldedFunctionParam<O> {
-    name: Option<Arc<str>>,
-    ty: O,
-    optional: bool,
-    rest: bool,
-    span: Option<Span>,
-}
-
-struct FoldedTypeParam<O> {
-    name: Arc<str>,
-    constraint: Option<O>,
-    default: Option<O>,
-}
-
-// ===========================================================================
-// The single shared fold.
-// ===========================================================================
-
-/// The SOLE exhaustive `SemanticNodeData` traversal: raise `node` one
-/// structural level at a time, recursing children, applying every raiser
-/// transform structurally, and building the algebra's `Out`. `None` when the
-/// node — or a `?`-propagating required child — is unavailable / unraisable
-/// from the live graph store.
-///
-/// Cycle protection via the per-call `active` visited set, guarded explicitly
-/// ONLY at `Alias` + `TypeParam` (insert / early-return-sentinel / remove); the
-/// `Object` arm uses a FRESH `active` per member. This control flow is the
-/// historical `raise_node_to_type_expr_core_impl` body verbatim — the
-/// byte-identity contract — re-housed so the materialization and the
-/// node-domain facts/key share ONE traversal.
-fn fold_node<A: RaisedShapeAlgebra>(
-    alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-    active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<A::Out> {
-    let ctx = dispatch.ctx;
-    let data = super::super::node_data_for(ctx, node)?;
-    Some(match data.as_ref() {
-        SemanticNodeData::Primitive(kind) => {
-            alg.primitive(semantic_primitive_to_primitive_name(*kind))
-        }
-        SemanticNodeData::Literal(value) => alg.literal(value.clone()),
-        SemanticNodeData::Alias(target) => {
-            if !active.insert(node) {
-                return Some(alg.opaque_sentinel(&QueryError::RaiseAliasCycle));
-            }
-            let result = fold_node(alg, dispatch, *target, active);
-            active.remove(&node);
-            return result;
-        }
-        SemanticNodeData::Union(members) => {
-            let folded: Vec<A::Out> = members
-                .iter()
-                .filter_map(|member| fold_node(alg, dispatch, *member, active))
-                .collect();
-            alg.union(folded)
-        }
-        SemanticNodeData::Intersection(members) => {
-            // filter_map recurse, then drop the SEMANTIC_OBJECT_SURFACE
-            // sentinel arms and the empty-object arms (`{} & X ≡ X`), then
-            // collapse: empty -> empty object, len==1 -> that arm, else
-            // Intersection. The recurse is materialised into a Vec FIRST so the
-            // arm-drop inspection (an immutable `alg` borrow) does not overlap
-            // the recurse closure's unique `alg` borrow.
-            let mut arms: Vec<A::Out> = members
-                .iter()
-                .filter_map(|member| fold_node(alg, dispatch, *member, active))
-                .collect();
-            arms.retain(|arm| !alg.is_object_surface_sentinel(arm) && !alg.is_empty_object(arm));
-            if arms.is_empty() {
-                alg.empty_object()
-            } else if arms.len() == 1 {
-                arms.into_iter().next().unwrap()
-            } else {
-                alg.intersection(arms)
-            }
-        }
-        SemanticNodeData::Array { element, readonly } => {
-            let element = fold_node(alg, dispatch, *element, active)?;
-            alg.array(element, *readonly)
-        }
-        SemanticNodeData::Tuple { elements, readonly } => {
-            let folded: Vec<FoldedTupleElement<A::Out>> = elements
-                .iter()
-                .filter_map(|element| {
-                    Some(FoldedTupleElement {
-                        label: element
-                            .label
-                            .as_ref()
-                            .map(|label| label.as_ref().to_string()),
-                        ty: fold_node(alg, dispatch, element.value, active)?,
-                        optional: element.optional,
-                        rest: element.rest,
-                    })
-                })
-                .collect();
-            alg.tuple(folded, *readonly)
-        }
-        SemanticNodeData::Object(surface) => {
-            if surface.members.is_empty()
-                && surface.call_signatures.is_empty()
-                && surface.construct_signatures.is_empty()
-                && !surface.has_index_signature
-            {
-                alg.empty_object()
-            } else {
-                fold_surface_view(alg, dispatch, surface)
-                    .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurface))
-            }
-        }
-        SemanticNodeData::MergedDecl { contributors } => {
-            let merged =
-                super::super::walk::reduce_merged_decl_with_graph(dispatch.graph(), contributors);
-            return fold_node(alg, dispatch, merged, active);
-        }
-        SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => {
-            alg.reference(Arc::clone(name), Vec::new())
-        }
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            ..
-        } => {
-            let check = fold_node(alg, dispatch, *check, active)?;
-            let extends = fold_node(alg, dispatch, *extends, active)?;
-            let true_type = fold_node(alg, dispatch, *true_branch_ref, active)?;
-            let false_type = fold_node(alg, dispatch, *false_branch_ref, active)?;
-            alg.conditional(check, extends, true_type, false_type)
-        }
-        SemanticNodeData::TemplateLiteral {
-            quasis,
-            expressions,
-        } => {
-            let quasis: Vec<String> = quasis
-                .iter()
-                .map(|quasi| quasi.as_ref().to_string())
-                .collect();
-            let expressions: Vec<A::Out> = expressions
-                .iter()
-                .filter_map(|expr| fold_node(alg, dispatch, *expr, active))
-                .collect();
-            alg.template_literal(quasis, expressions)
-        }
-        SemanticNodeData::KeyOf { base } => {
-            let base = fold_node(alg, dispatch, *base, active)?;
-            alg.key_of(base)
-        }
-        SemanticNodeData::IndexedAccess { object, index } => {
-            let object = fold_node(alg, dispatch, *object, active)?;
-            let index = fold_index_key(alg, dispatch, index, active)?;
-            alg.indexed_access(object, index)
-        }
-        SemanticNodeData::Mapped { mapper, .. } => {
-            let parameter = match super::super::node_data_for(ctx, mapper.parameter_node).as_deref()
-            {
-                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                    display_name.as_ref().to_string()
-                }
-                _ => String::new(),
-            };
-            // The source recurses KeyOf-aware (matching the materializer's
-            // explicit KeyOf shell around the mapped source key-space base).
-            let source = match super::super::node_data_for(ctx, mapper.key_space)?.as_ref() {
-                SemanticNodeData::KeyOf { base } => {
-                    let base = fold_node(alg, dispatch, *base, active)?;
-                    alg.key_of(base)
-                }
-                _ => fold_node(alg, dispatch, mapper.key_space, active)?,
-            };
-            let value = fold_node(alg, dispatch, mapper.value_expr, active)?;
-            let optional = mapped_modifier_for_optionality(mapper.optionality);
-            let readonly = mapped_modifier_for_readonly(mapper.readonly);
-            let name_type = match mapper.name_remap {
-                Some(remap) => Some(fold_node(alg, dispatch, remap, active)?),
-                None => None,
-            };
-            alg.mapped(parameter, source, value, optional, readonly, name_type)
-        }
-        SemanticNodeData::TypeOf(_) => {
-            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
-            let type_args = data.carrier_type_args();
-            let mut segments = value_root
-                .name
-                .split('.')
-                .map(|segment| segment.to_string())
-                .collect::<Vec<_>>();
-            segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-            let raised_args: Vec<A::Out> = type_args
-                .iter()
-                .map(|id| {
-                    fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
-                })
-                .collect();
-            alg.type_of(segments, raised_args)
-        }
-        SemanticNodeData::TypeParam {
-            display_name,
-            constraint,
-            default,
-            ..
-        } => {
-            if !active.insert(node) {
-                return Some(alg.opaque_sentinel(&QueryError::TypeParamCycle));
-            }
-            let constraint_out = constraint
-                .as_ref()
-                .and_then(|c| fold_node(alg, dispatch, *c, active));
-            let default_out = default
-                .as_ref()
-                .and_then(|d| fold_node(alg, dispatch, *d, active));
-            active.remove(&node);
-            alg.type_parameter(Arc::clone(display_name), constraint_out, default_out)
-        }
-        SemanticNodeData::Infer { name } => alg.infer(Arc::clone(name)),
-        SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { name } => alg.recursive_ref(Arc::clone(name)),
-            // The input is a typed `QueryError`, not a raw carrier — route it
-            // through the typed `opaque_sentinel` entry (BORROWED — no clone on
-            // this hot traversal arm) instead of round-tripping it to a string and
-            // re-deriving the materialised/tag facts. The materialize algebra still
-            // emits the byte-identical `Unknown { raw: semantic_query_error_raw(err)
-            // }`; the node-domain algebras classify directly from the typed
-            // variant, held in agreement with the raw recogniser by the no-drift
-            // contract.
-            _ => alg.opaque_sentinel(err),
-        },
-        SemanticNodeData::Function {
-            params,
-            return_type,
-            type_parameters,
-            signature_span,
-            return_type_span,
-        } => {
-            let folded = fold_function(
-                alg,
-                dispatch,
-                params,
-                *return_type,
-                type_parameters,
-                *signature_span,
-                *return_type_span,
-                active,
-            );
-            let function = alg.build_function(folded);
-            alg.function_to_out(function)
-        }
-        SemanticNodeData::DeclRef { identity } => {
-            alg.reference(Arc::clone(&identity.decl_name), Vec::new())
-        }
-        SemanticNodeData::InstantiationRef { base, args } => {
-            let raised_args: Vec<A::Out> = args
-                .iter()
-                .map(|id| {
-                    fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
-                })
-                .collect();
-            alg.reference(Arc::clone(&base.decl_name), raised_args)
-        }
-        SemanticNodeData::BareRef(_) => {
-            let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
-            let type_args = data.carrier_type_args();
-            let raised_args: Vec<A::Out> = type_args
-                .iter()
-                .map(|id| {
-                    fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
-                })
-                .collect();
-            alg.reference(Arc::clone(name), raised_args)
-        }
-        SemanticNodeData::ImportType(_) => {
-            let (specifier, qualifier, typeof_query) =
-                data.import_type_head().expect("ImportType carrier head");
-            let type_args = data.carrier_type_args();
-            let raised_args: Vec<A::Out> = type_args
-                .iter()
-                .map(|id| {
-                    fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
-                })
-                .collect();
-            alg.import_type(
-                Arc::clone(specifier),
-                Arc::clone(qualifier),
-                typeof_query,
-                raised_args,
-            )
-        }
-        SemanticNodeData::RawFallback { raw } => alg.unknown(Arc::clone(raw)),
-        SemanticNodeData::ConstructorType { signature } => {
-            let raised = fold_node(alg, dispatch, *signature, active)?;
-            match alg.out_as_function(&raised) {
-                Some(function) => alg.constructor_to_out(function),
-                None => raised,
-            }
-        }
-        SemanticNodeData::SyntheticBinding { id, value_node } => {
-            alg.synthetic_slot_binding(Arc::new(id.to_carrier_key(*value_node)))
-        }
-    })
-}
-
-/// Raise an [`IndexKey`] used as an `IndexedAccess` index — string / number
-/// literals construct directly; a `TypeNode` recurses through the core.
-fn fold_index_key<A: RaisedShapeAlgebra>(
-    alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
-    index: &IndexKey,
-    active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<A::Out> {
-    Some(match index {
-        IndexKey::String(text) => alg.literal(LiteralValue::String(text.as_ref().to_string())),
-        IndexKey::Number(number) => alg.literal(LiteralValue::Number(number.get() as f64)),
-        IndexKey::TypeNode(node) => fold_node(alg, dispatch, *node, active)?,
-    })
-}
-
-/// Fold a [`SemanticNodeData::Function`] payload into a [`FoldedFunction`].
-#[allow(clippy::too_many_arguments)]
-fn fold_function<A: RaisedShapeAlgebra>(
-    alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
-    params: &[crate::semantic_query::FunctionParam],
-    return_type: SemanticNodeId,
-    type_parameters: &[crate::semantic_query::TypeParamDecl],
-    signature_span: Option<Span>,
-    return_type_span: Option<Span>,
-    active: &mut FxHashSet<SemanticNodeId>,
-) -> FoldedFunction<A::Out> {
-    let parameters: Vec<FoldedFunctionParam<A::Out>> = params
-        .iter()
-        .filter_map(|p| {
-            Some(FoldedFunctionParam {
-                name: p.name.clone(),
-                ty: fold_node(alg, dispatch, p.ty, active)?,
-                optional: p.optional,
-                rest: p.rest,
-                span: p.span,
-            })
-        })
-        .collect();
-    let return_out = fold_node(alg, dispatch, return_type, active);
-    let type_params: Vec<FoldedTypeParam<A::Out>> = type_parameters
-        .iter()
-        .map(|tp| FoldedTypeParam {
-            name: Arc::clone(&tp.name),
-            constraint: tp
-                .constraint
-                .and_then(|c| fold_node(alg, dispatch, c, active)),
-            default: tp.default.and_then(|d| fold_node(alg, dispatch, d, active)),
-        })
-        .collect();
-    FoldedFunction {
-        parameters,
-        return_type: return_out,
-        type_parameters: type_params,
-        signature_span,
-        return_type_span,
+    /// Re-absorb any degradation carried by structures the fold NORMALIZED
+    /// AWAY (dropped vacuous intersection arms, invalid call/construct
+    /// signatures) into the surviving result — fail-closed, so a
+    /// normalized-away degradation never reads as a complete payload. The
+    /// materialize algebra merges the dropped sidecars (re-anchored off the
+    /// root); node-domain algebras carry no sidecar (identity).
+    fn absorb_dropped(&mut self, out: Self::Out, _dropped: Vec<Self::Out>) -> Self::Out {
+        out
     }
-}
-
-/// Reconstruct an Object from a [`SurfaceView`] — the non-empty `Object` arm.
-/// Each member / signature value folds through the core with a FRESH cycle set
-/// (matching the materializer's fresh-per-member `active`). A member whose
-/// value misses becomes the `SEMANTIC_SURFACE_MEMBER` sentinel. Returns `None`
-/// when the surface yields no representable members (the empty-`{}` case is
-/// handled by the caller).
-fn fold_surface_view<A: RaisedShapeAlgebra>(
-    alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
-    surface: &SurfaceView,
-) -> Option<A::Out> {
-    // Fold a member VALUE through the core with a fresh cycle set; a miss
-    // becomes the SEMANTIC_SURFACE_MEMBER sentinel (matching the materializer).
-    fn fold_member<A: RaisedShapeAlgebra>(
-        alg: &mut A,
-        dispatch: &ProjectSemanticDispatch<'_>,
-        node: SemanticNodeId,
-    ) -> A::Out {
-        let mut active = FxHashSet::default();
-        fold_node(alg, dispatch, node, &mut active)
-            .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember))
-    }
-
-    // Single-call-signature fast path: a surface with no members, no construct
-    // signatures, no index signature, and exactly one call signature IS that
-    // call signature's value (not wrapped in an object).
-    if surface.members.is_empty()
-        && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
-        && surface.call_signatures.len() == 1
-    {
-        return Some(fold_member(alg, dispatch, surface.call_signatures[0]));
-    }
-
-    let mut members: Vec<A::Member> = Vec::new();
-    for member in surface.members.iter() {
-        let ty = fold_member(alg, dispatch, member.value);
-        if member.is_method {
-            if let Some(function) = alg.out_as_function(&ty) {
-                members.push(alg.member_method(
-                    member.name.as_ref().to_string(),
-                    function,
-                    member.optional,
-                    member.visibility,
-                    member.spans,
-                ));
-                continue;
-            }
-        }
-        members.push(alg.member_property(
-            member.name.as_ref().to_string(),
-            ty,
-            member.optional,
-            member.readonly,
-            member.visibility,
-            member.spans,
-        ));
-    }
-
-    for signature in surface.call_signatures.iter() {
-        let raised = fold_member(alg, dispatch, *signature);
-        if let Some(function) = alg.out_as_function(&raised) {
-            members.push(alg.member_call_signature(function));
-        }
-    }
-
-    for signature in surface.construct_signatures.iter() {
-        let raised = fold_member(alg, dispatch, *signature);
-        if let Some(function) = alg.out_as_function(&raised) {
-            members.push(alg.member_construct_signature(function));
-        }
-    }
-
-    for signature in surface.index_signatures.iter() {
-        let key_type = fold_member(alg, dispatch, signature.key_type);
-        let value_type = fold_member(alg, dispatch, signature.value_type);
-        members.push(alg.member_index_signature(
-            "key".to_string(),
-            key_type,
-            value_type,
-            signature.readonly,
-            signature.spans,
-        ));
-    }
-
-    // The synthetic open-surface placeholder ONLY when the surface is genuinely
-    // OPEN (`has_index_signature` set, no concrete signature carried).
-    if surface.has_index_signature && surface.index_signatures.is_empty() {
-        let key_type = alg.primitive(PrimitiveName::String);
-        let value_type = alg.unknown(Arc::from("projectedOpenSurface"));
-        members.push(alg.member_index_signature(
-            "key".to_string(),
-            key_type,
-            value_type,
-            false,
-            verter_type_expr::IndexSignatureSpans::default(),
-        ));
-    }
-
-    if members.is_empty() {
-        return None;
-    }
-    Some(alg.object_from_members(members))
 }
 
 // ===========================================================================

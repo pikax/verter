@@ -472,7 +472,14 @@ fn parse_jsdoc_tag_type_payload_lowers_union() {
 fn parse_jsdoc_tag_type_payload_unknown_for_empty_input() {
     let expr = parse_jsdoc_tag_type_payload("", None);
     match &expr {
-        TypeExpr::Unknown { raw } => assert_eq!(raw.as_str(), "", "empty input keeps empty raw"),
+        TypeExpr::Unknown(value) => {
+            assert_eq!(value.raw(), "", "empty input keeps empty raw");
+            assert_eq!(
+                value.provenance(),
+                verter_type_expr::UnknownProvenance::JsdocParseFallback,
+                "a jsdoc parse fallback carries the typed provenance"
+            );
+        }
         other => panic!("expected Unknown for empty payload, got {other:?}"),
     }
 }

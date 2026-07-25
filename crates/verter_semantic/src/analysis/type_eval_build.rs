@@ -4429,13 +4429,11 @@ fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
 }
 
 fn is_const_assertion_type_expr(expr: &TypeExpr) -> bool {
-    matches!(
-        expr,
-        TypeExpr::Unknown { raw } if raw == "const"
-    ) || matches!(
-        expr,
-        TypeExpr::Ref { name, type_arguments } if name.as_ref() == "const" && type_arguments.is_empty()
-    )
+    matches!(expr, TypeExpr::Unknown(value) if value.is_const_assertion_syntax())
+        || matches!(
+            expr,
+            TypeExpr::Ref { name, type_arguments } if name.as_ref() == "const" && type_arguments.is_empty()
+        )
 }
 
 fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMember> {

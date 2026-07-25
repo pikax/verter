@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
-use verter_type_expr::{LiteralValue, TypeExpr};
+use verter_type_expr::{LiteralValue, TypeExpr, UnknownValue};
 
 use super::{member_jsdoc_from_spans, raise_member_value, slice_canonical_span};
 use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
@@ -161,12 +161,14 @@ fn materialize_slot_return_node(
 ) -> TypeExpr {
     let dispatch = ctx.dispatch();
     let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
-    // A node that does not materialize keeps the opaque `Unknown` raise-miss value
-    // (the shared raise-miss convention); a realized slot's return node always
-    // mints, so the fallback is robustness only.
+    // A node that does not materialize keeps an exact empty `Unknown` value
+    // (DISPLAY robustness only — the seam notes a present-but-unraisable
+    // failure as an `OutputMaterializationLoss` non-cacheable read); a
+    // realized slot's return node always mints, so the fallback is robustness
+    // only.
     cap.materialize_output_type_expr(return_node)
         .map(|raised| raised.into_type_expr(&cap))
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() })
+        .unwrap_or(TypeExpr::Unknown(UnknownValue::missing_output()))
 }
 
 /// Reconstruct a slot's binding fields from its function's first-parameter NODE.
@@ -353,13 +355,11 @@ fn slot_binding_field(
         // Non-Pick member: mint the member's own value ONCE through the
         // registered [`raise_member_value`] sink for DISPLAY ONLY.
         let raised = raise_member_value(ctx, member);
-        // Raise-miss fence: an absent mint is a torn graph read — mark the
-        // request's materialization-cache suppress so the torn result is never
-        // admitted warm as complete metadata (a pure absence check, never a
-        // variant decide on the materialized value).
-        if raised.is_none() {
-            crate::request_context::mark_request_result_partial();
-        }
+        // Raise-miss fence: an absent mint is a torn graph read. The shared
+        // output seam already notes a present-but-unraisable failure as an
+        // `OutputMaterializationLoss` non-cacheable read
+        // (`materialize_output_type_expr`), so no lane-local mark is needed —
+        // the torn result is never admitted warm as complete metadata.
         // Display renders through the by-name `.and_then` form, so an
         // unraisable value fabricates no display text.
         let type_annotation = raised.as_ref().and_then(render_type_expr_display);
@@ -378,7 +378,7 @@ fn slot_binding_field(
     let named_root = cap
         .materialize_output_type_expr(root_node)
         .map(|raised| raised.into_type_expr(&cap))
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() });
+        .unwrap_or(TypeExpr::Unknown(UnknownValue::missing_output()));
     let symbolic = TypeExpr::IndexedAccess {
         object: Arc::new(named_root),
         index: Arc::new(TypeExpr::Literal(LiteralValue::String(
@@ -402,7 +402,7 @@ mod raise_miss_normalization_tests {
     use verter_type_expr::MemberVisibility;
 
     use super::slot_binding_field;
-    use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
+    use crate::request_context::current_cold_compute_completeness;
     use crate::semantic_query::{MemberMergeRole, SemanticNodeId};
     use crate::typeinfo::surface::{JsdocTagSpan, SurfaceMemberOrigin, TypeInfoSurfaceMember};
     use crate::types::HostConfig;
@@ -438,19 +438,17 @@ mod raise_miss_normalization_tests {
 
     /// The resolver-published slot-binding invariant on a raise MISS: the
     /// binding fabricates NO display text, stays locator-less (`payload: None`
-    /// paired with a `None` scope), and marks the cold compute PARTIAL so the
-    /// torn graph read is never warmed as complete metadata (the no-poison
-    /// fence). Exercised through the non-Pick arm of the registered
-    /// [`slot_binding_field`] terminal (`pick_root: None`).
+    /// paired with a `None` scope), and the torn read is noted as an
+    /// `OutputMaterializationLoss` NON-CACHEABLE read so it is never warmed as
+    /// complete metadata (the no-poison fence) — while the compute's
+    /// completeness stays `Complete`. Exercised through the non-Pick arm of
+    /// the registered [`slot_binding_field`] terminal (`pick_root: None`).
     #[test]
     fn slot_binding_raise_miss_fabricates_no_display_and_suppresses_warm_admission() {
         let host = make_host();
         let member = raise_miss_member();
 
-        let guard = ColdComputeCompletenessScope::enter();
-        let binding = slot_binding_field(&*host, &member, None);
-        let completeness = current_cold_compute_completeness();
-        drop(guard);
+        let (binding, facts) = host.with_fact_tracer(|| slot_binding_field(&*host, &member, None));
 
         assert!(
             binding.type_annotation.is_none(),
@@ -461,9 +459,15 @@ mod raise_miss_normalization_tests {
             "a slot binding stays locator-less (payload: None paired with a None scope)"
         );
         assert!(
-            completeness.is_partial(),
-            "a raise miss must mark the cold compute partial so the torn \
-             result is never admitted warm"
+            matches!(
+                facts.finalise(),
+                crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            ),
+            "a raise miss must finalise NON-CACHEABLE so the torn result is never admitted warm"
+        );
+        assert!(
+            !current_cold_compute_completeness().is_partial(),
+            "the loss is NON-CACHEABLE, never a completeness fault"
         );
     }
 

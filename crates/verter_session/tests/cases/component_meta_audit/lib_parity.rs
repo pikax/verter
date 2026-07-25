@@ -235,7 +235,7 @@ fn render_type(expr: &verter_type_expr::TypeExpr) -> String {
             parts.sort();
             parts.join(" & ")
         }
-        TypeExpr::Unknown { raw } => format!("/*unknown*/ {raw}"),
+        TypeExpr::Unknown(value) => format!("/*unknown*/ {}", value.raw()),
         other => format!("{other:?}"),
     }
 }

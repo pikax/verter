@@ -2110,7 +2110,7 @@ impl ShapeCacheDb {
         let entry = Arc::new(CacheEntry {
             value: MaterializedOutputTypeExpr::from_type_expr_for_test(
                 None,
-                TypeExpr::Unknown { raw: String::new() },
+                TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
                 Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
                 false,
             ),

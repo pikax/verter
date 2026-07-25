@@ -1,5 +1,7 @@
 use super::*;
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
+use verter_type_expr::{
+    ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr, UnknownValue,
+};
 
 fn prim(p: PrimitiveName) -> TypeExpr {
     TypeExpr::Primitive(p)
@@ -797,9 +799,11 @@ fn value_body_fingerprint_fallback_matches_legacy_unknown_shape() {
     // reproduces that exact fallback byte-for-byte.
     let input = ValueBodyFingerprintInput::new(None, &[], ValueDeclKind::Const, None, None);
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
-    let expected = TypeExpr::Unknown {
-        raw: format!("{:?}::{:?}", ValueDeclKind::Const, None::<&ObjectExpr>),
-    };
+    let expected = TypeExpr::Unknown(UnknownValue::wire_opaque(format!(
+        "{:?}::{:?}",
+        ValueDeclKind::Const,
+        None::<&ObjectExpr>
+    )));
     let legacy = compute_semantic_hash(&expected, SymbolSpace::Value, &UnresolvedLens);
     assert_eq!(
         via_producer.hash, legacy.hash,
@@ -849,9 +853,10 @@ fn value_body_fingerprint_signatures_matches_legacy_unknown_carrier_and_discrimi
         ValueBodyFingerprintInput::new(None, &signatures, ValueDeclKind::Function, None, None);
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
 
-    let expected = TypeExpr::Unknown {
-        raw: format!("{:?}", signatures.as_slice()),
-    };
+    let expected = TypeExpr::Unknown(UnknownValue::wire_opaque(format!(
+        "{:?}",
+        signatures.as_slice()
+    )));
     let legacy = compute_semantic_hash(&expected, SymbolSpace::Value, &UnresolvedLens);
     assert_eq!(
         via_producer, legacy,
@@ -894,9 +899,11 @@ fn value_body_fingerprint_object_shape_fallback_matches_legacy_and_discriminates
     let input = ValueBodyFingerprintInput::new(None, &[], ValueDeclKind::Const, Some(&shape), None);
     let via_producer = value_body_fingerprint(&input, SymbolSpace::Value, &UnresolvedLens);
 
-    let expected = TypeExpr::Unknown {
-        raw: format!("{:?}::{:?}", ValueDeclKind::Const, Some(&shape)),
-    };
+    let expected = TypeExpr::Unknown(UnknownValue::wire_opaque(format!(
+        "{:?}::{:?}",
+        ValueDeclKind::Const,
+        Some(&shape)
+    )));
     let legacy = compute_semantic_hash(&expected, SymbolSpace::Value, &UnresolvedLens);
     assert_eq!(
         via_producer, legacy,

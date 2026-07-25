@@ -402,9 +402,9 @@ pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &m
                 carrier.binding_name.hash(hasher);
                 carrier.value_node.hash(hasher);
             }
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 21u8.hash(hasher);
-                raw.hash(hasher);
+                value.hash(hasher);
             }
             // Mirrors the `Ref` arm: a distinct discriminant (`23`, the next
             // free tag after `ConstructorType`'s `22`) then the leaf

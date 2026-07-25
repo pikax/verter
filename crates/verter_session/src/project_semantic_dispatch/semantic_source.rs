@@ -1234,6 +1234,18 @@ pub fn shallow_semantic_source_type_expr(
         }
         _ => {}
     }
+    shallow_semantic_source_carrier(host, owner_canonical, source)
+        .map(|carrier| carrier.type_expr_for_test().clone())
+}
+
+/// The shared shallow materialization of a published source into its sealed
+/// output carrier (the raise-time sidecar intact — nothing unwrapped).
+#[cfg(any(test, feature = "test-support"))]
+fn shallow_semantic_source_carrier(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
     let dispatch = ProjectSemanticDispatch::new(host);
     let context = ProjectionReductionContext::structural_transit_with_mode(
         crate::semantic_query::ProjectionMode::Navigate,
@@ -1248,13 +1260,73 @@ pub fn shallow_semantic_source_type_expr(
         },
     )?;
     let sealed = dispatch.output_shell_raise_sealed(hot.node())?;
-    let carrier = super::output_materialization::MaterializedOutputTypeExpr::from_parts(
-        Some(hot.node()),
-        sealed,
-        Arc::from(Vec::new().into_boxed_slice()),
-        false,
-    );
-    Some(carrier.type_expr_for_test().clone())
+    Some(
+        super::output_materialization::MaterializedOutputTypeExpr::from_parts(
+            Some(hot.node()),
+            sealed,
+            Arc::from(Vec::new().into_boxed_slice()),
+            false,
+        ),
+    )
+}
+
+/// Whether a published source's raised payload carries ANY typed degradation
+/// — the raise-time sidecar's partial bit, read BEFORE any terminal unwrap.
+/// This is the typed masking probe: a degraded field reads `true` here even
+/// when the request-level `synthesis_should_suppress` flag is `false` (the
+/// channel is the fold + `from_parts` choke point, never the suppress flag).
+#[cfg(any(test, feature = "test-support"))]
+pub fn shallow_semantic_source_is_degraded(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<bool> {
+    shallow_semantic_source_carrier(host, owner_canonical, source)
+        .map(|carrier| carrier.result_is_partial())
+}
+
+/// Whether a published source's DEMAND-walk (Published(Expanded)) payload
+/// carries ANY typed degradation — the raise-time sidecar's partial bit,
+/// read BEFORE any terminal unwrap. This is the typed masking probe over the
+/// full consumer walk (fold + `from_parts` choke point, never the suppress
+/// flag).
+#[cfg(any(test, feature = "test-support"))]
+pub fn demand_semantic_source_is_degraded(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<bool> {
+    demand_semantic_source_carrier(host, owner_canonical, source)
+        .map(|carrier| carrier.result_is_partial())
+}
+
+/// The shared demand-walk carrier extraction (sidecar intact — nothing
+/// unwrapped).
+#[cfg(any(test, feature = "test-support"))]
+fn demand_semantic_source_carrier(
+    host: &crate::VerterHost,
+    owner_canonical: &str,
+    source: &SemanticTypeSource,
+) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let context =
+        ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded);
+    let raise_context = match source {
+        SemanticTypeSource::Closed(_) => ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        ),
+        _ => context,
+    };
+    let hot = dispatch.raise_semantic_type_source_to_hot(
+        source,
+        SourceRaiseContext {
+            scope_canonical_id: owner_canonical,
+            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            context: raise_context,
+            interior_failures: None,
+        },
+    )?;
+    Some(dispatch.raise_and_reduce_observation(hot.node(), context, owner_canonical))
 }
 
 #[cfg(test)]

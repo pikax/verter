@@ -957,7 +957,7 @@ fn closedness_recipe_of(
         TypeExpr::TypeOf(_)
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => ClosednessRecipe::Unsupported,
+        | TypeExpr::Unknown(_) => ClosednessRecipe::Unsupported,
         // Everything else — generic/builtin instantiations, conditionals,
         // mapped/indexed/keyof/template operators, tuples, arrays, rests,
         // infer placeholders, import-type carriers — escapes to the
@@ -2909,7 +2909,7 @@ mod key_domain_closedness_producer_tests {
                 ClosednessRecipe::OpenLeaf,
             ),
             (
-                TypeExpr::Unknown { raw: "??".into() },
+                TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax("??")),
                 ClosednessRecipe::Unsupported,
             ),
         ];

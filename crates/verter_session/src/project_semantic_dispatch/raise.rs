@@ -49,6 +49,11 @@ mod shape_engine;
 // projection) reuse the shape engine's mapping instead of duplicating it.
 pub(crate) use shape_engine::semantic_primitive_to_primitive_name;
 pub(crate) use shape_engine::RaisedShallowMemberOutput;
+// The materialize-fold degradation sidecar vocabulary — the sealed output
+// payload (sibling `output_materialization`) carries it.
+#[cfg(test)]
+pub(in crate::project_semantic_dispatch) use shape_engine::fold_to_type_expr;
+pub(in crate::project_semantic_dispatch) use shape_engine::{DegradedLeaf, MaterializedTypeExpr};
 
 /// Graph-native result of reducing one output demand before the terminal sink
 /// performs its single display materialization.
@@ -298,7 +303,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
     /// [`Self::materialize_reduced_output_type_expr`]. This function alone
     /// is shell-only.
-    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<MaterializedTypeExpr> {
         let mut active = FxHashSet::default();
         // The shell-only materialization entry: delegate to the shared shape
         // engine's `MaterializeTypeExprAlg` — the SOLE exhaustive
@@ -372,9 +377,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let cap = TestOutputCap::new(self);
         cap.materialize_output_type_expr(handle.node())
             .map(|carrier| carrier.into_type_expr(&cap))
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "<materialize miss>".to_string(),
-            })
+            .unwrap_or(TypeExpr::Unknown(
+                verter_type_expr::UnknownValue::compatibility_projection("<materialize miss>"),
+            ))
     }
 
     /// Test-only plain SHELL-raise that returns the unwrapped `TypeExpr`
@@ -470,11 +475,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
         let reduced = self.reduce_output_node_with_context(node, context);
-        let type_expr =
-            self.raise_node_to_type_expr(reduced.node_id)
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: "<raise miss after reduction>".to_string(),
-                });
+        // A raise failure after a successful reduction is PRESENT-BUT-
+        // UNRAISABLE, never a genuine absence: degrade as the TYPED
+        // unmaterialized `Miss` carrier — the sidecar carries the leaf, the
+        // payload goes PARTIAL at the `from_parts` choke point (never
+        // admitted complete), and the compat tree projects the `semanticMiss`
+        // spelling.
+        let type_expr = self
+            .raise_node_to_type_expr(reduced.node_id)
+            .unwrap_or_else(|| MaterializedTypeExpr::degraded(QueryError::Miss));
         MaterializedOutputTypeExpr::from_parts(
             Some(reduced.node_id),
             OutputTypeExpr::from_raise(type_expr),
@@ -527,9 +536,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
         let type_expr = self
             .raise_node_to_type_expr(reduced)
-            .unwrap_or(TypeExpr::Unknown {
-                raw: "<raise miss after reduction>".to_string(),
-            });
+            .unwrap_or_else(|| MaterializedTypeExpr::degraded(QueryError::Miss));
         let result_is_partial = state.result_is_partial;
         MaterializedOutputTypeExpr::from_parts(
             Some(reduced),
@@ -4412,11 +4419,11 @@ pub(crate) fn node_shallow_member_output_with_dispatch(
     shape_engine::project_node_shallow_member_output(dispatch, node)
 }
 
-/// Node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`:
-/// whether `node`'s OWN raised ROOT term is an unmaterialised sentinel. A whole-
-/// raise `None` is `false` (the materialiser's `<raise miss after reduction>`
-/// fallback is not a recognised sentinel, so the `TypeExpr` recogniser also
-/// answers `false` there). DISPATCH-taking primary — the cache-admission gate
+/// Whether `node`'s OWN raised ROOT term is a typed unmaterialised degradation
+/// (the node-domain root-sentinel fact). A whole-raise `None` never reaches
+/// this fact (the terminal degrades it as the typed `Miss` carrier upstream,
+/// so the question is moot there); the compat tree is inert and never feeds
+/// this classification. DISPATCH-taking primary — the cache-admission gate
 /// reads this off the reduced-output carrier node instead of materialising it.
 #[must_use]
 pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
@@ -4651,8 +4658,8 @@ mod tests {
             .raise_node_to_type_expr(indexed)
             .expect("indexed-access semantic node should serialize");
 
-        let TypeExpr::IndexedAccess { index, .. } = &expr else {
-            panic!("expected IndexedAccess expr, got {expr:?}");
+        let TypeExpr::IndexedAccess { index, .. } = expr.expr() else {
+            panic!("expected IndexedAccess expr, got {:?}", expr.expr());
         };
         assert_eq!(
             **index,
@@ -4680,7 +4687,7 @@ mod tests {
             .raise_node_to_type_expr(intersection)
             .expect("intersection must raise");
 
-        match &expr {
+        match expr.expr() {
             TypeExpr::Object(object) => {
                 assert!(
                     object.properties.is_empty(),
@@ -4723,20 +4730,24 @@ mod tests {
         let dispatch = ProjectSemanticDispatch::new(&host);
         let oracle = |node| {
             type_expr_root_is_unmaterialized_sentinel(
-                &dispatch
+                dispatch
                     .raise_node_to_type_expr(node)
-                    .expect("node must raise"),
+                    .expect("node must raise")
+                    .expr(),
             )
         };
 
-        // (1) Root IS a miss sentinel → both the node-domain fact and the
-        // TypeExpr oracle say true.
+        // (1) Root IS a typed miss degradation → the node-domain fact is true.
+        // The TypeExpr tree oracle is INERT by design: the compat tree spells
+        // the projection but no raw classification reads it back, so the tree
+        // side never reports a sentinel. Parity is SPLIT — typed node facts
+        // carry the classification, the tree is display bytes only.
         assert!(node_root_is_unmaterialized_sentinel_with_dispatch(
             &dispatch, miss
         ));
         assert!(
-            oracle(miss),
-            "TypeExpr oracle agrees the Miss root is a sentinel"
+            !oracle(miss),
+            "the compat tree is inert: no raw sentinel classification remains"
         );
 
         // (2) Root is a plain primitive → both false.
@@ -4765,10 +4776,10 @@ mod tests {
         );
     }
 
-    /// DIFFERENTIAL EQUIVALENCE + DISCRIMINATION for the whole-tree semantic-miss
-    /// node fact (`node_contains_semantic_miss_with_dispatch`): it equals
-    /// `type_expr_contains_semantic_miss(raise(node))` field-for-field, AND it is
-    /// the WHOLE-TREE `!materialized` question, NOT the root-only sentinel. The
+    /// DISCRIMINATION for the whole-tree semantic-miss
+    /// node fact (`node_contains_semantic_miss_with_dispatch`): it is the TYPED
+    /// WHOLE-TREE `!materialized` question, NOT the root-only sentinel (the
+    /// inert tree oracle is pinned false on every shape — the split parity). The
     /// discriminator is an `Array` whose ELEMENT is a miss: whole-tree miss is
     /// `true` (the element miss propagates) while root-sentinel is `false` (the
     /// root is the Array) — proving the two facts answer different questions.
@@ -4793,19 +4804,32 @@ mod tests {
         let dispatch = ProjectSemanticDispatch::new(&host);
         let oracle = |node| {
             type_expr_contains_semantic_miss(
-                &dispatch
+                dispatch
                     .raise_node_to_type_expr(node)
-                    .expect("node must raise"),
+                    .expect("node must raise")
+                    .expr(),
             )
         };
 
-        // DIFFERENTIAL: the node fact equals the TypeExpr predicate on raise(node)
-        // for every shape (miss root, clean primitive, array-of-miss).
+        // SPLIT PARITY: the node-domain whole-tree miss fact is TYPED (a
+        // nested `Opaque(QueryError)` degrades the fold), while the compat
+        // tree is inert — the projection spellings carry no classification,
+        // so the tree oracle is false everywhere. The two answers differ BY
+        // DESIGN: classification lives in the typed domain only.
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, miss),
+            Some(true),
+            "typed node fact: a Miss root is a whole-tree miss"
+        );
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, string),
+            Some(false),
+            "typed node fact: a clean primitive carries no miss"
+        );
         for node in [miss, string, array_of_miss] {
-            assert_eq!(
-                node_contains_semantic_miss_with_dispatch(&dispatch, node),
-                Some(oracle(node)),
-                "node-domain whole-tree miss must equal type_expr_contains_semantic_miss(raise(node))"
+            assert!(
+                !oracle(node),
+                "the compat tree is inert: no raw sentinel classification remains"
             );
         }
 
@@ -4839,8 +4863,9 @@ mod tests {
             .expect("primitive must raise");
 
         assert!(
-            matches!(expr, TypeExpr::Primitive(_)),
-            "primitive should round-trip, got {expr:?}"
+            matches!(expr.expr(), TypeExpr::Primitive(_)),
+            "primitive should round-trip, got {:?}",
+            expr.expr()
         );
     }
 
@@ -4933,10 +4958,10 @@ mod tests {
         );
 
         match &materialized {
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 assert!(
-                    raw.contains("template literal"),
-                    "template literal hard-stop should mention the operator, got {raw:?}"
+                    value.raw().contains("template literal"),
+                    "template literal hard-stop should mention the operator, got {value:?}"
                 );
             }
             other => panic!("expected Unknown hard-stop, got {other:?}"),
@@ -4986,10 +5011,10 @@ mod tests {
             // reducer accepts it and the raise yields Unknown. Both
             // outcomes prove the lazy carrier was visited; the test
             // discriminates on the absence of `graphNode` text.
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 assert!(
-                    !raw.starts_with("graphNode"),
-                    "raise must not emit graphNode placeholder, got {raw:?}"
+                    !value.raw().starts_with("graphNode"),
+                    "raise must not emit graphNode placeholder, got {value:?}"
                 );
             }
             other => panic!("expected Ref{{name=Unresolved}} or Unknown, got {other:?}"),
@@ -5017,8 +5042,8 @@ mod tests {
             .raise_node_to_type_expr(indexed)
             .expect("indexed-access semantic node should serialize");
 
-        let TypeExpr::IndexedAccess { index, .. } = &expr else {
-            panic!("expected IndexedAccess expr, got {expr:?}");
+        let TypeExpr::IndexedAccess { index, .. } = expr.expr() else {
+            panic!("expected IndexedAccess expr, got {:?}", expr.expr());
         };
         assert_eq!(
             **index,

@@ -552,7 +552,7 @@ impl RouteFactProducer<'_> {
             | TypeExpr::Infer { .. }
             | TypeExpr::RecursiveRef { .. }
             | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Unknown { .. } => {}
+            | TypeExpr::Unknown(_) => {}
         }
     }
 
@@ -1036,7 +1036,7 @@ pub(crate) fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
         | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Unknown { .. }
+        | TypeExpr::Unknown(_)
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::SyntheticSlotBinding(_)
         | TypeExpr::Infer { .. } => {}

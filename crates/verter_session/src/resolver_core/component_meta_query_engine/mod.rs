@@ -145,7 +145,7 @@ mod surface;
 pub(crate) use route_admission::AdmittedRouteProjectionNode;
 pub(crate) use surface::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
-    semantic_query_error_raw, type_expr_is_budget_exceeded_sentinel,
+    semantic_query_error_raw,
 };
 // `type_expr_contains_semantic_miss`, `type_expr_is_expanded_surface`, and
 // `type_expr_root_is_unmaterialized_sentinel` survive only as parity ORACLES the
@@ -173,17 +173,14 @@ pub(crate) use surface::MetaQuerySurfaceOutputCap;
 // `helpers` child module. All entries are `pub(super)` and used from
 // the engine impl in sibling modules plus the inline test module.
 
-pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
-pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
-pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
-
-/// The exact `TypeExpr::Unknown { raw }` prefix `semantic_query_error_raw`
-/// emits for a `QueryError::BudgetExceeded` sentinel (`format!("budgetExceeded({:?})", …)`).
-/// This is the SINGLE source of truth for the budget-exceeded spelling:
-/// the owner classifier (`raise_sentinel::raw_is_unmaterialized_sentinel`) and
-/// every test that scans a published surface for a leaked budget sentinel
-/// reference this constant, so the spelling can never silently drift.
-pub(crate) const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = "budgetExceeded(";
+// The spelling consts are OWNED by `semantic_query::compat_spelling` (the
+// single spelling family home); re-exported here for path stability (the
+// consumers are the sentinel/test modules).
+#[allow(unused_imports)]
+pub(crate) use crate::semantic_query::compat_spelling::{
+    BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
+    SEMANTIC_SURFACE_MEMBER,
+};
 
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes

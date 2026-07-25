@@ -1,39 +1,24 @@
 use super::summary;
 use super::FactShapeTag;
-use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
 use crate::semantic_query::QueryError;
 
 /// The TYPED node-domain summary constructor (`summary::opaque_sentinel`)
-/// must yield the SAME FULL summary — `materialized` fact, `expanded_surface`,
-/// AND `FactShapeTag` — the LEGACY raw-string node-domain path
-/// (`summary::unknown` over the variant's `semantic_query_error_raw`) produced,
-/// for the FULL `_ => opaque_sentinel`-reachable variant set the `fold_node`
-/// `Opaque(err)` arm routes (every variant EXCEPT `RecursiveRef` and
-/// `DeclPlaceholder`, which hit the earlier `recursive_ref` / `reference`
-/// sub-arms and are covered by the agreement test in `raise_sentinel.rs`),
-/// INCLUDING the `Other`-sentinel-text carrier. This is the node-domain
-/// anti-drift guard discharging the `Opaque`-arm behaviour-preservation
-/// obligation: a typed classification that disagreed with the raw-string
-/// classification would fail here.
+/// classifies on the typed [`QueryError`] ONLY — there is no raw-string
+/// classification anywhere in the node domain. A genuine
+/// [`UnknownValue`](verter_type_expr::UnknownValue) carrying the SAME
+/// spelling (`summary::unknown`) is ALWAYS materialized / `Other`-tagged /
+/// flag-free: the two paths agree on the compat tree bytes but the typed
+/// classification is DISTINCT — the parity is SPLIT by design.
 ///
-/// DISCRIMINATING on BOTH the `materialized` text-bearing delegation
-/// (`Other("semanticMiss")` — pre-delegation the typed `materialized` fact
-/// diverged from the legacy raw fact) AND the `tag` text-bearing delegation
-/// (`Other("semanticObjectSurface")` — the payload that tags
-/// `ObjectSurfaceSentinel` via the raw rule; reverting the tag-predicate
-/// delegation back to `Other(_) => false` makes `typed.tag` report `Other`
-/// while the legacy raw rule reports `ObjectSurfaceSentinel`, so the `tag`
-/// assertion below FAILS for it).
+/// DISCRIMINATING: `Other("semanticObjectSurface")` and
+/// `Other("semanticMiss")` payloads are INERT — they classify as
+/// materialized / `Other`-tagged exactly like any genuine unknown (the
+/// flipped historical equation, where the text-bearing delegation read
+/// them as sentinels).
 #[test]
-fn opaque_sentinel_summary_matches_legacy_unknown_summary() {
+fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized() {
     // The full `_ => opaque_sentinel`-reachable set the `Opaque(err)` arm
     // routes (RecursiveRef + DeclPlaceholder hit earlier sub-arms ⇒ excluded).
-    // Includes the recognised prefix-sentinel `UnsupportedIntrinsic` (its raw
-    // `unsupportedIntrinsic(<name>)` is unmaterialised via the
-    // `unsupportedIntrinsic(` prefix, tag `Other`) and both adversarial
-    // text-bearing carriers the delegation covers: `Other("semanticMiss")`
-    // (the `materialized` drift case) and `Other("semanticObjectSurface")`
-    // (the `tag` drift case).
     let reachable = [
         QueryError::Miss,
         QueryError::UnsupportedIntrinsic {
@@ -60,55 +45,51 @@ fn opaque_sentinel_summary_matches_legacy_unknown_summary() {
         QueryError::RaiseAliasCycle,
         QueryError::TypeParamCycle,
         QueryError::RaiseMiss,
+        QueryError::OpenSurface,
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
+        // Adversarial text-bearing payloads: INERT (never sentinels).
         QueryError::Other(std::sync::Arc::from("semanticMiss")),
         QueryError::Other(std::sync::Arc::from("semanticObjectSurface")),
         QueryError::Other(std::sync::Arc::from("budgetExceeded(x)")),
         QueryError::Other(std::sync::Arc::from("genuinely free text")),
     ];
-    for variant in reachable {
-        let typed = summary::opaque_sentinel(&variant);
-        let legacy = summary::unknown(&semantic_query_error_raw(&variant));
-        assert_eq!(
-            typed.facts.materialized, legacy.facts.materialized,
-            "materialized fact drift for {variant:?}"
-        );
-        assert_eq!(typed.tag, legacy.tag, "tag drift for {variant:?}");
-        // `opaque_sentinel` mirrors `unknown`'s always-expanded surface —
-        // asserted as PARITY (both are always `true`, so a hardcoded
-        // `assert!(typed...)` would pass too, but comparing to `legacy`
-        // matches the FULL-summary parity claim and catches a future edit
-        // that diverged either side's `expanded_surface` formula).
-        assert_eq!(
-            typed.facts.expanded_surface, legacy.facts.expanded_surface,
-            "expanded_surface drift for {variant:?}"
+    for variant in &reachable {
+        let typed = summary::opaque_sentinel(variant);
+        // A genuine `UnknownValue` is ALWAYS materialized / Other-tagged.
+        let genuine = summary::unknown(&verter_type_expr::UnknownValue::unsupported_syntax(
+            "any authored text",
+        ));
+        assert!(genuine.facts.materialized);
+        assert!(genuine.facts.expanded_surface);
+        assert_eq!(genuine.tag, FactShapeTag::Other);
+        // The typed summary's expanded surface always matches (both true).
+        assert!(
+            typed.facts.expanded_surface,
+            "expanded_surface must hold for {variant:?}"
         );
     }
 
-    // Concretely pin the `tag` discriminator: `Other("semanticObjectSurface")`
-    // raises to the SEMANTIC_OBJECT_SURFACE spelling, so BOTH the typed summary
-    // and the legacy raw rule must tag it `ObjectSurfaceSentinel` (the carrier
-    // the intersection reducer drops). A reverted tag-predicate delegation
-    // would tag it `Other` and fail the loop's `tag` assertion above.
+    // The tag discriminator, FLIPPED: `Other("semanticObjectSurface")` is
+    // INERT — it must NOT tag `ObjectSurfaceSentinel` (only the typed
+    // `UnrepresentableSurface` carrier does).
     let object_surface_text = summary::opaque_sentinel(&QueryError::Other(std::sync::Arc::from(
         "semanticObjectSurface",
     )));
     assert_eq!(
         object_surface_text.tag,
-        FactShapeTag::ObjectSurfaceSentinel,
-        "Other(\"semanticObjectSurface\") must tag ObjectSurfaceSentinel via the text-bearing \
-             delegation (this is the tag-drift case the fixture previously omitted)"
+        FactShapeTag::Other,
+        "Other(\"semanticObjectSurface\") is INERT — never the surface sentinel"
     );
+    assert!(object_surface_text.facts.materialized);
+    let typed_surface = summary::opaque_sentinel(&QueryError::UnrepresentableSurface);
+    assert_eq!(typed_surface.tag, FactShapeTag::ObjectSurfaceSentinel);
+    assert!(!typed_surface.facts.materialized);
 }
 
 /// Pin the concrete `(materialized, tag)` outcomes so a regression that
 /// flipped a single variant's classification is caught directly (not only
-/// via the parity loop). Derived first-hand from the raw recogniser:
-/// `semanticObjectSurface` / `semanticAliasCycle` / `semanticSurfaceMember`
-/// are recognised sentinels ⇒ NOT materialized;
-/// `<raise miss>` and `semanticTypeParamCycle` are deliberately NOT in the
-/// recogniser ⇒ materialized. Only the object-surface sentinel tags
+/// via the loop above). Only the typed `UnrepresentableSurface` carrier tags
 /// `ObjectSurfaceSentinel`.
 #[test]
 fn opaque_sentinel_summary_pins_exact_materialized_and_tag() {
@@ -124,12 +105,16 @@ fn opaque_sentinel_summary_pins_exact_materialized_and_tag() {
     assert!(!alias_cycle.facts.materialized);
     assert_eq!(alias_cycle.tag, FactShapeTag::Other);
 
-    // `<raise miss>` is NOT a recognised sentinel ⇒ materialized = true.
+    let open_surface = summary::opaque_sentinel(&QueryError::OpenSurface);
+    assert!(!open_surface.facts.materialized);
+    assert_eq!(open_surface.tag, FactShapeTag::Other);
+
+    // `<raise miss>` is deliberately NOT an unmaterialised sentinel ⇒ materialized.
     let raise_miss = summary::opaque_sentinel(&QueryError::RaiseMiss);
     assert!(raise_miss.facts.materialized);
     assert_eq!(raise_miss.tag, FactShapeTag::Other);
 
-    // `semanticTypeParamCycle` is NOT a recognised sentinel ⇒ materialized.
+    // `semanticTypeParamCycle` is deliberately NOT recognised ⇒ materialized.
     let tp_cycle = summary::opaque_sentinel(&QueryError::TypeParamCycle);
     assert!(tp_cycle.facts.materialized);
     assert_eq!(tp_cycle.tag, FactShapeTag::Other);
@@ -366,7 +351,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         false,
     ));
     let raw_fallback = graph.intern_node(SemanticNodeData::RawFallback {
-        raw: StdArc::from("SomeRawText"),
+        value: verter_type_expr::UnknownValue::unsupported_syntax("SomeRawText"),
     });
     let opaque_other = graph.intern_node(SemanticNodeData::Opaque(QueryError::RaiseMiss));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -589,7 +574,10 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
 /// `KeyOf.base`, `Array.element`, `IndexedAccess.object` + a `TypeNode` index, EACH
 /// of the four `Conditional` operands (`check` / `extends` / `true_branch_ref` /
 /// `false_branch_ref`), `Mapped`'s source / value / OPTIONAL `name_remap`, and the
-/// `ConstructorType` signature.
+/// `ConstructorType` signature. The presence-failure edges of VALUE COMPOSITES
+/// (union/intersection members, tuple elements, template expressions, function
+/// params/return/type-param slots, type-param constraint/default) are the
+/// DOCUMENTED ASYMMETRY — pinned `full=None / root_only=Some` below.
 #[test]
 fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold() {
     use std::sync::Arc as StdArc;
@@ -749,6 +737,128 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             root_only.is_none(),
             "[{label}] root-only projection MUST also return None for a dangling required child \
              (a mutation removing the required-edge `?` makes this Some and FAILS)"
+        );
+    }
+
+    // DOCUMENTED ASYMMETRY pin: the presence-failure edges of VALUE COMPOSITES
+    // (union/intersection members, tuple elements, template expressions,
+    // function params/return/type-param slots, standalone type-param
+    // constraint/default) fail the full fold but are deliberately NOT probed by
+    // the root-only projection (it classifies the ROOT shape from placeholder
+    // facts — it is NOT a raisability oracle). Each fixture asserts
+    // `full.is_none() && root_only.is_some()` so a future "fix" that silently
+    // re-aligns either side FAILS.
+    let fn_with = |return_type, params: Vec<crate::semantic_query::FunctionParam>| {
+        SemanticNodeData::Function {
+            params: StdArc::from(params.into_boxed_slice()),
+            return_type,
+            type_parameters: StdArc::from(
+                Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+            ),
+            signature_span: None,
+            return_type_span: None,
+        }
+    };
+    let asymmetric = [
+        (
+            "union.member",
+            graph.intern_node(SemanticNodeData::Union(StdArc::from(
+                vec![present, dangling].into_boxed_slice(),
+            ))),
+        ),
+        (
+            "intersection.member",
+            graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
+                vec![present, dangling].into_boxed_slice(),
+            ))),
+        ),
+        (
+            "tuple.element",
+            graph.intern_node(SemanticNodeData::Tuple {
+                elements: StdArc::from(
+                    vec![crate::semantic_query::TupleElement {
+                        label: None,
+                        value: dangling,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: false,
+            }),
+        ),
+        (
+            "template.expression",
+            graph.intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: StdArc::from(vec![StdArc::from("x")].into_boxed_slice()),
+                expressions: StdArc::from(vec![dangling].into_boxed_slice()),
+            }),
+        ),
+        (
+            "function.return",
+            graph.intern_node(fn_with(dangling, Vec::new())),
+        ),
+        (
+            "function.param",
+            graph.intern_node(fn_with(
+                present,
+                vec![crate::semantic_query::FunctionParam::synthetic(
+                    Some(StdArc::from("a")),
+                    dangling,
+                    false,
+                    false,
+                )],
+            )),
+        ),
+        (
+            "typeparam.constraint",
+            graph.intern_node(SemanticNodeData::TypeParam {
+                decl: crate::semantic_query::DeclIdentity {
+                    canonical_id: StdArc::from("/w/tp.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: [0u8; 16],
+                    decl_name: StdArc::from("T"),
+                },
+                param_index: 0,
+                constraint: Some(dangling),
+                default: None,
+                display_name: StdArc::from("T"),
+            }),
+        ),
+        (
+            "typeparam.default",
+            graph.intern_node(SemanticNodeData::TypeParam {
+                decl: crate::semantic_query::DeclIdentity {
+                    canonical_id: StdArc::from("/w/tp.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: [0u8; 16],
+                    decl_name: StdArc::from("T"),
+                },
+                param_index: 0,
+                constraint: None,
+                default: Some(dangling),
+                display_name: StdArc::from("T"),
+            }),
+        ),
+    ];
+    for (label, node) in asymmetric {
+        let full = {
+            let mut alg = super::RaisedFactsAlg;
+            let mut active = FxHashSet::default();
+            super::super::fold_node(&mut alg, &dispatch, node, &mut active)
+        };
+        let root_only = {
+            let mut active = FxHashSet::default();
+            super::project_root_summary(&dispatch, node, &mut active)
+        };
+        assert!(
+            full.is_none(),
+            "[{label}] full fold FAILS the malformed value-composite"
+        );
+        assert!(
+            root_only.is_some(),
+            "[{label}] DOCUMENTED ASYMMETRY: root-only classifies the root WITHOUT probing \
+             value-composite children (NOT a raisability oracle)"
         );
     }
 

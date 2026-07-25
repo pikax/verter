@@ -245,7 +245,7 @@ impl TypeExpr {
             | Self::Literal(_)
             | Self::Infer { .. }
             | Self::SyntheticSlotBinding(_)
-            | Self::Unknown { .. } => {}
+            | Self::Unknown(_) => {}
 
             // -- `typeof C.make<string>`: the instantiation-expression args
             //    are children; the path itself carries no span --
@@ -346,7 +346,7 @@ impl TypeExpr {
             | Self::Literal(_)
             | Self::Infer { .. }
             | Self::SyntheticSlotBinding(_)
-            | Self::Unknown { .. } => {}
+            | Self::Unknown(_) => {}
 
             Self::TypeOf(value_ref) => {
                 for arg in value_ref.type_args.iter_mut() {

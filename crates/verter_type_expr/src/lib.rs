@@ -43,6 +43,11 @@ pub use display::{render_type_expr_display, RenderedTypeExpr, TypeExprDisplayErr
 mod type_expr_json;
 pub use type_expr_json::type_expr_from_json;
 
+/// The opaque [`TypeExpr::Unknown`] payload (kept out of the crate root for
+/// file-size hygiene).
+mod unknown;
+pub use unknown::{UnknownProvenance, UnknownValue};
+
 /// Content-free authored-body locators — the keyable inverse of a session
 /// `HotTypeRef` (the cross-boundary escape a closed fact routes through).
 pub mod locators;
@@ -352,8 +357,14 @@ pub enum TypeExpr {
     },
 
     /// A type the lowering could not represent.
-    /// Carries the raw source text for diagnostics.
-    Unknown { raw: String },
+    /// Carries the raw source text for diagnostics inside an opaque
+    /// [`UnknownValue`] — genuinely unrepresentable AUTHORED/raw syntax only.
+    /// Resolver DEGRADATION (a dispatch miss, an exhausted budget, an
+    /// unrepresentable surface) is NOT encoded here: it travels as typed
+    /// `QueryError` data through the session's materialization sidecar and
+    /// only projects back into an `UnknownValue` compatibility spelling at
+    /// the terminal output boundary.
+    Unknown(UnknownValue),
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,7 +1363,7 @@ impl TypeExpr {
 
     /// Returns `true` if this is an `Unknown` node.
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown { .. })
+        matches!(self, Self::Unknown(_))
     }
 
     /// Returns `true` if this is a primitive type.

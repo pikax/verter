@@ -503,7 +503,7 @@ pub(crate) fn display_type_node(
             out
         }
         // Raw-fallback carrier renders its preserved text verbatim.
-        SemanticNodeData::RawFallback { raw } => raw.to_string(),
+        SemanticNodeData::RawFallback { value } => value.raw().to_string(),
         // Constructor-type carrier renders `new ` + its function signature.
         SemanticNodeData::ConstructorType { signature } => {
             format!(

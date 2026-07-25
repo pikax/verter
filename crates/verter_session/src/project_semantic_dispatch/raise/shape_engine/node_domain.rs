@@ -14,18 +14,19 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
+use verter_type_expr::{
+    LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr, UnknownValue,
+};
 
+use super::fold::{FoldedFunction, FoldedTupleElement};
 use super::{
-    FactShapeTag, FoldedFunction, FoldedTupleElement, RaisedFunction, RaisedFunctionParam,
-    RaisedObjectMember, RaisedRecursiveFrame, RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts,
-    RaisedShapeKey, RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement,
-    RaisedTypeParam, RootOnlySummary, ShapeInterner,
+    FactShapeTag, RaisedFunction, RaisedFunctionParam, RaisedObjectMember, RaisedRecursiveFrame,
+    RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts, RaisedShapeKey, RaisedShapeResult,
+    RaisedShapeSummary, RaisedTerm, RaisedTupleElement, RaisedTypeParam, RootOnlySummary,
+    ShapeInterner,
 };
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
-use crate::resolver_core::component_meta_query_engine::{
-    semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
-};
+use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
 use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId};
 
 // ===========================================================================
@@ -149,18 +150,23 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             summary::materialized_expanded_leaf(),
         )
     }
-    fn unknown(&mut self, raw: Arc<str>) -> RaisedShapeResult {
-        let summary = summary::unknown(&raw);
-        self.result(RaisedTerm::Unknown { raw }, summary)
+    fn unknown(&mut self, value: UnknownValue) -> RaisedShapeResult {
+        let summary = summary::unknown(&value);
+        self.result(RaisedTerm::Unknown(value), summary)
     }
     fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeResult {
-        // The interned STRUCTURAL key is the same `Unknown { raw }` the
-        // materializer produces (byte-identical raw, so node-vs-`TypeExpr`
-        // equality is preserved); the SUMMARY is classified from the typed
-        // variant via the shared authority.
+        // The interned STRUCTURAL key is the terminal compatibility
+        // projection — raw-only identity, so node-vs-`TypeExpr` equality is
+        // preserved byte-for-byte; the SUMMARY is classified from the typed
+        // variant via the shared authority. Provenance and the `QueryError`
+        // never enter structural key identity.
         let summary = summary::opaque_sentinel(err);
-        let raw: Arc<str> = Arc::from(semantic_query_error_raw(err));
-        self.result(RaisedTerm::Unknown { raw }, summary)
+        self.result(
+            RaisedTerm::Unknown(UnknownValue::compatibility_projection(
+                semantic_query_error_raw(err),
+            )),
+            summary,
+        )
     }
     fn recursive_ref(&mut self, name: Arc<str>) -> RaisedShapeResult {
         self.result(
@@ -563,8 +569,8 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     fn infer(&mut self, _name: Arc<str>) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
-    fn unknown(&mut self, raw: Arc<str>) -> RaisedShapeSummary {
-        summary::unknown(&raw)
+    fn unknown(&mut self, value: UnknownValue) -> RaisedShapeSummary {
+        summary::unknown(&value)
     }
     fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeSummary {
         summary::opaque_sentinel(err)
@@ -928,9 +934,7 @@ pub(super) fn type_expr_to_key(interner: &mut ShapeInterner, expr: &TypeExpr) ->
                 .map(|a| type_expr_to_key(interner, a))
                 .collect(),
         },
-        TypeExpr::Unknown { raw } => RaisedTerm::Unknown {
-            raw: Arc::from(raw.as_str()),
-        },
+        TypeExpr::Unknown(value) => RaisedTerm::Unknown(value.clone()),
     };
     interner.intern(term)
 }
@@ -1115,11 +1119,23 @@ pub(super) fn project_root_summary(
 
         SemanticNodeData::TypeOf(_) => RootOnlySummary::from_summary(summary::type_of()),
 
-        // Required-edge `?` parity with `fold_node`: the operand child must raise
-        // for the operator to, so a dangling operand aborts BOTH (the root class
-        // itself does not read the child — only its `Some`/`None` does). Object
-        // member values stay short-circuited below, so this set mirrors EXACTLY
-        // `fold_node`'s `?`-propagating required edges, with no member deep-walk.
+        // Required-edge `?` parity with `fold_node`, SCOPED to the operator
+        // operands (KeyOf base, IndexedAccess object/index, the four Conditional
+        // operands, Mapped source/value/name_remap, Array element, ConstructorType
+        // signature): a dangling OPERAND aborts BOTH (the root class itself does
+        // not read the child — only its `Some`/`None` does).
+        //
+        // DOCUMENTED ASYMMETRY: `fold_node` ALSO fails a value-composite on a
+        // PRESENT-but-unraisable child (union/intersection members, tuple
+        // elements, template expressions, function params/return/type-param
+        // slots, standalone type-param constraint/default) — this root-only
+        // projection deliberately does NOT mirror those edges (it classifies the
+        // ROOT shape from placeholder facts, it is NOT a raisability oracle), so
+        // it returns `Some` for exactly those malformed composites the full fold
+        // fails. The asymmetry is pinned in
+        // `root_only_projection_returns_none_on_malformed_required_child_like_full_fold`.
+        // Object member values stay short-circuited below, with no member
+        // deep-walk.
         SemanticNodeData::KeyOf { base } => {
             project_root_summary(dispatch, *base, active)?;
             RootOnlySummary::from_summary(summary::key_of(root_only_placeholder_facts()))
@@ -1152,6 +1168,10 @@ pub(super) fn project_root_summary(
                 root_only_placeholder_facts(),
             ))
         }
+        // Root-classification only (see the DOCUMENTED ASYMMETRY note above):
+        // function params/return/type-param slots and tuple/union members are
+        // NOT probed — the full fold fails those malformed composites while
+        // this projection still answers the root class.
         SemanticNodeData::Function { .. } => RootOnlySummary::from_summary(summary::function(true)),
         SemanticNodeData::Array { element, .. } => {
             project_root_summary(dispatch, *element, active)?;
@@ -1163,8 +1183,8 @@ pub(super) fn project_root_summary(
         SemanticNodeData::Union(_) => {
             RootOnlySummary::from_summary(summary::union(std::iter::empty::<RaisedShapeFacts>()))
         }
-        SemanticNodeData::RawFallback { raw } => {
-            RootOnlySummary::from_summary(summary::unknown(raw))
+        SemanticNodeData::RawFallback { value } => {
+            RootOnlySummary::from_summary(summary::unknown(value))
         }
 
         SemanticNodeData::Alias(target) => {
@@ -1185,10 +1205,12 @@ pub(super) fn project_root_summary(
             return project_root_summary(dispatch, merged, active);
         }
         SemanticNodeData::Intersection(members) => {
-            // filter_map recurse (root-only), drop the SEMANTIC_OBJECT_SURFACE
-            // sentinel + empty-object arms, then collapse: empty -> empty object,
-            // len==1 -> that arm, else Intersection — identical to `fold_node`'s
-            // Intersection arm, but each arm classified root-only.
+            // filter_map recurse (root-only), drop the ObjectSurfaceSentinel +
+            // empty-object arms, then collapse: empty -> empty object,
+            // len==1 -> that arm, else Intersection — the same COLLAPSE shape as
+            // `fold_node`'s Intersection arm, but each arm classified root-only,
+            // and a DANGLING arm is dropped here while the full fold fails the
+            // whole composite (the DOCUMENTED ASYMMETRY).
             let mut arms: Vec<RootOnlySummary> = members
                 .iter()
                 .filter_map(|member| project_root_summary(dispatch, *member, active))

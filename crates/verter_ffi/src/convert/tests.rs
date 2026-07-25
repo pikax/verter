@@ -249,9 +249,9 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
     );
 
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
-        type_registry_entries: vec![verter_type_expr::TypeExpr::Unknown {
-            raw: "{ label: string }".to_string(),
-        }],
+        type_registry_entries: vec![verter_type_expr::TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::unsupported_syntax("{ label: string }"),
+        )],
         ..Default::default()
     };
     let ffi = component_meta_parts_to_ffi(analysis, Some(resolution), lanes);
@@ -263,9 +263,9 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
     assert_eq!(entry.name, "Props");
     assert_eq!(
         entry.r#type,
-        verter_type_expr::TypeExpr::Unknown {
-            raw: "{ label: string }".to_string(),
-        },
+        verter_type_expr::TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
+            "{ label: string }"
+        ),),
         "the EXPANDED lane value rides the positional registry lane 1:1",
     );
     assert_eq!(

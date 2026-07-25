@@ -612,9 +612,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope.clone(),
             ),
             // Raw fallback — display/compat carrier, never a control signal.
-            TypeExpr::Unknown { raw } => graph.intern_node_with_scope(
+            TypeExpr::Unknown(value) => graph.intern_node_with_scope(
                 SemanticNodeData::RawFallback {
-                    raw: Arc::from(raw.as_str()),
+                    value: value.clone(),
                 },
                 scope.clone(),
             ),

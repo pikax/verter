@@ -601,9 +601,9 @@ fn lower_node(
         }
 
         // -- Raw fallback (display/compat only, never a control signal) --
-        TypeExpr::Unknown { raw } => Ok(graph.intern_node_with_scope(
+        TypeExpr::Unknown(value) => Ok(graph.intern_node_with_scope(
             SemanticNodeData::RawFallback {
-                raw: Arc::from(raw.as_str()),
+                value: value.clone(),
             },
             scope.clone(),
         )),

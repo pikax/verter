@@ -525,9 +525,9 @@ fn binder_order_is_cross_side_stable() {
 
 #[test]
 fn unknown_and_synthetic_nodes_reject() {
-    let unknown = TypeExpr::Unknown {
-        raw: "garbage".to_string(),
-    };
+    let unknown = TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
+        "garbage",
+    ));
     assert_eq!(
         normalized_canonical_json(&unknown, M),
         Err(NormalizeReject::UnknownNode),

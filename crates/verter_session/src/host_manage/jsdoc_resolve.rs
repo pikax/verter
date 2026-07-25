@@ -891,25 +891,32 @@ pub(crate) fn parse_jsdoc_tag_payload(
     }
 }
 
-/// Sanitize a JSDoc display-fallback `raw` string so an unresolved user-authored
-/// payload can never be mistaken for an internal materialisation sentinel.
+/// Sanitize a JSDoc display-fallback payload so an unresolved user-authored
+/// text can never be mistaken for an internal degradation PROJECTION when a
+/// human reads rendered output.
 ///
-/// When a JSDoc tag payload fails to parse/resolve, its verbatim text is stored
-/// in `TypeExpr::Unknown { raw }` purely as a display fallback. The raw
-/// classifier [`raw_is_unmaterialized_sentinel`] recognises a fixed family of
-/// sentinel spellings (exact strings plus prefixes such as `budgetExceeded(`); a
-/// user-authored payload that happens to spell one of those would otherwise be
-/// misread as dispatch control flow. Only sentinel-looking payloads are wrapped
-/// (with a non-sentinel `jsdoc:` marker that preserves the human-readable text);
+/// DISPLAY-ONLY escape: this predicate is NOT a classifier — no
+/// raw spelling is ever read as dispatch control flow (degradation travels as
+/// typed `QueryError` data, and a `jsdoc_parse_fallback` [`UnknownValue`] is
+/// inert text everywhere). The wrap exists purely so rendered/snapshotted
+/// output keeps the historical bytes: a payload that happens to spell one of
+/// the legacy sentinel strings is `jsdoc:`-prefixed exactly as before, and
 /// every ordinary payload passes through byte-for-byte unchanged.
 ///
-/// [`raw_is_unmaterialized_sentinel`]: crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel
+/// [`UnknownValue`]: verter_type_expr::UnknownValue
 fn sanitize_jsdoc_unknown_raw(raw_type: &str) -> String {
-    if crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw_type) {
+    if jsdoc_payload_spells_legacy_sentinel(raw_type) {
         format!("jsdoc:{raw_type}")
     } else {
         raw_type.to_string()
     }
+}
+
+/// DISPLAY-ONLY predicate for [`sanitize_jsdoc_unknown_raw`] — the SHARED
+/// legacy-family predicate owned by `semantic_query::compat_spelling` (one
+/// home, no inline duplicate list). Never consulted for control flow.
+fn jsdoc_payload_spells_legacy_sentinel(raw: &str) -> bool {
+    crate::semantic_query::compat_spelling::spells_legacy_sentinel_family(raw)
 }
 
 pub(crate) fn resolve_jsdoc_tag_type(
@@ -929,9 +936,9 @@ pub(crate) fn resolve_jsdoc_tag_type(
     let parsed_product =
         verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload_product(raw_type, None);
     let parsed = if parsed_product.body.is_unknown() {
-        verter_type_expr::TypeExpr::Unknown {
-            raw: sanitize_jsdoc_unknown_raw(raw_type),
-        }
+        verter_type_expr::TypeExpr::Unknown(verter_type_expr::UnknownValue::jsdoc_parse_fallback(
+            sanitize_jsdoc_unknown_raw(raw_type),
+        ))
     } else {
         parsed_product.body
     };
@@ -1028,15 +1035,13 @@ pub(crate) fn resolve_jsdoc_tag_type(
 
 #[cfg(test)]
 mod sanitizer_tests {
-    use super::sanitize_jsdoc_unknown_raw;
-    use crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel;
+    use super::{jsdoc_payload_spells_legacy_sentinel, sanitize_jsdoc_unknown_raw};
 
-    /// A JSDoc tag payload that happens to SPELL an internal materialisation
-    /// sentinel must be wrapped (`jsdoc:`-prefixed) so the shared raw classifier
-    /// `raw_is_unmaterialized_sentinel` can NEVER read user JSDoc text as dispatch
-    /// control flow. Discriminating: it asserts the RAW payload classifies as a
-    /// sentinel (so the sanitiser is non-vacuous) AND the sanitised payload does
-    /// NOT.
+    /// A JSDoc tag payload that happens to SPELL a legacy internal sentinel
+    /// string must be wrapped (`jsdoc:`-prefixed) so rendered output keeps the
+    /// historical display bytes. Discriminating: it asserts the RAW payload
+    /// hits the display predicate (so the sanitiser is non-vacuous) AND the
+    /// sanitised payload does NOT.
     #[test]
     fn sanitizes_sentinel_spelling_jsdoc_payloads() {
         for sentinel in [
@@ -1047,8 +1052,8 @@ mod sanitizer_tests {
             "materialize:x",
         ] {
             assert!(
-                raw_is_unmaterialized_sentinel(sentinel),
-                "precondition: `{sentinel}` must classify as a raw sentinel (so the test is \
+                jsdoc_payload_spells_legacy_sentinel(sentinel),
+                "precondition: `{sentinel}` must hit the display predicate (so the test is \
                  non-vacuous)"
             );
             let sanitized = sanitize_jsdoc_unknown_raw(sentinel);
@@ -1058,9 +1063,8 @@ mod sanitizer_tests {
                 "a sentinel-spelling JSDoc payload must be `jsdoc:`-prefixed"
             );
             assert!(
-                !raw_is_unmaterialized_sentinel(&sanitized),
-                "the sanitised payload `{sanitized}` must NOT classify as a materialisation \
-                 sentinel — user JSDoc text can never be read as dispatch control flow"
+                !jsdoc_payload_spells_legacy_sentinel(&sanitized),
+                "the sanitised payload `{sanitized}` must NOT hit the display predicate"
             );
         }
     }
@@ -1073,13 +1077,13 @@ mod sanitizer_tests {
             "import('vue').PropType<string>",
             "Record<string, unknown>",
             "() => void",
-            "budgetExceeded", // bare verb (no `(`) — NOT a sentinel
+            "budgetExceeded", // bare verb (no `(`) — NOT in the display family
             "MyComponentProps",
             "{ a: number }",
         ] {
             assert!(
-                !raw_is_unmaterialized_sentinel(benign),
-                "precondition: `{benign}` must NOT be a sentinel"
+                !jsdoc_payload_spells_legacy_sentinel(benign),
+                "precondition: `{benign}` must NOT hit the display predicate"
             );
             assert_eq!(
                 sanitize_jsdoc_unknown_raw(benign),

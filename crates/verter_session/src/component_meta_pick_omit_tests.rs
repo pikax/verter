@@ -1588,54 +1588,87 @@ const m12 = defineModel<Cell<T, 'm12'>>('m12')
 <template><div /></template>
 "#;
 
-/// Pins the budget-exceeded detector to the REAL production spelling so
-/// the hollow-detector class (the case-sensitive `"BudgetExceeded"`
-/// mismatch against the production `budgetExceeded(...)` sentinel) can
-/// never re-open. The shared recognizer
-/// `type_expr_is_budget_exceeded_sentinel` MUST fire on the exact raw
-/// `semantic_query_error_raw` emits, and MUST NOT fire on clean text or a
-/// plain object surface.
+/// The discriminating pair for the typed budget channel (replacing the
+/// retired raw-spelling detector): a TYPED `QueryError::BudgetExceeded`
+/// degradation marks the payload PARTIAL and is refused admission, while an
+/// EXACT `UnknownValue` spelled identically to the projection is INERT —
+/// complete, never classified.
 #[test]
-fn budget_exceeded_detector_matches_production_spelling_not_capital_b() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-    use verter_type_expr::TypeExpr;
-
-    // The exact production spelling (lowercase `b`, parameterised domain).
-    let real_sentinel = TypeExpr::Unknown {
-        raw: "budgetExceeded(ProjectionOperation)".into(),
+fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
+    use crate::project_semantic_dispatch::output_materialization::{
+        wrap_degraded_output, wrap_output_type_expr, TestOutputCap,
     };
+    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
+    use crate::semantic_query::{DepSignature, QueryError};
+    use crate::VerterHost;
+    use verter_type_expr::{TypeExpr, UnknownValue};
+
+    let host = VerterHost::new_standalone(Default::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let cap = TestOutputCap::new(&dispatch);
+
+    // TYPED: a `BudgetExceeded` degradation seals with the sidecar leaf ⇒
+    // PARTIAL at the `from_parts` choke point ⇒ refused warm admission; the
+    // terminal tree keeps the production spelling.
+    let typed_sealed = wrap_degraded_output(
+        &cap,
+        QueryError::BudgetExceeded(BudgetExceededFailure {
+            domain: BudgetDomain::ProjectionOperation,
+            limit: 1,
+            actual: 2,
+            context: "typed-channel-fixture".to_string(),
+        }),
+    );
+    let tree = typed_sealed.into_type_expr(&cap);
+    let TypeExpr::Unknown(value) = &tree else {
+        panic!("a budget trip projects an Unknown leaf")
+    };
+    assert_eq!(
+        value.raw(),
+        "budgetExceeded(ProjectionOperation)",
+        "the terminal projection keeps the production spelling"
+    );
+    let typed_sealed = wrap_degraded_output(
+        &cap,
+        QueryError::BudgetExceeded(BudgetExceededFailure {
+            domain: BudgetDomain::ProjectionOperation,
+            limit: 1,
+            actual: 2,
+            context: "typed-channel-fixture".to_string(),
+        }),
+    );
+    let carrier =
+        MaterializedOutputTypeExpr::from_parts(None, typed_sealed, DepSignature::default(), false);
     assert!(
-        type_expr_is_budget_exceeded_sentinel(&real_sentinel),
-        "detector MUST fire on the real production sentinel `budgetExceeded(...)`"
+        carrier.result_is_partial(),
+        "a typed BudgetExceeded must mark the payload partial"
+    );
+    assert!(
+        crate::cache_runtime::refuse_result_cache_admission_if_partial(carrier.result_is_partial()),
+        "… and the admission gate refuses it"
     );
 
-    // The historically-wrong capital-B spelling occurs NOWHERE in
-    // production; the detector must NOT key on it (and crucially the real
-    // sentinel above must not depend on it either).
-    let capital_b = TypeExpr::Unknown {
-        raw: "BudgetExceeded".into(),
-    };
-    assert!(
-        !type_expr_is_budget_exceeded_sentinel(&capital_b),
-        "detector keys on the production prefix, not the stale capital-B literal"
+    // INERT: an identically-spelled GENUINE `UnknownValue` carries no
+    // classification — exact, complete, admitted.
+    let inert_sealed = wrap_output_type_expr(
+        &cap,
+        TypeExpr::Unknown(UnknownValue::unsupported_syntax(
+            "budgetExceeded(ProjectionOperation)",
+        )),
     );
-
-    // Clean unrelated `Unknown` raw text must not fire.
-    let clean = TypeExpr::Unknown {
-        raw: "string".into(),
-    };
+    let carrier =
+        MaterializedOutputTypeExpr::from_parts(None, inert_sealed, DepSignature::default(), false);
     assert!(
-        !type_expr_is_budget_exceeded_sentinel(&clean),
-        "detector MUST NOT fire on clean `Unknown` text"
+        !carrier.result_is_partial(),
+        "an identically-spelled genuine UnknownValue is complete, not classified"
     );
-
-    // A plain object surface (non-`Unknown`) must not fire.
-    let plain_object = TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
-        properties: Vec::new(),
-    }));
     assert!(
-        !type_expr_is_budget_exceeded_sentinel(&plain_object),
-        "detector MUST NOT fire on a plain object surface"
+        !crate::cache_runtime::refuse_result_cache_admission_if_partial(
+            carrier.result_is_partial()
+        ),
+        "… and the admission gate admits it"
     );
 }
 

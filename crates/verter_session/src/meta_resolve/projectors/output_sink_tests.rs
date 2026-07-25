@@ -51,8 +51,8 @@ fn sealed_output_seam_still_emits_unknown_raw_for_typed_miss() {
         .materialize_output_type_expr_for_test(miss)
         .expect("the typed miss carrier raises through the sealed output seam");
     assert!(
-        matches!(&raised, TypeExpr::Unknown { raw } if raw == "semanticMiss"),
-        "the sealed output seam must spell the typed miss as the raw sentinel, got {raised:?}"
+        matches!(&raised, TypeExpr::Unknown(value) if value.raw() == "semanticMiss"),
+        "the sealed output seam must spell the typed miss as the compat projection, got {raised:?}"
     );
 }
 
@@ -95,16 +95,21 @@ fn input_side_no_poison_gate_reads_typed_whole_tree_miss_fact() {
         "a clean operator input must classify Some(false) (confidently miss-free)"
     );
 
-    let missy_input = ref_indexed_access(TypeExpr::Unknown {
-        raw: "semanticMiss".to_string(),
-    });
+    // A lowered genuine `UnknownValue` (spelled `semanticMiss`) carries NO
+    // classification of its own — but demanding a projection of it cannot
+    // succeed, so the locator-view worklist converts the `RawFallback` to a
+    // TYPED `Opaque(QueryError::Miss)` and the whole-tree fact reads the miss
+    // off that typed carrier (never off the spelling).
+    let missy_input = ref_indexed_access(TypeExpr::Unknown(
+        verter_type_expr::UnknownValue::unsupported_syntax("semanticMiss"),
+    ));
     let missy_node = dispatch
         .lower_type_expr_in_scope_with_context("/p.ts", &missy_input, transit)
         .expect("the miss-carrying input lowers");
     assert_eq!(
         node_contains_semantic_miss_with_dispatch(&dispatch, missy_node),
         Some(true),
-        "an input whose object position is the miss leaf must classify Some(true)"
+        "an input whose object position degrades to a TYPED Miss must classify Some(true)"
     );
 
     // End-to-end no-poison off the NODE-start reducer: reducing the clean
@@ -124,5 +129,59 @@ fn input_side_no_poison_gate_reads_typed_whole_tree_miss_fact() {
     assert!(
         !node_root_is_unmaterialized_sentinel_with_dispatch(&dispatch, published_node),
         "a clean input must never publish a root-sentinel shape (no-poison)"
+    );
+}
+
+/// R4-F3 — the `raise_node_to_sealed_carrier` None-arm split is pinned BOTH
+/// ways via real graph fixtures: a PRESENT-but-unraisable composite degrades
+/// to a typed `Miss` (partial, `semanticMiss` projection); a GENUINELY-absent
+/// id stays the exact `missing_output` (non-partial). An arm-swap reopens the
+/// laundering and fails here.
+#[test]
+fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = StdArc::clone(host.project_type_store().semantic_graph());
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // (1) PRESENT-BUT-UNRAISABLE: the union node mints but a member id is
+    // absent — degrades to the typed `Miss` carrier (partial; `semanticMiss`
+    // compat projection), and the torn read notes `OutputMaterializationLoss`
+    // (NON-CACHEABLE) on the admission rail.
+    let unraisable = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+        vec![str_id, crate::semantic_query::SemanticNodeId(u64::MAX)].into_boxed_slice(),
+    )));
+    let (_carrier, facts) = host.with_fact_tracer(|| {
+        let carrier = super::raise_node_to_sealed_carrier(
+            &dispatch,
+            unraisable,
+            crate::semantic_query::DepSignature::default(),
+        );
+        assert!(
+            carrier.result_is_partial(),
+            "a present-but-unraisable composite must degrade PARTIAL, never admitted complete"
+        );
+    });
+    assert!(
+        matches!(
+            facts.finalise(),
+            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        ),
+        "the unraisable arm must finalise NON-CACHEABLE on the loss rail"
+    );
+
+    // (2) GENUINELY-ABSENT: an id with no arena entry is a real absence —
+    // the exact `missing_output`, NON-partial.
+    let absent = crate::semantic_query::SemanticNodeId(u64::MAX);
+    let carrier = super::raise_node_to_sealed_carrier(
+        &dispatch,
+        absent,
+        crate::semantic_query::DepSignature::default(),
+    );
+    assert!(
+        !carrier.result_is_partial(),
+        "a genuinely-absent id stays exact + non-partial"
     );
 }

@@ -1100,7 +1100,7 @@ pub fn audit_key_for_node(
                 qualifier.len()
             )
         }
-        SemanticNodeData::RawFallback { raw } => format!("RawFallback(\"{raw}\")"),
+        SemanticNodeData::RawFallback { value } => format!("RawFallback(\"{}\")", value.raw()),
         SemanticNodeData::ConstructorType { signature } => {
             format!("ConstructorType({})", signature.0)
         }

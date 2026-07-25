@@ -49,7 +49,8 @@ use verter_type_expr::{
     FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
     MappedModifier, MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
     ObjectProperty, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
-    SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, ValueRef,
+    SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam,
+    UnknownValue, ValueRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ fn variant_index(expr: &TypeExpr) -> isize {
         TypeExpr::Parenthesized(_) => 18,
         TypeExpr::RecursiveRef { .. } => 19,
         TypeExpr::SyntheticSlotBinding(_) => 20,
-        TypeExpr::Unknown { .. } => 21,
+        TypeExpr::Unknown(_) => 21,
         // Added after the original derive: a new variant takes the next free
         // discriminant (NOT its declaration-order index) so 0..=21 stay frozen.
         TypeExpr::ConstructorType(_) => 22,
@@ -281,7 +282,9 @@ fn ref_hash<H: Hasher>(expr: &TypeExpr, h: &mut H) {
             typeof_query.hash(h);
             ref_hash_slice(type_arguments, h);
         }
-        TypeExpr::Unknown { raw } => raw.hash(h),
+        // The `UnknownValue` payload hashes RAW-ONLY — `str`'s stream, exactly
+        // the legacy `String` field's byte stream.
+        TypeExpr::Unknown(value) => value.raw().hash(h),
     }
 }
 
@@ -861,9 +864,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     // Unknown.
     v.push((
         "unknown",
-        TypeExpr::Unknown {
-            raw: "weird<>".into(),
-        },
+        TypeExpr::Unknown(UnknownValue::unsupported_syntax("weird<>")),
     ));
 
     // Deep-ish nesting to exercise multi-level child ordering.

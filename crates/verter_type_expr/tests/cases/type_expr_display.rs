@@ -7,7 +7,8 @@ use verter_type_expr::{
     render_type_expr_display, FunctionExpr, FunctionParam, IndexSignature, LiteralValue,
     MappedModifier, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
     RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
-    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError, TypeParam, ValueRef,
+    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeExprDisplayError, TypeParam,
+    UnknownValue, ValueRef,
 };
 
 fn reference(name: &str) -> TypeExpr {
@@ -204,9 +205,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                 },
             ]),
         },
-        TypeExpr::Unknown {
-            raw: "Custom & Raw".into(),
-        },
+        TypeExpr::Unknown(UnknownValue::unsupported_syntax("Custom & Raw")),
     ]));
 
     let rendered = render_type_expr_display(&expression).expect("the complete union must render");
@@ -298,7 +297,7 @@ fn rejects_internal_or_malformed_carriers_instead_of_rendering_unknown() {
     );
 
     assert_eq!(
-        render_type_expr_display(&TypeExpr::Unknown { raw: String::new() }),
+        render_type_expr_display(&TypeExpr::Unknown(UnknownValue::missing_output())),
         Err(TypeExprDisplayError::EmptyUnknownSource)
     );
     assert_eq!(

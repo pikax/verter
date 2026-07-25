@@ -592,6 +592,7 @@ fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReaso
         | QueryError::Other(_)
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::RaiseMiss
+        | QueryError::OpenSurface
         | QueryError::UnrepresentableSurface
         | QueryError::UnrepresentableSurfaceMember => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
     }

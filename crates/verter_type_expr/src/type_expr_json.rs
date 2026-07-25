@@ -296,12 +296,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             )))
         }
         "unknown" => {
-            let raw = v.get("raw")?.as_str()?.to_string();
-            Some(TypeExpr::Unknown { raw })
+            let raw = v.get("raw")?.as_str()?;
+            Some(TypeExpr::Unknown(UnknownValue::wire_opaque(raw)))
         }
-        _ => Some(TypeExpr::Unknown {
-            raw: kind.to_string(),
-        }),
+        _ => Some(TypeExpr::Unknown(UnknownValue::wire_opaque(kind))),
     }
 }
 
@@ -660,7 +658,7 @@ impl TypeExpr {
                 "bindingName": key.binding_name.as_ref(),
                 "valueNode": key.value_node.to_string(),
             }),
-            Self::Unknown { raw } => json!({ "kind": "unknown", "raw": raw }),
+            Self::Unknown(value) => json!({ "kind": "unknown", "raw": value.raw() }),
         }
     }
 

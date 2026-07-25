@@ -5,7 +5,7 @@ use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
-use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr, UnknownValue};
 
 fn make_project() -> Arc<MetaProject> {
     make_project_with_config(HostConfig {
@@ -5941,8 +5941,6 @@ defineProps<ColorModeSelectProps>()
 /// assertions FAIL pre-change and PASS post-change.
 #[test]
 fn get_component_meta_table_shaped_open_omit_heritage_carrier_stops_complete() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-
     let project = make_project();
     project
         .upsert_base(
@@ -6016,19 +6014,17 @@ defineProps<TableProps<T>>()
         other => panic!("`options` must be an `Omit` carrier Ref, got {other:?}"),
     }
 
-    // No published field may carry a budget-tripped partial sentinel — the
-    // result must be COMPLETE, not a degraded budget partial.
-    for p in &meta.props {
-        let Some(source) = p.type_source.present() else {
-            continue;
-        };
-        let published = shallow_published_type(project.host(), "/Table.vue", Some(source), &p.name);
-        assert!(
-            !type_expr_is_budget_exceeded_sentinel(&published),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
-            p.name,
-        );
-    }
+    // Typed no-leak guard (replaces the raw-spelling scan): the resolved meta
+    // was ADMITTED to the resolved-meta cache — admission is complete-only, so
+    // a budget-tripped partial surface would have been refused (the negative
+    // class is pinned by the partial-fixture / budget-exhaustion admission
+    // tests).
+    assert!(
+        cached_resolved_state(&project, "/Table.vue", crate::types::ProjectionMode::Expanded)
+            .is_some(),
+        "the Table.vue resolution must be admitted complete — a leaked budget partial would refuse admission"
+    );
+    assert_no_degraded_props(project.host(), "/Table.vue", &meta);
 }
 
 /// Route/mode-INDEPENDENT L1: a ChatMessages.vue-shaped HERMETIC SFC. A
@@ -6065,8 +6061,6 @@ defineProps<TableProps<T>>()
 /// carrier (`chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier`).
 #[test]
 fn get_component_meta_chat_messages_shaped_open_pick_heritage_enumerates_picked_keys_only() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-
     let project = make_project();
     project
         .upsert_base(
@@ -6127,19 +6121,14 @@ defineProps<ChatProps<T>>()
          source must never whole-materialise, got: {prop_names:?}"
     );
 
-    // No published field may carry a budget-tripped partial sentinel.
-    for p in &meta.props {
-        let Some(source) = p.type_source.present() else {
-            continue;
-        };
-        let published =
-            shallow_published_type(project.host(), "/ChatMessages.vue", Some(source), &p.name);
-        assert!(
-            !type_expr_is_budget_exceeded_sentinel(&published),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
-            p.name,
-        );
-    }
+    // Typed no-leak guard (replaces the raw-spelling scan): the resolved meta
+    // was ADMITTED to the resolved-meta cache — admission is complete-only.
+    assert!(
+        cached_resolved_state(&project, "/ChatMessages.vue", crate::types::ProjectionMode::Expanded)
+            .is_some(),
+        "the ChatMessages.vue resolution must be admitted complete — a leaked budget partial would refuse admission"
+    );
+    assert_no_degraded_props(project.host(), "/ChatMessages.vue", &meta);
 }
 
 /// Route/mode-INDEPENDENT L1 for the MAPPED family: a hermetic SFC with
@@ -6170,8 +6159,6 @@ defineProps<ChatProps<T>>()
 /// assertions.
 #[test]
 fn get_component_meta_open_mapped_slots_surface_carrier_stops_no_sentinel() {
-    use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
-
     let project = make_project();
     project
         .upsert_base(
@@ -6207,45 +6194,20 @@ defineSlots<OpenMappedSlots<T>>()
     // The resolution must TERMINATE and publish a COMPLETE result.
     let meta = get_meta(&project, "/OpenMappedSlots.vue");
 
-    // No published prop / slot binding may carry a budget-tripped partial
-    // sentinel — the open mapped slots surface carrier-stopped to a
-    // shallow shell instead of materialising the per-key value loop.
-    for p in &meta.props {
-        let Some(source) = p.type_source.present() else {
-            continue;
-        };
-        let published = shallow_published_type(
-            project.host(),
+    // Typed no-leak guard (replaces the raw-spelling scans over props and
+    // slot bindings): the resolved meta was ADMITTED to the resolved-meta
+    // cache — admission is complete-only, so a budget-tripped partial would
+    // have been refused.
+    assert!(
+        cached_resolved_state(
+            &project,
             "/OpenMappedSlots.vue",
-            Some(source),
-            &p.name,
-        );
-        assert!(
-            !type_expr_is_budget_exceeded_sentinel(&published),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
-            p.name,
-        );
-    }
-    for slot in &meta.slots {
-        for binding in &slot.bindings {
-            let Some(source) = binding.type_source.present() else {
-                continue;
-            };
-            let published = shallow_published_type(
-                project.host(),
-                "/OpenMappedSlots.vue",
-                Some(source),
-                &binding.name,
-            );
-            assert!(
-                !type_expr_is_budget_exceeded_sentinel(&published),
-                "no slot binding may carry a BudgetExceeded sentinel; slot `{}` binding `{}` \
-                 did: {published:?} — the open mapped slots value body was materialised (the storm)",
-                slot.name,
-                binding.name,
-            );
-        }
-    }
+            crate::types::ProjectionMode::Expanded
+        )
+        .is_some(),
+        "the OpenMappedSlots.vue resolution must be admitted complete — a leaked budget partial would refuse admission"
+    );
+    assert_no_degraded_props(project.host(), "/OpenMappedSlots.vue", &meta);
 
     // CLOSED key domain ⇒ the keys ENUMERATE: `header` / `footer` publish
     // as named slots (key enumeration is path-precise even when the value
@@ -19505,6 +19467,29 @@ use verter_semantic::analysis::component_meta::{
 };
 
 /// Helper: get the component meta for a file (through session).
+/// The typed masking probe over a published prop surface: every present
+/// prop source reads NOT-degraded on the raise-time sidecar (fold +
+/// `from_parts` choke point — independent of `synthesis_should_suppress`).
+fn assert_no_degraded_props(
+    host: &VerterHost,
+    canonical: &str,
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) {
+    for p in &meta.props {
+        let Some(source) = p.type_source.present() else {
+            continue;
+        };
+        assert_eq!(
+            crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_is_degraded(
+                host, canonical, source
+            ),
+            Some(false),
+            "prop `{}` must carry NO typed degradation on its raise-time sidecar (masking case)",
+            p.name,
+        );
+    }
+}
+
 fn get_meta(
     project: &Arc<MetaProject>,
     canonical_id: &str,
@@ -26492,7 +26477,7 @@ defineEmits(['ping'])
     );
     assert_eq!(
         payloads[0],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(UnknownValue::missing_output()),
         "a None payload source must materialize to the canonical typed Unknown \
          via the central missing-source policy, got {:?}",
         payloads[0]
@@ -27495,7 +27480,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
     let (analysis, _resolution, types) = output.into_parts();
     let lanes = types.into_lanes();
 
-    let unknown = TypeExpr::Unknown { raw: String::new() };
+    let unknown = TypeExpr::Unknown(UnknownValue::missing_output());
     assert_eq!(
         lanes.props,
         vec![unknown.clone()],
@@ -29750,7 +29735,7 @@ defineEmits(['save'])
         .expect("the save event publishes");
     assert_eq!(
         lanes.event_payloads[save],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(UnknownValue::missing_output()),
         "the unannotated position renders the centralized typed unknown"
     );
 
@@ -29857,7 +29842,7 @@ defineEmits<{ save: [id: number] }>()
     let (_analysis, _resolution, types) = output.into_parts();
     assert_eq!(
         types.into_lanes().event_payloads[0],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(UnknownValue::missing_output()),
         "the absent position renders the centralized typed Unknown"
     );
 

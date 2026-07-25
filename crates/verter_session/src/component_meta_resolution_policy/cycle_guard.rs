@@ -500,9 +500,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(23);
             error.hash(hasher);
         }
-        SemanticNodeData::RawFallback { raw } => {
+        SemanticNodeData::RawFallback { value } => {
             hasher.write_u8(24);
-            hasher.write(raw.as_bytes());
+            hasher.write(value.raw().as_bytes());
         }
         SemanticNodeData::ImportType(_) => {
             hasher.write_u8(25);

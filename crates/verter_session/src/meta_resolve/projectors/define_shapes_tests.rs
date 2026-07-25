@@ -370,7 +370,7 @@ defineEmits<{ save: [id: number] }>()
     let payloads = types.into_lanes().event_payloads;
     assert_eq!(
         payloads[0],
-        TypeExpr::Unknown { raw: String::new() },
+        TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
         "the schema-ABSENT position renders the canonical typed Unknown, got {:?}",
         payloads[0]
     );

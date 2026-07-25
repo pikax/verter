@@ -31,7 +31,7 @@ use std::sync::Arc;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans,
     MappedModifier, MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
-    PrimitiveName, TupleElement, TypeExpr, TypeParam, ValueRef,
+    PrimitiveName, TupleElement, TypeExpr, TypeParam, UnknownValue, ValueRef,
 };
 
 mod dependency_facts;
@@ -231,9 +231,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         // -- Catch-all --
         _ => {
             let span = ts_type.span();
-            TypeExpr::Unknown {
-                raw: span_text(source, span),
-            }
+            TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(source, span)))
         }
     }
 }
@@ -258,9 +256,10 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
             Expression::NumericLiteral(n) => match unary.operator {
                 UnaryOperator::UnaryNegation => TypeExpr::number_literal(-n.value),
                 UnaryOperator::UnaryPlus => TypeExpr::number_literal(n.value),
-                _ => TypeExpr::Unknown {
-                    raw: span_text(source, unary.span()),
-                },
+                _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                    source,
+                    unary.span(),
+                ))),
             },
             // `-1n` / `+1n` — a signed bigint literal type. `BigIntLiteral.value`
             // is the base-10 magnitude with NO sign (the sign lives on this
@@ -279,13 +278,15 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
                 UnaryOperator::UnaryPlus => {
                     TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
                 }
-                _ => TypeExpr::Unknown {
-                    raw: span_text(source, unary.span()),
-                },
+                _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                    source,
+                    unary.span(),
+                ))),
             },
-            _ => TypeExpr::Unknown {
-                raw: span_text(source, unary.span()),
-            },
+            _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source,
+                unary.span(),
+            ))),
         },
         TSLiteral::TemplateLiteral(tpl) => {
             if tpl.expressions.is_empty() {
@@ -295,9 +296,10 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
                     TypeExpr::string_literal("")
                 }
             } else {
-                TypeExpr::Unknown {
-                    raw: span_text(source, tpl.span()),
-                }
+                TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                    source,
+                    tpl.span(),
+                )))
             }
         } // TSLiteral is exhaustive with the variants above in OXC 0.117
     }
@@ -308,9 +310,10 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
         TSTypeName::IdentifierReference(id) => id.name.to_string(),
         TSTypeName::QualifiedName(qualified) => qualified_name_to_string(qualified),
         _ => {
-            return TypeExpr::Unknown {
-                raw: span_text(source, type_ref.span),
-            };
+            return TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source,
+                type_ref.span,
+            )));
         }
     };
 
@@ -408,9 +411,9 @@ fn lower_type_query(query: &TSTypeQuery<'_>, source: &str) -> TypeExpr {
             return lower_import_type(import, source, true);
         }
         _ => {
-            return TypeExpr::Unknown {
-                raw: span_text(source, query.span),
-            };
+            return TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
+                source, query.span,
+            )));
         }
     };
 
@@ -927,7 +930,7 @@ fn normalize_type_parameter_refs(expr: &TypeExpr, scope: &[TypeParam]) -> TypeEx
         | TypeExpr::Literal(_)
         | TypeExpr::RecursiveRef { .. }
         | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => expr.clone(),
+        | TypeExpr::Unknown(_) => expr.clone(),
     }
 }
 

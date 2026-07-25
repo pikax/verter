@@ -406,7 +406,9 @@ impl ExprMemoKey {
                 type_arguments_ptr: slice_ptr_id(type_arguments),
                 type_arguments_len: type_arguments.len(),
             },
-            TypeExpr::Unknown { raw } => Self::Unknown { raw: raw.clone() },
+            TypeExpr::Unknown(value) => Self::Unknown {
+                raw: value.raw().to_string(),
+            },
         }
     }
 }
@@ -946,8 +948,8 @@ impl GraphBuilder {
             TypeExpr::Parenthesized(inner) => GraphNode::Parenthesized {
                 inner: self.node_id(inner),
             },
-            TypeExpr::Unknown { raw } => GraphNode::Unknown {
-                raw: self.string_id(raw),
+            TypeExpr::Unknown(value) => GraphNode::Unknown {
+                raw: self.string_id(value.raw()),
             },
             // An import-type carrier resolves in the dispatch before reaching
             // the wire surface; the closed typeinfo schema has no dedicated

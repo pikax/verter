@@ -688,12 +688,12 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
                 buf.push('>');
             }
         }
-        TypeExpr::Unknown { raw } => {
+        TypeExpr::Unknown(value) => {
             // For Unknown, fall back to the raw source so the gate
             // can still distinguish "Verter could not lower X" from
             // "Verter could not lower Y".
             buf.push_str("/*unknown*/ ");
-            buf.push_str(raw);
+            buf.push_str(value.raw());
         }
     }
 }

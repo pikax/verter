@@ -317,8 +317,11 @@ fn projector_self_reduces_nested_indexed_access_chain() {
          A symbolic IndexedAccess proves the reduction step \
          was bypassed.",
     );
-    if let TypeExpr::Unknown { raw } = &size_ty {
-        panic!("`size` prop must NOT be Unknown; got Unknown {{ raw: {raw:?} }}");
+    if let TypeExpr::Unknown(value) = &size_ty {
+        panic!(
+            "`size` prop must NOT be Unknown; got Unknown {{ raw: {:?} }}",
+            value.raw()
+        );
     }
 
     // Positive assertion: the resolved type is the literal union

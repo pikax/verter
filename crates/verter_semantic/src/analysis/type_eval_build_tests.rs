@@ -4075,3 +4075,46 @@ fn plus_initializer_degrades_to_number_or_string_domain() {
         EnumScalar::Primitive(EnumPrimitiveDomain::NumberOrString),
     );
 }
+
+/// Const-assertion recognition runs on the TYPED
+/// [`UnknownValue::is_const_assertion_syntax`] accessor (never a raw
+/// `raw == "const"` string scan), and the `as const` behaviour it gates
+/// (literal preservation + readonly) is unchanged.
+#[test]
+fn const_assertion_recognition_is_typed_and_behavior_preserving() {
+    // The accessor: exactly `const`, provenance-independent, no trimming.
+    assert!(UnknownValue::unsupported_syntax("const").is_const_assertion_syntax());
+    assert!(UnknownValue::jsdoc_parse_fallback("const").is_const_assertion_syntax());
+    assert!(UnknownValue::compatibility_projection("const").is_const_assertion_syntax());
+    assert!(!UnknownValue::unsupported_syntax("const ").is_const_assertion_syntax());
+    assert!(!UnknownValue::unsupported_syntax("constant").is_const_assertion_syntax());
+    assert!(!UnknownValue::missing_output().is_const_assertion_syntax());
+
+    // Behaviour: `{ tag: "x" } as const` keeps the literal + readonly…
+    let const_parts = lowered(r#"const obj = { tag: "x" } as const"#);
+    let const_decl = const_parts.value_decl("obj").expect("lowered const obj");
+    let Some(TypeExpr::Object(obj)) = const_decl.type_annotation.as_ref() else {
+        panic!(
+            "as const must keep the object shape, got {:?}",
+            const_decl.type_annotation
+        );
+    };
+    let Some(ObjectMember::Property(prop)) = obj.properties.first() else {
+        panic!("the const object keeps its property");
+    };
+    assert_eq!(prop.ty, TypeExpr::string_literal("x"));
+    assert!(prop.readonly, "as const marks the property readonly");
+
+    // … while the same literal WITHOUT `as const` widens (the gate is not
+    // vacuously on).
+    let plain_parts = lowered(r#"const obj = { tag: "x" }"#);
+    let plain_decl = plain_parts.value_decl("obj").expect("lowered plain obj");
+    let Some(TypeExpr::Object(obj)) = plain_decl.type_annotation.as_ref() else {
+        panic!("plain object keeps its shape");
+    };
+    let Some(ObjectMember::Property(prop)) = obj.properties.first() else {
+        panic!("the plain object keeps its property");
+    };
+    assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
+    assert!(!prop.readonly);
+}

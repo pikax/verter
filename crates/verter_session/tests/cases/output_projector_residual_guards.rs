@@ -7388,13 +7388,18 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         NonAuthorityCategory::GenericOrAssocOrStd(&["Self"]),
     ),
     // The `RaisedShapeAlgebra` trait's associated-type returns (`Self::Out` /
-    // `Self::Fn` / `Self::Member` in the shared `shape_engine` fold). At the
-    // TRAIT declaration these are generic placeholders the field-closure cannot
+    // `Self::Fn` / `Self::Member` in the shared `shape_engine` fold, and the
+    // `A::Out` projection in the generic free-fn fold, `A: RaisedShapeAlgebra`).
+    // At the TRAIT declaration these are generic placeholders the field-closure cannot
     // resolve; the CONCRETE algebra impls (`MaterializeTypeExprAlg::* -> TypeExpr`
     // bearing, `RaisedShapeAlg::* -> RaisedShapeResult` non-bearing) are scanned
     // on their own merits and take folded children, NOT a forgeable
-    // `SemanticNodeId`. Exempted ONLY under the `Self::` qualifier.
-    ("Out", NonAuthorityCategory::GenericOrAssocOrStd(&["Self"])),
+    // `SemanticNodeId`. Exempted ONLY under the `Self::` / `A::` assoc-type
+    // qualifiers.
+    (
+        "Out",
+        NonAuthorityCategory::GenericOrAssocOrStd(&["Self", "A"]),
+    ),
     // `BuildHasher::build_hasher -> Self::Hasher` on the output-envelope
     // memo's counting hasher (`MemoBuildHasher` in
     // `output_sink/envelope.rs`) — a hash-machinery associated type
@@ -7935,6 +7940,15 @@ const KNOWN_NON_AUTHORITY_INPUT_IDENTS: &[KnownNonAuthorityInput] = &[
         NonAuthorityCategory::SealedTraitBound(&[
             "crate::typeinfo::framework_surface::resolved_surface_access",
         ]),
+    ),
+    // --- `verter_type_expr::UnknownValue` — the OPAQUE `Unknown` payload
+    // (both fields private, no public generic constructor, no raw escape
+    // hatch): a display-text value type carrying no resolution authority, NOT
+    // a forgeable raw surface. It surfaces as the materialize algebra's
+    // `unknown` leaf input (the `RawFallback` carrier payload). ---
+    KnownNonAuthorityInput::Category(
+        "UnknownValue",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_type_expr"]),
     ),
 ];
 
@@ -12730,9 +12744,6 @@ impl LexicalAliasStack {
     fn variants(&self) -> &std::collections::HashSet<String> {
         &self.cur_variants
     }
-    fn unknown(&self) -> &std::collections::HashSet<String> {
-        &self.cur_unknown
-    }
 }
 
 /// Classify a `use` binding (`from` is the imported name under path `stack`, bound
@@ -16002,39 +16013,6 @@ fn hot_materialize_fence_lexical_alias_scoping() {
          `use …::TypeExpr as TE`, so the inner `matches!(raised, TE::…)` is not classified and \
          the fn STAYS GREEN; got: {v:?}"
     );
-
-    // (FP3-c) UNKNOWN FENCE — a block-local `TypeExpr` alias in one fn must NOT
-    //         make a SIBLING fn's `TE::Unknown { raw: <sentinel> }` an Unknown
-    //         construction.
-    let unknown_scoped = r#"
-        fn owner_uses_alias() {
-            use real::TypeExpr as TE;
-            let _ = TE::Object(());
-        }
-        fn sibling_unknown() {
-            let _ = TE::Unknown { raw: "semanticMiss".to_string() };
-        }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(unknown_scoped).is_empty(),
-        "self-test (FP3-c): a block-local `TypeExpr` alias in one fn must NOT make a SIBLING fn's \
-         `TE::Unknown {{ raw: <sentinel> }}` an Unknown construction (no file-global leak); got: {:?}",
-        unknown_sentinel_constructions_in_src(unknown_scoped)
-    );
-    // Positive control: an IN-SCOPE aliased `TE::Unknown { raw: <sentinel> }` DOES
-    // fire — the lexical alias is honoured within its own scope (so the green
-    // assertions above are not vacuous).
-    let unknown_in_scope = r#"
-        fn fabricate() {
-            use real::TypeExpr as TE;
-            let _ = TE::Unknown { raw: "semanticMiss".to_string() };
-        }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(unknown_in_scope).is_empty(),
-        "self-test (FP3-c2): an IN-SCOPE block-local `use …::TypeExpr as TE; TE::Unknown \
-         {{ raw: <sentinel> }}` MUST fire (the lexical alias is honoured within its scope)"
-    );
 }
 
 /// Discrimination self-test for trait-DEFAULT method-body coverage: a default
@@ -16378,60 +16356,6 @@ fn hot_materialize_fence_return_type_alias_lexically_scoped() {
 /// cfg-test exclusion now gates the trait-default scan, killing the FP from syn's
 /// accidental default-visitor descent); a NON-test trait-default sentinel IS caught
 /// with proper fn attribution (not `<file-scope>`); and a raw-tainted field
-/// shorthand inside a trait default fires through the per-fn raw-taint frame.
-#[test]
-fn unknown_fence_trait_default_reconcile() {
-    // (cfg-test) a `#[cfg(test)]`-gated trait-default sentinel MUST NOT fire.
-    let cfg_test_default = r#"
-        trait Surface {
-            #[cfg(test)]
-            fn classify(&self) -> TypeExpr {
-                TypeExpr::Unknown { raw: "semanticMiss".to_string() }
-            }
-        }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(cfg_test_default).is_empty(),
-        "self-test (cfg-test): a `#[cfg(test)]` trait-DEFAULT `Unknown {{ raw: <sentinel> }}` MUST \
-         NOT fire (cfg-test-gated trait defaults are skipped, the same `#[cfg(test)]` exclusion as a free / impl fn within the Unknown scanner); got: {:?}",
-        unknown_sentinel_constructions_in_src(cfg_test_default)
-    );
-
-    // (non-test) a NON-test trait-default sentinel IS caught, attributed to the
-    //            trait-default fn (`classify`), NOT `<file-scope>`.
-    let nontest_default = r#"
-        trait Surface {
-            fn classify(&self) -> TypeExpr {
-                TypeExpr::Unknown { raw: "semanticMiss".to_string() }
-            }
-        }
-    "#;
-    let hits = unknown_sentinel_constructions_in_src(nontest_default);
-    assert!(
-        hits.iter().any(|(ident, _)| ident == "classify"),
-        "self-test (non-test): a non-test trait-DEFAULT sentinel `Unknown` MUST fire and attribute \
-         to the trait-default fn `classify` (not `<file-scope>`); got: {hits:?}"
-    );
-
-    // (field-shorthand) a raw-tainted field shorthand inside a trait default fires
-    //            through the per-fn raw-taint frame (pre-fix there was no frame, so
-    //            the shorthand form was missed).
-    let field_shorthand_default = r#"
-        trait Surface {
-            fn classify(&self, err: &QueryError) -> TypeExpr {
-                let raw = semantic_query_error_raw(err);
-                TypeExpr::Unknown { raw }
-            }
-        }
-    "#;
-    let hits = unknown_sentinel_constructions_in_src(field_shorthand_default);
-    assert!(
-        hits.iter().any(|(ident, _)| ident == "classify"),
-        "self-test (field-shorthand): a raw-tainted field-shorthand `Unknown {{ raw }}` inside a \
-         trait default MUST fire via the per-fn raw-taint frame, attributed to `classify`; got: {hits:?}"
-    );
-}
-
 /// Discrimination self-test for the VALUE-SCOPED self-policing exemption: the
 /// `lowers_param` exemption is PER-PARAMETER. A lowering terminal that ALSO
 /// decides on a fresh mint (or reads one, or decides on a SEPARATE un-lowered
@@ -17070,649 +16994,6 @@ fn hot_detector_spellings_are_live_or_synthetic() {
     );
 }
 
-// ===========================================================================
-// Global Unknown-as-control-flow fence.
-//
-// A `TypeExpr::Unknown { raw }` SEMANTIC sentinel (a raw string the
-// materializedness / miss / budget classifiers string-recognise as control
-// flow) may be constructed ONLY inside the shared sentinel-owner substrate: the
-// raw-spelling producer (`semantic_query_error_raw`), the raw classifier
-// authority (`raw_is_unmaterialized_sentinel`), the output materialize algebra
-// (the `shape_engine` / `raise` boundary), the terminal surface DTO publication
-// (`surface_view_to_projected_surface` / `projected_surface_to_*`), and the
-// display/parser raw fallback (`jsdoc_resolve`). A NEW semantic-sentinel
-// construction OUTSIDE that owner substrate is the forbidden "Unknown as control
-// flow" the global fence bans — a non-owner module fabricating a control
-// sentinel string instead of routing a typed `QueryError` through the single
-// owner mapping.
-//
-// The scanner recognises the construction through `use`-alias maps (so
-// `TypeExpr::Unknown`, an aliased `TE::Unknown`, AND a bare variant-imported
-// `Unknown { … }` all match) and tracks LOCAL raw-taint (so a field-shorthand
-// `TypeExpr::Unknown { raw }` is caught when `raw` was bound from a sentinel
-// producer / const / literal). Benign placeholder Unknowns (`raw: String::new()`,
-// a display `"unknown"`, a debug `format!("{x:?}")`) carry no sentinel-family
-// string and are not flagged.
-//
-// This is the GLOBAL fence (production-wide). The pre-existing carrier-scoped
-// tripwire `carrier_constructors_do_not_use_unknown_as_control_flow`
-// (architecture_guards.rs) stays intact as a narrow scoped guard; this fence
-// does not subsume or weaken it.
-//
-// INHERENT SYNTACTIC LIMIT (accepted, NOT a silent gap). A purely syntactic
-// `syn` guard recognises a sentinel only when its spelling is statically present
-// (a literal, a named const, the producer fn). It CANNOT catch a sentinel string
-// assembled DYNAMICALLY at runtime — `format!("semantic{}", suffix)`, byte
-// concatenation, a runtime-built `String` — because the spelling never appears
-// as a token. That gap is closed at RUNTIME, not syntactically, by three
-// cooperating defenses: (1) the raw classifier authority
-// `raw_is_unmaterialized_sentinel` (`raise_sentinel.rs`), which classifies any
-// `Unknown { raw }` string — however assembled — at the dispatch boundary; (2)
-// the armed per-request projection budget fuse (`request_budget.rs`), which
-// trips on a runaway regardless of how a sentinel was produced; and (3) the
-// producer-side sanitizers (`sanitize_jsdoc_unknown_raw`), which wrap any
-// sentinel-SPELLING payload at the one display-fallback producer so user text
-// can never be read as control flow. This fence is the STATIC half (a new
-// literal/const/producer sentinel construction outside the owner substrate); the
-// runtime classifier + budget fuse + producer sanitizers are the dynamic half.
-// ===========================================================================
-
-// Sentinel markers, split to MIRROR the owner classifier
-// `raw_is_unmaterialized_sentinel` (raise_sentinel.rs) EXACTLY: an exact-match
-// arm, a leading-prefix arm, and the producer-fn / const identifiers that
-// PRODUCE those spellings. Matching the classifier's actual shape — exact
-// spelling / leading prefix on a string VALUE, whole-identifier on a
-// producer/const — is what keeps a benign string that merely EMBEDS a spelling
-// (`"not semanticMiss"`, `"see budgetExceeded( docs"`) from being misread as a
-// control sentinel (the loose-`contains` false positive this faithful split
-// closes).
-
-/// Producer-fn / sentinel-const IDENT markers — an identifier that PRODUCES a
-/// semantic sentinel raw string (the raw producer `semantic_query_error_raw`
-/// and the sentinel-spelling / budget-prefix consts). Matched as a WHOLE
-/// IDENTIFIER token in the `raw:`-field expression, never as a substring.
-const UNKNOWN_SENTINEL_IDENT_MARKERS: &[&str] = &[
-    "semantic_query_error_raw",
-    "SEMANTIC_MISS",
-    "SEMANTIC_OBJECT_SURFACE",
-    "SEMANTIC_SURFACE_MEMBER",
-    "BUDGET_EXCEEDED_SENTINEL_PREFIX",
-];
-
-/// EXACT sentinel spellings — faithful to the owner classifier's exact-match
-/// arm (`SEMANTIC_MISS | SEMANTIC_OBJECT_SURFACE | SEMANTIC_SURFACE_MEMBER |
-/// "semanticAliasCycle" | "semanticFunction" |
-/// "projectedOpenSurface"`). A `raw:` string literal fires only when its VALUE
-/// equals one of these EXACTLY — never when it merely embeds the text.
-const UNKNOWN_SENTINEL_EXACT_SPELLINGS: &[&str] = &[
-    "semanticMiss",
-    "semanticObjectSurface",
-    "semanticSurfaceMember",
-    "semanticAliasCycle",
-    "semanticFunction",
-    "projectedOpenSurface",
-];
-
-/// PREFIX sentinel spellings — faithful to the owner classifier's
-/// `starts_with(..)` arm (`"materialize:" | "unsupportedIntrinsic(" |
-/// BUDGET_EXCEEDED_SENTINEL_PREFIX | "unstableState(" | "aliasCycle("`). A
-/// `raw:` string literal fires only when its VALUE STARTS WITH one of these —
-/// never when it embeds the text mid-string.
-const UNKNOWN_SENTINEL_PREFIX_SPELLINGS: &[&str] = &[
-    "materialize:",
-    "unsupportedIntrinsic(",
-    "budgetExceeded(",
-    "unstableState(",
-    "aliasCycle(",
-];
-
-/// The sentinel-owner substrate (file SUFFIXES). A semantic-sentinel `Unknown`
-/// construction is PERMITTED here — these files own the raw spelling, the raw
-/// classifier authority, the output materialize algebra, the terminal surface
-/// DTO publication, and the display/parser fallback.
-const UNKNOWN_SENTINEL_OWNER_FILES: &[&str] = &[
-    "resolver_core/component_meta_query_engine/surface.rs",
-    "resolver_core/component_meta_query_engine/mod.rs",
-    "project_semantic_dispatch/raise_sentinel.rs",
-    "project_semantic_dispatch/raise.rs",
-    "project_semantic_dispatch/raise/shape_engine/", // whole output-algebra subtree
-    "host_manage/jsdoc_resolve.rs",
-];
-
-fn unknown_rel_is_sentinel_owner(rel: &str) -> bool {
-    UNKNOWN_SENTINEL_OWNER_FILES
-        .iter()
-        .any(|owner| rel.contains(owner))
-}
-
-/// Whether a raw STRING VALUE is classified as a semantic control sentinel by
-/// the SAME rule as the owner classifier `raw_is_unmaterialized_sentinel`
-/// (raise_sentinel.rs): an EXACT spelling match or a recognised leading PREFIX.
-fn raw_string_is_owner_sentinel(s: &str) -> bool {
-    UNKNOWN_SENTINEL_EXACT_SPELLINGS.contains(&s)
-        || UNKNOWN_SENTINEL_PREFIX_SPELLINGS
-            .iter()
-            .any(|p| s.starts_with(p))
-}
-
-/// Does a `raw:`-field expression carry a semantic control sentinel — FAITHFUL
-/// to the owner classifier `raw_is_unmaterialized_sentinel`? The expression's
-/// token stream (descending macro groups, so a `format!("budgetExceeded({})",
-/// n)` leading-prefix assembly is still caught) is scanned for: (1) a
-/// producer-fn / sentinel-const IDENT marker as a WHOLE identifier; (2) a STRING
-/// LITERAL whose VALUE matches an exact spelling or a leading prefix. A benign
-/// string that merely EMBEDS a spelling (`"not semanticMiss"`,
-/// `"see budgetExceeded( docs"`) carries neither and is NOT flagged — the false
-/// positive a loose `contains` over the rendered tokens produced. Benign
-/// placeholders (`String::new()`, `"unknown"`, a debug `format!("{x:?}")`)
-/// carry no marker.
-fn unknown_raw_expr_is_sentinel(raw_expr: &syn::Expr) -> bool {
-    fn collect(
-        ts: &proc_macro2::TokenStream,
-        idents: &mut std::collections::HashSet<String>,
-        str_values: &mut Vec<String>,
-    ) {
-        use proc_macro2::TokenTree;
-        for tt in ts.clone() {
-            match tt {
-                TokenTree::Ident(i) => {
-                    idents.insert(i.to_string());
-                }
-                TokenTree::Literal(l) => {
-                    if let syn::Lit::Str(s) = syn::Lit::new(l) {
-                        str_values.push(s.value());
-                    }
-                }
-                TokenTree::Group(g) => collect(&g.stream(), idents, str_values),
-                TokenTree::Punct(_) => {}
-            }
-        }
-    }
-    let mut idents = std::collections::HashSet::new();
-    let mut str_values = Vec::new();
-    collect(&raw_expr.to_token_stream(), &mut idents, &mut str_values);
-    if idents
-        .iter()
-        .any(|id| UNKNOWN_SENTINEL_IDENT_MARKERS.contains(&id.as_str()))
-    {
-        return true;
-    }
-    str_values.iter().any(|s| raw_string_is_owner_sentinel(s))
-}
-
-/// Collects `TypeExpr::Unknown { raw: <sentinel> }` constructions in production
-/// fns (skipping `#[cfg(test)]` fns/mods), recognising aliased / bare-variant
-/// forms and field-shorthand raw-taint. Aliases resolve through the LEXICALLY
-/// scoped [`LexicalAliasStack`] (frames per file / module / fn / block), so a
-/// function-local `use …::TypeExpr as TE; TE::Unknown { … }` is caught WITHIN its
-/// scope and a block-local alias never FPs on a sibling.
-struct UnknownSentinelScanner {
-    fn_stack: Vec<String>,
-    raw_tainted_stack: Vec<std::collections::HashSet<String>>,
-    /// Lexically-scoped alias stack (the SAME mechanism as the hot fence), so a
-    /// block-local `use …::TypeExpr as TE;` classifies `TE::Unknown` ONLY within
-    /// the scope its `use` is visible and never FPs on a sibling scope.
-    aliases: LexicalAliasStack,
-    hits: Vec<(String, String)>,
-}
-impl UnknownSentinelScanner {
-    fn ident(&self) -> String {
-        if self.fn_stack.is_empty() {
-            "<file-scope>".to_string()
-        } else {
-            self.fn_stack.join("::")
-        }
-    }
-    fn mark_raw_tainted(&mut self, id: String) {
-        if let Some(set) = self.raw_tainted_stack.last_mut() {
-            set.insert(id);
-        }
-    }
-    fn raw_is_tainted(&self, id: &str) -> bool {
-        self.raw_tainted_stack
-            .last()
-            .is_some_and(|s| s.contains(id))
-    }
-    /// Whether an `ExprStruct` path constructs `TypeExpr::Unknown` — directly,
-    /// through a `TypeExpr` alias (`TE::Unknown`), or as a bare variant-imported
-    /// `Unknown { … }`.
-    fn is_unknown_ctor(&self, path: &syn::Path) -> bool {
-        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let Some(last) = segs.last() else {
-            return false;
-        };
-        if last == "Unknown" && segs.iter().any(|s| self.aliases.aliases().contains(s)) {
-            return true;
-        }
-        segs.len() == 1 && self.aliases.unknown().contains(&segs[0])
-    }
-}
-impl<'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner {
-    fn visit_file(&mut self, f: &'ast syn::File) {
-        let uses = hot_direct_uses_in_items(&f.items);
-        self.aliases.push_uses(&uses);
-        syn::visit::visit_file(self, f);
-        self.aliases.pop();
-    }
-    fn visit_block(&mut self, b: &'ast syn::Block) {
-        let uses = hot_direct_uses_in_stmts(&b.stmts);
-        self.aliases.push_uses(&uses);
-        syn::visit::visit_block(self, b);
-        self.aliases.pop();
-    }
-    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        if attrs_are_test_gated(&f.attrs) {
-            return;
-        }
-        self.fn_stack.push(f.sig.ident.to_string());
-        self.raw_tainted_stack
-            .push(std::collections::HashSet::new());
-        syn::visit::visit_item_fn(self, f);
-        self.raw_tainted_stack.pop();
-        self.fn_stack.pop();
-    }
-    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-        if attrs_are_test_gated(&f.attrs) {
-            return;
-        }
-        self.fn_stack.push(f.sig.ident.to_string());
-        self.raw_tainted_stack
-            .push(std::collections::HashSet::new());
-        syn::visit::visit_impl_item_fn(self, f);
-        self.raw_tainted_stack.pop();
-        self.fn_stack.pop();
-    }
-    /// A trait-DEFAULT (provided) method body is production code and is scanned
-    /// with the SAME `#[cfg(test)]` exclusion + per-fn raw-taint frame + fn
-    /// attribution as a free / impl fn within this same `UnknownSentinelScanner`
-    /// (not a claim of full parity with the separate hot fence). This replaces
-    /// syn's accidental default-visitor
-    /// descent, which scanned a trait-default sentinel construction WITHOUT
-    /// cfg-test gating (a `#[cfg(test)]` trait default would have FP'd), without a
-    /// raw-taint frame (a field-shorthand `Unknown { raw }` form was missed), and
-    /// without fn attribution (a hit read `<file-scope>`). A signature-only trait
-    /// method has no default body, so the recursion scans nothing.
-    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
-        if attrs_are_test_gated(&f.attrs) {
-            return;
-        }
-        self.fn_stack.push(f.sig.ident.to_string());
-        self.raw_tainted_stack
-            .push(std::collections::HashSet::new());
-        syn::visit::visit_trait_item_fn(self, f);
-        self.raw_tainted_stack.pop();
-        self.fn_stack.pop();
-    }
-    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-        if attrs_are_test_gated(&m.attrs) {
-            return;
-        }
-        {
-            let uses = m
-                .content
-                .as_ref()
-                .map(|(_, items)| hot_direct_uses_in_items(items))
-                .unwrap_or_default();
-            self.aliases.push_uses(&uses);
-        }
-        syn::visit::visit_item_mod(self, m);
-        self.aliases.pop();
-    }
-    fn visit_local(&mut self, l: &'ast syn::Local) {
-        if let Some(init) = &l.init {
-            if unknown_raw_expr_is_sentinel(&init.expr) {
-                let mut ids = Vec::new();
-                hot_collect_bound_idents(&l.pat, &mut ids);
-                for id in ids {
-                    self.mark_raw_tainted(id);
-                }
-            }
-        }
-        syn::visit::visit_local(self, l);
-    }
-    fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
-        // Assignment-form raw-taint: `raw = semantic_query_error_raw(err);`
-        // taints `raw` (so a later `Unknown { raw }` field shorthand fires),
-        // mirroring the `let`-initialiser taint above. A field-write
-        // (`self.raw = …`) is publication, not a tracked taint source.
-        if unknown_raw_expr_is_sentinel(&a.right) {
-            if let syn::Expr::Path(p) = &*a.left {
-                if p.path.segments.len() == 1 {
-                    self.mark_raw_tainted(p.path.segments[0].ident.to_string());
-                }
-            }
-        }
-        syn::visit::visit_expr_assign(self, a);
-    }
-    fn visit_expr_struct(&mut self, es: &'ast syn::ExprStruct) {
-        if self.is_unknown_ctor(&es.path) {
-            for field in &es.fields {
-                if let syn::Member::Named(name) = &field.member {
-                    if name == "raw" {
-                        let sentinel = unknown_raw_expr_is_sentinel(&field.expr)
-                            || matches!(&field.expr, syn::Expr::Path(p)
-                                if p.path.segments.len() == 1
-                                    && self.raw_is_tainted(&p.path.segments[0].ident.to_string()));
-                        if sentinel {
-                            self.hits
-                                .push((self.ident(), field.expr.to_token_stream().to_string()));
-                        }
-                    }
-                }
-            }
-        }
-        syn::visit::visit_expr_struct(self, es);
-    }
-}
-
-/// Scan one production source for sentinel-family `Unknown` constructions.
-fn unknown_sentinel_constructions_in_src(src: &str) -> Vec<(String, String)> {
-    let file = match syn::parse_file(src) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    let mut scanner = UnknownSentinelScanner {
-        fn_stack: Vec::new(),
-        raw_tainted_stack: Vec::new(),
-        aliases: LexicalAliasStack::new(),
-        hits: Vec::new(),
-    };
-    syn::visit::Visit::visit_file(&mut scanner, &file);
-    scanner.hits
-}
-
-/// The global Unknown-as-control-flow fence: NO production module OUTSIDE the
-/// sentinel-owner substrate may construct a `TypeExpr::Unknown { raw: <semantic
-/// sentinel> }` (directly, through a `TypeExpr` alias, a bare variant import, or
-/// a raw-tainted field shorthand).
-///
-/// Currently GREEN: every sentinel-carrying `Unknown` construction lives in the
-/// owner substrate; non-owner modules construct only benign placeholders. A new
-/// semantic-sentinel construction outside the owner turns this RED.
-#[test]
-fn no_new_semantic_unknown_control_flow_outside_owner() {
-    let mut offenders: Vec<String> = Vec::new();
-    for (rel, src) in production_src_files() {
-        if rel.contains("/typeinfo_tests/") || rel.ends_with("/test_only.rs") {
-            continue;
-        }
-        if unknown_rel_is_sentinel_owner(&rel) {
-            continue;
-        }
-        for (qual_fn, raw) in unknown_sentinel_constructions_in_src(&src) {
-            offenders.push(format!("{rel}::{qual_fn} -> Unknown {{ raw: {raw} }}"));
-        }
-    }
-    offenders.sort();
-    assert!(
-        offenders.is_empty(),
-        "Global Unknown-as-control-flow fence: {} production module(s) OUTSIDE the \
-         sentinel-owner substrate construct a `TypeExpr::Unknown {{ raw: <semantic \
-         sentinel> }}`. Route the typed `QueryError` through the single owner mapping \
-         (`semantic_query_error_raw`) / return a typed carrier instead of fabricating a \
-         control sentinel string. Sites:\n{}",
-        offenders.len(),
-        offenders.join("\n")
-    );
-}
-
-/// Discrimination self-test for the global Unknown fence — covers the alias,
-/// bare-variant-import, and field-shorthand raw-taint forms in addition to the
-/// direct sentinel construction.
-#[test]
-fn unknown_control_flow_fence_self_test_discriminates() {
-    // (A) A semantic-sentinel `Unknown` construction in a NON-owner fn FIRES.
-    let sentinel_lit = r#"
-        fn fabricate() -> TypeExpr { TypeExpr::Unknown { raw: "semanticMiss".to_string() } }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(sentinel_lit).is_empty(),
-        "self-test (A): a `TypeExpr::Unknown {{ raw: \"semanticMiss\" }}` construction MUST fire"
-    );
-    let sentinel_const = r#"
-        fn fabricate() -> TypeExpr { TypeExpr::Unknown { raw: SEMANTIC_MISS.to_string() } }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(sentinel_const).is_empty(),
-        "self-test (A2): a `raw: SEMANTIC_MISS` construction MUST fire"
-    );
-    let producer_call = r#"
-        fn fabricate(err: &QueryError) -> TypeExpr { TypeExpr::Unknown { raw: semantic_query_error_raw(err) } }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(producer_call).is_empty(),
-        "self-test (A3): a `raw: semantic_query_error_raw(err)` construction MUST fire"
-    );
-
-    // (A4) ALIAS: `use …::TypeExpr as TE; TE::Unknown { raw: <sentinel> }` FIRES.
-    let aliased = r#"
-        use verter_type_expr::TypeExpr as TE;
-        fn fabricate() -> TE { TE::Unknown { raw: "semanticMiss".to_string() } }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(aliased).is_empty(),
-        "self-test (A4): an aliased `TE::Unknown {{ raw: <sentinel> }}` construction MUST fire"
-    );
-
-    // (A5) BARE VARIANT IMPORT: `use …::TypeExpr::Unknown; Unknown { raw: <sentinel> }` FIRES.
-    let bare_variant = r#"
-        use verter_type_expr::TypeExpr::Unknown;
-        fn fabricate() -> X { Unknown { raw: "semanticMiss".into() } }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(bare_variant).is_empty(),
-        "self-test (A5): a bare variant-imported `Unknown {{ raw: <sentinel> }}` MUST fire"
-    );
-
-    // (A6) FIELD-SHORTHAND RAW-TAINT: `let raw = semantic_query_error_raw(e);
-    //      TypeExpr::Unknown { raw }` FIRES (the shorthand carries the tainted local).
-    let shorthand = r#"
-        fn fabricate(err: &QueryError) -> TypeExpr {
-            let raw = semantic_query_error_raw(err);
-            TypeExpr::Unknown { raw }
-        }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(shorthand).is_empty(),
-        "self-test (A6): a field-shorthand `Unknown {{ raw }}` carrying a sentinel-tainted \
-         local MUST fire"
-    );
-
-    // (B) BENIGN placeholders (empty / display / debug) do NOT fire.
-    let empty = r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: String::new() } }"#;
-    assert!(
-        unknown_sentinel_constructions_in_src(empty).is_empty(),
-        "self-test (B): a benign `raw: String::new()` placeholder must NOT fire"
-    );
-    let display = r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: "unknown".to_string() } }"#;
-    assert!(
-        unknown_sentinel_constructions_in_src(display).is_empty(),
-        "self-test (B2): a benign `raw: \"unknown\"` display placeholder must NOT fire"
-    );
-    let debug = r#"fn f(x: &X) -> TypeExpr { TypeExpr::Unknown { raw: format!("{x:?}") } }"#;
-    assert!(
-        unknown_sentinel_constructions_in_src(debug).is_empty(),
-        "self-test (B3): a benign debug-format placeholder must NOT fire"
-    );
-    let benign_shorthand = r#"
-        fn f() -> TypeExpr { let raw = String::new(); TypeExpr::Unknown { raw } }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(benign_shorthand).is_empty(),
-        "self-test (B4): a field-shorthand carrying a benign (non-sentinel) local must NOT fire"
-    );
-
-    // (C) A `#[cfg(test)]`-gated sentinel construction is skipped whole.
-    let test_gated = r#"
-        #[cfg(test)]
-        fn t() -> TypeExpr { TypeExpr::Unknown { raw: "semanticMiss".to_string() } }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(test_gated).is_empty(),
-        "self-test (C): a `#[cfg(test)]`-gated sentinel construction must be skipped"
-    );
-
-    // (D) A NON-`TypeExpr` `Unknown { raw }` (a different type's variant, not
-    //     imported from `TypeExpr`) does NOT fire.
-    let other = r#"fn f() -> Other { OtherKind::Unknown { raw: "semanticMiss".into() } }"#;
-    assert!(
-        unknown_sentinel_constructions_in_src(other).is_empty(),
-        "self-test (D): a non-`TypeExpr` `Unknown` construction must NOT fire"
-    );
-
-    // (E) FUNCTION-LOCAL `use` ALIAS: a fn/block-local `use …::TypeExpr as TE;`
-    //     followed by `TE::Unknown { raw: <sentinel> }` FIRES — alias collection
-    //     is recursive over the whole file, not top-level `use` only.
-    let local_use_alias = r#"
-        fn fabricate() -> X {
-            use verter_type_expr::TypeExpr as TE;
-            TE::Unknown { raw: "semanticMiss".into() }
-        }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(local_use_alias).is_empty(),
-        "self-test (E): a FUNCTION-LOCAL `use …::TypeExpr as TE; TE::Unknown {{ raw: <sentinel> }}` \
-         MUST fire (local-use alias collection)"
-    );
-    let local_use_bare_variant = r#"
-        fn fabricate() -> X {
-            use verter_type_expr::TypeExpr::Unknown;
-            Unknown { raw: "budgetExceeded(7)".into() }
-        }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(local_use_bare_variant).is_empty(),
-        "self-test (E2): a FUNCTION-LOCAL bare variant import `use …::TypeExpr::Unknown; \
-         Unknown {{ raw: <sentinel> }}` MUST fire"
-    );
-}
-
-/// Discrimination self-test for the classifier-FAITHFUL Unknown fence: a benign
-/// string that merely EMBEDS a sentinel spelling does NOT fire (the owner
-/// classifier `raw_is_unmaterialized_sentinel` matches the exact spelling /
-/// leading prefix, not a substring), a genuine exact/prefix sentinel DOES fire,
-/// and an assignment-form (`raw = <sentinel>`) raw-taint fires.
-#[test]
-fn unknown_fence_is_classifier_faithful_and_assignment_aware() {
-    // (FAITHFUL-i) A benign literal EMBEDDING `semanticMiss` as a substring is
-    //     NOT the exact spelling the owner classifier recognises → must NOT fire.
-    let benign_substring = r#"
-        fn f() -> TypeExpr { TypeExpr::Unknown { raw: "not semanticMiss".to_string() } }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(benign_substring).is_empty(),
-        "self-test (FAITHFUL-i): a benign `raw: \"not semanticMiss\"` (embeds the spelling, is not \
-         the EXACT sentinel) must NOT fire — the marker match is classifier-faithful, not a loose \
-         `contains`"
-    );
-    // (FAITHFUL-i2) A literal embedding a PREFIX sentinel mid-string (not as a
-    //     leading prefix) is NOT what `starts_with(..)` recognises → must NOT fire.
-    let benign_prefix_substring = r#"
-        fn f() -> TypeExpr { TypeExpr::Unknown { raw: "see budgetExceeded( docs".to_string() } }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(benign_prefix_substring).is_empty(),
-        "self-test (FAITHFUL-i2): a benign literal embedding a prefix sentinel mid-string (not as a \
-         leading prefix) must NOT fire"
-    );
-
-    // (FAITHFUL-ii) The EXACT spelling, a LEADING-PREFIX form, and a const ref all
-    //     DO fire (the owner classifier WOULD recognise each).
-    let exact = r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: "semanticMiss".to_string() } }"#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(exact).is_empty(),
-        "self-test (FAITHFUL-ii): the EXACT `semanticMiss` spelling MUST fire"
-    );
-    let prefix =
-        r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: "budgetExceeded(7)".to_string() } }"#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(prefix).is_empty(),
-        "self-test (FAITHFUL-ii2): a LEADING-prefix `budgetExceeded(7)` MUST fire"
-    );
-    let const_ref =
-        r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: SEMANTIC_OBJECT_SURFACE.to_string() } }"#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(const_ref).is_empty(),
-        "self-test (FAITHFUL-ii3): a sentinel-const reference (`SEMANTIC_OBJECT_SURFACE`) MUST fire"
-    );
-
-    // (ASSIGNMENT) A sentinel bound via `=` REASSIGNMENT (not only a `let`
-    //     initialiser) then placed in `Unknown { raw }` MUST fire.
-    let assign = r#"
-        fn fabricate(err: &QueryError) -> TypeExpr {
-            let mut raw = String::new();
-            raw = semantic_query_error_raw(err);
-            TypeExpr::Unknown { raw }
-        }
-    "#;
-    assert!(
-        !unknown_sentinel_constructions_in_src(assign).is_empty(),
-        "self-test (ASSIGNMENT): a sentinel bound via ASSIGNMENT \
-         (`raw = semantic_query_error_raw(..)`) then used in `Unknown {{ raw }}` MUST fire \
-         (assignment-form raw-taint, not only `let`)"
-    );
-    // The benign assignment counterpart stays GREEN (no sentinel on the RHS).
-    let assign_benign = r#"
-        fn fabricate() -> TypeExpr {
-            let mut raw = String::new();
-            raw = "unknown".to_string();
-            TypeExpr::Unknown { raw }
-        }
-    "#;
-    assert!(
-        unknown_sentinel_constructions_in_src(assign_benign).is_empty(),
-        "self-test (ASSIGNMENT-benign): an assignment of a benign placeholder must NOT fire"
-    );
-}
-
-/// Collects the rendered first argument of every `<recv>.starts_with(<arg>)`
-/// method call within a target fn body (used to prove the budget classifier
-/// references the shared constant, not an inline literal).
-#[derive(Default)]
-struct StartsWithArgCollector {
-    args: Vec<String>,
-}
-impl<'ast> syn::visit::Visit<'ast> for StartsWithArgCollector {
-    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
-        if mc.method == "starts_with" {
-            if let Some(arg) = mc.args.first() {
-                self.args.push(arg.to_token_stream().to_string());
-            }
-        }
-        syn::visit::visit_expr_method_call(self, mc);
-    }
-}
-
-/// Find a free / impl fn named `name` anywhere in a parsed file (recursing
-/// modules + impls) and return its block.
-fn find_fn_block(file: &syn::File, name: &str) -> Option<syn::Block> {
-    #[derive(Default)]
-    struct Finder {
-        target: String,
-        block: Option<syn::Block>,
-    }
-    impl<'ast> syn::visit::Visit<'ast> for Finder {
-        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-            if f.sig.ident == self.target.as_str() {
-                self.block = Some((*f.block).clone());
-            }
-            syn::visit::visit_item_fn(self, f);
-        }
-        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-            if f.sig.ident == self.target.as_str() {
-                self.block = Some(f.block.clone());
-            }
-            syn::visit::visit_impl_item_fn(self, f);
-        }
-    }
-    let mut finder = Finder {
-        target: name.to_string(),
-        block: None,
-    };
-    syn::visit::Visit::visit_file(&mut finder, file);
-    finder.block
-}
-
 /// The `&str` literal VALUE of a top-level / nested `const NAME: &str = "…";`
 /// item, read from the parsed AST (recursing modules + impls). Reading the
 /// const's literal through `syn` — not a source-text `contains` — means a
@@ -17747,54 +17028,29 @@ fn const_str_value(file: &syn::File, name: &str) -> Option<String> {
     finder.value
 }
 
-/// Budget-exceeded sentinel spelling pin: the SINGLE source of truth
-/// `BUDGET_EXCEEDED_SENTINEL_PREFIX` is exactly `"budgetExceeded("`, and the raw
-/// classifier authority `raw_is_unmaterialized_sentinel` recognises the budget
-/// prefix THROUGH that constant (an AST-level `starts_with(BUDGET_EXCEEDED_…)`
-/// reference, comment-blind), never a divergent inline literal. The
-/// armed-runaway fuse depends on this spelling never drifting; the behavioural
-/// half (the classifier actually recognising the prefix at runtime) is pinned by
-/// the `raise_sentinel` unit test
-/// `budget_exceeded_prefix_classifies_as_unmaterialized_sentinel`.
+/// Budget-exceeded spelling pin: the SINGLE source of truth
+/// `BUDGET_EXCEEDED_SENTINEL_PREFIX` is exactly `"budgetExceeded("` — an INERT
+/// compatibility-projection spelling owned by `semantic_query::compat_spelling`
+/// (the typed `QueryError::BudgetExceeded` degradation projects through
+/// `semantic_query_error_raw` from this const; there is NO raw detector —
+/// classification is typed). The armed-runaway fuse depends on this spelling
+/// never drifting; the typed-behaviour half is pinned by the discriminating
+/// pair in `component_meta_pick_omit_tests.rs`.
 #[test]
 fn budget_exceeded_sentinel_prefix_is_pinned_and_in_parity() {
-    let mod_src = read_rel("src/resolver_core/component_meta_query_engine/mod.rs");
-    let mod_file = syn::parse_file(&mod_src).expect("parse component_meta_query_engine/mod.rs");
-    let prefix_value = const_str_value(&mod_file, "BUDGET_EXCEEDED_SENTINEL_PREFIX").expect(
+    let spelling_src = read_rel("src/semantic_query/compat_spelling.rs");
+    let spelling_file =
+        syn::parse_file(&spelling_src).expect("parse semantic_query/compat_spelling.rs");
+    let prefix_value = const_str_value(&spelling_file, "BUDGET_EXCEEDED_SENTINEL_PREFIX").expect(
         "the `BUDGET_EXCEEDED_SENTINEL_PREFIX` const must exist (as a bare `&str` literal) in \
-         component_meta_query_engine/mod.rs",
+         semantic_query/compat_spelling.rs",
     );
     assert_eq!(
         prefix_value, "budgetExceeded(",
         "the budget-exceeded sentinel prefix const must hold EXACTLY `\"budgetExceeded(\"` in \
-         component_meta_query_engine/mod.rs (the single source of truth). The pin reads the \
+         semantic_query/compat_spelling.rs (the single source of truth). The pin reads the \
          const's AST literal VALUE, so a commented-out spelling cannot spoof it and a drift of \
          the real const fails"
-    );
-
-    let sentinel_src = read_rel("src/project_semantic_dispatch/raise_sentinel.rs");
-    let file = syn::parse_file(&sentinel_src).expect("parse raise_sentinel.rs");
-    let block = find_fn_block(&file, "raw_is_unmaterialized_sentinel")
-        .expect("raw_is_unmaterialized_sentinel must exist in raise_sentinel.rs");
-    let mut collector = StartsWithArgCollector::default();
-    syn::visit::Visit::visit_block(&mut collector, &block);
-
-    assert!(
-        collector
-            .args
-            .iter()
-            .any(|a| a == "BUDGET_EXCEEDED_SENTINEL_PREFIX"),
-        "the raw classifier `raw_is_unmaterialized_sentinel` must recognise the budget \
-         sentinel through a `starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX)` reference to the \
-         shared constant (spelling parity); found `starts_with` args: {:?}",
-        collector.args
-    );
-    assert!(
-        !collector.args.iter().any(|a| a.contains("budgetExceeded(")),
-        "the raw classifier must reference the shared constant, not an inline \
-         `starts_with(\"budgetExceeded(\")` literal (no spelling fork); found `starts_with` \
-         args: {:?}",
-        collector.args
     );
 }
 

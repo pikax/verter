@@ -80,9 +80,9 @@ fn materialize(host: &VerterHost, data: SemanticNodeData) -> TypeExpr {
     let dispatch = ProjectSemanticDispatch::new(host);
     dispatch
         .materialize_output_type_expr_for_test(node)
-        .unwrap_or(TypeExpr::Unknown {
-            raw: "<materialize miss>".to_string(),
-        })
+        .unwrap_or(TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::compatibility_projection("<materialize miss>"),
+        ))
 }
 
 #[test]
@@ -236,13 +236,13 @@ fn materialize_raw_fallback_round_trips_to_unknown() {
     let expr = materialize(
         &host,
         SemanticNodeData::RawFallback {
-            raw: Arc::from("Weird<& Type>"),
+            value: verter_type_expr::UnknownValue::unsupported_syntax("Weird<& Type>"),
         },
     );
     match &expr {
         // The raw-fallback carrier is the ONLY carrier that holds raw text;
         // it round-trips verbatim to `Unknown { raw }`.
-        TypeExpr::Unknown { raw } => assert_eq!(raw, "Weird<& Type>"),
+        TypeExpr::Unknown(value) => assert_eq!(value.raw(), "Weird<& Type>"),
         other => panic!("expected Unknown, got {other:?}"),
     }
 }
@@ -422,7 +422,7 @@ fn hot_type_ref_harness_matches_plain_output_boundary() {
     assert!(
         matches!(
             &dispatch.materialize_type_expr(HotTypeRef::new(absent)),
-            TypeExpr::Unknown { raw } if raw == "<materialize miss>"
+            TypeExpr::Unknown(value) if value.raw() == "<materialize miss>"
         ),
         "the harness must map a plain-boundary miss to the `<materialize miss>` sentinel"
     );
@@ -469,83 +469,95 @@ fn typed_query_error_sentinels_round_trip_to_legacy_raw() {
     );
 }
 
-/// Tombstone for the typed resolver-control-sentinel swap: the converted
-/// producer files must NOT reconstruct any of the six control sentinels as a
-/// bare `Unknown { raw }` / `alg.unknown(Arc::from("literal"))` at a
-/// resolver-control site — those now go exclusively through the typed
-/// `opaque_sentinel(QueryError::…)` / `semantic_query_error_raw` path.
-///
-/// NARROWED CLAIM (Fork-D structural-first + tombstone): this is a LEAN
-/// source-contains check over ONLY the two converted files, asserting the EXACT
-/// converted construction patterns are gone. It is NOT a repo-wide scanner. It
-/// deliberately does not police:
-/// - `semantic_query_error_raw` (the legitimate variant→string mapping fn),
-///   whose arms read `=> "semanticAliasCycle".to_string()` /
-///   `=> SEMANTIC_SURFACE_MEMBER.to_string()` (no `raw:` / `Arc::from`
-///   construction context, so the patterns below do not match them);
-/// - the typed `Opaque(err)` conduit `_ => alg.opaque_sentinel(err)` (already
-///   typed-sourced; matches none of the literal patterns);
-/// - the OUT `"projectedOpenSurface"` placeholder (not in the swap set);
-/// - the round-trip pin above, or doc comments.
-///
-/// HONEST RESIDUAL (tracked as debt): a future developer could introduce a NEW
-/// raw control-sentinel spelling not in this fixed pattern list, and this
-/// narrow tombstone would not catch it. The structural defence — the typed
-/// `opaque_sentinel(QueryError)` entry point + exhaustive typed classification —
-/// is the primary guard; this tombstone only pins that the SIX known literals
-/// were actually removed from the SPECIFIC converted sites.
+/// F2 regression: the partial channel must agree with the TYPED
+/// materialised class — a deliberately-MATERIALISED degradation
+/// (`RaiseMiss`, a carrier-arg placeholder) keeps the payload NOT partial,
+/// while an unmaterialised-sentinel degradation (`Miss`) flips it.
 #[test]
-fn converted_sites_have_no_bare_control_sentinel_literal() {
-    use std::path::PathBuf;
+fn from_parts_partial_follows_the_typed_materialised_class() {
+    use crate::project_semantic_dispatch::raise::{
+        MaterializedOutputTypeExpr, MaterializedTypeExpr, OutputTypeExpr,
+    };
+    use crate::semantic_query::{DepSignature, QueryError};
 
-    fn read_src(rel: &str) -> String {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-    }
-
-    // The shared raise traversal — the converted `fold_node` /
-    // `fold_member` arms. After the swap, NONE of the control literals may
-    // appear inside an `alg.unknown(Arc::from(...))` construction here.
-    let shape_engine = read_src("src/project_semantic_dispatch/raise/shape_engine/mod.rs");
-    for forbidden in [
-        r#"alg.unknown(Arc::from("semanticAliasCycle"))"#,
-        r#"alg.unknown(Arc::from("semanticTypeParamCycle"))"#,
-        r#"alg.unknown(Arc::from("<raise miss>"))"#,
-        "alg.unknown(Arc::from(SEMANTIC_OBJECT_SURFACE))",
-        "alg.unknown(Arc::from(SEMANTIC_SURFACE_MEMBER))",
-    ] {
-        assert!(
-            !shape_engine.contains(forbidden),
-            "shape_engine/mod.rs still constructs a bare control sentinel: `{forbidden}` — \
-             route it through `alg.opaque_sentinel(QueryError::…)` instead"
-        );
-    }
-    // The typed `Opaque(err)` conduit (the live `fold_node` arm) MUST remain —
-    // its presence confirms this tombstone reads the right file and that the
-    // converted arm routes the borrowed typed `QueryError` through
-    // `opaque_sentinel`, NOT a raw round-trip. Anchored on the LIVE code pattern
-    // (not `semantic_query_error_raw(err)`, which after the swap appears only in a
-    // doc-comment here and so would pass on a comment).
+    // RaiseMiss: materialised class ⇒ NO degradation leaf ⇒ NOT partial.
+    let raise_miss = MaterializedTypeExpr::degraded(QueryError::RaiseMiss);
     assert!(
-        shape_engine.contains("_ => alg.opaque_sentinel(err)"),
-        "the typed Opaque(err) conduit (`_ => alg.opaque_sentinel(err)`) must stay"
+        !raise_miss.has_degradation(),
+        "a materialised-class degradation must not record a sidecar leaf"
+    );
+    let carrier = MaterializedOutputTypeExpr::from_parts(
+        None,
+        OutputTypeExpr::from_raise(raise_miss),
+        DepSignature::default(),
+        false,
+    );
+    assert!(
+        !carrier.result_is_partial(),
+        "RaiseMiss keeps the payload NOT partial (typed materialised class)"
     );
 
-    // The component-meta surface projector — the three converted
-    // `.unwrap_or(TypeExpr::Unknown { raw: … })` member/index sites. After the
-    // swap, the bare `raw: SEMANTIC_SURFACE_MEMBER.to_string()` construction is
-    // gone (the `semantic_query_error_raw` mapping arm `=> SEMANTIC_SURFACE_MEMBER
-    // .to_string()` has no `raw:` prefix, so it is NOT matched).
-    let surface = read_src("src/resolver_core/component_meta_query_engine/surface.rs");
-    assert!(
-        !surface.contains("raw: SEMANTIC_SURFACE_MEMBER.to_string()"),
-        "surface.rs still constructs `Unknown {{ raw: SEMANTIC_SURFACE_MEMBER.to_string() }}` — \
-         route it through `semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember)`"
+    // Miss: unmaterialised sentinel ⇒ leaf ⇒ partial.
+    let miss = MaterializedTypeExpr::degraded(QueryError::Miss);
+    assert!(miss.has_degradation());
+    let carrier = MaterializedOutputTypeExpr::from_parts(
+        None,
+        OutputTypeExpr::from_raise(miss),
+        DepSignature::default(),
+        false,
     );
-    // The legitimate mapping arm MUST remain (confirms we are not over-claiming
-    // by deleting the mapping itself).
     assert!(
-        surface.contains("SEMANTIC_SURFACE_MEMBER.to_string()"),
-        "the semantic_query_error_raw UnrepresentableSurfaceMember mapping arm must stay"
+        carrier.result_is_partial(),
+        "an unmaterialised-sentinel degradation flips the payload partial"
+    );
+}
+
+/// A payload carrying a degradation sidecar marks
+/// the assembled `MaterializedOutputTypeExpr` PARTIAL at the `from_parts`
+/// choke point; an exact payload does not.
+#[test]
+fn from_parts_marks_degraded_payload_partial_and_keeps_exact_clean() {
+    use crate::project_semantic_dispatch::raise::{
+        MaterializedOutputTypeExpr, MaterializedTypeExpr, OutputTypeExpr,
+    };
+    use crate::semantic_query::{DepSignature, QueryError};
+
+    let degraded = MaterializedTypeExpr::degraded(QueryError::Miss);
+    let carrier = MaterializedOutputTypeExpr::from_parts(
+        None,
+        OutputTypeExpr::from_raise(degraded),
+        DepSignature::default(),
+        false,
+    );
+    assert!(
+        carrier.result_is_partial(),
+        "a degradation sidecar must mark the result partial at from_parts"
+    );
+
+    let exact =
+        MaterializedTypeExpr::exact(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    let carrier = MaterializedOutputTypeExpr::from_parts(
+        None,
+        OutputTypeExpr::from_raise(exact),
+        DepSignature::default(),
+        false,
+    );
+    assert!(
+        !carrier.result_is_partial(),
+        "an exact payload must NOT be marked partial"
+    );
+
+    // The supplied partial bit is preserved independently.
+    let exact =
+        MaterializedTypeExpr::exact(TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number));
+    let carrier = MaterializedOutputTypeExpr::from_parts(
+        None,
+        OutputTypeExpr::from_raise(exact),
+        DepSignature::default(),
+        true,
+    );
+    assert!(
+        carrier.result_is_partial(),
+        "the supplied partial bit is preserved"
     );
 }

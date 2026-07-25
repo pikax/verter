@@ -716,9 +716,9 @@ impl<'a> Walker<'a> {
                     self.buf.push(0xFE);
                 }
             }
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 self.buf.push(0x3F);
-                self.buf.extend_from_slice(raw.as_bytes());
+                self.buf.extend_from_slice(value.raw().as_bytes());
                 self.buf.push(0xFF);
             }
         }
@@ -1336,9 +1336,9 @@ impl<'a> Walker<'a> {
                 );
                 key.extend_from_slice(&(type_arguments.len() as u32).to_le_bytes());
             }
-            TypeExpr::Unknown { raw } => {
+            TypeExpr::Unknown(value) => {
                 key.push(0xBF);
-                key.extend_from_slice(raw.as_bytes());
+                key.extend_from_slice(value.raw().as_bytes());
             }
         }
         key

@@ -92,6 +92,12 @@ pub mod admit;
 /// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
 /// [`SemanticNodeData::map_carrier_type_args`].
 pub mod carrier;
+
+/// The ONE owner of the legacy compatibility-spelling family (exact
+/// spellings + parameterised prefixes) and the shared display-family
+/// predicate. Inert text only — typed [`QueryError`] data is the control
+/// channel.
+pub(crate) mod compat_spelling;
 pub use index_key::CanonicalIndexInt;
 
 pub use demand::{
@@ -2890,6 +2896,11 @@ pub enum QueryError {
     /// A surface member the projection boundary cannot represent. Maps to
     /// the `SEMANTIC_SURFACE_MEMBER` sentinel.
     UnrepresentableSurfaceMember,
+    /// A genuinely OPEN surface placeholder (an open index signature whose
+    /// value domain is deferred). Maps to the `"projectedOpenSurface"`
+    /// sentinel — an unmaterialised degradation, but NEITHER the
+    /// object-surface sentinel (intersection arm-drop) NOR the miss sentinel.
+    OpenSurface,
 }
 
 impl QueryError {
@@ -2938,11 +2949,12 @@ impl QueryError {
             | QueryError::DeclPlaceholder { .. }
             // The typed semantic-sentinel carriers are CONTROL signals
             // (cycle / miss / unrepresentable / macro-placeholder), not the
-            // §22 error type — they keep their existing raw-sentinel
-            // semantics under relation / raise / absorption.
+            // §22 error type — they keep their typed control semantics under
+            // relation / raise / absorption.
             | QueryError::RaiseAliasCycle
             | QueryError::TypeParamCycle
             | QueryError::RaiseMiss
+            | QueryError::OpenSurface
             | QueryError::UnrepresentableSurface
             | QueryError::UnrepresentableSurfaceMember => false,
         }
@@ -2998,6 +3010,7 @@ impl PartialEq for QueryError {
             (Self::RaiseMiss, Self::RaiseMiss) => true,
             (Self::UnrepresentableSurface, Self::UnrepresentableSurface) => true,
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
+            (Self::OpenSurface, Self::OpenSurface) => true,
             _ => false,
         }
     }
@@ -3005,38 +3018,51 @@ impl PartialEq for QueryError {
 
 impl Eq for QueryError {}
 
+impl QueryError {
+    /// The interning discriminant tag (hand-assigned, UNIQUE per variant —
+    /// pinned by `query_error_hash_tags_are_unique_per_variant`). The tags
+    /// are stable (never renumbered): a new variant takes the next free tag.
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Miss => 0,
+            Self::UnsupportedIntrinsic { .. } => 1,
+            Self::BudgetExceeded(_) => 2,
+            Self::UnstableState { .. } => 3,
+            Self::AliasCycle { .. } => 4,
+            Self::RecursiveRef { .. } => 5,
+            Self::Other(_) => 6,
+            Self::DeclPlaceholder { .. } => 7,
+            Self::ValueDomainMismatch { .. } => 8,
+            Self::RaiseAliasCycle => 9,
+            Self::TypeParamCycle => 10,
+            Self::RaiseMiss => 11,
+            Self::UnrepresentableSurface => 12,
+            Self::UnrepresentableSurfaceMember => 13,
+            Self::Cancelled => 14,
+            Self::OpenSurface => 15,
+        }
+    }
+}
+
 impl std::hash::Hash for QueryError {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Discriminant tag, then per-variant field hashing. BudgetExceeded
         // hashes tag-only because its payload is an opaque carrier.
+        self.tag().hash(state);
         match self {
-            Self::Miss => {
-                0u8.hash(state);
-            }
             Self::UnsupportedIntrinsic { name } => {
-                1u8.hash(state);
                 name.hash(state);
             }
-            Self::BudgetExceeded(_) => {
-                2u8.hash(state);
-            }
-            Self::Cancelled => {
-                14u8.hash(state);
-            }
             Self::UnstableState { attempts } => {
-                3u8.hash(state);
                 attempts.hash(state);
             }
             Self::AliasCycle { chain } => {
-                4u8.hash(state);
                 chain.hash(state);
             }
             Self::RecursiveRef { name } => {
-                5u8.hash(state);
                 name.hash(state);
             }
             Self::Other(msg) => {
-                6u8.hash(state);
                 msg.hash(state);
             }
             Self::DeclPlaceholder {
@@ -3045,32 +3071,24 @@ impl std::hash::Hash for QueryError {
                 name,
                 whole_hash,
             } => {
-                7u8.hash(state);
                 canonical_id.hash(state);
                 owner.hash(state);
                 name.hash(state);
                 whole_hash.hash(state);
             }
             Self::ValueDomainMismatch { expected, actual } => {
-                8u8.hash(state);
                 expected.hash(state);
                 actual.hash(state);
             }
-            Self::RaiseAliasCycle => {
-                9u8.hash(state);
-            }
-            Self::TypeParamCycle => {
-                10u8.hash(state);
-            }
-            Self::RaiseMiss => {
-                11u8.hash(state);
-            }
-            Self::UnrepresentableSurface => {
-                12u8.hash(state);
-            }
-            Self::UnrepresentableSurfaceMember => {
-                13u8.hash(state);
-            }
+            Self::Miss
+            | Self::BudgetExceeded(_)
+            | Self::Cancelled
+            | Self::RaiseAliasCycle
+            | Self::TypeParamCycle
+            | Self::RaiseMiss
+            | Self::UnrepresentableSurface
+            | Self::UnrepresentableSurfaceMember
+            | Self::OpenSurface => {}
         }
     }
 }
@@ -5597,16 +5615,16 @@ pub enum SemanticNodeData {
     /// Raw-fallback carrier — the typed-IR home for a type the lowering
     /// could not represent structurally.
     ///
-    /// Preserves the raw source text verbatim so the reverse boundary can
-    /// round-trip it back to [`TypeExpr::Unknown`](verter_type_expr::TypeExpr::Unknown).
+    /// Preserves the opaque [`UnknownValue`] payload (raw source text +
+    /// diagnostic provenance) so the reverse boundary can round-trip it back
+    /// to [`TypeExpr::Unknown`](verter_type_expr::TypeExpr::Unknown).
     /// This is the ONLY carrier that holds raw type text, and it is
     /// display-only: it is never interpreted as a semantic control signal
     /// (those ride the typed [`QueryError`] carriers on
-    /// [`SemanticNodeData::Opaque`]). `raw` is `Arc<str>` for a cheap,
-    /// `Send + Sync` clone on the host cache path.
+    /// [`SemanticNodeData::Opaque`]).
     RawFallback {
-        /// The raw source text of the unrepresentable type.
-        raw: Arc<str>,
+        /// The opaque unrepresentable-type payload.
+        value: verter_type_expr::UnknownValue,
     },
 
     /// Constructor-type carrier — `new (…) => R` (TS `TSConstructorType`).
@@ -5832,7 +5850,7 @@ impl PartialEq for SemanticNodeData {
             (Self::MergedDecl { contributors: a }, Self::MergedDecl { contributors: b }) => a == b,
             (Self::BareRef(a), Self::BareRef(b)) => a == b,
             (Self::ImportType(a), Self::ImportType(b)) => a == b,
-            (Self::RawFallback { raw: a }, Self::RawFallback { raw: b }) => a == b,
+            (Self::RawFallback { value: a }, Self::RawFallback { value: b }) => a == b,
             (Self::ConstructorType { signature: a }, Self::ConstructorType { signature: b }) => {
                 a == b
             }
@@ -5966,8 +5984,8 @@ impl std::hash::Hash for SemanticNodeData {
             }
             Self::BareRef(c) => c.hash(state),
             Self::ImportType(c) => c.hash(state),
-            Self::RawFallback { raw } => {
-                raw.hash(state);
+            Self::RawFallback { value } => {
+                value.hash(state);
             }
             Self::ConstructorType { signature } => {
                 signature.hash(state);
@@ -6141,6 +6159,69 @@ pub trait SemanticQueryApi {
 mod tests {
     use super::*;
     use verter_type_expr::TopLevelOwnerId;
+
+    /// Every `QueryError` variant must own a UNIQUE `u8` discriminant tag:
+    /// the tags are hand-assigned, and while the arena resolves hash collisions
+    /// by full equality, a REUSED tag silently shares the fast-path identity
+    /// for two DIFFERENT error carriers (the 14/14 `Cancelled`/`OpenSurface`
+    /// collision this caught). Exhaustive by construction: [`QueryError::tag`]
+    /// is an exhaustive match, so a variant added without a tag is a compile
+    /// error; this test pins the tag VALUES are pairwise-distinct.
+    #[test]
+    fn query_error_hash_tags_are_unique_per_variant() {
+        use std::collections::HashSet;
+        // ADD NEW VARIANTS HERE when extending `QueryError` (the sibling
+        // classification fixture in `raise_sentinel.rs` carries the same nudge).
+        let variants: Vec<QueryError> = vec![
+            QueryError::Miss,
+            QueryError::UnsupportedIntrinsic {
+                name: Arc::from("I"),
+            },
+            QueryError::BudgetExceeded(
+                crate::resolver_core::shallow_file_state::BudgetExceededFailure {
+                    domain:
+                        crate::resolver_core::shallow_file_state::BudgetDomain::ProjectionOperation,
+                    limit: 1,
+                    actual: 2,
+                    context: "hash-fixture".to_string(),
+                },
+            ),
+            QueryError::Cancelled,
+            QueryError::UnstableState { attempts: 1 },
+            QueryError::AliasCycle {
+                chain: Arc::from(vec![Arc::from("A")].into_boxed_slice()),
+            },
+            QueryError::RecursiveRef {
+                name: Arc::from("R"),
+            },
+            QueryError::Other(Arc::from("x")),
+            QueryError::DeclPlaceholder {
+                canonical_id: Arc::from("/w/p.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
+                name: Arc::from("P"),
+                whole_hash: [0u8; 16],
+            },
+            QueryError::ValueDomainMismatch {
+                expected: SemanticQueryValueTag::TypeNode,
+                actual: SemanticQueryValueTag::Relation,
+            },
+            QueryError::RaiseAliasCycle,
+            QueryError::TypeParamCycle,
+            QueryError::RaiseMiss,
+            QueryError::UnrepresentableSurface,
+            QueryError::UnrepresentableSurfaceMember,
+            QueryError::OpenSurface,
+        ];
+        let mut tags = HashSet::new();
+        for variant in &variants {
+            assert!(
+                tags.insert(variant.tag()),
+                "tag collision: {variant:?} reuses tag {} — assign the next free tag",
+                variant.tag()
+            );
+        }
+        assert_eq!(tags.len(), variants.len());
+    }
 
     /// The shared structural carrier-arg accessor returns the `type_args`
     /// slice for each of the three carriers that apply type arguments
