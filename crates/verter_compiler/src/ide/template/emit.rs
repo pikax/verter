@@ -537,11 +537,31 @@ fn emit_plan_in_place<'alloc>(out: &mut CodeGenOutput<'alloc>, plan: &ExprPlan<'
     }
 }
 
+/// Split a verbatim source slice into its per-line runs — the byte offset within
+/// the slice paired with that line's text, newline terminator INCLUDED.
+///
+/// A source-map token anchors a single generated line, so a relocated verbatim
+/// slice spanning several lines must be emitted as one mapped run per line, each
+/// anchored at the authored offset of that line's own start. Keeping the newline on
+/// the END of its line is what makes the next run start at column 0 of the next
+/// generated line — the shape the strict range mapper needs to join the two runs
+/// across the line wrap. A `\r\n` terminator stays whole for the same reason. An
+/// empty slice yields no runs.
+fn split_inclusive_line_runs<'s>(slice: &'s str) -> impl Iterator<Item = (u32, &'s str)> + 's {
+    let mut offset = 0u32;
+    slice.split_inclusive('\n').map(move |line| {
+        let at = offset;
+        offset += line.len() as u32;
+        (at, line)
+    })
+}
+
 /// RELOCATED sink: the prop span is deleted and the expression re-emitted at `at`.
-/// Each surviving identifier AND each verbatim slice is an `InsertMapped` pointing
-/// at its source start, so the authored expression stays one unbroken mapped run
-/// chain; accessor prefixes/suffixes, shorthand keys, and object-literal
-/// scaffolding are unmapped inserts. Ignored locals are MAPPED bare identifiers.
+/// Each surviving identifier AND each LINE of each verbatim slice is an
+/// `InsertMapped` pointing at its source start, so the authored expression stays one
+/// unbroken mapped run chain — across generated newlines included; accessor
+/// prefixes/suffixes, shorthand keys, and object-literal scaffolding are unmapped
+/// inserts. Ignored locals are MAPPED bare identifiers.
 fn emit_plan_relocated<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     plan: &ExprPlan<'_>,
@@ -573,17 +593,31 @@ fn emit_plan_relocated<'alloc>(
             }
             ExprPiece::Verbatim { range } => {
                 let slice = &source[range.start.0 as usize..range.end.0 as usize];
-                if !slice.is_empty() {
-                    // A relocated verbatim slice is a byte-for-byte copy of the
-                    // authored bytes at `range.start`, so it OWNS that authored
-                    // span. Emitting it unmapped punched a hole through the middle
-                    // of an authored expression: a strict range mapper composes a
-                    // carrier range only from runs contiguous in BOTH spaces, so a
-                    // diagnostic over `1 + count` (whose range starts in the
-                    // unmapped `1 + `) was dropped whole and the user saw no
-                    // squiggle on a real type error. Mapping it is not a widening —
-                    // the bytes and their offsets are identical to the source.
-                    mapped(out, EmitText::Borrowed(slice), range.start);
+                // A relocated verbatim slice is a byte-for-byte copy of the authored
+                // bytes at `range.start`, so it OWNS that authored span. Emitting it
+                // unmapped punched a hole through the middle of an authored
+                // expression: a strict range mapper composes a carrier range only
+                // from runs contiguous in BOTH spaces, so a diagnostic over
+                // `1 + count` (whose range starts in the unmapped `1 + `) was dropped
+                // whole and the user saw no squiggle on a real type error. Mapping it
+                // is not a widening — the bytes and their offsets are identical to
+                // the source.
+                //
+                // A source-map token anchors ONE generated line; mapping state does
+                // not carry across a generated newline. A MULTILINE slice therefore
+                // needs one mapped run PER line it spans, each anchored at the
+                // authored offset of that line's own start — a single chunk maps only
+                // the first line and leaves the continuation lines starting unmapped,
+                // which breaks the run chain across the newline and drops the range
+                // again. The byte-for-byte copy is exactly what makes the per-line
+                // anchors exact: generated line k of the slice IS authored line k of
+                // the slice, at the same intra-line offsets.
+                for (offset, line) in split_inclusive_line_runs(slice) {
+                    mapped(
+                        out,
+                        EmitText::Borrowed(line),
+                        SourceByteOffset(range.start.0 + offset),
+                    );
                 }
             }
             ExprPiece::IgnoredIdent { source_start, name } => {
