@@ -503,6 +503,11 @@ enum CompletionSourceContext {
     TemplateAttr,
     /// Template expression / interpolation (`:prop="x|"`, `{{ x| }}`).
     TemplateExpression,
+    /// A framework-syntax slot the TypeScript projection cannot name: a Vue
+    /// slot name (`<template #|`, `<template v-slot:|`) or a Svelte snippet
+    /// name (`{#snippet |`). The declared surface Verter computes IS the
+    /// answer — a provider identifier here is never a valid completion.
+    TemplateFrameworkSlot,
     /// Inside `<script>` / `<script setup>`.
     Script,
     /// Anywhere else (tag name, text, style, root level, …).
@@ -742,11 +747,14 @@ async fn handle_completion_attempt(
 
     let verter_result = native_snapshot.as_ref().and_then(|native| {
         let canonical_id = &native.canonical_id;
-        // Cross-file native enrichment is opt-in and cache-only. The background
-        // workspace/semantic lanes may warm these analyses, but completion never
-        // loads, compiles, or constructs component meta on the request path.
-        // TypeScript remains the authoritative cold-path provider.
-        let native_semantic_enrichment = server.documents.semantic_analysis_enabled();
+        // The WORKSPACE component scan is opt-in: it enumerates components the
+        // document does not import yet (the auto-import tag surface), which is
+        // the background-enrichment lane's job. Resolving the ONE child the
+        // cursor is already inside is not — a `<template #|` slot name has no
+        // TypeScript surface at all, so Verter is its only possible owner and
+        // the resolver must be available whether or not the analysis sidebar
+        // is switched on.
+        let workspace_component_scan = server.documents.semantic_analysis_enabled();
         let resolve_component = |import_source: &str,
                                  component_name: Option<&str>|
          -> Option<verter_session::FileAnalysisSnapshot> {
@@ -829,15 +837,14 @@ async fn handle_completion_attempt(
             // Try 4: Direct lookup (bare specifiers, already-resolved)
             try_follow_reexport(import_source, component_name)
         };
-        let ws_components = if native_semantic_enrichment {
+        let ws_components = if workspace_component_scan {
             build_workspace_components(&server.documents.host, canonical_id)
         } else {
             Vec::new()
         };
         type NativeComponentResolver<'a> =
             dyn Fn(&str, Option<&str>) -> Option<verter_session::FileAnalysisSnapshot> + 'a;
-        let resolve_component: Option<&NativeComponentResolver<'_>> =
-            native_semantic_enrichment.then_some(&resolve_component);
+        let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
         completions_at_position(
             position,
             &native.source,
@@ -931,6 +938,10 @@ async fn handle_completion_attempt(
             CursorContext::Template(
                 TemplateCursorContext::Expression { .. } | TemplateCursorContext::Interpolation,
             ) => CompletionSourceContext::TemplateExpression,
+            CursorContext::Template(
+                TemplateCursorContext::SlotName { .. }
+                | TemplateCursorContext::SvelteSnippetName { .. },
+            ) => CompletionSourceContext::TemplateFrameworkSlot,
             CursorContext::Script => CompletionSourceContext::Script,
             _ => CompletionSourceContext::Other,
         };
@@ -946,6 +957,21 @@ async fn handle_completion_attempt(
     .unwrap_or((CompletionSourceContext::Other, None));
     let carrier_source_snapshot = native_snapshot.as_ref().map(|native| native.source.clone());
     let is_template_attr_context = matches!(source_ctx, CompletionSourceContext::TemplateAttr);
+
+    // A framework slot-name position is framework syntax with no TypeScript
+    // correlate: the child's declared slot/snippet surface IS the answer, and
+    // anything the provider can offer at the mapped offset is carrier scope,
+    // not a slot name. Serve Verter's list alone rather than merging junk into
+    // a closed, server-owned surface.
+    if matches!(source_ctx, CompletionSourceContext::TemplateFrameworkSlot) {
+        drop(native_edit_fence);
+        return Ok(verter_items.map(|items| {
+            CompletionResponse::List(CompletionList {
+                is_incomplete: verter_is_incomplete,
+                items,
+            })
+        }));
+    }
 
     // The attested editor tsserver plugin is the typed owner for all script
     // completions and for template member lists. Script blocks must retain the

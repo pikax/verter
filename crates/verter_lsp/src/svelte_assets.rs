@@ -294,7 +294,10 @@ fn collision_free_binding(asset_key: &str, content: &str) -> String {
         } else {
             blake3::hash(format!("{asset_key}\0{nonce}").as_bytes()).to_hex()[..24].to_owned()
         };
-        let candidate = format!("__verter_svelte_jsx_{suffix}");
+        let candidate = format!(
+            "{}svelte_jsx_{suffix}",
+            verter_compiler::framework_common::GENERATED_IDENTIFIER_PREFIX
+        );
         if !content.contains(&candidate) {
             return candidate;
         }

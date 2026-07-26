@@ -5921,31 +5921,13 @@ async fn d5_complete_labels(files: &[(&str, &str, &str)], doc: &str, needle: &st
     labels
 }
 
-#[tokio::test]
-async fn contract_slot_name_completion_offers_child_declared_slots() {
-    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n<template>\n  <MyComp>\n    <template #\n  </MyComp>\n</template>\n";
-    let labels = d5_complete_labels(
-        &[
-            ("src/MyComp.vue", "vue", D5_CHILD_SOURCE),
-            ("src/App.vue", "vue", parent_source),
-        ],
-        "src/App.vue",
-        "<template #",
-    )
-    .await;
-    for expected in ["header", "default", "mySlot"] {
-        assert!(
-            labels.contains(&expected.to_string()),
-            "`<template #|` must offer declared slot {expected}, got: {labels:?}"
-        );
-    }
-    assert!(
-        !labels
-            .iter()
-            .any(|l| l.contains("___VERTER___") || l.contains("__props")),
-        "internal symbols must not leak: {labels:?}"
-    );
-}
+// The `<template #|` PUBLIC-BOUNDARY contract lives in
+// `real_provider_tests::template_surface::completion_vue_slot_name_offers_child_declared_slots`.
+// A `MockTypeProvider` server exercises Verter's native half in isolation and
+// enables the analysis-sidebar opt-in, so a mock-backed shorthand lane passed
+// while a real user's merged path returned zero items — the lanes below cover
+// native shapes the boundary test does not (longhand syntax, used-slot
+// filtering) and never stand in for it.
 
 #[tokio::test]
 async fn contract_slot_name_completion_longhand_offers_child_declared_slots() {

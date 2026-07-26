@@ -45,3 +45,4 @@ mod references;
 mod rename;
 mod request_surface;
 mod signature_help;
+mod template_surface;
