@@ -4388,14 +4388,13 @@ fn parse_inlay_hint(item: &serde_json::Value, content: Option<&str>) -> Option<I
     // label can be a string or an array of InlayHintLabelPart
     let label = if let Some(s) = item.get("label").and_then(|v| v.as_str()) {
         s.to_string()
-    } else if let Some(parts) = item.get("label").and_then(|v| v.as_array()) {
+    } else {
+        let parts = item.get("label").and_then(|v| v.as_array())?;
         parts
             .iter()
             .filter_map(|p| p.get("value").and_then(|v| v.as_str()))
             .collect::<Vec<_>>()
             .join("")
-    } else {
-        return None;
     };
 
     let kind = item

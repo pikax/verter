@@ -692,7 +692,7 @@ pub fn merge_fallthrough_branches(
         }
     }
 
-    for (_, (prop, branch_keys, _)) in inherited_prop_map.iter_mut() {
+    for (prop, branch_keys, _) in inherited_prop_map.values_mut() {
         branch_keys.sort();
         branch_keys.dedup();
         if force_conditional || branch_keys.len() < total_branches {
@@ -701,7 +701,7 @@ pub fn merge_fallthrough_branches(
             };
         }
     }
-    for (_, (event, branch_keys, _)) in inherited_event_map.iter_mut() {
+    for (event, branch_keys, _) in inherited_event_map.values_mut() {
         branch_keys.sort();
         branch_keys.dedup();
         if force_conditional || branch_keys.len() < total_branches {

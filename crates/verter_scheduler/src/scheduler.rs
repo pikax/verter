@@ -3470,8 +3470,8 @@ impl Scheduler {
         // CONVENTION, not enforcement: `_captured_node` remains an ordinary
         // readable binding and the leading underscore only suppresses an
         // unused-variable lint. Deleting the field outright is the structural
-        // fix and is scoped to the lifecycle-unification cutover
-        // (`docs/arch/scheduler-lifecycle-unification-plan.md`).
+        // fix, and that work is owned by
+        // `docs/arch/scheduler-lifecycle-unification-plan.md`.
         let mut node: Arc<FileNode>;
         match self.nodes.get(&file_id) {
             Some(live) if live.incarnation_id() == prepared_incarnation => {

@@ -220,10 +220,8 @@ fn outer_template_content_span(source: &str, blocks: &[SfcBlock]) -> Option<(usi
             b'<' => {
                 // Comment?
                 if k + 4 <= len && &bytes[k..k + 4] == b"<!--" {
-                    match source[k + 4..].find("-->") {
-                        Some(off) => k = k + 4 + off + 3,
-                        None => return None,
-                    }
+                    let off = source[k + 4..].find("-->")?;
+                    k = k + 4 + off + 3;
                     continue;
                 }
                 // Closing `</template>`?

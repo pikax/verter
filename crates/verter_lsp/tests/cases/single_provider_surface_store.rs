@@ -78,10 +78,8 @@ fn extract_struct_name(line: &str) -> Option<String> {
     let t = line.trim_start();
     let after = t.strip_prefix("pub ").unwrap_or(t);
     // Skip a `pub(...)` visibility qualifier.
-    let after = match after.find("struct ") {
-        Some(idx) => &after[idx..],
-        None => return None,
-    };
+    let idx = after.find("struct ")?;
+    let after = &after[idx..];
     let rest = after.strip_prefix("struct ")?;
     let name: String = rest
         .chars()

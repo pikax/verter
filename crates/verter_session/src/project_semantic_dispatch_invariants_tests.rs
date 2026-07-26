@@ -3153,7 +3153,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
     assert!(
         is_publication_reified,
         "AX-hybrid: KeyOf under Published+Expanded MUST reify the keyspace as a literal union / single literal; got {:?}",
-        &*publish_data
+        *publish_data
     );
 }
 
@@ -3271,7 +3271,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
     assert!(
         is_publication_object,
         "AX-hybrid: MappedType under Published+Expanded MUST materialise an Object surface; got {:?}",
-        &*publish_data
+        *publish_data
     );
 }
 

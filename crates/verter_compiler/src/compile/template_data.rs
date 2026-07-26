@@ -1695,10 +1695,9 @@ fn extract_binding_occurrences(
 fn parse_comment_directive(content: &str, start: u32, end: u32) -> Option<RawCommentDirective> {
     let trimmed = content.trim();
 
-    let (prefix, rest) = if let Some(r) = trimmed.strip_prefix("@verter:") {
+    let (prefix, rest) = {
+        let r = trimmed.strip_prefix("@verter:")?;
         ("@verter:", r)
-    } else {
-        return None;
     };
     let _ = prefix;
 
@@ -1720,15 +1719,14 @@ fn parse_comment_directive(content: &str, start: u32, end: u32) -> Option<RawCom
             (6, false, None)
         } else if rest.starts_with("ignore-end") {
             (7, false, None)
-        } else if let Some(r) = rest.strip_prefix("level") {
+        } else {
+            let r = rest.strip_prefix("level")?;
             // @verter:level(warn) or @verter:level(error) or @verter:level(off)
             // Extract the argument inside parens, e.g. "level(warn)" → "warn"
             let arg = r.trim();
             let arg = arg.strip_prefix('(').and_then(|s| s.strip_suffix(')'));
             let msg = arg.map(str::trim).map(|s| s.to_string());
             (8, false, msg)
-        } else {
-            return None;
         };
 
     let rule_or_message = rule_or_message.and_then(|s| {

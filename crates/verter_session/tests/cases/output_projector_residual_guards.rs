@@ -13892,10 +13892,8 @@ impl<'a> HotMaterializeScanner<'a> {
             if let Some(k) = set.get(p) {
                 return Some(*k);
             }
-            match p.rfind('.') {
-                Some(i) => p = &p[..i],
-                None => return None,
-            }
+            let i = p.rfind('.')?;
+            p = &p[..i];
         }
     }
     fn is_tainted(&self, id: &str) -> bool {

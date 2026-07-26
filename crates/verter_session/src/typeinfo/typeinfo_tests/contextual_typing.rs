@@ -191,7 +191,7 @@ fn contextual_typing_ct11_as_const_readonly_modifier() {
     assert!(
         props["a"].readonly,
         "`as const` must mark every property readonly; got {:?}",
-        &props["a"]
+        props["a"]
     );
 }
 

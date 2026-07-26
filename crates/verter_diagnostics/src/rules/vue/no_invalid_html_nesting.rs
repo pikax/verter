@@ -48,18 +48,14 @@ fn find_nearest_html_ancestor<'a>(
 ) -> Option<&'a str> {
     let mut current = el;
     loop {
-        match current.parent_index {
-            None => return None,
-            Some(idx) => {
-                let parent = &elements[idx as usize];
-                // Skip Vue <template> wrappers (transparent structural elements)
-                if parent.tag == "template" && !parent.is_component {
-                    current = parent;
-                    continue;
-                }
-                return Some(&parent.tag);
-            }
+        let idx = current.parent_index?;
+        let parent = &elements[idx as usize];
+        // Skip Vue <template> wrappers (transparent structural elements)
+        if parent.tag == "template" && !parent.is_component {
+            current = parent;
+            continue;
         }
+        return Some(&parent.tag);
     }
 }
 

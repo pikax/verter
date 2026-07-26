@@ -110,11 +110,11 @@ pub(crate) fn build_origin_graph(
             .node_data(id)
             .map(|d| {
                 use crate::semantic_query::SemanticNodeData;
-                let k = format!("{:?}", &*d).split_once('{').map_or_else(
+                let k = format!("{:?}", *d).split_once('{').map_or_else(
                     || {
-                        format!("{:?}", &*d)
+                        format!("{:?}", *d)
                             .split_once('(')
-                            .map_or_else(|| format!("{:?}", &*d), |(name, _)| name.to_string())
+                            .map_or_else(|| format!("{:?}", *d), |(name, _)| name.to_string())
                     },
                     |(name, _)| name.to_string(),
                 );

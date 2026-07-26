@@ -218,7 +218,7 @@ fn insert_resolvable_type_space_imports(
     import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
 ) {
-    for (local, _target) in state.owner_import_targets.iter() {
+    for local in state.owner_import_targets.keys() {
         if local.owner != owner || state.has_type_symbol_in(owner, local.name.as_ref()) {
             continue;
         }

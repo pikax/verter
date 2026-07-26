@@ -273,14 +273,8 @@ impl FileNode {
     /// Coherence: `artifact.generation == analysis.generation == source.generation == node.generation`.
     pub fn current_artifact(&self, profile_hash: u64) -> Option<Arc<ArtifactSnapshot>> {
         let node_gen = self.generation.load(Ordering::Acquire);
-        let src_gen = match self.source.load().as_ref() {
-            Some(s) => s.generation,
-            None => return None,
-        };
-        let analysis_gen = match self.analysis.load().as_ref() {
-            Some(a) => a.generation,
-            None => return None,
-        };
+        let src_gen = self.source.load().as_deref()?.generation;
+        let analysis_gen = self.analysis.load().as_deref()?.generation;
         if src_gen != node_gen || analysis_gen != node_gen {
             return None;
         }

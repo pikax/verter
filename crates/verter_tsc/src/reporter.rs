@@ -118,10 +118,9 @@ fn parse_tsc_line(line: &str) -> Option<TscDiagnostic> {
 
     let (severity, rest) = if let Some(after) = rest.strip_prefix("error ") {
         (Severity::Error, after)
-    } else if let Some(after) = rest.strip_prefix("warning ") {
-        (Severity::Warning, after)
     } else {
-        return None;
+        let after = rest.strip_prefix("warning ")?;
+        (Severity::Warning, after)
     };
 
     // rest = "TS<code>: <message>"

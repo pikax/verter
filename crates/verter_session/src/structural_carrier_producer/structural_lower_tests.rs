@@ -1106,7 +1106,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
             assert!(
                 matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::Infer { name } if name.as_ref() == "R"),
                 "the true-branch `R` binds to the mapped `as infer R` carrier, got {:?}",
-                &*node(&graph, *true_branch_ref)
+                *node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(

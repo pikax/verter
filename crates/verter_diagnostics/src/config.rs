@@ -347,11 +347,10 @@ fn load_eslint_config(
     let json: serde_json::Value = if let Some(content) = workspace.read_file(&eslint_json) {
         let cleaned = strip_json_comments(&content);
         serde_json::from_str(&cleaned).ok()?
-    } else if let Some(content) = workspace.read_file(&package_json) {
+    } else {
+        let content = workspace.read_file(&package_json)?;
         let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
         pkg.get("eslintConfig")?.clone()
-    } else {
-        return None;
     };
 
     let mut config = LintConfig::default();

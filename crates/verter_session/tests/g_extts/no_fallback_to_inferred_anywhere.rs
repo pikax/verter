@@ -339,10 +339,7 @@ fn fn_name_introduced_on_line(line: &str) -> Option<&str> {
             rest.strip_prefix(kw)
                 .filter(|tail| starts_with_boundary(tail))
         });
-        match next {
-            Some(tail) => rest = tail,
-            None => return None,
-        }
+        rest = next?;
     }
 }
 
