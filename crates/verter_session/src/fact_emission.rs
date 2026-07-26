@@ -68,6 +68,207 @@ pub struct ParseFactsEmission {
     pub augmentations: Vec<ModuleAugmentationFact>,
 }
 
+/// The sealed counting inventory view.
+///
+/// Every header-walk function below reads the shallow inventory THROUGH
+/// this view and never touches a [`ShallowFileState`] directly. The
+/// point is structural, not stylistic: the view's `shallow` field is
+/// PRIVATE to this child module, so no function in the parent module can
+/// reach it (`error[E0616]: field 'shallow' of struct 'FactEmissionView'
+/// is private`) — a walk function that wanted the raw inventory would
+/// have to change its own signature to accept one, which is a visible,
+/// reviewable act rather than a one-line accident.
+///
+/// The contract the view exists to make measurable is exactly:
+/// **NO REPEATED INVENTORY TRAVERSAL.** Whole-inventory operations
+/// (iterating the type / value / enum symbol tables, the export map, the
+/// import map, the wildcard list, the augmentation tables) bump
+/// `inventory_traversals`; per-symbol POINT lookups bump `point_lookups`
+/// instead, because those are O(1) map probes and are expected to scale
+/// linearly with the declaration count.
+///
+/// Scope of the claim, deliberately narrow: a traversal count catches a
+/// walk that re-scans the whole inventory per declaration — the
+/// quadratic shape this emitter is actually exposed to. It does NOT
+/// bound arbitrary computation over data already collected, and it is
+/// not a total-work measure. See
+/// `tests/cases/g_fact/fact_emission_work_class.rs`.
+///
+/// Production cost: the counters are always live, and the POINT-LOOKUP
+/// counter bumps once per probe, so the total is `2N + 9` non-atomic
+/// `Cell` updates per file publish — 20_009 at N = 10_000 declarations,
+/// not a handful. (`2N` because the walk probes twice per declaration:
+/// once for the member headers, once for the export target; `9` is the
+/// fixed number of section-level inventory traversals.) That is still
+/// negligible against the same call's thousands of heap allocations and
+/// its per-member hashing, but it is a per-declaration cost and is
+/// recorded as one rather than rounded to nothing.
+mod inventory_view {
+    use std::cell::Cell;
+
+    use verter_semantic::analysis::decl_headers::{MemberHeader, ValueDeclHeader};
+    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+
+    use crate::resolver_core::shallow_file_state::{
+        ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
+    };
+
+    /// Per-call inventory-access tally. Exact and deterministic: a
+    /// function of the input alone, so it cannot be perturbed by machine
+    /// load.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct InventoryAccessCounts {
+        /// Whole-inventory traversals. MUST NOT grow with the
+        /// declaration count.
+        pub inventory_traversals: u32,
+        /// Per-symbol O(1) point lookups. Expected to grow linearly.
+        pub point_lookups: u32,
+    }
+
+    pub(crate) struct FactEmissionView<'a> {
+        /// PRIVATE — the seal. Visible only inside this module.
+        shallow: &'a ShallowFileState,
+        inventory_traversals: Cell<u32>,
+        point_lookups: Cell<u32>,
+    }
+
+    impl<'a> FactEmissionView<'a> {
+        pub(crate) fn new(shallow: &'a ShallowFileState) -> Self {
+            Self {
+                shallow,
+                inventory_traversals: Cell::new(0),
+                point_lookups: Cell::new(0),
+            }
+        }
+
+        pub(crate) fn counts(&self) -> InventoryAccessCounts {
+            InventoryAccessCounts {
+                inventory_traversals: self.inventory_traversals.get(),
+                point_lookups: self.point_lookups.get(),
+            }
+        }
+
+        fn note_traversal(&self) {
+            self.inventory_traversals
+                .set(self.inventory_traversals.get().saturating_add(1));
+        }
+
+        fn note_point_lookup(&self) {
+            self.point_lookups
+                .set(self.point_lookups.get().saturating_add(1));
+        }
+
+        // ── Whole-inventory traversals ──
+
+        pub(crate) fn type_symbol_names(&self) -> impl Iterator<Item = &str> {
+            self.note_traversal();
+            self.shallow.type_symbol_names()
+        }
+
+        pub(crate) fn value_symbol_names(&self) -> impl Iterator<Item = &str> {
+            self.note_traversal();
+            self.shallow.value_symbol_names()
+        }
+
+        pub(crate) fn enum_symbol_names(&self) -> impl Iterator<Item = &str> {
+            self.note_traversal();
+            self.shallow.enum_symbol_names()
+        }
+
+        pub(crate) fn exports(&self) -> impl Iterator<Item = (&String, &ExportTarget)> {
+            self.note_traversal();
+            self.shallow.exports.iter()
+        }
+
+        pub(crate) fn export_names(&self) -> impl Iterator<Item = &String> {
+            self.note_traversal();
+            self.shallow.exports.keys()
+        }
+
+        pub(crate) fn wildcard_reexports(&self) -> impl Iterator<Item = &WildcardReexport> {
+            self.note_traversal();
+            self.shallow.wildcard_reexports.iter()
+        }
+
+        pub(crate) fn import_targets(&self) -> impl Iterator<Item = (&String, &ImportTarget)> {
+            self.note_traversal();
+            self.shallow.import_targets.iter()
+        }
+
+        /// Flattened `(scope, key, header)` triples. Flattened INSIDE the
+        /// view on purpose: handing out the per-scope `DeclMap` would let a
+        /// caller re-iterate it without the tally noticing.
+        pub(crate) fn augmentation_type_headers(
+            &self,
+        ) -> impl Iterator<
+            Item = (
+                &AugmentationScopeKind,
+                &verter_type_expr::DeclBindingKey,
+                &verter_semantic::analysis::decl_headers::TypeDeclHeader,
+            ),
+        > {
+            self.note_traversal();
+            self.shallow
+                .decl_bodies()
+                .header_index()
+                .augmentation_type_headers
+                .iter()
+                .flat_map(|(scope, names)| names.into_iter().map(move |(k, h)| (scope, k, h)))
+        }
+
+        pub(crate) fn augmentation_value_headers(
+            &self,
+        ) -> impl Iterator<
+            Item = (
+                &AugmentationScopeKind,
+                &verter_type_expr::DeclBindingKey,
+                &ValueDeclHeader,
+            ),
+        > {
+            self.note_traversal();
+            self.shallow
+                .decl_bodies()
+                .header_index()
+                .augmentation_value_headers
+                .iter()
+                .flat_map(|(scope, names)| names.into_iter().map(move |(k, h)| (scope, k, h)))
+        }
+
+        // ── Per-symbol point lookups (O(1) map probes) ──
+
+        pub(crate) fn type_member_headers(&self, name: &str) -> Option<&[MemberHeader]> {
+            self.note_point_lookup();
+            self.shallow.type_member_headers(name)
+        }
+
+        pub(crate) fn value_header(&self, name: &str) -> Option<&ValueDeclHeader> {
+            self.note_point_lookup();
+            self.shallow.decl_bodies().header_index().value_header(name)
+        }
+
+        pub(crate) fn enum_member_names(&self, name: &str) -> Option<&[String]> {
+            self.note_point_lookup();
+            self.shallow.enum_member_names(name)
+        }
+
+        pub(crate) fn export_target(&self, name: &str) -> Option<&ExportTarget> {
+            self.note_point_lookup();
+            self.shallow.exports.get(name)
+        }
+    }
+}
+
+pub(crate) use inventory_view::FactEmissionView;
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use inventory_view::InventoryAccessCounts;
+/// Reachable from the integration-test binaries (which are separate
+/// crates, so `pub(crate)` would not do) under the crate's usual
+/// `test-support` gate; production builds compile it out of the public
+/// surface entirely.
+#[cfg(any(test, feature = "test-support"))]
+pub use inventory_view::InventoryAccessCounts;
+
 /// Emit parse-domain facts from an [`IndexedReady`].
 ///
 /// Side-effect free over the header inventory; deterministic over the
@@ -75,7 +276,35 @@ pub struct ParseFactsEmission {
 /// `FileArtifacts::{facts, augmentations}`.
 #[must_use]
 pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
+    emit_parse_facts_counting_inventory(indexed).0
+}
+
+/// [`emit_parse_facts`] plus the per-call inventory-access tally, for the
+/// integration-test binaries.
+///
+/// Gated on the crate's usual `test-support` feature; it is a thin
+/// forward to the always-present internal below, NOT a second emission
+/// path.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn emit_parse_facts_with_inventory_counts_for_test(
+    indexed: &IndexedReady,
+) -> (ParseFactsEmission, InventoryAccessCounts) {
+    emit_parse_facts_counting_inventory(indexed)
+}
+
+/// [`emit_parse_facts`] plus the per-call inventory-access tally.
+///
+/// The SAME walk as production — there is no second emission path; the
+/// public entry point above simply discards the counts. The tally exists
+/// so a test can assert the "no repeated inventory traversal" contract
+/// on the real walk.
+#[must_use]
+pub(crate) fn emit_parse_facts_counting_inventory(
+    indexed: &IndexedReady,
+) -> (ParseFactsEmission, InventoryAccessCounts) {
     let shallow = &*indexed.shallow_state;
+    let view = FactEmissionView::new(shallow);
     // The ONE shared shallow lens: built once at `ShallowFileState`
     // construction (`ShallowLens::from_shallow`) and installed on the
     // declaration-body memo — the SAME `Arc` the lowering-time body
@@ -85,22 +314,24 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
 
     let mut registry = FactRegistry::empty();
 
+    // Every walk below reads the inventory through `view`, never through
+    // `shallow` — that is what makes the traversal tally meaningful.
     // ── Per-symbol header facts: `MemberShape` / `MemberPresence` ──
-    emit_type_symbol_headers(&mut registry, shallow);
-    emit_value_symbol_headers(&mut registry, shallow);
-    emit_enum_symbol_headers(&mut registry, shallow);
+    emit_type_symbol_headers(&mut registry, &view);
+    emit_value_symbol_headers(&mut registry, &view);
+    emit_enum_symbol_headers(&mut registry, &view);
 
     // ── `Export` / `ExportAlias` / `SyntacticReexportRef` for
     //    explicit re-exports ──
-    emit_export_targets(&mut registry, shallow);
+    emit_export_targets(&mut registry, &view);
 
     // ── `SyntacticExportSet` whole-file surface fingerprint ──
-    emit_syntactic_export_set(&mut registry, shallow);
+    emit_syntactic_export_set(&mut registry, &view);
 
     // ── `ImportRef` per binding ──
-    emit_import_refs(&mut registry, shallow);
+    emit_import_refs(&mut registry, &view);
 
-    let augmentations = collect_augmentations(shallow);
+    let augmentations = collect_augmentations(&view);
     for aug in &augmentations {
         let body_hash = aug.augmented_member_shape_fingerprint;
         registry.insert(Fact {
@@ -125,10 +356,13 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
         computed: Arc::new(DashMap::default()),
     };
 
-    ParseFactsEmission {
-        facts: FileFacts::from_registry_with_lazy(registry, lazy),
-        augmentations,
-    }
+    (
+        ParseFactsEmission {
+            facts: FileFacts::from_registry_with_lazy(registry, lazy),
+            augmentations,
+        },
+        view.counts(),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -556,23 +790,25 @@ fn emit_member_facts_from_kinds(
     }
 }
 
-fn emit_type_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileState) {
-    let mut sorted: Vec<&str> = shallow.type_symbol_names().collect();
+fn emit_type_symbol_headers(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
+    // ONE inventory traversal, then per-symbol POINT lookups. Re-scanning
+    // the inventory inside this loop is the quadratic shape the traversal
+    // tally exists to reject.
+    let mut sorted: Vec<&str> = view.type_symbol_names().collect();
     sorted.sort_unstable();
     for name in sorted {
         let exporter = InternedName::from(name);
-        let headers = shallow.type_member_headers(name).unwrap_or(&[]);
+        let headers = view.type_member_headers(name).unwrap_or(&[]);
         emit_member_shape_facts(registry, name, &exporter, SymbolSpace::Type, headers);
     }
 }
 
-fn emit_value_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileState) {
-    let header_index = shallow.decl_bodies().header_index();
-    let mut sorted: Vec<&str> = shallow.value_symbol_names().collect();
+fn emit_value_symbol_headers(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
+    let mut sorted: Vec<&str> = view.value_symbol_names().collect();
     sorted.sort_unstable();
     for name in sorted {
         let exporter = InternedName::from(name);
-        let Some(header) = header_index.value_header(name) else {
+        let Some(header) = view.value_header(name) else {
             continue;
         };
         emit_member_shape_facts(
@@ -595,11 +831,11 @@ fn emit_value_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileS
 /// member headers. Header-only: variant NAMES + kind, no initializer
 /// body lowering (consistent with the zero-body-lowering publish
 /// invariant).
-fn emit_enum_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileState) {
-    let mut sorted: Vec<&str> = shallow.enum_symbol_names().collect();
+fn emit_enum_symbol_headers(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
+    let mut sorted: Vec<&str> = view.enum_symbol_names().collect();
     sorted.sort_unstable();
     for name in sorted {
-        let Some(members) = shallow.enum_member_names(name) else {
+        let Some(members) = view.enum_member_names(name) else {
             continue;
         };
         let exporter = InternedName::from(name);
@@ -617,8 +853,8 @@ fn emit_enum_symbol_headers(registry: &mut FactRegistry, shallow: &ShallowFileSt
     }
 }
 
-fn emit_export_targets(registry: &mut FactRegistry, shallow: &ShallowFileState) {
-    let mut sorted: Vec<(&String, &ExportTarget)> = shallow.exports.iter().collect();
+fn emit_export_targets(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
+    let mut sorted: Vec<(&String, &ExportTarget)> = view.exports().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (exported_name, target) in sorted {
         match target {
@@ -689,12 +925,11 @@ fn emit_export_targets(registry: &mut FactRegistry, shallow: &ShallowFileState) 
     }
 }
 
-fn emit_syntactic_export_set(registry: &mut FactRegistry, shallow: &ShallowFileState) {
-    let mut export_names: Vec<&String> = shallow.exports.keys().collect();
+fn emit_syntactic_export_set(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
+    let mut export_names: Vec<&String> = view.export_names().collect();
     export_names.sort();
-    let mut wildcard: Vec<&str> = shallow
-        .wildcard_reexports
-        .iter()
+    let mut wildcard: Vec<&str> = view
+        .wildcard_reexports()
         .map(|w| w.source_specifier.as_str())
         .collect();
     wildcard.sort();
@@ -705,7 +940,7 @@ fn emit_syntactic_export_set(registry: &mut FactRegistry, shallow: &ShallowFileS
         // Tag with the export target shape (local vs reexport vs
         // wildcard) — this matters for invalidation: a name moving
         // from `Local` to `Reexport` is a structural change.
-        if let Some(target) = shallow.exports.get(n) {
+        if let Some(target) = view.export_target(n) {
             match target {
                 ExportTarget::Local { .. } => buf.push(0x01),
                 ExportTarget::Reexport { .. } => buf.push(0x02),
@@ -726,11 +961,11 @@ fn emit_syntactic_export_set(registry: &mut FactRegistry, shallow: &ShallowFileS
     });
 }
 
-fn emit_import_refs(registry: &mut FactRegistry, shallow: &ShallowFileState) {
+fn emit_import_refs(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
     let mut sorted: Vec<(
         &String,
         &crate::resolver_core::shallow_file_state::ImportTarget,
-    )> = shallow.import_targets.iter().collect();
+    )> = view.import_targets().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     // Exact incoming batch: one `ImportRef` fact per import binding.
     registry.facts.reserve(sorted.len());
@@ -796,7 +1031,7 @@ fn compute_display_hash(semantic: &Hash16) -> Hash16 {
 /// Cross-project `augmentation_index` population is NOT done here — the
 /// augmentation-index producer populates it lazily on first
 /// augmentation-sensitive query.
-fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFact> {
+fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationFact> {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 
     let specifier_for = |scope: &AugmentationScopeKind| -> InternedSpecifier {
@@ -806,49 +1041,44 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
         }
     };
 
-    let header_index = shallow.decl_bodies().header_index();
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
 
     // Type-space augmentations (interfaces, type aliases).
-    for (scope, names) in &header_index.augmentation_type_headers {
-        for (key, header) in names {
-            let name = key.name.as_ref();
-            out.push(ModuleAugmentationFact {
-                specifier: specifier_for(scope),
-                owner: key.owner,
-                augmented_name: InternedName::from(name),
-                space: SymbolSpace::Type,
-                augmented_member_shape_fingerprint: augmentation_header_fingerprint(
-                    scope,
-                    key.owner,
-                    name,
-                    format!("{:?}", header.kind).as_str(),
-                    header.member_headers.as_slice(),
-                    header.contributors.len(),
-                ),
-            });
-        }
+    for (scope, key, header) in view.augmentation_type_headers() {
+        let name = key.name.as_ref();
+        out.push(ModuleAugmentationFact {
+            specifier: specifier_for(scope),
+            owner: key.owner,
+            augmented_name: InternedName::from(name),
+            space: SymbolSpace::Type,
+            augmented_member_shape_fingerprint: augmentation_header_fingerprint(
+                scope,
+                key.owner,
+                name,
+                format!("{:?}", header.kind).as_str(),
+                header.member_headers.as_slice(),
+                header.contributors.len(),
+            ),
+        });
     }
 
     // Value-space augmentations (`const`/`let`/`var`, `function`, `class`).
-    for (scope, names) in &header_index.augmentation_value_headers {
-        for (key, header) in names {
-            let name = key.name.as_ref();
-            out.push(ModuleAugmentationFact {
-                specifier: specifier_for(scope),
-                owner: key.owner,
-                augmented_name: InternedName::from(name),
-                space: SymbolSpace::Value,
-                augmented_member_shape_fingerprint: augmentation_header_fingerprint(
-                    scope,
-                    key.owner,
-                    name,
-                    format!("{:?}", header.kind).as_str(),
-                    header.object_member_headers.as_slice(),
-                    header.contributors.len(),
-                ),
-            });
-        }
+    for (scope, key, header) in view.augmentation_value_headers() {
+        let name = key.name.as_ref();
+        out.push(ModuleAugmentationFact {
+            specifier: specifier_for(scope),
+            owner: key.owner,
+            augmented_name: InternedName::from(name),
+            space: SymbolSpace::Value,
+            augmented_member_shape_fingerprint: augmentation_header_fingerprint(
+                scope,
+                key.owner,
+                name,
+                format!("{:?}", header.kind).as_str(),
+                header.object_member_headers.as_slice(),
+                header.contributors.len(),
+            ),
+        });
     }
 
     // `HashMap` iteration is nondeterministic; sort for a stable fact order
@@ -924,7 +1154,7 @@ mod tests {
     /// raw-source rescan.
     fn augmentations_for(src: &str) -> Vec<ModuleAugmentationFact> {
         let state = crate::resolver_core::ShallowFileState::service_backed_for_test(src);
-        collect_augmentations(&state)
+        collect_augmentations(&FactEmissionView::new(&state))
     }
 
     #[test]
@@ -961,7 +1191,7 @@ declare module "vue" { interface Shared { value: string } }
                 &[module, instance],
             );
 
-        let facts = collect_augmentations(&state);
+        let facts = collect_augmentations(&FactEmissionView::new(&state));
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].owner, module);
         assert_eq!(facts[1].owner, instance);

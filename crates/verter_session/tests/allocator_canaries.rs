@@ -16,34 +16,49 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 /// Counting global allocator. Increments [`ALLOC_COUNTER`] on every
-/// allocating call (`alloc` / `alloc_zeroed` / `realloc`) and
-/// delegates to the system allocator.
+/// allocating call (`alloc` / `alloc_zeroed` / `realloc`), adds the
+/// requested size to [`ALLOC_BYTES`], and delegates to the system
+/// allocator.
 struct CountingAllocator;
 
 thread_local! {
     /// Allocation count for the current harness thread. A `const`
     /// initializer keeps allocator access allocation-free.
     static ALLOC_COUNTER: Cell<u64> = const { Cell::new(0) };
+    /// Bytes REQUESTED from the allocator on the current harness
+    /// thread. Tracked beside the call count because the two answer
+    /// different questions: a container that grows geometrically to
+    /// size `n` costs `O(log n)` allocator CALLS but `O(n)` BYTES, so a
+    /// regression that rebuilds a whole-file buffer once per
+    /// declaration is near-invisible in the call count and quadratic in
+    /// the byte count.
+    static ALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
 }
 
-fn increment_alloc_counter() {
+fn increment_alloc_counter(size: usize) {
     // Allocation can occur while a thread is tearing down TLS. Do not
     // turn an otherwise valid allocation into a panic if this key is
     // no longer accessible.
     let _ = ALLOC_COUNTER.try_with(|counter| counter.set(counter.get().wrapping_add(1)));
+    let _ = ALLOC_BYTES.try_with(|bytes| bytes.set(bytes.get().wrapping_add(size as u64)));
 }
 
 fn reset_alloc_counter() {
     ALLOC_COUNTER.with(|counter| counter.set(0));
+    ALLOC_BYTES.with(|bytes| bytes.set(0));
 }
 
 fn alloc_count() -> u64 {
     ALLOC_COUNTER.with(Cell::get)
 }
 
+fn alloc_bytes() -> u64 {
+    ALLOC_BYTES.with(Cell::get)
+}
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        increment_alloc_counter();
+        increment_alloc_counter(layout.size());
         unsafe { System.alloc(layout) }
     }
 
@@ -52,12 +67,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        increment_alloc_counter();
+        increment_alloc_counter(layout.size());
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        increment_alloc_counter();
+        // A grow-in-place realloc still REQUESTS `new_size` bytes; the
+        // byte counter records requests, not net residency.
+        increment_alloc_counter(new_size);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -472,6 +489,295 @@ mod canary_signature_fingerprint_zero_alloc {
              format!() reports ≥ 5 allocations per call here; observed \
              {delta} over {ITERATIONS} iterations",
             facts.len(),
+        );
+    }
+}
+
+mod canary_fact_emission_allocation_volume_class {
+    //! ALLOCATION-COMPLEXITY canary for `emit_parse_facts`.
+    //!
+    //! # What this canary claims, exactly
+    //!
+    //! One thing: the emitter's ALLOCATION volume — allocator calls and
+    //! allocator bytes — stays in the linear class as the declaration
+    //! count grows. It is not a total-work or `O(file_size)` guarantee,
+    //! and it must not be described as one: a regression that computes
+    //! quadratically over already-collected data allocates nothing and is
+    //! invisible here.
+    //!
+    //! The companion guard in
+    //! `tests/cases/g_fact/fact_emission_output_cardinality.rs` claims
+    //! its own separate thing — that the emitted FACT count is affine in
+    //! the declaration count. That is necessary but not sufficient: a
+    //! regression can materialise per-pair data WITHOUT changing the fact
+    //! count at all.
+    //! The concrete case — and the most plausible real bug in this
+    //! emitter — is rebuilding a whole-file hash buffer once per
+    //! declaration (e.g. the `SyntacticExportSet` fold moving inside the
+    //! per-symbol loop). Every iteration writes the SAME registry key, so
+    //! the fact count is untouched, while the bytes handed to the
+    //! allocator go quadratic.
+    //!
+    //! So this canary measures the allocator traffic of one
+    //! `emit_parse_facts` call at `N` and `2N` declarations and asserts
+    //! the growth stays in the LINEAR class:
+    //!
+    //! - linear    O(N)  ⇒ doubling the input ⇒ ratio ≈ 2.0x
+    //! - quadratic O(N²) ⇒ doubling the input ⇒ ratio ≈ 4.0x
+    //!
+    //! A 3.0x boundary sits between the two classes. That is the same
+    //! class-boundary argument the retired wall-clock version used —
+    //! 3.0x was never noise tolerance, it was the midpoint between the
+    //! classes — but the instrument underneath it is now an exact
+    //! integer instead of a clock. Allocator counts cannot be perturbed
+    //! by machine load: the same input produces byte-identical counts on
+    //! a busy machine and an idle one, which is precisely the property
+    //! the timing version lacked.
+    //!
+    //! BOTH the call count and the byte count are asserted, because they
+    //! catch different shapes. A container that grows geometrically to
+    //! size `n` costs `O(log n)` allocator CALLS but `O(n)` BYTES, so the
+    //! per-declaration whole-file-buffer regression above is only
+    //! ~linear in calls while being quadratic in bytes.
+    //!
+    //! Residual, stated honestly: a regression that is quadratic in PURE
+    //! COMPUTE — emitting no extra facts and allocating nothing — is
+    //! invisible to this canary and to its fact-cardinality companion.
+    //! The specific case of re-scanning the shallow inventory once per
+    //! declaration is caught by
+    //! `tests/cases/g_fact/fact_emission_work_class.rs` (a sealed counting
+    //! view over the inventory). Beyond that — arbitrary quadratic
+    //! computation over already-collected data — only a clock sees it, so
+    //! that measurement is kept in
+    //! `crates/verter_bench/benches/fact_emission_scaling.rs`, reported
+    //! rather than gated.
+    //!
+    //! Measurement isolation: allocator counts are thread-local, so
+    //! allocations made by sibling harness workers cannot enter a
+    //! measured delta. `emit_parse_facts` is synchronous and stays on
+    //! this harness thread.
+    //!
+    //! Hermeticity: no third-party corpus or external fixture — the
+    //! declarations are synthesised in-process.
+
+    use std::hint::black_box;
+    use std::sync::Arc;
+
+    use verter_session::fact_emission::emit_parse_facts;
+    use verter_session::project_type_store::IndexedReady;
+    use verter_session::resolver_core::shallow_file_state::ShallowFileState;
+
+    use super::{alloc_bytes, alloc_count};
+
+    /// `decl_count` IDENTICAL-shape interface declarations, built through
+    /// the production-shaped service-backed path so the shallow header
+    /// walk is pre-paid at construction and the measured window observes
+    /// only `emit_parse_facts`.
+    fn build_indexed(decl_count: usize) -> Arc<IndexedReady> {
+        let mut source = String::with_capacity(decl_count * 48);
+        for i in 0..decl_count {
+            source.push_str(&format!("export interface Decl{i} {{ a: string }}\n"));
+        }
+        let shallow =
+            ShallowFileState::service_backed_for_test_with_hash("/large.ts", &source, [0u8; 16]);
+        Arc::new(IndexedReady::new_for_test_with_state(
+            [0u8; 16],
+            shallow,
+            Arc::from(source.as_str()),
+            Arc::from(source.as_str()),
+        ))
+    }
+
+    /// Allocator traffic of exactly one `emit_parse_facts` call.
+    struct Volume {
+        calls: u64,
+        bytes: u64,
+    }
+
+    fn emit_volume(indexed: &Arc<IndexedReady>) -> Volume {
+        let calls_before = alloc_count();
+        let bytes_before = alloc_bytes();
+        let emission = emit_parse_facts(indexed);
+        let calls_after = alloc_count();
+        let bytes_after = alloc_bytes();
+        // Keep the result alive past the counter reads so nothing is
+        // optimised away; deallocation is not counted, so dropping it
+        // afterwards cannot disturb the delta.
+        black_box(&emission);
+        Volume {
+            calls: calls_after - calls_before,
+            bytes: bytes_after - bytes_before,
+        }
+    }
+
+    /// Scaled-by-1000 ratio `b / a`, so the class boundary can be
+    /// compared with integer math.
+    fn ratio_milli(a: u64, b: u64) -> u64 {
+        (b * 1000) / a.max(1)
+    }
+
+    /// 3.0x, scaled by 1000: the midpoint between the linear (~2.0x) and
+    /// quadratic (~4.0x) classes.
+    const CLASS_BOUNDARY_MILLI: u64 = 3_000;
+
+    #[test]
+    fn fact_emission_allocation_volume_scales_linearly() {
+        const N: usize = 5_000;
+
+        // Setup phase — building the inputs allocates heavily and is
+        // deliberately OUTSIDE every measured window.
+        let indexed_n = build_indexed(N);
+        let indexed_2n = build_indexed(2 * N);
+
+        // Warm both inputs so one-time lazy initialisation (TLS slots,
+        // shard pools) is not attributed to a measured call.
+        black_box(emit_parse_facts(&indexed_n));
+        black_box(emit_parse_facts(&indexed_2n));
+
+        let v_n = emit_volume(&indexed_n);
+        let v_2n = emit_volume(&indexed_2n);
+
+        let calls_ratio = ratio_milli(v_n.calls, v_2n.calls);
+        let bytes_ratio = ratio_milli(v_n.bytes, v_2n.bytes);
+
+        eprintln!(
+            "fact-emission allocation scaling — emit({N}): {} calls / {} bytes; \
+             emit({}): {} calls / {} bytes; call ratio {}.{:03}x, byte ratio {}.{:03}x \
+             (class boundary {}.{:03}x)",
+            v_n.calls,
+            v_n.bytes,
+            2 * N,
+            v_2n.calls,
+            v_2n.bytes,
+            calls_ratio / 1000,
+            calls_ratio % 1000,
+            bytes_ratio / 1000,
+            bytes_ratio % 1000,
+            CLASS_BOUNDARY_MILLI / 1000,
+            CLASS_BOUNDARY_MILLI % 1000,
+        );
+
+        // ANTI-VACUITY. A ratio is meaningless if the measurement window
+        // saw nothing: with `calls == bytes == 0` at both sizes the ratio
+        // would be 0 and the class assertions would pass while proving
+        // nothing. Pin that the counting allocator observed real,
+        // input-proportional work first.
+        assert!(
+            v_n.calls > 0 && v_n.bytes >= N as u64,
+            "anti-vacuity: emitting facts for {N} declarations was measured at {} allocator \
+             calls / {} bytes. Either the counting allocator is not wired into the global \
+             allocator slot for this binary, or the emitter did no work — in both cases the \
+             scaling ratios below would pass vacuously.",
+            v_n.calls,
+            v_n.bytes,
+        );
+        assert!(
+            v_2n.bytes > v_n.bytes,
+            "anti-vacuity: doubling the declaration count from {N} to {} did not increase \
+             allocator byte traffic ({} bytes then {} bytes). A ratio at or below 1.0x means \
+             the measurement is not tracking input size, so the class assertions below cannot \
+             discriminate.",
+            2 * N,
+            v_n.bytes,
+            v_2n.bytes,
+        );
+
+        // THE ALLOCATION-CLASS GUARD — bytes. This is the sensitive one:
+        // a per-declaration rebuild of a whole-file buffer is quadratic
+        // here even when the fact count and the allocator CALL count
+        // both stay ~linear.
+        assert!(
+            bytes_ratio < CLASS_BOUNDARY_MILLI,
+            "emit_parse_facts ALLOCATION VOLUME must stay in the LINEAR class. Doubling the \
+             declaration count from {N} to {} should roughly double the bytes requested from \
+             the allocator (ratio ≈ 2.0x); allocating per declaration PAIR shows ≈ 4.0x. \
+             Observed byte ratio {}.{:03}x crosses the 3.0x class boundary: {} bytes at {N} \
+             declarations, {} bytes at {}. This measurement is exact and load-independent, so a \
+             failure here is a real regression in ALLOCATION growth, not machine noise. \
+             (Allocation volume only — this says nothing about the emitter's total work. \
+             Inventory traversal is guarded by \
+             tests/cases/g_fact/fact_emission_work_class.rs, emitted fact cardinality by \
+             tests/cases/g_fact/fact_emission_output_cardinality.rs.)",
+            2 * N,
+            bytes_ratio / 1000,
+            bytes_ratio % 1000,
+            v_n.bytes,
+            v_2n.bytes,
+            2 * N,
+        );
+
+        // THE ALLOCATION-CLASS GUARD — allocator call count. Catches the
+        // shape that allocates a fresh object per (declaration,
+        // declaration) pair.
+        assert!(
+            calls_ratio < CLASS_BOUNDARY_MILLI,
+            "emit_parse_facts ALLOCATION VOLUME must stay in the LINEAR class. Doubling the \
+             declaration count from {N} to {} should roughly double the number of allocator \
+             calls (ratio ≈ 2.0x); allocating per declaration PAIR shows ≈ 4.0x. Observed call \
+             ratio {}.{:03}x crosses the 3.0x class boundary: {} calls at {N} declarations, {} \
+             calls at {}. This measurement is exact and load-independent, so a failure here is \
+             a real regression in ALLOCATION growth, not machine noise. (Allocation volume \
+             only — this says nothing about the emitter's total work.)",
+            2 * N,
+            calls_ratio / 1000,
+            calls_ratio % 1000,
+            v_n.calls,
+            v_2n.calls,
+            2 * N,
+        );
+    }
+
+    /// Determinism companion. The property that makes this canary a
+    /// correctness-suite citizen rather than a benchmark is that the
+    /// measurement is a function of the INPUT alone — repeating it yields
+    /// byte-identical numbers, whatever else the machine is doing. Assert
+    /// that directly: three consecutive measurements of the same input
+    /// must be exactly equal.
+    ///
+    /// A wall-clock measurement cannot pass this test at all, so it also
+    /// documents why the timing version was replaced.
+    #[test]
+    fn fact_emission_allocation_volume_is_repeatable_to_the_byte() {
+        const N: usize = 2_000;
+        let indexed = build_indexed(N);
+
+        // Settle one-time lazy initialisation before the first recorded
+        // measurement, so run-to-run equality is measured on the
+        // steady state.
+        black_box(emit_parse_facts(&indexed));
+
+        let first = emit_volume(&indexed);
+        let second = emit_volume(&indexed);
+        let third = emit_volume(&indexed);
+
+        assert!(
+            first.calls > 0 && first.bytes > 0,
+            "anti-vacuity: measured no allocator traffic for {N} declarations ({} calls / {} \
+             bytes) — equality across three zero measurements would prove nothing",
+            first.calls,
+            first.bytes,
+        );
+        assert_eq!(
+            (second.calls, second.bytes),
+            (first.calls, first.bytes),
+            "allocator traffic for one emit_parse_facts call must be a function of the input \
+             alone: run 1 was {} calls / {} bytes, run 2 was {} calls / {} bytes. If these \
+             differ, the measurement carries hidden state and the scaling ratios above are not \
+             reproducible.",
+            first.calls,
+            first.bytes,
+            second.calls,
+            second.bytes,
+        );
+        assert_eq!(
+            (third.calls, third.bytes),
+            (first.calls, first.bytes),
+            "allocator traffic for one emit_parse_facts call must be a function of the input \
+             alone: run 1 was {} calls / {} bytes, run 3 was {} calls / {} bytes",
+            first.calls,
+            first.bytes,
+            third.calls,
+            third.bytes,
         );
     }
 }
