@@ -94,7 +94,7 @@ impl<'a> HostResolverContext<'a> {
     /// so cooperative-admission lanes that inherit the context share
     /// the same overlay.
     #[must_use]
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "oracle-gen"))]
     pub(crate) fn new(
         inner: &'a crate::VerterHost,
         base: &'a HostStoreView,

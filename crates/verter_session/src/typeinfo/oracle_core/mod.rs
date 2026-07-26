@@ -25,6 +25,7 @@ pub(crate) mod hover_extract;
 pub(crate) mod identity;
 pub(crate) mod normalize;
 pub(crate) mod probe;
+pub(crate) mod relation_probe;
 pub(crate) mod snapshot;
 pub(crate) mod source_walk;
 
@@ -56,6 +57,13 @@ pub(crate) mod query_specs;
 // tsgo), so the generator build does not compile it.
 #[cfg(test)]
 pub(crate) mod driver;
+
+// The v4 `relation_verdict` consumption driver — the comparison half of the
+// relation-tuple-wire capture family (the observation adapter + the
+// parity/ledger posture). Same `#[cfg(test)]` gating as `driver`: it rides the
+// `support.rs` host helpers and NEVER launches tsgo.
+#[cfg(test)]
+pub(crate) mod relation_driver;
 
 // The tsgo-driving snapshot GENERATOR — behind `oracle-gen` only, so the default
 // resolver build + default test gate stay tsgo-free (design §3 inv 1). It is the

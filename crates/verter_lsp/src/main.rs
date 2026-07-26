@@ -384,6 +384,19 @@ pub(crate) fn route_consumes_editor_tsserver_attestation(type_provider: &str) ->
     type_provider == "editor-tsserver"
 }
 
+/// The type-provider construction result: `(provider, kind, topology, reason,
+/// advisory)` where `reason` preserves selected-route provenance or explains
+/// why no provider could be started, and `advisory` is the served-with-warning
+/// notice for the active provider (today: the tsserver legacy/below-floor
+/// serving-tier advisory).
+type ProviderSelection = (
+    Option<Arc<dyn TypeProvider>>,
+    TypeProviderKind,
+    TypeProviderTopology,
+    Option<String>,
+    Option<String>,
+);
+
 /// Create the type provider based on CLI args.
 ///
 /// Auto mode consumes neutral facts supplied by an editor client: an attested
@@ -391,21 +404,12 @@ pub(crate) fn route_consumes_editor_tsserver_attestation(type_provider: &str) ->
 /// receipt. Without either fact it constructs a stateful managed TSGO fallback
 /// that remains cold until the first connected demand.
 ///
-/// Returns `(provider, kind, topology, reason, advisory)` where `reason`
-/// preserves selected-route provenance or explains why no provider could be
-/// started, and `advisory` is the served-with-warning notice for the active
-/// provider (today: the tsserver legacy/below-floor serving-tier advisory).
+/// Returns a [`ProviderSelection`].
 async fn create_type_provider(
     args: &CliArgs,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
     host: &Arc<VerterHost>,
-) -> (
-    Option<Arc<dyn TypeProvider>>,
-    TypeProviderKind,
-    TypeProviderTopology,
-    Option<String>,
-    Option<String>,
-) {
+) -> ProviderSelection {
     tracing::info!(
         "create_type_provider: type_provider={:?}, tsdk={:?}, workspace_root={:?}",
         args.type_provider,
@@ -878,13 +882,7 @@ async fn managed_fallback_topology(
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
     host: &Arc<VerterHost>,
     ws_canonical: &str,
-) -> (
-    Option<Arc<dyn TypeProvider>>,
-    TypeProviderKind,
-    TypeProviderTopology,
-    Option<String>,
-    Option<String>,
-) {
+) -> ProviderSelection {
     match probe_managed_engine(ws_canonical, args.tsdk.as_deref()) {
         ManagedEngineChoice::Tsgo { detail } => {
             tracing::info!("managed fallback: {detail}");
@@ -957,13 +955,7 @@ async fn managed_fallback_topology(
 
 fn editor_tsserver_topology(
     attestation: &verter_lsp::editor_tsserver::EditorTsserverAttestation,
-) -> (
-    Option<Arc<dyn TypeProvider>>,
-    TypeProviderKind,
-    TypeProviderTopology,
-    Option<String>,
-    Option<String>,
-) {
+) -> ProviderSelection {
     tracing::info!(
         "using attested editor-owned tsserver plugin: pid={} projects={:?}",
         attestation.pid,

@@ -1948,3 +1948,542 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/template_literal_inference.ts\" , \"CounterHandlers\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"onDec\" , \"onInc\"]) ; let on_inc = function_type (& props [\"onInc\"] . ty) ; assert_eq ! (on_inc . parameters . len () , 1) ; assert_string_literal (& on_inc . parameters [0] . ty , \"inc\") ; let on_dec = function_type (& props [\"onDec\"] . ty) ; assert_eq ! (on_dec . parameters . len () , 1) ; assert_string_literal (& on_dec . parameters [0] . ty , \"dec\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
 ];
+
+// ---------------------------------------------------------------------------
+// The v4 `relation_verdict` query-spec registry (the relation-tuple-wire
+// capture family — `docs/arch/ri0-relation-verdict-oracle-addendum.md` §4)
+// ---------------------------------------------------------------------------
+//
+// The SECOND closed value family's registry. Relation rows are CAPTURE-ONLY NEW
+// rows — never lifts — so they carry no retained-lift provenance and seat in
+// their OWN spec shape (the `relation_verdict` kind's registry half of the
+// closed kind-set addition; `QuerySpec` stays the `structured_type_expr`
+// shape). PURE data under the same purity contract as the v3 table above: the
+// `include!`d `tests/` guard compiles this exact file, so no spec may reference
+// a crate-internal helper. Every derived artifact (the synthesized probe file,
+// the canonical operand ASTs, the `snapshot_id`) is produced by the shared pure
+// derivation in `oracle_core::relation_probe`, NEVER stored here — the registry
+// holds only the operand texts + the binder layout + the contract mapping + the
+// known-mismatch ledger pins.
+
+/// One binder of the target-pattern binder layout, in target-pattern PREORDER
+/// (NOT name sort). `ordinal` must equal the entry's position (`0..n-1`); names
+/// must be unique and set-match the `infer X` positions of `target_text` (the
+/// src-side guard proves this through the shared canonical-operand derivation).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelationBinderSpec {
+    pub(crate) ordinal: u16,
+    pub(crate) name: &'static str,
+    /// The binder's `infer X extends <constraint>` constraint text, when the
+    /// target pattern declares one (`None` for a bare `infer X`). The
+    /// constraint is an identity-carrying axis: an `infer V extends string`
+    /// and a bare `infer V` MUST derive DISTINCT identities (the derivation
+    /// canonicalizes it into the binder layout entry and rejects a declared
+    /// constraint that does not match the target pattern's).
+    pub(crate) constraint: Option<&'static str>,
+}
+
+/// A verdict the ENGINE produces today (the ledger pin's payload). Closed set —
+/// `Unknown` / `Miss` / `BudgetExceeded` are engine failures, never pinnable
+/// verdicts.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationEngineVerdict {
+    Assignable,
+    NotAssignable,
+}
+
+/// The known-mismatch ledger, first-class data (addendum §5). A row WITHOUT a
+/// pin is parity-enforced against its captured snapshot; a pinned row has its
+/// engine observation asserted against the PIN instead (parity DISABLED), so a
+/// future engine fix flips the row loudly. CAPTURE-ONLY honesty: no pin is an
+/// M=0 claim — the ledger records rows the engine gets wrong (or cannot answer)
+/// today.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineObservationPin {
+    /// The observation adapter REJECTS the key: the target pattern carries
+    /// `infer` binders (an inference context), which the engine's
+    /// `relate_nodes` identity (assignable, default policy, regular source, no
+    /// inference context) does not support this block. The engine can produce
+    /// NO verdict for the row — a direct inference target returns `Unknown`
+    /// today, which is an engine failure, never an oracle verdict.
+    UnsupportedKey,
+    /// The engine answers with THIS verdict today and it DIVERGES from the
+    /// captured oracle verdict (a source-proven mismatch — the projection
+    /// contract's `#[ignore]` comment proves the engine's live answer).
+    MismatchedVerdict(RelationEngineVerdict),
+}
+
+/// One `(row_file, row_function, query_ordinal)` relation registry entry — the
+/// full capture spec for one RAW relation identity (addendum §4). PURE data:
+/// closed enums + owned `&'static str` / static slices. `oracle_family` is the
+/// directory/presentation key (`relation_verdict`). `contract_rows` names the
+/// `relation_semantics.rs` projection-contract test(s) whose RAW relation
+/// identity this spec captures — the 28→26 mapping is first-class data, pinned
+/// exactly by the src-side registry guard.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelationQuerySpec {
+    pub(crate) row_file: &'static str,
+    pub(crate) row_function: &'static str,
+    pub(crate) query_ordinal: u16,
+    pub(crate) oracle_family: &'static str,
+    pub(crate) host_project: HostProjectSpec,
+    /// The SOURCE operand's TS type text (never carries `infer`).
+    pub(crate) source_text: &'static str,
+    /// The TARGET operand's TS type text; `infer X` positions are the binder
+    /// layout's names.
+    pub(crate) target_text: &'static str,
+    /// The target-pattern binder layout in binder preorder (empty ⇔
+    /// `inference_mode: "none"`).
+    pub(crate) binder_layout: &'static [RelationBinderSpec],
+    /// The `relation_semantics.rs` projection-contract row(s) this raw relation
+    /// identity covers (exactly one spec covers TWO rows per collapse: the
+    /// `never`→`string` and `string|number`→`string` pairs).
+    pub(crate) contract_rows: &'static [&'static str],
+    /// The known-mismatch ledger pin (`None` = parity-enforced row).
+    pub(crate) engine_pin: Option<EngineObservationPin>,
+}
+
+/// The standalone host/project axes every relation spec shares (the only
+/// admissible host class this block, same as the v3 table).
+const RELATION_HOST_PROJECT: HostProjectSpec = HostProjectSpec {
+    project_root: "/",
+    workspace_root: "/",
+    tsconfig_path: "/oracle.tsconfig.json",
+    host_setup_kind: HostSetupKindSpec::Standalone,
+};
+
+/// One binder-free relation spec (the 20 non-infer rows).
+const fn relation_spec(
+    row_function: &'static str,
+    source_text: &'static str,
+    target_text: &'static str,
+    contract_rows: &'static [&'static str],
+    engine_pin: Option<EngineObservationPin>,
+) -> RelationQuerySpec {
+    RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: RELATION_HOST_PROJECT,
+        source_text,
+        target_text,
+        binder_layout: &[],
+        contract_rows,
+        engine_pin,
+    }
+}
+
+/// One single-binder relation spec (the 6 `infer` rows — all carry the
+/// `UnsupportedKey` pin: a direct inference target is outside the engine's
+/// supported relation identity this block). The layout is a named `&'static`
+/// slice (a `const fn` argument cannot promote a temporary).
+const fn relation_infer_spec(
+    row_function: &'static str,
+    source_text: &'static str,
+    target_text: &'static str,
+    binder_layout: &'static [RelationBinderSpec],
+    contract_rows: &'static [&'static str],
+) -> RelationQuerySpec {
+    RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: RELATION_HOST_PROJECT,
+        source_text,
+        target_text,
+        binder_layout,
+        contract_rows,
+        engine_pin: Some(EngineObservationPin::UnsupportedKey),
+    }
+}
+
+/// The single-binder layouts (target-pattern preorder, ordinal 0) for the 6
+/// `infer` rows.
+const BINDER_V: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "V",
+    constraint: None,
+}];
+const BINDER_H: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "H",
+    constraint: None,
+}];
+const BINDER_R: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "R",
+    constraint: None,
+}];
+const BINDER_A: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "A",
+    constraint: None,
+}];
+const BINDER_X: &[RelationBinderSpec] = &[RelationBinderSpec {
+    ordinal: 0,
+    name: "X",
+    constraint: None,
+}];
+
+/// The 26 relation identities the v4 family captures (addendum §4): the 28
+/// `relation_semantics.rs` projection contracts minus the two collapse pairs
+/// (`never`→`string` direct + via-generic; `string|number`→`string`
+/// distributive + tuple-wrapped — the distribution scaffold is
+/// projection-level, not relation identity). Coverage by family:
+/// top/bottom/unknown ×6, optional properties ×3, readonly ×2, function
+/// variance ×2, tuple/rest ×4, whole-union ×1, intersections ×2, infer
+/// bindings ×6. NO strict-axis multiplication (no ON/OFF pairs — no verdict
+/// flips on the live config surface). Pinned exactly by
+/// `relation_registry_holds_the_26_identities_and_maps_the_28_contracts`.
+#[allow(dead_code)]
+pub(crate) const RELATION_QUERY_SPECS: &[RelationQuerySpec] = &[
+    // -- Row 1: top / bottom / unknown (×6) ---------------------------------
+    relation_spec(
+        "relation_any_extends_string",
+        "any",
+        "string",
+        &["relation_any_extends_string_distributes_both_branches"],
+        None,
+    ),
+    relation_spec(
+        "relation_unknown_extends_string",
+        "unknown",
+        "string",
+        &["relation_unknown_extends_string_selects_false_branch"],
+        None,
+    ),
+    // COLLAPSE 1 of 2: the DIRECT `never extends string` and the via-generic
+    // `IsStringDistributive<never>` contracts share the raw relation identity
+    // `never`→`string` (the via-generic distribution collapse is
+    // projection-level).
+    relation_spec(
+        "relation_never_extends_string",
+        "never",
+        "string",
+        &[
+            "relation_never_extends_string_directly_selects_true_branch",
+            "relation_never_via_generic_helper_collapses_to_never",
+        ],
+        None,
+    ),
+    relation_spec(
+        "relation_string_extends_any",
+        "string",
+        "any",
+        &["relation_string_extends_any_selects_true_branch"],
+        None,
+    ),
+    relation_spec(
+        "relation_string_extends_unknown",
+        "string",
+        "unknown",
+        &["relation_string_extends_unknown_selects_true_branch"],
+        None,
+    ),
+    relation_spec(
+        "relation_string_extends_never",
+        "string",
+        "never",
+        &["relation_string_extends_never_selects_false_branch"],
+        None,
+    ),
+    // -- Row 2: optional properties (×3) ------------------------------------
+    relation_spec(
+        "relation_required_to_optional",
+        "{ a: string }",
+        "{ a?: string }",
+        &["relation_required_property_assignable_to_optional"],
+        None,
+    ),
+    // LEDGER (source-proven): the engine answers `assignable` today
+    // (`relation_optional_property_not_assignable_to_required` is `#[ignore]`d
+    // for exactly this); the oracle captures `not_assignable`.
+    relation_spec(
+        "relation_optional_to_required",
+        "{ a?: string }",
+        "{ a: string }",
+        &["relation_optional_property_not_assignable_to_required"],
+        Some(EngineObservationPin::MismatchedVerdict(
+            RelationEngineVerdict::Assignable,
+        )),
+    ),
+    relation_spec(
+        "relation_empty_to_all_optional",
+        "{}",
+        "{ a?: string }",
+        &["relation_empty_object_assignable_to_all_optional"],
+        None,
+    ),
+    // -- Row 3: readonly (×2) -----------------------------------------------
+    relation_spec(
+        "relation_mutable_to_readonly",
+        "{ a: string }",
+        "{ readonly a: string }",
+        &["relation_mutable_property_assignable_to_readonly"],
+        None,
+    ),
+    // LEDGER (source-proven): the engine answers `not_assignable` today
+    // (`relation_readonly_property_assignable_to_mutable` is `#[ignore]`d);
+    // the oracle captures `assignable` (readonly is not enforced on the
+    // producer side).
+    relation_spec(
+        "relation_readonly_to_mutable",
+        "{ readonly a: string }",
+        "{ a: string }",
+        &["relation_readonly_property_assignable_to_mutable"],
+        Some(EngineObservationPin::MismatchedVerdict(
+            RelationEngineVerdict::NotAssignable,
+        )),
+    ),
+    // -- Row 4: function variance (×2) ---------------------------------------
+    relation_spec(
+        "relation_wider_param_to_narrower",
+        "((x: \"a\" | \"b\") => void)",
+        "((x: \"a\") => void)",
+        &["relation_function_with_wider_param_assignable_to_narrower_target"],
+        None,
+    ),
+    relation_spec(
+        "relation_narrower_param_to_wider",
+        "((x: \"a\") => void)",
+        "((x: \"a\" | \"b\") => void)",
+        &["relation_function_with_narrower_param_not_assignable_to_wider_target"],
+        None,
+    ),
+    // -- Row 5: tuple / rest (×4) --------------------------------------------
+    // LEDGER (source-proven): the engine answers `not_assignable` today
+    // (`relation_fixed_tuple_assignable_to_first_plus_rest` is `#[ignore]`d);
+    // the oracle captures `assignable` (the fixed tail satisfies the rest slot).
+    relation_spec(
+        "relation_fixed_to_first_rest",
+        "[string, number]",
+        "[string, ...unknown[]]",
+        &["relation_fixed_tuple_assignable_to_first_plus_rest"],
+        Some(EngineObservationPin::MismatchedVerdict(
+            RelationEngineVerdict::NotAssignable,
+        )),
+    ),
+    relation_spec(
+        "relation_rest_to_fixed",
+        "[string, ...number[]]",
+        "[string, number]",
+        &["relation_rest_tuple_not_assignable_to_fixed_tuple"],
+        None,
+    ),
+    relation_spec(
+        "relation_one_to_one_optional",
+        "[string]",
+        "[string, number?]",
+        &["relation_one_tuple_assignable_to_one_with_optional_second_slot"],
+        None,
+    ),
+    relation_spec(
+        "relation_empty_to_readonly_array",
+        "[]",
+        "readonly string[]",
+        &["relation_empty_tuple_assignable_to_readonly_array"],
+        None,
+    ),
+    // -- Row 6: whole-union (×1) ---------------------------------------------
+    // COLLAPSE 2 of 2: the DISTRIBUTIVE `IsStringDistributive<string|number>`
+    // and the tuple-wrapped `IsStringNonDistributive<string|number>` contracts
+    // share the raw relation identity `string|number`→`string` (the
+    // distribution scaffold is projection-level; the oracle's own tuple wire
+    // never distributes).
+    relation_spec(
+        "relation_whole_union_not_assignable",
+        "string | number",
+        "string",
+        &[
+            "relation_distributive_conditional_over_union_emits_branch_union",
+            "relation_tuple_wrapped_conditional_over_union_does_not_distribute",
+        ],
+        None,
+    ),
+    // -- Row 7: intersections (×2) -------------------------------------------
+    relation_spec(
+        "relation_intersection_extends_base",
+        "{ a: string } & { b: number }",
+        "{ a: string }",
+        &["relation_intersection_assignable_to_one_base_arm"],
+        None,
+    ),
+    relation_spec(
+        "relation_base_extends_intersection",
+        "{ a: string }",
+        "{ a: string } & { b: number }",
+        &["relation_one_arm_not_assignable_to_intersection"],
+        None,
+    ),
+    // -- Row 8: `infer` bindings (×6 — all `UnsupportedKey` ledger rows) -----
+    relation_infer_spec(
+        "relation_infer_value_of_object",
+        "{ value: number }",
+        "{ value: infer V }",
+        BINDER_V,
+        &["relation_infer_value_of_object_property"],
+    ),
+    relation_infer_spec(
+        "relation_infer_head_of_tuple",
+        "[1, 2, 3]",
+        "[infer H, ...unknown[]]",
+        BINDER_H,
+        &["relation_infer_head_of_tuple_pattern"],
+    ),
+    relation_infer_spec(
+        "relation_infer_tail_of_tuple",
+        "[1, 2, 3]",
+        "[unknown, ...infer R]",
+        BINDER_R,
+        &["relation_infer_tail_of_tuple_pattern"],
+    ),
+    relation_infer_spec(
+        "relation_infer_return_of_function",
+        "() => \"hello\"",
+        "(...args: any[]) => infer R",
+        BINDER_R,
+        &["relation_infer_return_of_function"],
+    ),
+    relation_infer_spec(
+        "relation_infer_params_of_function",
+        "((x: string, y?: number) => void)",
+        "(...args: infer A) => any",
+        BINDER_A,
+        &["relation_infer_params_of_function_preserves_optional_undefined"],
+    ),
+    relation_infer_spec(
+        "relation_infer_single_param",
+        "((s: string) => void)",
+        "((x: infer X) => any)",
+        BINDER_X,
+        &["relation_infer_single_param_of_function"],
+    ),
+];
+
+/// Why the relation registry failed validation (PURE, over the registry's own
+/// types only — the canonical-operand consistency proof lives in the src-side
+/// guard, which runs the shared derivation over every spec).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RelationRegistryError {
+    /// A spec carried an empty `oracle_family` / operand text / contract-row
+    /// mapping.
+    EmptyField {
+        row_function: &'static str,
+        field: &'static str,
+    },
+    /// Two specs shared a `(row_file, row_function, query_ordinal)` key.
+    DuplicateKey {
+        row_file: &'static str,
+        row_function: &'static str,
+        query_ordinal: u16,
+    },
+    /// A binder layout's ordinals were not exactly `0..n-1` in layout order.
+    BinderOrdinalSequence { row_function: &'static str },
+    /// A binder layout carried the same name twice.
+    DuplicateBinderName {
+        row_function: &'static str,
+        name: &'static str,
+    },
+    /// An `UnsupportedKey` pin sat on a binder-free spec (only an inference
+    /// context is an unsupported key), or a `MismatchedVerdict` pin sat on a
+    /// binder-carrying spec (an inference key has no engine verdict to pin).
+    PinShape { row_function: &'static str },
+    /// A contract row was named by two specs (each projection contract maps to
+    /// exactly one raw relation identity).
+    DuplicateContractRow {
+        row_function: &'static str,
+        contract_row: &'static str,
+    },
+}
+
+/// Validate the relation registry's structural well-formedness — PURE, over the
+/// registry's own types only: non-empty fields; unique row keys; binder layouts
+/// with ordinals exactly `0..n-1` in layout order and unique names; the
+/// ledger-pin shape honesty rules (an `UnsupportedKey` pin requires a binder
+/// layout — only an inference context is an unsupported key; a
+/// `MismatchedVerdict` pin requires an EMPTY layout — an inference key has no
+/// engine verdict to pin); contract rows unique across the whole table.
+#[allow(dead_code)]
+pub(crate) fn relation_registry_well_formed(
+    specs: &[RelationQuerySpec],
+) -> Result<(), RelationRegistryError> {
+    let mut keys: Vec<(&'static str, &'static str, u16)> = Vec::new();
+    let mut contract_rows: Vec<&'static str> = Vec::new();
+    for spec in specs {
+        for (field, value) in [
+            ("oracle_family", spec.oracle_family),
+            ("source_text", spec.source_text),
+            ("target_text", spec.target_text),
+        ] {
+            if value.is_empty() {
+                return Err(RelationRegistryError::EmptyField {
+                    row_function: spec.row_function,
+                    field,
+                });
+            }
+        }
+        if spec.contract_rows.is_empty() {
+            return Err(RelationRegistryError::EmptyField {
+                row_function: spec.row_function,
+                field: "contract_rows",
+            });
+        }
+        let key = (spec.row_file, spec.row_function, spec.query_ordinal);
+        if keys.contains(&key) {
+            return Err(RelationRegistryError::DuplicateKey {
+                row_file: spec.row_file,
+                row_function: spec.row_function,
+                query_ordinal: spec.query_ordinal,
+            });
+        }
+        keys.push(key);
+
+        let mut names: Vec<&'static str> = Vec::new();
+        for (index, binder) in spec.binder_layout.iter().enumerate() {
+            if binder.ordinal as usize != index {
+                return Err(RelationRegistryError::BinderOrdinalSequence {
+                    row_function: spec.row_function,
+                });
+            }
+            if names.contains(&binder.name) {
+                return Err(RelationRegistryError::DuplicateBinderName {
+                    row_function: spec.row_function,
+                    name: binder.name,
+                });
+            }
+            names.push(binder.name);
+        }
+
+        match spec.engine_pin {
+            Some(EngineObservationPin::UnsupportedKey) if spec.binder_layout.is_empty() => {
+                return Err(RelationRegistryError::PinShape {
+                    row_function: spec.row_function,
+                });
+            }
+            Some(EngineObservationPin::MismatchedVerdict(_)) if !spec.binder_layout.is_empty() => {
+                return Err(RelationRegistryError::PinShape {
+                    row_function: spec.row_function,
+                });
+            }
+            _ => {}
+        }
+
+        for contract_row in spec.contract_rows {
+            if contract_rows.contains(contract_row) {
+                return Err(RelationRegistryError::DuplicateContractRow {
+                    row_function: spec.row_function,
+                    contract_row,
+                });
+            }
+            contract_rows.push(contract_row);
+        }
+    }
+    Ok(())
+}

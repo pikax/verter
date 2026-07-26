@@ -54,6 +54,7 @@ use super::query_specs::{
     QuerySpec, COMPILER_OPTIONS_HASH, CURRENT_ENV_CORPUS_ID, LIFTED_ROW_MIGRATIONS,
     ORACLE_QUERY_SPECS,
 };
+use super::relation_probe;
 use super::snapshot::{self, ProbeLocator};
 use super::source_digest::{
     build_source_digest, build_source_host, source_side_walk, workspace_file_source,
@@ -175,8 +176,9 @@ impl GenConfig {
 }
 
 /// Generate + write every registry snapshot, returning the count written (one
-/// per `ORACLE_QUERY_SPECS` entry). The per-spec body ([`generate_snapshot`])
-/// is additionally exercised against real tsgo by the idempotence test.
+/// per `ORACLE_QUERY_SPECS` entry plus one per `RELATION_QUERY_SPECS` entry).
+/// The per-spec bodies ([`generate_snapshot`] / [`generate_relation_snapshot`])
+/// are additionally exercised against real tsgo by the idempotence tests.
 pub fn run_oracle_gen() -> Result<usize, GenError> {
     let config = GenConfig::checked_in();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -198,25 +200,50 @@ pub fn run_oracle_gen() -> Result<usize, GenError> {
         write_snapshot(&config, spec.oracle_family, &document)?;
         written += 1;
     }
+    // The v4 `relation_verdict` capture family (the relation tuple-wire probe —
+    // a SEPARATE path from the TypeExpr pipeline above, never through the
+    // two-sided admission, which correctly rejects Conditional/Infer).
+    for spec in super::query_specs::RELATION_QUERY_SPECS {
+        let document = runtime
+            .block_on(generate_relation_snapshot(spec, &config))
+            .map_err(|e| match e {
+                GenError::Rejected(msg) => {
+                    GenError::Rejected(format!("{}::{} — {msg}", spec.row_file, spec.row_function))
+                }
+                other => other,
+            })?;
+        write_snapshot(&config, spec.oracle_family, &document)?;
+        written += 1;
+    }
     Ok(written)
 }
 
-/// Deterministic, TSGO-FREE v2→v3 snapshot upgrade (§Q4). The v3 schema change
-/// ADDS only the tsgo-free migration-fidelity mirror
-/// (`migration_fingerprint_version` + `migration_fingerprint`) and bumps
-/// `oracle_schema_version` 2→3; the tsgo-derived content (oracle_value /
-/// raw_capture / source_admission_digest / oracle_env_*) is UNCHANGED, so each
-/// snapshot is upgraded by injecting the row's retained
-/// `LIFTED_ROW_MIGRATIONS` fingerprint, bumping the version, recomputing the
-/// (now-changed) `snapshot_id`, writing the new file, and removing the stale one.
-/// Re-running is byte-idempotent: an already-v3 snapshot recomputes the SAME id
-/// (so it overwrites itself, never deleting the file it just wrote). Returns
-/// `(written, deleted)`. NEVER drives tsgo.
-pub fn upgrade_snapshots_to_v3() -> Result<(usize, usize), GenError> {
+/// Deterministic, TSGO-FREE v3→v4 snapshot re-keying (§Q4 +
+/// `docs/arch/ri0-relation-verdict-oracle-addendum.md`). The v4 schema change
+/// ADDS the closed `relation_verdict` value kind; for the EXISTING
+/// `structured_type_expr` snapshots the ONLY change is `oracle_schema_version`
+/// 3→4 flowing into `snapshot_id` through `PinnedEnv` (the v3-family hash-input
+/// field set is UNCHANGED — the domain tag stays v2). Every tsgo-derived byte
+/// (oracle_value / raw_capture / source_admission_digest / oracle_env_*) is
+/// UNCHANGED, so each snapshot is re-keyed by bumping the stored version,
+/// recomputing the (now-changed) `snapshot_id`, writing the new file, and
+/// removing the stale one. Re-running is byte-idempotent: an already-v4
+/// snapshot recomputes the SAME id (so it overwrites itself, never deleting
+/// the file it just wrote). `relation_verdict` files (generated FRESH at v4,
+/// never re-keyed) are skipped. Returns `(written, deleted)`. NEVER drives
+/// tsgo — the proof is byte-equality of the tsgo-derived content plus
+/// idempotence of the id redrive.
+pub fn upgrade_snapshots_to_v4() -> Result<(usize, usize), GenError> {
     let config = GenConfig::checked_in();
-    let root = &config.snapshot_root;
+    upgrade_snapshots_to_v4_in(&config.snapshot_root)
+}
 
-    // Collect every current snapshot path FIRST, so the newly-written v3 files are
+/// The root-parameterized body of [`upgrade_snapshots_to_v4`] (the checked-in
+/// entry delegates with the checked-in snapshot tree). Split out so the
+/// deterministic tsgo-free re-key proof runs over a SYNTHETIC temp tree —
+/// never mutating the checked-in snapshots from a test.
+pub(crate) fn upgrade_snapshots_to_v4_in(root: &Path) -> Result<(usize, usize), GenError> {
+    // Collect every current snapshot path FIRST, so the newly-written v4 files are
     // not re-processed mid-walk.
     let mut files: Vec<PathBuf> = Vec::new();
     for fam in std::fs::read_dir(root).map_err(|e| GenError::Io(e.to_string()))? {
@@ -240,28 +267,28 @@ pub fn upgrade_snapshots_to_v3() -> Result<(usize, usize), GenError> {
         let mut json: Value = serde_json::from_slice(&bytes)
             .map_err(|e| GenError::Io(format!("{}: {e}", path.display())))?;
 
-        let row_file = json["row_ref"]["row_file"]
-            .as_str()
-            .ok_or_else(|| GenError::Io(format!("{}: missing row_ref.row_file", path.display())))?
-            .to_string();
-        let row_function = json["row_ref"]["row_function"]
-            .as_str()
-            .ok_or_else(|| {
-                GenError::Io(format!("{}: missing row_ref.row_function", path.display()))
-            })?
-            .to_string();
+        // Only `structured_type_expr` snapshots re-key; the relation family is
+        // generated fresh at v4.
+        let kind = json["oracle_value_kind"].as_str().ok_or_else(|| {
+            GenError::Io(format!("{}: missing oracle_value_kind", path.display()))
+        })?;
+        if kind != "structured_type_expr" {
+            continue;
+        }
         let family = json["oracle_family"]
             .as_str()
             .ok_or_else(|| GenError::Io(format!("{}: missing oracle_family", path.display())))?
             .to_string();
-        let migration = LIFTED_ROW_MIGRATIONS
-            .iter()
-            .find(|m| m.row_file == row_file && m.row_function == row_function)
-            .ok_or_else(|| {
-                GenError::Rejected(format!(
-                    "{row_file}::{row_function}: no retained migration provenance for the snapshot's row"
-                ))
-            })?;
+        let stored_version = json["oracle_schema_version"].as_u64().ok_or_else(|| {
+            GenError::Io(format!("{}: missing oracle_schema_version", path.display()))
+        })?;
+        if stored_version != 3 && stored_version != identity::ORACLE_SCHEMA_VERSION as u64 {
+            return Err(GenError::Rejected(format!(
+                "{}: unexpected oracle_schema_version {stored_version} (the v3→v4 re-key only \
+                 upgrades v3 files)",
+                path.display()
+            )));
+        }
 
         {
             let obj = json
@@ -271,19 +298,11 @@ pub fn upgrade_snapshots_to_v3() -> Result<(usize, usize), GenError> {
                 "oracle_schema_version".to_string(),
                 json!(identity::ORACLE_SCHEMA_VERSION),
             );
-            obj.insert(
-                "migration_fingerprint_version".to_string(),
-                json!(migration.migration_fingerprint_version),
-            );
-            obj.insert(
-                "migration_fingerprint".to_string(),
-                json!(migration.migration_fingerprint),
-            );
         }
 
-        // Recompute the snapshot_id from the now-v3 envelope (the schema-version
+        // Recompute the snapshot_id from the now-v4 envelope (the schema-version
         // bump flows into the id through `PinnedEnv`). decode_strict doubles as a
-        // sanity gate that the upgraded envelope is well-formed.
+        // sanity gate that the re-keyed envelope is well-formed.
         let snapshot =
             snapshot::decode_strict(&json).map_err(|e| GenError::Rejected(format!("{e:?}")))?;
         let new_id = snapshot::redrive_snapshot_id(&snapshot)
@@ -324,9 +343,27 @@ fn write_snapshot(config: &GenConfig, family: &str, document: &Value) -> Result<
 /// The per-spec generation pipeline (§4 generator-side row). Produces the full
 /// canonical snapshot document for one `(row, query)`. Drives the pinned tsgo;
 /// returns [`GenError::TsgoUnavailable`] (skip) when tsgo is not installed.
+/// Requires the row's retained migration provenance (a LIFTED row MUST carry
+/// it — a missing entry is a loud generation failure); the provenance
+/// parameter is split out ([`generate_snapshot_with_migration`]) so the
+/// generator's own idempotence proof can drive the SAME pipeline over a
+/// SYNTHETIC spec with a synthetic provenance record.
 pub(crate) async fn generate_snapshot(
     spec: &QuerySpec,
     config: &GenConfig,
+) -> Result<Value, GenError> {
+    let migration = lookup_migration(spec)?;
+    generate_snapshot_with_migration(spec, config, migration).await
+}
+
+/// The [`generate_snapshot`] body with the retained migration provenance
+/// handed in explicitly (the production entry resolves it through
+/// [`lookup_migration`]; the generator's idempotence proof supplies a
+/// synthetic record).
+pub(crate) async fn generate_snapshot_with_migration(
+    spec: &QuerySpec,
+    config: &GenConfig,
+    migration: &LiftMigrationProvenance,
 ) -> Result<Value, GenError> {
     // (0) reducer preflight — BEFORE driving tsgo or writing anything, prove
     //     Verter's own resolver reduces the query to a clean, operator-free
@@ -390,7 +427,6 @@ pub(crate) async fn generate_snapshot(
     });
     let source_admission_digest = build_source_digest(spec, contributors)?;
     let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
-    let migration = lookup_migration(spec)?;
 
     let document = snapshot::assemble_snapshot_document(
         spec.oracle_family,
@@ -513,33 +549,10 @@ async fn drive_hover(
     spec: &QuerySpec,
     synth: &Synthesized,
 ) -> Result<String, GenError> {
-    let tsgo_bin = {
-        // Resolve the engine through the toolchain resolver (shared →
-        // project-local → cache → bundled; capability-validated: bounded
-        // version probe + support policy + a `--lsp` capability smoke per
-        // candidate). Reached via the `verter_type_runtime` facade —
-        // verter_session's tsgo-generation-only guard bans a direct
-        // `verter_tsgo_api` dep.
-        let request = verter_type_runtime::tsgo::discovery::ResolutionRequest::for_environment(
-            verter_type_runtime::tsgo::validation::Capability::Lsp,
-            None,
-        );
-        verter_type_runtime::tsgo::discovery::resolve(&request)
-            .await
-            .map(|resolution| resolution.path.to_string_lossy().into_owned())
-            .map_err(|e| GenError::TsgoUnavailable(e.to_string()))?
-    };
-    let sandbox = tempfile::tempdir().map_err(|e| GenError::Io(e.to_string()))?;
-
-    // (a) Seed the vendored corpus. The canonical `oracle.tsconfig.json` becomes
-    //     the root `tsconfig.json` tsgo reads; every other corpus file keeps its
-    //     corpus-relative path.
-    seed_corpus(&config.corpus_root, sandbox.path())?;
-
-    // (b) Write the per-row workspace files (the primary one REPLACED by the probe
-    //     source).
+    let tsgo_bin = resolve_tsgo_bin()?;
+    // The per-row workspace files (the primary one REPLACED by the probe source).
     let primary_rel = sandbox_relative(spec.primary_canonical);
-    let mut files_to_open: Vec<(PathBuf, String)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     for f in spec.workspace_files {
         let rel = sandbox_relative(f.path);
         let content = if f.path == spec.primary_canonical {
@@ -547,21 +560,153 @@ async fn drive_hover(
         } else {
             f.source.to_string()
         };
+        files.push((rel.to_string(), content));
+    }
+    drive_hover_over_files(
+        config,
+        &tsgo_bin,
+        &files,
+        primary_rel,
+        synth.probe_name_offset as u32,
+    )
+    .await
+}
+
+/// Resolve the PINNED tsgo binary the oracle harness generates with — EXACTLY
+/// `@typescript/native-preview` `identity::TSGO_VERSION` (`7.0.0-dev.20260526.1`).
+/// The dev-only generation harness does NOT ride the product toolchain
+/// resolver: the resolver's stable-only support window (`>=7.0.2, <7.1.0`)
+/// governs the PRODUCT's engine provisioning, while this harness pins an exact
+/// nightly — every snapshot records that version and the consumption driver
+/// validates it, so ANY other engine (a stable the product would accept
+/// included) would produce snapshots the env-pin rail rejects. Resolution
+/// order: (1) `VERTER_TSGO_BIN` naming an existing file, then (2) the
+/// project-local `node_modules` install (flat + pnpm-store layouts) walking
+/// the crate manifest's ancestors. Every candidate must report `--version`
+/// EXACTLY `Version {TSGO_VERSION}` — a version mismatch is a generation
+/// error, never a silent fallthrough. [`GenError::TsgoUnavailable`] (skip)
+/// when no exact-pin binary is found.
+fn resolve_tsgo_bin() -> Result<String, GenError> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(override_path) = std::env::var_os("VERTER_TSGO_BIN").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(override_path));
+    }
+    let exe_name = if cfg!(windows) { "tsgo.exe" } else { "tsgo" };
+    let platform = tsgo_platform_key().ok_or_else(|| {
+        GenError::TsgoUnavailable(format!(
+            "no @typescript/native-preview platform package for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    })?;
+    for ancestor in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
+        // Flat layout: `node_modules/@typescript/native-preview-<platform>/lib/tsgo`.
+        candidates.push(
+            ancestor
+                .join("node_modules")
+                .join("@typescript")
+                .join(format!("native-preview-{platform}"))
+                .join("lib")
+                .join(exe_name),
+        );
+        // pnpm-store layout:
+        // `node_modules/.pnpm/@typescript+native-preview-<platform>@<version>/node_modules/…`.
+        candidates.push(
+            ancestor
+                .join("node_modules")
+                .join(".pnpm")
+                .join(format!(
+                    "@typescript+native-preview-{platform}@{}",
+                    identity::TSGO_VERSION
+                ))
+                .join("node_modules")
+                .join("@typescript")
+                .join(format!("native-preview-{platform}"))
+                .join("lib")
+                .join(exe_name),
+        );
+    }
+    let expected = format!("Version {}", identity::TSGO_VERSION);
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let output = std::process::Command::new(&candidate)
+            .arg("--version")
+            .output()
+            .map_err(|e| {
+                GenError::TsgoUnavailable(format!(
+                    "{}: --version probe failed: {e}",
+                    candidate.display()
+                ))
+            })?;
+        let reported = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if reported != expected {
+            return Err(GenError::TsgoUnavailable(format!(
+                "{} reports `{reported}`, not the harness pin `{expected}` — generation with a \
+                 different engine would produce snapshots the env-pin rail rejects",
+                candidate.display()
+            )));
+        }
+        return Ok(candidate.to_string_lossy().into_owned());
+    }
+    Err(GenError::TsgoUnavailable(format!(
+        "no @typescript/native-preview {platform} binary at the exact harness pin {} \
+         (searched VERTER_TSGO_BIN + project-local node_modules)",
+        identity::TSGO_VERSION
+    )))
+}
+
+/// The `@typescript/native-preview-<platform>` package key for this host.
+fn tsgo_platform_key() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("darwin-arm64"),
+        ("macos", "x86_64") => Some("darwin-x64"),
+        ("linux", "aarch64") => Some("linux-arm64"),
+        ("linux", "x86_64") => Some("linux-x64"),
+        ("windows", "aarch64") => Some("win32-arm64"),
+        ("windows", "x86_64") => Some("win32-x64"),
+        _ => None,
+    }
+}
+
+/// The shared hover drive: seed the corpus sandbox, write `files`
+/// (sandbox-relative path + content), spawn the pinned tsgo LSP, open every
+/// file, and hover `hover_rel` at `hover_offset`. Both capture families ride
+/// this ONE drive — the v3 append-model probes and the v4 relation tuple-wire
+/// probe differ only in the file set + hover point they hand in.
+async fn drive_hover_over_files(
+    config: &GenConfig,
+    tsgo_bin: &str,
+    files: &[(String, String)],
+    hover_rel: &str,
+    hover_offset: u32,
+) -> Result<String, GenError> {
+    let sandbox = tempfile::tempdir().map_err(|e| GenError::Io(e.to_string()))?;
+
+    // (a) Seed the vendored corpus. The canonical `oracle.tsconfig.json` becomes
+    //     the root `tsconfig.json` tsgo reads; every other corpus file keeps its
+    //     corpus-relative path.
+    seed_corpus(&config.corpus_root, sandbox.path())?;
+
+    // (b) Write the workspace files.
+    let mut files_to_open: Vec<(PathBuf, String)> = Vec::new();
+    for (rel, content) in files {
         let abs = sandbox.path().join(rel);
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent).map_err(|e| GenError::Io(e.to_string()))?;
         }
-        std::fs::write(&abs, &content).map_err(|e| GenError::Io(e.to_string()))?;
-        files_to_open.push((abs, content));
+        std::fs::write(&abs, content).map_err(|e| GenError::Io(e.to_string()))?;
+        files_to_open.push((abs, content.clone()));
     }
-    let primary_abs = sandbox.path().join(primary_rel);
+    let hover_abs = sandbox.path().join(hover_rel);
 
     // (c) Spawn the tsgo LSP and open every program file. The root URI goes
     // through the shared Windows-safe builder (drive letters, backslashes).
     let root_uri = path_to_file_uri_string(&sandbox.path().to_string_lossy());
     let provider = match tokio::time::timeout(
         Duration::from_secs(30),
-        TsgoTypeProvider::spawn(&tsgo_bin, &root_uri),
+        TsgoTypeProvider::spawn(tsgo_bin, &root_uri),
     )
     .await
     {
@@ -576,16 +721,244 @@ async fn drive_hover(
     // (d) Hover the probe name.
     let hover = tokio::time::timeout(
         Duration::from_secs(15),
-        provider.get_hover(
-            &primary_abs.to_string_lossy(),
-            synth.probe_name_offset as u32,
-        ),
+        provider.get_hover(&hover_abs.to_string_lossy(), hover_offset),
     )
     .await
     .map_err(|_| GenError::TsgoDriver("hover timed out".to_string()))?
     .map_err(|e| GenError::TsgoDriver(e.to_string()))?
     .ok_or(GenError::NoHover)?;
     Ok(hover.contents)
+}
+
+/// The per-spec v4 relation generation pipeline
+/// (`docs/arch/ri0-relation-verdict-oracle-addendum.md`): a relation-specific
+/// capture path BESIDE the TypeExpr pipeline — NOT through the two-sided
+/// admission (which correctly rejects the Conditional/Infer the probe embodies)
+/// and with NO reducer preflight (a capture-only relation row asserts nothing
+/// about Verter's own reduction; the engine-observation boundary is the
+/// consumption driver's concern). Steps: derive the registry-derivable v4
+/// identity (tsgo-free, loud on any operand/binder inconsistency) → synthesize
+/// the versioned tuple-wire probe file → drive the pinned tsgo's hover over the
+/// probe name → extract the RHS → STRICT tuple-wire decode (anything off the
+/// fixed grammar is a loud generation error) → cross-check the wire's binder
+/// names against the declared layout (ordinal AND name, in preorder) →
+/// assemble the canonical `relation_verdict` document and prove it strictly
+/// decodes before writing.
+pub(crate) async fn generate_relation_snapshot(
+    spec: &super::query_specs::RelationQuerySpec,
+    config: &GenConfig,
+) -> Result<Value, GenError> {
+    // (1) The registry-derivable identity — tsgo-free; a bad operand text or an
+    //     inconsistent binder layout is a loud rejection, never a guessed axis.
+    let identity = relation_probe::relation_identity_from_spec(spec).map_err(|e| {
+        GenError::Rejected(format!(
+            "{}: relation identity derivation: {e:?}",
+            spec.row_function
+        ))
+    })?;
+
+    // (2) The versioned probe file + hover point.
+    let probe_source = relation_probe::relation_probe_source(
+        spec.row_function,
+        spec.query_ordinal,
+        spec.source_text,
+        spec.target_text,
+        &identity.binder_layout,
+    );
+    let probe_header = relation_probe::relation_probe_header(
+        spec.query_ordinal,
+        spec.source_text,
+        spec.target_text,
+        &identity.binder_layout,
+    );
+    let probe_name = probe::probe_name(spec.query_ordinal);
+    let probe_name_offset = probe_source.find(&probe_name).ok_or_else(|| {
+        GenError::HoverExtract(format!(
+            "{}: synthesized probe source does not contain `{probe_name}`",
+            spec.row_function
+        ))
+    })?;
+    let canonical_path = relation_probe::relation_probe_canonical_path(spec.row_function);
+    let rel = sandbox_relative(&canonical_path).to_string();
+
+    // (3) Drive the pinned tsgo over the corpus-seeded sandbox + the probe file.
+    let tsgo_bin = resolve_tsgo_bin()?;
+    let hover_contents = drive_hover_over_files(
+        config,
+        &tsgo_bin,
+        &[(rel.clone(), probe_source)],
+        &rel,
+        probe_name_offset as u32,
+    )
+    .await?;
+
+    // (4) Extract the probe RHS from the markdown hover and STRICT-decode the
+    //     tuple wire — hover is ONLY the transport; anything off the fixed
+    //     grammar is a loud generation error.
+    let hover_rhs = hover_extract::extract_probe_rhs(&hover_contents, &probe_name)
+        .map_err(|e| GenError::HoverExtract(format!("{e:?}")))?;
+    let value = relation_probe::decode_tuple_wire(&hover_rhs).map_err(|e| {
+        GenError::Rejected(format!("{}: tuple-wire decode: {e:?}", spec.row_function))
+    })?;
+
+    // (5) Cross-check the wire's bindings against the DECLARED binder layout.
+    //     An ASSIGNABLE verdict binds EVERY declared binder — ordinal AND name
+    //     must match in target-pattern preorder (the strict decoder already
+    //     enforced the ordinal sequence + uniqueness; a name divergence from
+    //     the registry layout is a capture the registry cannot explain). A
+    //     FAILED-infer capture (`not_assignable`, non-empty layout) records
+    //     ZERO matched bindings by definition (the wire's false branch is
+    //     always the empty tuple) — no preorder check applies to it.
+    let bindings_consistent = match value.verdict {
+        relation_probe::RelationVerdict::Assignable => {
+            value.bindings.len() == identity.binder_layout.len()
+                && value
+                    .bindings
+                    .iter()
+                    .zip(identity.binder_layout.iter())
+                    .all(|(binding, layout)| {
+                        binding.ordinal == layout.ordinal && binding.name == layout.name
+                    })
+        }
+        relation_probe::RelationVerdict::NotAssignable => value.bindings.is_empty(),
+    };
+    if !bindings_consistent {
+        return Err(GenError::Rejected(format!(
+            "{}: wire verdict `{}` with bindings {:?} does not match the declared binder layout {:?}",
+            spec.row_function,
+            value.verdict.tag(),
+            value
+                .bindings
+                .iter()
+                .map(|b| (b.ordinal, b.name.as_str()))
+                .collect::<Vec<_>>(),
+            identity
+                .binder_layout
+                .iter()
+                .map(|b| (b.ordinal, b.name.as_str()))
+                .collect::<Vec<_>>(),
+        )));
+    }
+
+    // (5b) Bound⊢constraint verification for CONSTRAINED binders (`infer X
+    //     extends C`): re-ask the pinned tsgo — through the SAME anti-
+    //     distribution tuple wire in a SECOND, generation-only probe file —
+    //     whether each captured bound is assignable to its declared
+    //     constraint. A violation is a loud generation error, never a silent
+    //     escape. A `not_assignable` main verdict carries no bindings, so
+    //     there is nothing to verify; constraint-free rows skip the second
+    //     drive entirely. The check probes are verification-only and are NOT
+    //     persisted in the snapshot.
+    let checks: Vec<(u16, String, String)> =
+        if value.verdict == relation_probe::RelationVerdict::Assignable {
+            spec.binder_layout
+                .iter()
+                .filter_map(|declared| {
+                    declared.constraint.map(|constraint_text| {
+                        let binding = &value.bindings[declared.ordinal as usize];
+                        let bound_text = binding.bound_text.clone().ok_or_else(|| {
+                            GenError::Rejected(format!(
+                                "{}: captured binding `{}` carries no wire bound text for the \
+                             constraint check",
+                                spec.row_function, binding.name
+                            ))
+                        })?;
+                        Ok((declared.ordinal, bound_text, constraint_text.to_string()))
+                    })
+                })
+                .collect::<Result<_, GenError>>()?
+        } else {
+            Vec::new()
+        };
+    if !checks.is_empty() {
+        let check_source = relation_probe::relation_check_probe_source(spec.row_function, &checks);
+        let check_rel = format!(
+            "fixtures/relation_verdict/{}_constraint_checks.ts",
+            spec.row_function
+        );
+        let tsgo_bin = resolve_tsgo_bin()?;
+        for (ordinal, _, constraint_text) in &checks {
+            let check_name = relation_probe::relation_check_probe_name(*ordinal);
+            let check_offset = check_source.find(&check_name).ok_or_else(|| {
+                GenError::HoverExtract(format!(
+                    "{}: synthesized check source does not contain `{check_name}`",
+                    spec.row_function
+                ))
+            })?;
+            let check_hover = drive_hover_over_files(
+                config,
+                &tsgo_bin,
+                &[(check_rel.clone(), check_source.clone())],
+                &check_rel,
+                check_offset as u32,
+            )
+            .await?;
+            let check_rhs = hover_extract::extract_probe_rhs(&check_hover, &check_name)
+                .map_err(|e| GenError::HoverExtract(format!("{e:?}")))?;
+            let check_verdict = relation_probe::decode_tuple_wire(&check_rhs).map_err(|e| {
+                GenError::Rejected(format!(
+                    "{}: constraint-check wire decode: {e:?}",
+                    spec.row_function
+                ))
+            })?;
+            if check_verdict.verdict != relation_probe::RelationVerdict::Assignable {
+                return Err(GenError::Rejected(format!(
+                    "{}: captured bound for binder ordinal {ordinal} VIOLATES the declared \
+                     constraint `{constraint_text}` — a bound violating a present constraint is \
+                     a generation error, never a silent escape",
+                    spec.row_function
+                )));
+            }
+        }
+    }
+
+    // (6) Assemble the oracle value + the envelope. Each bound is the canonical
+    //     normalized TypeExpr JSON under the ONE relation-binding projection
+    //     (the strict decoder projected it); NO SemanticNodeId anywhere.
+    let oracle_value = json!({
+        "verdict": value.verdict.tag(),
+        "bindings": value
+            .bindings
+            .iter()
+            .map(|b| json!({
+                "ordinal": b.ordinal,
+                "name": b.name,
+                "bound": b.bound.to_json_value(),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let probe_locator = ProbeLocator {
+        probe_name: probe_name.clone(),
+        offset: probe_name_offset as u64,
+    };
+    let raw_capture = json!({
+        "probe_name": probe_name,
+        "probe_header": probe_header,
+        "probe_scaffold": Value::Null,
+        "hover_contents": hover_contents,
+    });
+    let (oracle_env_files, oracle_env_hash) = build_env_files(config)?;
+    let document = snapshot::assemble_relation_snapshot_document(
+        spec.oracle_family,
+        &identity,
+        &config.env,
+        &oracle_value,
+        &probe_locator,
+        &raw_capture,
+        &oracle_env_files,
+        &oracle_env_hash,
+    );
+
+    // (7) Self-check: the assembled document must STRICTLY DECODE (the v4
+    //     raw-capture rail re-decodes the recorded hover to the stored value) —
+    //     a snapshot that cannot re-validate offline is never written.
+    snapshot::decode_strict(&document).map_err(|e| {
+        GenError::Rejected(format!(
+            "{}: assembled relation snapshot failed strict decode: {e:?}",
+            spec.row_function
+        ))
+    })?;
+    Ok(document)
 }
 
 /// Recursively copy every file under `corpus_root` into `dest`, mapping the

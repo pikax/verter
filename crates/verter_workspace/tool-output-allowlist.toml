@@ -103,3 +103,10 @@ rationale = "managed-tsgo Vue JSX authority — reads the installed `node_module
 [[entries]]
 path = "crates/verter_tsgo_api/src/fake_engine.rs"
 rationale = "fake `--api` engine test double — writes a process-id rendezvous file and manages the local IPC pipe/socket file lifecycle so the harness can drive the API protocol off real IPC; real-FS IPC by nature (sibling of `control/advertisement.rs`), never workspace/semantic state"
+[[entries]]
+path = "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs"
+rationale = "TS7 oracle harness v4 relation_verdict consumption driver (#[cfg(test)] in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime std::fs::read, the same design-mandated mechanism (docs/arch/u0-oracle-harness-design.md §Q1) the v3 consumption driver above is allowlisted for. Not semantic/VFS state."
+
+[[entries]]
+path = "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs"
+rationale = "TS7 oracle harness v4 relation_verdict rows (#[cfg(test)] typeinfo tests) — load checked-in relation snapshot TEST FIXTURES via runtime std::fs::read for the capture-backed assertions (one true/false wire shape, ordered bindings), the same runtime-fs mechanism the design mandates. Not semantic/VFS state."

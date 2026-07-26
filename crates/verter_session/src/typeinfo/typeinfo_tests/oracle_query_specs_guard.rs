@@ -603,3 +603,317 @@ fn registry_ordinals_must_be_unique_and_contiguous() {
     ];
     assert_eq!(registry_well_formed(&two_rows), Ok(()));
 }
+
+// ---------------------------------------------------------------------------
+// The v4 `relation_verdict` registry (addendum §4/§5)
+// ---------------------------------------------------------------------------
+
+use super::oracle::identity;
+use super::oracle::query_specs::{
+    relation_registry_well_formed, EngineObservationPin, RelationEngineVerdict,
+    RelationRegistryError, RELATION_QUERY_SPECS,
+};
+use super::oracle::relation_probe;
+
+/// The 28 `relation_semantics.rs` projection-contract row names — the
+/// authoritative list the 26 relation identities map onto (the two collapse
+/// pairs are named explicitly below).
+const EXPECTED_CONTRACT_ROWS: &[&str] = &[
+    "relation_any_extends_string_distributes_both_branches",
+    "relation_unknown_extends_string_selects_false_branch",
+    "relation_never_extends_string_directly_selects_true_branch",
+    "relation_never_via_generic_helper_collapses_to_never",
+    "relation_string_extends_any_selects_true_branch",
+    "relation_string_extends_unknown_selects_true_branch",
+    "relation_string_extends_never_selects_false_branch",
+    "relation_required_property_assignable_to_optional",
+    "relation_optional_property_not_assignable_to_required",
+    "relation_empty_object_assignable_to_all_optional",
+    "relation_mutable_property_assignable_to_readonly",
+    "relation_readonly_property_assignable_to_mutable",
+    "relation_function_with_wider_param_assignable_to_narrower_target",
+    "relation_function_with_narrower_param_not_assignable_to_wider_target",
+    "relation_fixed_tuple_assignable_to_first_plus_rest",
+    "relation_rest_tuple_not_assignable_to_fixed_tuple",
+    "relation_one_tuple_assignable_to_one_with_optional_second_slot",
+    "relation_empty_tuple_assignable_to_readonly_array",
+    "relation_distributive_conditional_over_union_emits_branch_union",
+    "relation_tuple_wrapped_conditional_over_union_does_not_distribute",
+    "relation_intersection_assignable_to_one_base_arm",
+    "relation_one_arm_not_assignable_to_intersection",
+    "relation_infer_value_of_object_property",
+    "relation_infer_head_of_tuple_pattern",
+    "relation_infer_tail_of_tuple_pattern",
+    "relation_infer_return_of_function",
+    "relation_infer_params_of_function_preserves_optional_undefined",
+    "relation_infer_single_param_of_function",
+];
+
+#[test]
+fn relation_registry_holds_the_26_identities_and_maps_the_28_contracts() {
+    assert_eq!(
+        relation_registry_well_formed(RELATION_QUERY_SPECS),
+        Ok(()),
+        "the relation registry is well-formed"
+    );
+    // Exactly 26 specs — NO strict-axis multiplication (no ON/OFF pairs).
+    assert_eq!(
+        RELATION_QUERY_SPECS.len(),
+        26,
+        "the registry seats exactly the 26 relation identities"
+    );
+
+    // The 28 projection contracts map onto exactly the 26 specs: the contract
+    // rows' union IS the 28-name set, each named exactly once.
+    let mut mapped: Vec<&str> = RELATION_QUERY_SPECS
+        .iter()
+        .flat_map(|s| s.contract_rows.iter().copied())
+        .collect();
+    mapped.sort_unstable();
+    let mut expected: Vec<&str> = EXPECTED_CONTRACT_ROWS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        mapped, expected,
+        "the contract-row mapping covers exactly the 28 projection contracts"
+    );
+
+    // The two collapses are EXPLICIT: exactly two specs cover two contract
+    // rows each — the `never`→`string` pair (direct + via-generic) and the
+    // `string|number`→`string` pair (distributive + tuple-wrapped).
+    let two_row_specs: Vec<&super::oracle::query_specs::RelationQuerySpec> = RELATION_QUERY_SPECS
+        .iter()
+        .filter(|s| s.contract_rows.len() == 2)
+        .collect();
+    assert_eq!(two_row_specs.len(), 2, "exactly two collapse specs");
+    let never = RELATION_QUERY_SPECS
+        .iter()
+        .find(|s| s.row_function == "relation_never_extends_string")
+        .expect("the never collapse spec");
+    assert_eq!(never.source_text, "never");
+    assert_eq!(never.target_text, "string");
+    assert_eq!(
+        never.contract_rows,
+        &[
+            "relation_never_extends_string_directly_selects_true_branch",
+            "relation_never_via_generic_helper_collapses_to_never",
+        ]
+    );
+    let union = RELATION_QUERY_SPECS
+        .iter()
+        .find(|s| s.row_function == "relation_whole_union_not_assignable")
+        .expect("the whole-union collapse spec");
+    assert_eq!(union.source_text, "string | number");
+    assert_eq!(union.target_text, "string");
+    assert_eq!(
+        union.contract_rows,
+        &[
+            "relation_distributive_conditional_over_union_emits_branch_union",
+            "relation_tuple_wrapped_conditional_over_union_does_not_distribute",
+        ]
+    );
+
+    // The known-mismatch ledger is exactly 9 rows: 6 `UnsupportedKey` pins
+    // (exactly the binder-carrying infer rows — a direct inference target is
+    // outside the engine's supported key) + 3 named `MismatchedVerdict` pins
+    // with their source-proven engine answers.
+    let pins: Vec<(&str, EngineObservationPin)> = RELATION_QUERY_SPECS
+        .iter()
+        .filter_map(|s| s.engine_pin.map(|p| (s.row_function, p)))
+        .collect();
+    assert_eq!(pins.len(), 9, "the ledger seats exactly 9 rows");
+    let unsupported: Vec<&str> = RELATION_QUERY_SPECS
+        .iter()
+        .filter(|s| s.engine_pin == Some(EngineObservationPin::UnsupportedKey))
+        .map(|s| s.row_function)
+        .collect();
+    let binder_rows: Vec<&str> = RELATION_QUERY_SPECS
+        .iter()
+        .filter(|s| !s.binder_layout.is_empty())
+        .map(|s| s.row_function)
+        .collect();
+    assert_eq!(unsupported.len(), 6);
+    assert_eq!(
+        unsupported, binder_rows,
+        "the UnsupportedKey pins are exactly the 6 infer rows"
+    );
+    for (row, pinned) in [
+        (
+            "relation_optional_to_required",
+            RelationEngineVerdict::Assignable,
+        ),
+        (
+            "relation_readonly_to_mutable",
+            RelationEngineVerdict::NotAssignable,
+        ),
+        (
+            "relation_fixed_to_first_rest",
+            RelationEngineVerdict::NotAssignable,
+        ),
+    ] {
+        let spec = RELATION_QUERY_SPECS
+            .iter()
+            .find(|s| s.row_function == row)
+            .unwrap_or_else(|| panic!("registry seats {row}"));
+        assert_eq!(
+            spec.engine_pin,
+            Some(EngineObservationPin::MismatchedVerdict(pinned)),
+            "{row}: the pinned engine answer is the source-proven mismatch"
+        );
+    }
+}
+
+#[test]
+fn relation_registry_derives_26_distinct_snapshot_ids() {
+    // Every spec derives its v4 identity (the shared tsgo-free derivation —
+    // proving every operand canonicalizes and every binder layout set-matches
+    // its target operand's reserved refs), and the 26 derived snapshot_ids are
+    // ALL DISTINCT (the two collapse pairs genuinely collapsed: no two specs
+    // share a raw relation identity).
+    let env = super::oracle::driver::pinned_env();
+    let mut ids: Vec<String> = Vec::new();
+    for spec in RELATION_QUERY_SPECS {
+        let id = relation_probe::relation_identity_from_spec(spec).unwrap_or_else(|e| {
+            panic!(
+                "{}: the registry spec must derive its identity: {e:?}",
+                spec.row_function
+            )
+        });
+        ids.push(identity::derive_relation_snapshot_id(&id, &env));
+    }
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        ids.len(),
+        "the 26 specs derive 26 DISTINCT snapshot_ids"
+    );
+}
+
+#[test]
+fn relation_registry_well_formed_is_discriminating() {
+    use super::oracle::query_specs::{HostSetupKindSpec, RelationBinderSpec, RelationQuerySpec};
+
+    fn rel_spec(
+        row_function: &'static str,
+        binder_layout: &'static [RelationBinderSpec],
+        contract_rows: &'static [&'static str],
+        engine_pin: Option<EngineObservationPin>,
+    ) -> RelationQuerySpec {
+        RelationQuerySpec {
+            row_file: "relation_verdict_oracle.rs",
+            row_function,
+            query_ordinal: 0,
+            oracle_family: "relation_verdict",
+            host_project: super::oracle::query_specs::HostProjectSpec {
+                project_root: "/",
+                workspace_root: "/",
+                tsconfig_path: "/oracle.tsconfig.json",
+                host_setup_kind: HostSetupKindSpec::Standalone,
+            },
+            source_text: "string",
+            target_text: "number",
+            binder_layout,
+            contract_rows,
+            engine_pin,
+        }
+    }
+
+    // A duplicate (row_file, row_function, query_ordinal) key rejects.
+    let dup = [
+        rel_spec("row_a", &[], &["c1"], None),
+        rel_spec("row_a", &[], &["c2"], None),
+    ];
+    assert!(matches!(
+        relation_registry_well_formed(&dup),
+        Err(RelationRegistryError::DuplicateKey { .. })
+    ));
+
+    // A binder layout with a broken ordinal sequence rejects.
+    let bad_ord = [rel_spec(
+        "row_b",
+        &[RelationBinderSpec {
+            ordinal: 7,
+            name: "A",
+            constraint: None,
+        }],
+        &["c1"],
+        Some(EngineObservationPin::UnsupportedKey),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&bad_ord),
+        Err(RelationRegistryError::BinderOrdinalSequence { .. })
+    ));
+
+    // A duplicate binder name rejects.
+    let dup_name = [rel_spec(
+        "row_c",
+        &[
+            RelationBinderSpec {
+                ordinal: 0,
+                name: "A",
+                constraint: None,
+            },
+            RelationBinderSpec {
+                ordinal: 1,
+                name: "A",
+                constraint: None,
+            },
+        ],
+        &["c1"],
+        Some(EngineObservationPin::UnsupportedKey),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&dup_name),
+        Err(RelationRegistryError::DuplicateBinderName { .. })
+    ));
+
+    // An UnsupportedKey pin on a binder-free spec rejects (only an inference
+    // context is an unsupported key).
+    let bad_pin = [rel_spec(
+        "row_d",
+        &[],
+        &["c1"],
+        Some(EngineObservationPin::UnsupportedKey),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&bad_pin),
+        Err(RelationRegistryError::PinShape { .. })
+    ));
+
+    // A MismatchedVerdict pin on a binder-carrying spec rejects (an inference
+    // key has no engine verdict to pin).
+    let bad_pin2 = [rel_spec(
+        "row_e",
+        &[RelationBinderSpec {
+            ordinal: 0,
+            name: "A",
+            constraint: None,
+        }],
+        &["c1"],
+        Some(EngineObservationPin::MismatchedVerdict(
+            RelationEngineVerdict::Assignable,
+        )),
+    )];
+    assert!(matches!(
+        relation_registry_well_formed(&bad_pin2),
+        Err(RelationRegistryError::PinShape { .. })
+    ));
+
+    // A contract row named by two specs rejects.
+    let dup_contract = [
+        rel_spec("row_f", &[], &["shared_contract"], None),
+        rel_spec("row_g", &[], &["shared_contract"], None),
+    ];
+    assert!(matches!(
+        relation_registry_well_formed(&dup_contract),
+        Err(RelationRegistryError::DuplicateContractRow { .. })
+    ));
+
+    // An empty contract-row mapping rejects.
+    let empty_contract = [rel_spec("row_h", &[], &[], None)];
+    assert!(matches!(
+        relation_registry_well_formed(&empty_contract),
+        Err(RelationRegistryError::EmptyField { .. })
+    ));
+}

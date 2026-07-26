@@ -67,6 +67,7 @@ mod oracle_raw_surface_capture;
 mod recursive_conditional;
 mod recursive_union;
 mod relation_semantics;
+mod relation_verdict_oracle;
 mod shallow_surface_facts;
 mod substitution_types;
 // `pub(crate)` so the moved `oracle_core::driver` (consumption side, `#[cfg(test)]`)

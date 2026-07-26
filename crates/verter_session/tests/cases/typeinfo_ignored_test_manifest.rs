@@ -2769,6 +2769,13 @@ fn decode_all_snapshot_bindings() -> Vec<OracleIdentityBinding> {
             let bytes = fs::read(&p).unwrap_or_else(|e| panic!("read snapshot {p:?}: {e}"));
             let json: serde_json::Value = serde_json::from_slice(&bytes)
                 .unwrap_or_else(|e| panic!("parse snapshot {p:?}: {e}"));
+            // The v4 `relation_verdict` family is capture-only (never a lift):
+            // its DISTINCT closed identity carries no `symbol_or_expression`
+            // and no retained-lift provenance (schema v4 kind-keyed), so the
+            // lifted-row binding rails below scope it out.
+            if json["oracle_value_kind"].as_str() != Some("structured_type_expr") {
+                continue;
+            }
             let rr = &json["row_ref"];
             let idt = &json["identity"];
             let s = |v: &serde_json::Value, field: &str| -> String {
@@ -3792,6 +3799,13 @@ fn snapshot_migration_fingerprint_matches_retained_lift_metadata() {
             }
             let j: serde_json::Value =
                 serde_json::from_slice(&fs::read(&p).unwrap()).expect("snapshot JSON");
+            // The v4 `relation_verdict` family is capture-only (never a lift),
+            // so it carries NO retained provenance BY DESIGN (schema v4
+            // kind-keyed: the migration mirror + source digest are forbidden
+            // cross-kind fields there) — the lifted-row rails skip it.
+            if j["oracle_value_kind"].as_str() != Some("structured_type_expr") {
+                continue;
+            }
             let row_file = j["row_ref"]["row_file"].as_str().unwrap();
             let row_function = j["row_ref"]["row_function"].as_str().unwrap();
             let m = oracle_registry::LIFTED_ROW_MIGRATIONS
@@ -3842,6 +3856,13 @@ fn snapshot_workspace_files_match_retained_provenance() {
             }
             let j: serde_json::Value =
                 serde_json::from_slice(&fs::read(&p).unwrap()).expect("snapshot JSON");
+            // The v4 `relation_verdict` family is capture-only (never a lift),
+            // so it carries NO retained provenance BY DESIGN (schema v4
+            // kind-keyed: the migration mirror + source digest are forbidden
+            // cross-kind fields there) — the lifted-row rails skip it.
+            if j["oracle_value_kind"].as_str() != Some("structured_type_expr") {
+                continue;
+            }
             let row_file = j["row_ref"]["row_file"].as_str().unwrap();
             let row_function = j["row_ref"]["row_function"].as_str().unwrap();
             let m = oracle_registry::LIFTED_ROW_MIGRATIONS

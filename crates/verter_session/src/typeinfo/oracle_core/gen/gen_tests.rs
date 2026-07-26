@@ -97,6 +97,23 @@ fn synthetic_config(corpus_dir: &std::path::Path, snapshot_dir: &std::path::Path
     }
 }
 
+/// The synthetic retained-migration provenance the idempotence proof hands to
+/// `generate_snapshot_with_migration` — the synthetic spec is NOT a lifted row
+/// (it seats no real `LIFTED_ROW_MIGRATIONS` entry), so the proof supplies the
+/// record the production lookup would require, mirroring `synthetic_config`'s
+/// substitution of the registry's pinned-env constants.
+const SYNTHETIC_MIGRATION: super::super::query_specs::LiftMigrationProvenance =
+    super::super::query_specs::LiftMigrationProvenance {
+        row_file: "gen_idempotence_synthetic.rs",
+        row_function: "gen_probe_resolves",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint:
+            "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+        workspace_files: &[],
+        original_body_tokens: "{}",
+    };
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oracle_gen_is_idempotent() {
     let corpus = tempfile::tempdir().expect("corpus tempdir");
@@ -105,7 +122,7 @@ async fn oracle_gen_is_idempotent() {
     let spec = synthetic_spec();
 
     // First generation. A tsgo-less environment SKIPS (mirrors the spike).
-    let first = match generate_snapshot(&spec, &config).await {
+    let first = match generate_snapshot_with_migration(&spec, &config, &SYNTHETIC_MIGRATION).await {
         Ok(doc) => doc,
         Err(GenError::TsgoUnavailable(msg)) => {
             eprintln!("oracle_gen_is_idempotent: SKIP — tsgo not available: {msg}");
@@ -168,7 +185,7 @@ async fn oracle_gen_is_idempotent() {
 
     // (3) Idempotence — a second run over the unchanged spec + corpus is
     //     BYTE-IDENTICAL under the canonical encoding.
-    let second = generate_snapshot(&spec, &config)
+    let second = generate_snapshot_with_migration(&spec, &config, &SYNTHETIC_MIGRATION)
         .await
         .expect("second generation");
     assert_eq!(
@@ -180,43 +197,60 @@ async fn oracle_gen_is_idempotent() {
     assert_eq!(first["snapshot_id"], second["snapshot_id"]);
 }
 
-/// A genuinely-discriminating companion: a fixture carrying a NON-allowlisted
-/// construct (a method — a callable member) must be REJECTED by the two-sided
-/// admission, so the generator writes NO snapshot for it. Proves the gate is live
-/// in the generator, not bypassed. SKIPS without tsgo.
+/// A genuinely-discriminating companion: a fixture whose construct Verter
+/// reduces CLEANLY (the reducer preflight passes) but whose source body sits
+/// OUTSIDE the two-sided admission allowlist must be REJECTED by the ADMISSION
+/// gate — so the generator writes NO snapshot for it and the expected outcome
+/// is exactly `GenError::Rejected` (never `PreflightUnclean`). The construct is
+/// a TEMPLATE-LITERAL type: Verter reduces it to the clean literal union
+/// (`"pfx_a" | "pfx_b"`, operator-free — preflight admits), while admission
+/// classifies the `TemplateLiteral` source body as a deferred construct outside
+/// the source-root carve-out and rejects. (A method would now be ADMITTED
+/// per-signature by admission rule E3, and a mapped/conditional alias dies
+/// earlier at the reducer preflight as an opaque miss — neither exercises THIS
+/// gate.) Proves the admission gate is live in the generator, not bypassed:
+/// with admission admitting everything the pipeline would produce `Ok`.
+/// SKIPS without tsgo.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oracle_gen_rejects_non_allowlisted_construct() {
-    const METHOD_FIXTURE: &str = "export type HasMethod = { m(): void };\n";
+    const TEMPLATE_FIXTURE: &str = "export type HasTemplate = `pfx_${\"a\" | \"b\"}`;\n";
     const FILES: &[super::super::query_specs::WorkspaceFileSpec] =
         &[super::super::query_specs::WorkspaceFileSpec {
-            path: "/fixtures/has_method.ts",
-            source: METHOD_FIXTURE,
+            path: "/fixtures/has_template.ts",
+            source: TEMPLATE_FIXTURE,
         }];
     let corpus = tempfile::tempdir().expect("corpus tempdir");
     let snapshots = tempfile::tempdir().expect("snapshot tempdir");
     let config = synthetic_config(corpus.path(), snapshots.path());
     let mut spec = synthetic_spec();
     spec.workspace_files = FILES;
-    spec.primary_canonical = "/fixtures/has_method.ts";
+    spec.primary_canonical = "/fixtures/has_template.ts";
     spec.query_helper = QueryHelperSpec::ResolveExpr {
-        symbol: "HasMethod",
+        symbol: "HasTemplate",
         type_args: &[],
         projection_mode: ProjectionModeSpec::Expanded,
         probe_rhs: ProbeRhsSpec::Bare,
     };
     spec.source_locator = super::super::query_specs::SourceLocatorSpec {
-        reference_canonical: "/fixtures/has_method.ts",
-        reference_name: "HasMethod",
+        reference_canonical: "/fixtures/has_template.ts",
+        reference_name: "HasTemplate",
         symbol_space: SymbolSpace::Type,
     };
 
-    match generate_snapshot(&spec, &config).await {
-        Err(GenError::Rejected(_)) => { /* correct — the callable member rejects */ }
+    // Drive the provenance-explicit body so the lifted-row provenance lookup is
+    // not the gate that fires. The preflight MUST pass (Verter reduces the
+    // template literal cleanly), so exactly the TWO-SIDED ADMISSION rejects.
+    match generate_snapshot_with_migration(&spec, &config, &SYNTHETIC_MIGRATION).await {
+        Err(GenError::Rejected(_)) => { /* correct — the admission gate rejects */ }
         Err(GenError::TsgoUnavailable(msg)) => {
             eprintln!("oracle_gen_rejects_non_allowlisted_construct: SKIP — tsgo: {msg}");
         }
-        Ok(_) => panic!("a method-bearing type must be REJECTED by the two-sided gate"),
-        Err(e) => panic!("expected Rejected, got {e:?}"),
+        Ok(_) => panic!("a template-literal-bodied type must be REJECTED by the admission gate"),
+        Err(e) => panic!(
+            "expected Rejected from the ADMISSION gate (the preflight must PASS for this \
+             fixture — a PreflightUnclean here means the fixture no longer exercises admission), \
+             got {e:?}"
+        ),
     }
 }
 
@@ -466,4 +500,326 @@ fn distributive_identity_only_for_expanded_keyof_carveout() {
     // is caught by the existing hover-side gates, not here).
     assert!(cross_check(&strategy_spec("PreflightPlain", Expanded, Bare)).is_ok());
     assert!(cross_check(&strategy_spec("PreflightKeyof", Expanded, Bare)).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// The v4 relation capture pipeline — the relation analog of
+// `oracle_gen_is_idempotent`: drives `generate_relation_snapshot` end-to-end
+// against the PINNED tsgo over a SYNTHETIC relation spec and asserts schema
+// completeness + strict decodability + BYTE-IDENTICAL regeneration. SKIPS
+// (does not fail) when tsgo is not installed.
+// ---------------------------------------------------------------------------
+
+/// The synthetic relation spec: `{ value: number }` against `{ value: infer V }`
+/// — one binder, an object-property inference the empirical wire table proves.
+fn synthetic_relation_spec() -> super::super::query_specs::RelationQuerySpec {
+    super::super::query_specs::RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function: "gen_relation_synthetic",
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: super::super::query_specs::HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: super::super::query_specs::HostSetupKindSpec::Standalone,
+        },
+        source_text: "{ value: number }",
+        target_text: "{ value: infer V }",
+        binder_layout: &[super::super::query_specs::RelationBinderSpec {
+            ordinal: 0,
+            name: "V",
+            constraint: None,
+        }],
+        contract_rows: &["relation_gen_synthetic_contract"],
+        engine_pin: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_gen_is_idempotent() {
+    let corpus = tempfile::tempdir().expect("corpus tempdir");
+    let snapshots = tempfile::tempdir().expect("snapshot tempdir");
+    let config = synthetic_config(corpus.path(), snapshots.path());
+    let spec = synthetic_relation_spec();
+
+    // First generation. A tsgo-less environment SKIPS (mirrors the spike).
+    let first = match generate_relation_snapshot(&spec, &config).await {
+        Ok(doc) => doc,
+        Err(GenError::TsgoUnavailable(msg)) => {
+            eprintln!("relation_gen_is_idempotent: SKIP — tsgo not available: {msg}");
+            return;
+        }
+        Err(e) => panic!("first relation generation failed: {e:?}"),
+    };
+
+    // (1) Schema-COMPLETE + strictly decodable, kind-keyed envelope.
+    let decoded = snapshot::decode_strict(&first)
+        .unwrap_or_else(|e| panic!("generated relation snapshot must strict-decode: {e:?}"));
+    assert_eq!(decoded.oracle_value_kind, "relation_verdict");
+    assert_eq!(decoded.row_ref.row_function, "gen_relation_synthetic");
+    assert!(
+        decoded.migration_fingerprint.is_none() && decoded.source_admission_digest.is_none(),
+        "a capture-only relation row carries no lift provenance and no source digest"
+    );
+    assert_eq!(first["oracle_value"]["verdict"], "assignable");
+    assert_eq!(first["oracle_value"]["bindings"][0]["name"], "V");
+    assert_eq!(first["oracle_value"]["bindings"][0]["ordinal"], 0);
+    assert!(
+        first["raw_capture"]["hover_contents"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("__oracle_probe__0"),
+        "raw_capture must retain the verbatim probe-naming hover"
+    );
+    assert!(
+        first["raw_capture"]["probe_scaffold"].is_null(),
+        "the relation tuple-wire probe has no scaffold"
+    );
+    // The materialized value rides the normalized boundary: V = number.
+    let value = snapshot::materialize_relation_value(&decoded).expect("materializes");
+    assert_eq!(value.bindings.len(), 1);
+    assert!(matches!(
+        value.bindings[0].bound,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    ));
+
+    // (2) Idempotence — a second run over the unchanged spec + corpus is
+    //     BYTE-IDENTICAL under the canonical encoding.
+    let second = generate_relation_snapshot(&spec, &config)
+        .await
+        .expect("second relation generation");
+    assert_eq!(
+        normalize::canonical_json_string(&first),
+        normalize::canonical_json_string(&second),
+        "re-running the relation generator over an unchanged spec + corpus must be byte-identical"
+    );
+    assert_eq!(first["snapshot_id"], second["snapshot_id"]);
+}
+
+// ---------------------------------------------------------------------------
+// The v3→v4 re-key proof: tsgo-free + byte-deterministic +
+// relation-safe. Runs `upgrade_snapshots_to_v4_in` over a SYNTHETIC temp tree
+// (never the checked-in snapshots) and asserts: (a) ONLY
+// `oracle_schema_version` + `snapshot_id` change per re-keyed file (every
+// tsgo-derived byte identical); (b) the new stored id redrives from the
+// stored identity; (c) re-running is byte-idempotent; (d) a `relation_verdict`
+// file is SKIPPED untouched. NO tsgo anywhere in this test.
+// ---------------------------------------------------------------------------
+
+/// A synthetic v3 `structured_type_expr` snapshot document (hand-built valid —
+/// the strict decoder must accept it after the re-key).
+fn synthetic_v3_snapshot(root_family: &str) -> (serde_json::Value, String) {
+    let spec = synthetic_spec();
+    let env = GenConfig::checked_in().env;
+    let identity = build_identity(&spec);
+    let v3_env = identity::PinnedEnv {
+        oracle_schema_version: 3,
+        ..env
+    };
+    let probe_locator = snapshot::ProbeLocator {
+        probe_name: "__oracle_probe__0".to_string(),
+        offset: 0,
+    };
+    let doc = snapshot::assemble_snapshot_document(
+        root_family,
+        &identity,
+        &v3_env,
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            .to_json_value(),
+        &probe_locator,
+        &serde_json::json!({
+            "probe_name": "__oracle_probe__0",
+            "probe_header": "type __oracle_probe__0 = GenProbe;",
+            "probe_scaffold": null,
+            "hover_contents": "```typescript\ntype __oracle_probe__0 = number;\n```",
+        }),
+        &serde_json::json!({ "manifest": [], "files": [] }),
+        "blake3:placeholder",
+        &serde_json::json!({
+            "source_locator": {
+                "reference_canonical": "/fixtures/gen_probe.ts",
+                "reference_name": "GenProbe",
+                "symbol_space": "Type",
+            },
+            "observed_source_files": [],
+            "contributors": [],
+            "final_verdict": "Admit",
+        }),
+        1,
+        "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    let snapshot_id = doc["snapshot_id"].as_str().expect("id").to_string();
+    (doc, snapshot_id)
+}
+
+#[test]
+fn upgrade_to_v4_in_is_tsgo_free_deterministic_and_relation_safe() {
+    let dir = tempfile::tempdir().expect("temp root");
+    let root = dir.path();
+    let family_dir = root.join("utility_composition");
+    std::fs::create_dir_all(&family_dir).expect("family dir");
+
+    // A v3 snapshot on disk + a relation_verdict file beside it.
+    let (v3_doc, v3_id) = synthetic_v3_snapshot("utility_composition");
+    let v3_path = family_dir.join(format!("{v3_id}.json"));
+    std::fs::write(&v3_path, normalize::canonical_json_string(&v3_doc)).expect("write v3");
+    let relation_dir = root.join("relation_verdict");
+    std::fs::create_dir_all(&relation_dir).expect("relation dir");
+    let relation_path = relation_dir.join("u_relation.json");
+    let relation_bytes = serde_json::to_string(&serde_json::json!({
+        "oracle_value_kind": "relation_verdict",
+        "note": "skipped before any v3-only field is read"
+    }))
+    .expect("relation json");
+    std::fs::write(&relation_path, &relation_bytes).expect("write relation");
+
+    // First run: re-keys the v3 file, skips the relation file.
+    let (written, deleted) = upgrade_snapshots_to_v4_in(root).expect("first re-key");
+    assert_eq!((written, deleted), (1, 1), "one v3 file re-keyed + removed");
+    assert!(!v3_path.exists(), "the stale v3 file is removed");
+    assert_eq!(
+        std::fs::read_to_string(&relation_path).expect("relation file"),
+        relation_bytes,
+        "the relation_verdict file is SKIPPED untouched"
+    );
+
+    // Exactly one v4 file, differing from the v3 doc in ONLY
+    // oracle_schema_version + snapshot_id.
+    let entries: Vec<_> = std::fs::read_dir(&family_dir)
+        .expect("family dir")
+        .flatten()
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let v4_text = std::fs::read_to_string(entries[0].path()).expect("read v4");
+    let v4_doc: serde_json::Value = serde_json::from_str(&v4_text).expect("parse v4");
+    assert_eq!(v4_doc["oracle_schema_version"], 4);
+    assert_eq!(v3_doc["oracle_schema_version"], 3);
+    assert_ne!(v4_doc["snapshot_id"], v3_doc["snapshot_id"]);
+    for key in v3_doc.as_object().expect("v3 object").keys() {
+        if key == "oracle_schema_version" || key == "snapshot_id" {
+            continue;
+        }
+        assert_eq!(
+            v4_doc.get(key),
+            v3_doc.get(key),
+            "field `{key}` must be byte-identical after the re-key (only the \
+             schema version + the derived id change)"
+        );
+    }
+    // The new file name IS the new stored id, and the stored id redrives from
+    // the stored identity (decode_strict doubles as the well-formedness gate).
+    let decoded = snapshot::decode_strict(&v4_doc).expect("v4 decodes");
+    let redriven = snapshot::redrive_snapshot_id(&decoded).expect("redrive");
+    assert_eq!(redriven, v4_doc["snapshot_id"].as_str().expect("id"));
+    assert_eq!(
+        entries[0].path().file_stem().and_then(|s| s.to_str()),
+        Some(redriven.as_str()),
+        "the file name is the redriven id"
+    );
+
+    // Second run: byte-idempotent (overwrites itself with identical bytes,
+    // deletes nothing).
+    let (written2, deleted2) = upgrade_snapshots_to_v4_in(root).expect("second re-key");
+    assert_eq!((written2, deleted2), (1, 0));
+    let v4_text2 = std::fs::read_to_string(entries[0].path()).expect("read v4 again");
+    assert_eq!(
+        v4_text, v4_text2,
+        "re-running the re-key is byte-idempotent"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Constrained-infer generation: the bound is verified against the
+// declared constraint through a second tuple-wire probe drive, and the
+// constrained row never aliases the unconstrained one. SKIPS without tsgo.
+// ---------------------------------------------------------------------------
+
+fn synthetic_constrained_spec(
+    row_function: &'static str,
+    source_text: &'static str,
+) -> super::super::query_specs::RelationQuerySpec {
+    super::super::query_specs::RelationQuerySpec {
+        row_file: "relation_verdict_oracle.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "relation_verdict",
+        host_project: super::super::query_specs::HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: super::super::query_specs::HostSetupKindSpec::Standalone,
+        },
+        source_text,
+        target_text: "{ value: infer V extends string }",
+        binder_layout: &[super::super::query_specs::RelationBinderSpec {
+            ordinal: 0,
+            name: "V",
+            constraint: Some("string"),
+        }],
+        contract_rows: &["relation_constrained_gen_contract"],
+        engine_pin: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relation_gen_constrained_infer_verifies_bound_against_constraint() {
+    let corpus = tempfile::tempdir().expect("corpus tempdir");
+    let snapshots = tempfile::tempdir().expect("snapshot tempdir");
+    let config = synthetic_config(corpus.path(), snapshots.path());
+
+    // (A) The satisfying source: `{ value: string }` binds V = string, which
+    // SATISFIES the declared `extends string` — the constraint-check probe
+    // drive passes and the snapshot generates.
+    let spec_a = synthetic_constrained_spec("gen_constrained_assignable", "{ value: string }");
+    let first = match generate_relation_snapshot(&spec_a, &config).await {
+        Ok(doc) => doc,
+        Err(GenError::TsgoUnavailable(msg)) => {
+            eprintln!("relation_gen_constrained_infer: SKIP — tsgo not available: {msg}");
+            return;
+        }
+        Err(e) => panic!("constrained generation failed: {e:?}"),
+    };
+    assert_eq!(first["oracle_value"]["verdict"], "assignable");
+    assert_eq!(
+        first["identity"]["binder_layout"][0]["constraint"],
+        serde_json::json!({ "kind": "primitive", "name": "string" }),
+        "the stored layout entry carries the canonical constraint"
+    );
+    let decoded = snapshot::decode_strict(&first).expect("strict decode");
+    let value = snapshot::materialize_relation_value(&decoded).expect("materialize");
+    assert!(matches!(
+        value.bindings[0].bound,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    ));
+    // Idempotent.
+    let second = generate_relation_snapshot(&spec_a, &config)
+        .await
+        .expect("second constrained generation");
+    assert_eq!(
+        normalize::canonical_json_string(&first),
+        normalize::canonical_json_string(&second),
+        "constrained regeneration is byte-identical"
+    );
+
+    // (B) The violating source: `{ value: number }` FAILS the constraint at
+    // inference — tsgo answers `not_assignable` with NO bindings (there is no
+    // violating bound to check), and the row generates cleanly with an
+    // identity DISTINCT from (A) and from the unconstrained variant (no
+    // aliasing escape).
+    let spec_b = synthetic_constrained_spec("gen_constrained_failed_infer", "{ value: number }");
+    let failed = generate_relation_snapshot(&spec_b, &config)
+        .await
+        .expect("failed-infer constrained generation");
+    assert_eq!(failed["oracle_value"]["verdict"], "not_assignable");
+    assert_eq!(failed["oracle_value"]["bindings"], serde_json::json!([]));
+    assert_eq!(
+        failed["identity"]["binder_layout"][0]["constraint"],
+        serde_json::json!({ "kind": "primitive", "name": "string" }),
+        "the failed-infer row still records the constraint in its identity"
+    );
+    assert_ne!(
+        failed["snapshot_id"], first["snapshot_id"],
+        "the constrained failed-infer row must not alias the satisfying row"
+    );
 }

@@ -5948,11 +5948,13 @@ mod foundations_guards {
         // `ProjectionReductionContext`, so the reducing lowering entry is
         // unreachable from the locator path by type.
         "pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx",
-        // TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
+        // TS7 oracle harness snapshot GENERATOR entries — `pub` ONLY under the
         // `oracle-gen` feature (off the default closure), so the
-        // `src/bin/oracle_gen` binary (a separate crate that sees only non-test
-        // `pub` lib items) can invoke it. The default build never compiles it.
-        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v3, GenError}",
+        // `src/bin/oracle_gen` + `src/bin/oracle_upgrade` binaries (separate
+        // crates that see only non-test `pub` lib items) can invoke them. The
+        // default build never compiles them. `upgrade_snapshots_to_v4` is the
+        // schema-v4 tsgo-free re-key (supersedes the v2→v3 re-key export).
+        "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v4, GenError}",
         // Env-gated declaration-lowering rendezvous instrumentation. The
         // audit/profile examples consume this narrow snapshot API across the
         // crate boundary; ordinary runtime code never consults it, and the
@@ -9406,6 +9408,14 @@ mod foundations_guards {
             "TS7 oracle harness snapshot GENERATOR (`#[cfg(feature = \"oracle-gen\")]`, excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via `std::fs` — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
+            "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs",
+            "TS7 oracle harness v4 `relation_verdict` consumption driver (`#[cfg(test)]` in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime `std::fs::read`, the same design-mandated mechanism (docs/arch/u0-oracle-harness-design.md §Q1) the v3 consumption driver above is listed for. Not a NativeFs/VFS disk-boundary bypass — in-repo test fixtures, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
+            "TS7 oracle harness v4 `relation_verdict` rows (`#[cfg(test)]` typeinfo tests) — load checked-in relation snapshot TEST FIXTURES via runtime `std::fs::read` for the capture-backed assertions (one true/false wire shape, ordered bindings), the same runtime-fs mechanism the design mandates. Not a NativeFs/VFS disk-boundary bypass — in-repo test fixtures, never workspace/semantic state.",
+        ),
+        (
             "crates/verter_lsp/src/audit_harness.rs",
             "LSP audit telemetry — `VERTER_LSP_AUDIT_TRACE_OUT` JSON-lines drainer. Off by default and gated behind the env var at the call site; mirrors the existing `VERTER_COMPONENT_META_AUDIT_JSON_OUT` drainer in `verter_session::component_meta_audit`.",
         ),
@@ -10639,7 +10649,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     // Rows that stop matching any live OXC `Parser::new` site must be
     // DELETED, not kept as pre-authorization for future uncounted
     // parses (the anti-vacuity check below enforces this).
-    let allow_list: [(&str, usize); 8] = [
+    let allow_list: [(&str, usize); 9] = [
         // The `ParsedEvalProgram::parse` constructor IS the
         // scheduler-bound parse entry — the single eval-program parse
         // funnel; `host_manage::eval_program::parse_eval_program` is
@@ -10711,6 +10721,16 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         (
             "crates/verter_session/src/typeinfo/oracle_core/admission.rs",
             2,
+        ),
+        // The v4 relation tuple-wire probe (same oracle-core category as the
+        // rows above): parses SMALL synthetic probe texts — the operand
+        // canonicalization wrapper (`type __oracle_operand__ = …`), the
+        // strict probe-header inverse, and the strict tuple-wire decode
+        // wrapper — each constructing and dropping a local `Allocator` within
+        // one function, none populating a host cache.
+        (
+            "crates/verter_session/src/typeinfo/oracle_core/relation_probe.rs",
+            3,
         ),
     ];
 
@@ -16639,6 +16659,13 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // both the `oracle-gen` generator and the consumption guard
     // `source_admission_digest_consistent`.
     "crates/verter_session/src/typeinfo/oracle_core/source_digest.rs",
+    // The v4 `relation_verdict` consumption driver (`#[cfg(test)]` only —
+    // never on the production resolver path): builds the SAME quiescent owned
+    // view over a freshly-constructed standalone host to observe the engine's
+    // live `relate_nodes` answer for a registry relation spec, mirroring the
+    // `support.rs` shallow-surface pattern. The raw-text scan cannot see the
+    // cfg(test) boundary.
+    "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs",
     // Inline `#[cfg(test)]` proof only (the input-side no-poison gate test
     // builds a quiescent bare-host owned view over a standalone host); no
     // production code path in this file touches the raw view — the raw-text

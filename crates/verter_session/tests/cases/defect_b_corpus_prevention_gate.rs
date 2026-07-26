@@ -1222,4 +1222,3 @@ fn fact_signature_overflow_never_fires_on_the_real_corpus() {
          decision.",
     );
 }
-
