@@ -2,8 +2,7 @@
 //! (`super::MetaSession`): the fixed-view scalar and batch entries producing
 //! the session-owned [`crate::meta_resolve::ComponentMetaOutput`], plus the
 //! test-only payload completeness probe. Continuation `impl MetaSession`
-//! block; split out of `meta.rs` to keep the parent module within the
-//! production file-size gate.
+//! block, kept separate from `meta.rs` so output-envelope APIs remain focused.
 
 #[cfg(test)]
 use super::PAYLOAD_ITEM_COMPLETENESS_PROBE;

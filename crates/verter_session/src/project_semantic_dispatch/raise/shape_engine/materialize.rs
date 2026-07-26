@@ -1,8 +1,8 @@
 //! Algebra 1 of the shared shape engine: `MaterializeTypeExprAlg` — the EXACT
 //! historical `SemanticNodeId -> TypeExpr` materialization, reached only through
-//! the sealed `OutputProjector` output seam and the `#[cfg(test)]` oracle. Split
-//! from the parent for file-size; the fold + the algebra trait live in the
-//! parent `shape_engine` module.
+//! the sealed `OutputProjector` output seam and the `#[cfg(test)]` oracle. The
+//! algebra stays separate while the shared fold and trait remain in the parent
+//! `shape_engine` module.
 
 use std::sync::Arc;
 

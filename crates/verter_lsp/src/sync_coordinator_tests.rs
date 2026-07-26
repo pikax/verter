@@ -1,7 +1,7 @@
 //! Unit tests for [`crate::sync_coordinator`] coordinator behavior.
 //!
 //! Extracted from the inline `#[cfg(test)] mod tests` in `sync_coordinator.rs` to
-//! keep the production source under the file-size guard (`no_oversize_files`).
+//! keep the production source small and readable.
 //! Wired back as a `#[cfg(test)] #[path = "sync_coordinator_tests.rs"] mod tests;`
 //! child of `sync_coordinator`, so `use super::*` resolves to its items.
 

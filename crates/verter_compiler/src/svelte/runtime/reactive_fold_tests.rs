@@ -1,6 +1,6 @@
 //! Unit tests for the Svelte client const-fold evaluator (`mixed_chunk_fold` /
-//! `mixed_chunk_nullish_wrap`) — extracted from the inline `#[cfg(test)]` module to keep
-//! `reactive_fold.rs` under the file-size guard. Included via `#[path]`.
+//! `mixed_chunk_nullish_wrap`), kept in a sibling so the evaluator and its tests
+//! remain independently readable. Included via `#[path]`.
 
 use super::super::expr::{BindingRuntimeKind, BindingTable, ScopeGraph};
 use super::super::reactive_fold_tristate::{ChunkFold, ConstFoldRefuse, LiveFallbackReason};

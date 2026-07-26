@@ -6,11 +6,10 @@
 //! impls delegate to [`TypeExpr::to_json_value`] and
 //! [`type_expr_from_json`].
 //!
-//! These impls live here (rather than inline in `lib.rs`) purely to keep
-//! the crate root under the production file-size budget. The orphan rule
-//! permits `impl Serialize`/`impl Deserialize for TypeExpr` in any module
-//! of this crate because `TypeExpr` is crate-local; the helpers reach
-//! every node type through `use crate::*`.
+//! These impls live here so JSON transport remains separate from the core type
+//! definitions in `lib.rs`. The orphan rule permits `impl Serialize`/`impl
+//! Deserialize for TypeExpr` in any module of this crate because `TypeExpr` is
+//! crate-local; the helpers reach every node type through `use crate::*`.
 
 use crate::*;
 use serde::ser::Serialize;

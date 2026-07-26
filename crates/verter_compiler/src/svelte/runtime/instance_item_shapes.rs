@@ -2,8 +2,8 @@
 //! and the state scan: the assignable effect-family EXPRESSION-rune shape
 //! (`$effect.root(fn)` / `$effect.tracking()` declarator inits) and the
 //! `$props.id()` declarator shape (the hoisted-id carrier + its literal-only
-//! siblings). Extracted from `instance_items.rs` (the file-size guard
-//! boundary); both classifiers stay the SINGLE shape authority their consumers
+//! siblings). Kept separate from `instance_items.rs` so both classifiers stay
+//! the SINGLE focused shape authority their consumers
 //! (`classify_instance_variable_decl`, `state_scan`) share.
 
 use oxc_ast::ast::{BindingPattern, Comment, VariableDeclarationKind};

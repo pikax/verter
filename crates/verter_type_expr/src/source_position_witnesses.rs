@@ -1,6 +1,7 @@
 //! Discrimination + serde/hash/accessor witnesses for the three-state
 //! [`SourcePosition`] carrier — the source-position sibling of
-//! [`super::fact_witnesses`] (split out for the production file-size gate).
+//! [`super::fact_witnesses`], kept separate so these runtime discrimination
+//! fixtures remain focused.
 //! The compile-time marker witnesses for the carrier live in the parent
 //! witness file's `assert_fact_carriers!` list; this file owns the runtime
 //! discrimination fixtures: the three states never alias (the aliasing —

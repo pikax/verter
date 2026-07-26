@@ -2222,9 +2222,8 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
             // builder). It mints the cap INTERNALLY in
             // `build_component_meta_output` and drives the per-source terminal
             // (`materialize_output_source`) — output transport only, no
-            // decision on any materialized value. A genuine co-sink split out
-            // of `output_sink.rs` for the file-size gate, NOT a non-sink
-            // helper.
+            // decision on any materialized value. A genuine co-sink separated
+            // by terminal output responsibility, NOT a non-sink helper.
             "crate :: meta_resolve :: projectors :: output_sink :: envelope",
             // The published-field FINALIZE half of the terminal sink (the
             // whole-surface field-type reducer over `ExpandedComponentTypes`,
@@ -2232,8 +2231,8 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
             // node-start reducer (`reduce_field_value_node`, which mints
             // internally) and publishes content-free sources — publication
             // finalize only, no decision on any materialized value. A genuine
-            // co-sink split out of `output_sink.rs` for the file-size gate,
-            // NOT a non-sink helper.
+            // co-sink separated by terminal output responsibility, NOT a
+            // non-sink helper.
             "crate :: meta_resolve :: projectors :: output_sink :: published_finalize",
         ],
     ),
@@ -2247,8 +2246,8 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
         &[
             "crate :: typeinfo :: framework_surface :: vue_exec",
             "crate :: typeinfo :: framework_surface :: vue_exec :: normalize",
-            // The slot half of the per-surface normalizers (file-size split
-            // sibling of `normalize`) — the SAME sanctioned slot sinks
+            // The focused slot half of the per-surface normalizers, a sibling
+            // of `normalize` containing the SAME sanctioned slot sinks
             // (`materialize_slot_return_node`, `slot_binding_field`), minting
             // the cap internally at the terminal display renders.
             "crate :: typeinfo :: framework_surface :: vue_exec :: normalize_slots",
@@ -2995,11 +2994,11 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
     );
     let sink_expected: std::collections::BTreeSet<String> = [
         "crate :: meta_resolve :: projectors :: output_sink",
-        // The sanctioned envelope co-sink (the 11-lane positional
-        // materializer + envelope builder split out for the file-size gate).
+        // The sanctioned envelope co-sink (the focused 11-lane positional
+        // materializer + envelope builder).
         "crate :: meta_resolve :: projectors :: output_sink :: envelope",
-        // The sanctioned published-finalize co-sink (the whole-surface
-        // field-type reducer split out for the file-size gate).
+        // The sanctioned published-finalize co-sink (the focused whole-surface
+        // field-type reducer).
         "crate :: meta_resolve :: projectors :: output_sink :: published_finalize",
     ]
     .iter()

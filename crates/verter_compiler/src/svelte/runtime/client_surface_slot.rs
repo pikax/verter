@@ -1,8 +1,8 @@
 //! The `<slot>`-SURFACE classification half of the default-deny classifier:
 //! the unified `slot=`-ATTRIBUTE placement choke-point
 //! ([`validate_slot_placement`]) and the `<slot>`-ELEMENT official-rule
-//! classifier ([`classify_slot_element`]). Extracted from `client_surface.rs`
-//! (the file-size guard boundary); the per-node walk dispatches here.
+//! classifier ([`classify_slot_element`]). This focused module is the target of
+//! the per-node walk's slot-surface dispatch.
 
 use super::ir::{AttrIr, IrNode, NodeId, SlotElementIr, SpecialKind};
 use super::unsupported::UnsupportedSvelteRuntimeSurface;

@@ -3,9 +3,9 @@
 //! The wide `bind:` family and function bindings project to type-checked IDE
 //! TSX via the generated bind-contract table (the source of truth) and the
 //! prelude's `__verter_bind_*` checker helpers. This module is a continuation
-//! of [`super`]'s `TemplateProjector` impl — extracted for file size; it accesses
-//! the parent module's private projector type, helpers, and the contract table
-//! through `use super::*`.
+//! of [`super`]'s `TemplateProjector` impl, focused on binding projection. It
+//! accesses the parent module's private projector type, helpers, and contract
+//! table through `use super::*`.
 
 use super::*;
 

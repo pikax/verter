@@ -7,7 +7,7 @@
 //! function-member filtering, first-param object bindings, union-of-callables
 //! slots, Pick-binding publication (symbolic nominal-root vs concrete
 //! structural / userland), and the intentional nullable-slot drop. Split out
-//! so neither file exceeds the `no_oversize_files` architecture-guard limit.
+//! to keep each test module a readable size.
 
 use std::sync::Arc;
 

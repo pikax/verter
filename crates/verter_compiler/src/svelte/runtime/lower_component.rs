@@ -1,6 +1,6 @@
 //! The component-family SLOT-DECOMPOSITION lowering — the official `Component.js`
-//! child grouping, extracted from `mod.rs` to keep the lowering module under the
-//! file-size guard.
+//! child grouping, kept separate from `mod.rs` so the lowering responsibilities stay
+//! focused.
 //!
 //! A `<Foo>` component / `<svelte:component>` / `<svelte:self>` / `<svelte:fragment>`
 //! decomposes its children into SLOT regions: a `{#snippet}` def becomes a hoisted

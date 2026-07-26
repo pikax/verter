@@ -1,7 +1,7 @@
 //! The element-spread `$.attribute_effect` + the `{@html}` `$.html` EMISSION helpers.
 //!
-//! Extracted from `client.rs` (the file-size guard boundary): these are the
-//! [`ClientEmitter`] methods that build the emitted call text for the two coalesced
+//! This focused sibling contains the [`ClientEmitter`] methods that build the
+//! emitted call text for the two coalesced
 //! runtime surfaces a spread element / a `{@html}` tag produces. They read the narrow
 //! plan op set + the walk-populated DOM var maps (never a broad-IR emission decision).
 //! The fold ITEMS render through ONE ordered per-effect memoizer (the official

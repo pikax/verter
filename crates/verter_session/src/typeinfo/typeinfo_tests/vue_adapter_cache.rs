@@ -5,8 +5,8 @@
 //! the host-cache identity tests (`vue_macro_dtos` content/kind/level keying +
 //! stale/poison rejection), the `.vue` PUBLIC component-type tests (resolved
 //! through typeinfo WITHOUT component-meta), query-level distinctness, and the
-//! spans-not-strings structural guard. Split out so neither file exceeds the
-//! `no_oversize_files` architecture-guard limit.
+//! spans-not-strings structural guard. Split out to keep both test modules a
+//! readable size.
 
 use std::sync::Arc;
 

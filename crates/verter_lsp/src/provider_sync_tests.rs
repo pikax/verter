@@ -1,7 +1,7 @@
 //! Unit tests for [`crate::provider_sync`] provider-sync state transforms.
 //!
 //! Extracted from the inline `#[cfg(test)] mod tests` in `provider_sync.rs` to
-//! keep the production source under the file-size guard (`no_oversize_files`).
+//! keep the production source small and readable.
 //! Wired back as a `#[cfg(test)] #[path = "provider_sync_tests.rs"] mod tests;`
 //! child of `provider_sync`, so `use super::*` resolves to its items.
 

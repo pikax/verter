@@ -1,6 +1,6 @@
-//! `#[cfg(test)]` modules for `graph_predicates` — extracted to a sibling
-//! `_tests.rs` (excluded from the oversize-files guard) so the production module
-//! stays under the line cap. The nested test modules are descendants of
+//! `#[cfg(test)]` modules for `graph_predicates`, kept in a sibling `_tests.rs`
+//! so the production predicates and their tests remain independently readable.
+//! The nested test modules are descendants of
 //! `graph_predicates`, so `super::super::` reaches its (private) items.
 
 mod node_root_gate_tests {

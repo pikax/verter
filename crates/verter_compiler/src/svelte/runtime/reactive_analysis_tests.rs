@@ -1,6 +1,6 @@
 //! Unit tests for the Svelte client reactive-analysis predicates (`has_call` /
-//! `needs_context`) — extracted from the inline `#[cfg(test)]` module to keep
-//! `reactive_analysis.rs` under the file-size guard. Included via `#[path]`.
+//! `needs_context`), kept in a sibling so the analysis and tests remain
+//! independently readable. Included via `#[path]`.
 
 use super::super::expr::{BindingInfo, BindingRuntimeKind, BindingTable, ScopeGraph};
 use super::expr_has_call;

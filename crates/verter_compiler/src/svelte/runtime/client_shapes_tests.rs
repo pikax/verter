@@ -1,6 +1,6 @@
 //! Unit tests for the client shape classifiers (bind shapes, target-lvalue
-//! writability, interpolation shapes) — extracted from the inline module to keep
-//! `client_shapes.rs` under the file-size guard.
+//! writability, interpolation shapes), kept in a sibling so the classifiers and
+//! their tests remain independently readable.
 
 use super::*;
 use crate::svelte::runtime::expr::BindingInfo;

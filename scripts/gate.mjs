@@ -168,6 +168,7 @@
 //     runner-owned dir.
 //   (No environment variable can divert this CLI to a non-gate success path.)
 
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   // exit-code constants (EXIT_STALL is mapped inside mapStepReason, not referenced directly here)
@@ -219,6 +220,187 @@ import {
 } from "./gate-internals.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+
+const OVERSIZE_SOURCE_LINE_LIMIT = 1500;
+const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
+  "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs.rs",
+  "crates/verter_session/src/host_manage/prepared_decl.rs",
+  "crates/verter_compiler/src/compile/template_data.rs",
+  "crates/verter_compiler/src/svelte/runtime/entity_table.rs",
+  "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
+  "crates/verter_compiler/src/svelte/runtime/expr.rs",
+  "crates/verter_compiler/src/svelte/parser/tokenizer.rs",
+  "crates/verter_compiler/src/ide/template/mod.rs",
+  "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
+  "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",
+  "crates/verter_compiler/src/template/code_gen/vdom/element.rs",
+  "crates/verter_compiler/src/template/code_gen/vdom/slots.rs",
+  "crates/verter_compiler/src/tsc/script.rs",
+  "crates/verter_ffi/src/convert.rs",
+  "crates/verter_lsp/src/config.rs",
+  "crates/verter_lsp/src/features/completion.rs",
+  "crates/verter_lsp/src/server/sync_orchestration.rs",
+  "crates/verter_lsp/src/workspace_scanner.rs",
+  "crates/verter_mcp/src/server.rs",
+  "crates/verter_napi/src/lib.rs",
+  "crates/verter_parser/src/parser/mod.rs",
+  "crates/verter_parser/src/tokenizer/byte.rs",
+  "crates/verter_parser/src/utils/oxc/bindings/helpers.rs",
+  "crates/verter_parser/src/utils/oxc/vue/script/setup.rs",
+  "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
+  "crates/verter_protocol/src/component_meta.rs",
+  "crates/verter_scheduler/src/scheduler.rs",
+  "crates/verter_scheduler/src/dag.rs",
+  "crates/verter_semantic/src/analysis/build.rs",
+  "crates/verter_semantic/src/analysis/component_meta.rs",
+  "crates/verter_semantic/src/analysis/html_intrinsics_data.rs",
+  "crates/verter_semantic/src/analysis/macros.rs",
+  "crates/verter_semantic/src/analysis/style.rs",
+  "crates/verter_semantic/src/analysis/template.rs",
+  "crates/verter_semantic/src/analysis/type_eval_build.rs",
+  "crates/verter_semantic/src/analysis/type_solver/prepared.rs",
+  "crates/verter_semantic/src/analysis/types.rs",
+  "crates/verter_session/src/component_meta_audit/mod.rs",
+  "crates/verter_session/src/component_meta_caches.rs",
+  "crates/verter_session/src/component_meta_materialize.rs",
+  "crates/verter_session/src/file_artifact_store.rs",
+  "crates/verter_session/src/host_manage.rs",
+  "crates/verter_session/src/host_manage/analysis_io.rs",
+  "crates/verter_session/src/host_manage/component_meta_extract.rs",
+  "crates/verter_session/src/host_manage/component_meta_methods.rs",
+  "crates/verter_session/src/host_resolve.rs",
+  "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+  "crates/verter_session/src/resolver_core/mod.rs",
+  "crates/verter_session/src/resolver_store.rs",
+  "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+  "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs",
+  "crates/verter_session/src/meta_resolve/projectors/mod.rs",
+  "crates/verter_session/src/parse.rs",
+  "crates/verter_session/src/request_context.rs",
+  "crates/verter_session/src/project_semantic_dispatch/build.rs",
+  "crates/verter_session/src/project_semantic_dispatch/lower.rs",
+  "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+  "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+  "crates/verter_session/src/project_type_store.rs",
+  "crates/verter_session/src/decl_body_memo.rs",
+  "crates/verter_session/src/host_manage/eval_env.rs",
+  "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+  "crates/verter_type_expr/src/facts.rs",
+  "crates/verter_session/src/resolver_core/component_meta.rs",
+  "crates/verter_session/src/resolver_core/component_meta_registry.rs",
+  "crates/verter_session/src/resolver_core/external_type_frontier.rs",
+  "crates/verter_session/src/resolver_core/fallthrough.rs",
+  "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+  "crates/verter_session/src/semantic_query.rs",
+  "crates/verter_session/src/semantic_query_memo/mod.rs",
+  "crates/verter_session/src/semantic_query_memo/arena.rs",
+  "crates/verter_session/src/semantic_query_memo/derivation.rs",
+  "crates/verter_session/src/semantic_query_memo/family.rs",
+  "crates/verter_session/src/semantic_query_memo/inflight.rs",
+  "crates/verter_session/src/semantic_query_memo/interner.rs",
+  "crates/verter_session/src/semantic_query_memo/stats.rs",
+  "crates/verter_session/src/semantic_query_memo/tests.rs",
+  "crates/verter_session/src/types.rs",
+  "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_catalog.rs",
+  "crates/verter_tsc/src/checker.rs",
+  "crates/verter_type_runtime/src/tsgo/ipc.rs",
+  "crates/verter_type_runtime/src/tsserver/ipc.rs",
+  "crates/verter_workspace/src/resolver.rs",
+  "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+  "crates/verter_wasm/src/lib.rs",
+]);
+
+function countSourceLines(source) {
+  if (source.length === 0) return 0;
+  let lines = source.endsWith("\n") ? 0 : 1;
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lines++;
+  }
+  return lines;
+}
+
+function directoryIdentity(abs, entry) {
+  if (entry && !entry.isDirectory() && !entry.isSymbolicLink()) return null;
+  try {
+    if (!statSync(abs).isDirectory()) return null;
+    return realpathSync(abs);
+  } catch {
+    return null;
+  }
+}
+
+function collectOversizeProductionSources(repoRoot) {
+  const violations = [];
+  const stack = [];
+  const cratesRoot = join(repoRoot, "crates");
+
+  for (const crateEntry of readdirSync(cratesRoot, { withFileTypes: true })) {
+    const crateAbs = join(cratesRoot, crateEntry.name);
+    if (directoryIdentity(crateAbs, crateEntry) === null) continue;
+    const rel = `crates/${crateEntry.name}/src`;
+    const abs = join(crateAbs, "src");
+    if (!existsSync(abs)) continue;
+    const identity = directoryIdentity(abs);
+    if (identity !== null) stack.push({ abs, rel, ancestors: new Set([identity]) });
+  }
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(current.abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const abs = join(current.abs, entry.name);
+      const rel = `${current.rel}/${entry.name}`;
+      const identity = directoryIdentity(abs, entry);
+      if (identity !== null) {
+        if (["tests", "benches", "examples", "target"].includes(entry.name)) continue;
+        // Branch-local identities stop symlink cycles without suppressing a distinct alias path.
+        if (current.ancestors.has(identity)) continue;
+        const ancestors = new Set(current.ancestors);
+        ancestors.add(identity);
+        stack.push({ abs, rel, ancestors });
+        continue;
+      }
+      if (!entry.name.endsWith(".rs")) continue;
+      if (entry.name === "tests.rs" || entry.name.endsWith("_tests.rs")) continue;
+      let source;
+      try {
+        source = readFileSync(abs, "utf8");
+      } catch {
+        continue;
+      }
+      const lines = countSourceLines(source);
+      if (lines > OVERSIZE_SOURCE_LINE_LIMIT && !OVERSIZE_SOURCE_EXEMPTIONS.has(rel)) {
+        violations.push([rel, lines]);
+      }
+    }
+  }
+
+  violations.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return violations;
+}
+
+function reportOversizeProductionSources(repoRoot) {
+  let violations;
+  try {
+    violations = collectOversizeProductionSources(repoRoot);
+  } catch (error) {
+    warn(`oversize-source advisory could not scan the production tree: ${error.message}`);
+    return;
+  }
+  if (violations.length === 0) return;
+
+  const rows = violations.map(([rel, lines]) => `${rel} (${lines} lines)`).join("\n  ");
+  warn(
+    `Oversize source advisory: production source files exceed ${OVERSIZE_SOURCE_LINE_LIMIT} lines\n` +
+      `without an explicit exemption:\n  ${rows}\n\n` +
+      "File size is advisory and does not affect the gate verdict.",
+  );
+}
 
 // ----------------------------------------------------------------------------------------------------
 // Argument parsing. The production CLI accepts ONLY the real-gate flags + --prepare + --help. There is NO
@@ -376,6 +558,8 @@ async function main() {
     err(`could not determine repo root (git rev-parse failed from ${SCRIPT_DIR})`);
     process.exit(EXIT_USAGE);
   }
+
+  reportOversizeProductionSources(repoRealpath);
 
   const runnerTarget = opts.targetDir
     ? isAbsolute(opts.targetDir)

@@ -1,7 +1,7 @@
 //! The instance-SCRIPT lowering half of the Svelte client plan builder.
 //!
-//! Extracted from `client_plan.rs` (the file-size guard boundary): these are the
-//! [`SupportedClientIr`] methods that lower the TYPED supported instance-script
+//! This focused sibling contains the [`SupportedClientIr`] methods that lower
+//! the TYPED supported instance-script
 //! items into the narrow [`ClientScriptItem`] component-FUNCTION-BODY statements
 //! ([`build_script_items`](SupportedClientIr::build_script_items)), the
 //! `$props()` destructure's single prop-source `$.prop` declaration

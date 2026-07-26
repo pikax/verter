@@ -1,7 +1,7 @@
 //! The carrier-facing client compile ENTRY of the Svelte runtime backend.
 //!
-//! Extracted from the runtime module root (the file-size guard boundary):
-//! [`compile_client`] — the REFUSE-BY-DEFAULT pipeline driver (official-reject
+//! This focused module owns [`compile_client`] — the REFUSE-BY-DEFAULT pipeline
+//! driver (official-reject
 //! gate → parse-domain gate → runtime lowering → default-deny classification →
 //! narrow-plan projection → static-template + topology planning → emission) —
 //! and its typed [`ClientCompileError`] outcome.

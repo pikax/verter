@@ -834,6 +834,5 @@ pub(crate) fn resolve_payload_surface(
 // Macro-payload boundary substrate primitives — diagnostic probe,
 // scope tag, branch-merged scope-gated resolver, MemberValueRole —
 // live in the sibling [`macro_payload_substrate`] module to keep this file
-// under the `no_oversize_files` architecture-guard cap. The
-// primitives are re-exported at the module top so call sites
-// continue to import them as `crate::meta_resolve::projectors::*`.
+// a readable size. The primitives are re-exported at the module top so call
+// sites continue to import them as `crate::meta_resolve::projectors::*`.

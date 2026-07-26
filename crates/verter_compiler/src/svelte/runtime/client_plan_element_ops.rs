@@ -1,5 +1,5 @@
 //! Element attribute / class / style op-projection helpers for the narrow client
-//! plan, extracted from `client_plan` to keep it under the file-size guard.
+//! plan, kept separate from `client_plan` so the projection responsibilities stay focused.
 //!
 //! These [`SupportedClientIr`] methods project an accepted element's dynamic plain
 //! attribute / non-static-property / `class` / `style` surfaces into their narrow

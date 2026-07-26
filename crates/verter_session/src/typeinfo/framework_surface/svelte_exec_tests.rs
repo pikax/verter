@@ -1,5 +1,5 @@
-//! Tests for the Svelte resolution leg (extracted from `svelte_exec.rs`
-//! to keep the production module under the oversize-file guard).
+//! Tests for the Svelte resolution leg, kept in a sibling so the production
+//! executor and its tests remain independently readable.
 
 use super::*;
 use verter_compiler::svelte::parser::parse_svelte;

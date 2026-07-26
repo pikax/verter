@@ -1,6 +1,6 @@
 // Vendored fixture source bytes for the U2.JSX-era oracle lift rows
-// (`jsx.ts`), split out of `oracle_query_specs_vendored_sources.rs` to keep
-// each vendored-sources file under the production line-size guard.
+// (`jsx.ts`), grouped separately so this oracle feature family's byte
+// authority remains focused.
 // `include!`'d by `oracle_query_specs.rs` immediately after the
 // module-augmentation vendored-sources file (the registry is the source-byte
 // authority; the guard `inlined_registry_source_is_byte_identical_to_fixture_files`

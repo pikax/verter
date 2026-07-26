@@ -4,8 +4,8 @@
 //! (non-reassignable — the official `constant_assignment` reject), a member deep
 //! write, a grammar-valid TypeScript-wrapped target, a destructuring target). A SECOND `impl`
 //! block of [`BindingOccurrenceCollector`](super::plan::BindingOccurrenceCollector),
-//! extracted from `plan.rs` (the file-size guard boundary); the occurrence
-//! recording + edit planning stay there.
+//! kept separate from `plan.rs` so target classification and occurrence
+//! recording/edit planning remain focused.
 
 use oxc_ast::ast::{AssignmentTarget, Expression, SimpleAssignmentTarget};
 

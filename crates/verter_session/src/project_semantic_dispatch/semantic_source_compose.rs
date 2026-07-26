@@ -4,9 +4,8 @@
 //! carrier nodes — data assembly over already-defined closed facts, with
 //! every interior body position lowered through the memoized locator query
 //! and reference RESOLUTION still happening only at the consuming dispatch
-//! demands. Split from `semantic_source.rs` along the fact-shell seam for
-//! the production file-size gate; the raise ENTRIES, the strict-raise sink,
-//! and the locator absolutization stay in the parent-half module.
+//! demands. The fact-shell seam keeps composition focused here while the raise
+//! ENTRIES, strict-raise sink, and locator absolutization stay in the parent module.
 
 use std::sync::Arc;
 

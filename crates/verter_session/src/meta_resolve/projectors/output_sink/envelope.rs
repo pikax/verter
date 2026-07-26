@@ -8,8 +8,8 @@
 //! (`pub(in crate::meta_resolve::projectors::output_sink)`) covers this
 //! descendant, so envelope assembly can mint
 //! [`MetaResolveProjectorsOutputCap`] while every non-sink projector module
-//! still cannot (`E0624`). Split out of `output_sink.rs` for the production
-//! file-size gate; a SANCTIONED co-sink of the cap's mint scope (registered
+//! still cannot (`E0624`). It is a SANCTIONED co-sink that keeps envelope
+//! assembly separate from the other terminal output responsibilities (registered
 //! in the mint-scope guard's `SANCTIONED_SINK_MODULES`).
 
 use verter_type_expr::TypeExpr;

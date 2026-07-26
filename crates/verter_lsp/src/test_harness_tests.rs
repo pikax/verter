@@ -2,8 +2,8 @@
 //!
 //! Wired back as `#[cfg(test)] #[path = "test_harness_tests.rs"] mod test_harness_tests;`
 //! at the tail of `test_harness.rs`. Kept in a `_tests.rs` sibling so the harness
-//! source stays under the `no_oversize_files` line budget; the tests run unchanged
-//! via the `super` glob.
+//! source stays small and readable; the tests run unchanged via the `super`
+//! glob.
 
 use super::*;
 

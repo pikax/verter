@@ -3,8 +3,8 @@
 //! component-context plumbing. Read-only (it neither rewrites a read nor emits JS);
 //! scope-aware via the shared lexical [`ShadowStack`] model in [`super::expr`];
 //! driven purely from the OXC AST + the collected unsafe-root names — never a
-//! source-text scan. Extracted from `reactive_analysis.rs` (the file-size guard
-//! boundary); the reactive-text `has_call` / `has_state` analyses stay there.
+//! source-text scan. It stays separate from `reactive_analysis.rs` so context and
+//! reactive-text `has_call` / `has_state` analyses remain focused.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{

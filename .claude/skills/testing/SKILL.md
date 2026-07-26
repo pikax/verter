@@ -151,6 +151,10 @@ The canonical full verification pass:
 3. `cargo fmt --all --check`
 4. `pnpm test` for TypeScript changes
 
+The gate runner also emits an advisory warning for each non-exempt production Rust source above 1,500
+lines, formatted as `path (N lines)`. This scan is informational only: its findings do not enter either
+surface analyzer, the failure accumulator, or the final gate verdict.
+
 Without Node, or to debug one surface in isolation, run the two underlying surfaces directly: `cargo nextest run --workspace` then `cargo test -p verter_session --tests`. Run the gate with `node_modules` present (e.g. `pnpm install --frozen-lockfile` first in a fresh worktree) so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*` byte-pin runs genuinely — with the tooling present a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), not tolerated. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS; the verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure).
 
 Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. Must NOT be used as the sole Rust gate — run `node scripts/gate.mjs` (which runs both surfaces from one archive) or the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair directly.

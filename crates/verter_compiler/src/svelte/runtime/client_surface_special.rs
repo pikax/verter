@@ -1,5 +1,5 @@
-//! The `<svelte:*>` HOST / RENDERABLE-SPECIAL classifiers, extracted from `client_surface.rs`
-//! to keep the default-deny classifier under the file-size guard.
+//! The `<svelte:*>` HOST / RENDERABLE-SPECIAL classifiers, kept separate from
+//! `client_surface.rs` so the default-deny classifier stays focused.
 //!
 //! These are the per-special-kind classification entry points the node walk
 //! ([`classify_node`](super::client_surface)) dispatches to: [`classify_special_host`] (the

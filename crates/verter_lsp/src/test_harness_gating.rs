@@ -2,8 +2,8 @@
 //! harness: the provider-kind identity and the absent-provider policy.
 //!
 //! Split from [`crate::test_harness`] so the pure decision surface
-//! (`provider_absence_outcome`) stays independently unit-testable and the
-//! harness file stays within the production size guard.
+//! (`provider_absence_outcome`) stays independently unit-testable and harness
+//! orchestration remains focused.
 
 use crate::test_harness::RealProviderTestSession;
 

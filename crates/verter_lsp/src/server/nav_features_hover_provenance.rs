@@ -6,8 +6,8 @@
 //! `append_markdown` hover-suffix helper.
 //!
 //! `handle_hover` calls `enrich_hover_with_provenance` through this sibling
-//! module; it lives apart from `nav_features` so each stays under the file-size
-//! guard (`no_oversize_files`).
+//! module; it lives apart from `nav_features` so both modules remain a readable
+//! size.
 
 use std::sync::Arc;
 

@@ -1,5 +1,5 @@
 //! The NARROW client-plan VOCABULARY — the closed type set the client emitter
-//! consumes (extracted from `client_plan.rs` to keep it under the file-size guard).
+//! consumes, kept separate from `client_plan.rs` so data definitions remain focused.
 //!
 //! Every supported broad-IR node / attribute / op projects to exactly one of these
 //! narrow variants in `client_plan.rs`'s `SupportedClientIr::build`; no broad-IR

@@ -1,7 +1,7 @@
 //! The `bind:` / event OP-PROJECTION half of the Svelte client plan builder.
 //!
-//! Extracted from `client_plan.rs` (the file-size guard boundary): these are the
-//! [`SupportedClientIr`] methods that project a `bind:` directive
+//! This focused sibling contains the [`SupportedClientIr`] methods that project
+//! a `bind:` directive
 //! ([`project_bind_op`](SupportedClientIr::project_bind_op)) or a delegated event
 //! ([`project_event_op`](SupportedClientIr::project_event_op)) into its narrow
 //! [`ClientRuntimeOp`], plus the shared getter/setter derivation

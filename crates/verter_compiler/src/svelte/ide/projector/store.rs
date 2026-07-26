@@ -1,5 +1,5 @@
-//! The F11 store auto-subscription rewrite — a continuation of the Svelte IDE
-//! projector, extracted for file size.
+//! The F11 store auto-subscription rewrite, kept as a focused continuation of
+//! the Svelte IDE projector.
 //!
 //! A classified [`StoreSub`] (from `store_scan`) is rewritten through the F11
 //! prelude helpers (`__verter_store_get` / `__verter_store_set`), mutating ONLY

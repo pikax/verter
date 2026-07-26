@@ -1,7 +1,7 @@
 //! Unit tests for the JSDoc shallow-analysis helpers in [`super`].
 //!
 //! Extracted to a sibling file (the established `*_tests.rs` pattern) to keep
-//! `jsdoc.rs` under the `no_oversize_files` architecture guard's line target.
+//! `jsdoc.rs` a readable size.
 
 use super::{extract_jsdoc_near_offset, parse_jsdoc_tag_type_payload};
 use verter_type_expr::{PrimitiveName, TypeExpr};

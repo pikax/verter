@@ -104,7 +104,7 @@ const CONTENT_VERB_ALLOWLIST: &[&str] = &[
     "crates/verter_lsp/src/server/provider_state.rs",
     "crates/verter_lsp/src/background_drain.rs",
     // The proactive declaration-overlay closure pass — a drain carrier-sync site
-    // extracted from `background_drain.rs` (above) for the file-size guard. It
+    // kept separate from `background_drain.rs` so closure discovery stays focused. It
     // opens each carrier dependency's `.d.<ext>.ts` declaration companion via the
     // same bounded content verbs the drain uses for the IDE/API companions; it is
     // not a store-membership mutator and routes no off-gateway commit.

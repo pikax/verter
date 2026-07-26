@@ -38,8 +38,8 @@ use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, Primitive
 use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
 
-// Algebra impls + leaf conversions split into child files for file-size (the
-// fold + the algebra trait + the interned term stay here, in the parent module).
+// Algebra impls and leaf conversions live in focused child modules; the fold,
+// algebra trait, and interned term stay here in the parent module.
 mod conversions;
 mod materialize;
 mod node_domain;

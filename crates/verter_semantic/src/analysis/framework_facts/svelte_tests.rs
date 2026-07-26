@@ -1,5 +1,5 @@
-//! Tests for the Svelte script-fact provider (extracted from `svelte.rs`
-//! to keep the production module under the oversize-file guard).
+//! Tests for the Svelte script-fact provider, kept in a sibling so the provider
+//! and its tests remain independently readable.
 
 use super::*;
 use oxc_allocator::Allocator;

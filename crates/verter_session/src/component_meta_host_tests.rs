@@ -1,6 +1,6 @@
-//! Tests for the [`ComponentMetaHost`] / [`ComponentMetaSession`] seam —
-//! extracted sibling of `component_meta_host.rs` (file-size split; the
-//! `#[path]` attach keeps the `component_meta_host::tests::*` test paths).
+//! Tests for the [`ComponentMetaHost`] / [`ComponentMetaSession`] seam, kept
+//! in a sibling so the host implementation and tests remain independently
+//! readable. The `#[path]` attach keeps the `component_meta_host::tests::*` test paths.
 
 use super::*;
 

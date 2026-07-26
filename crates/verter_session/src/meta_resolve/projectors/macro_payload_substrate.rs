@@ -2,8 +2,8 @@
 //! shallow macro publication pipeline.
 //!
 //! Split out of [`super`] to keep the projector entry-point file
-//! under the architecture-guard line cap (`no_oversize_files`). The
-//! substrate primitives are re-exported from [`super`] so call sites
+//! a readable size. The substrate primitives are re-exported from
+//! [`super`] so call sites
 //! continue to import from `crate::meta_resolve::projectors::*`
 //! unchanged.
 //!

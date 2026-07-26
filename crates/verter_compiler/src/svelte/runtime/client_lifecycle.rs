@@ -1,7 +1,7 @@
 //! The element lifecycle-directive emission half of the Svelte client emitter
 //! (`use:` actions, `transition:`/`in:`/`out:` transitions, keyed-each `animate:`
-//! animations, element-position `{@attach}` attachments), extracted alongside
-//! `client_event.rs` to keep `client.rs` under the file-size guard.
+//! animations, element-position `{@attach}` attachments), kept alongside
+//! `client_event.rs` so each emission responsibility stays focused.
 //!
 //! These free functions render the official `svelte/internal/client` lifecycle
 //! shapes from the narrow [`ElementLifecycleOp`] substrate:

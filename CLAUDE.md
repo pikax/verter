@@ -355,6 +355,10 @@ cargo test --package verter_compiler test_name   # Specific Rust test
 cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
+**Oversize-source advisory:** `scripts/gate.mjs` scans production Rust sources and warns for each
+non-exempt file above 1,500 lines as `path (N lines)`. File size is informational and never affects the
+gate verdict.
+
 ### End-of-change Checks
 
 Run after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
