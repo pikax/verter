@@ -159,7 +159,7 @@ impl ProjectSync {
             return result;
         }
 
-        self.record_delivered_carrier_surface(tsx_path, prepared.prepared);
+        self.record_delivered_carrier_surface(tsx_path, tsx_content, prepared.prepared);
 
         // When an installed package becomes available, publish the unrewritten
         // carrier first. Closing its old overlay before that update would break

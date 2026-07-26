@@ -102,21 +102,46 @@ fn only_the_explicit_editor_tsserver_route_adopts_the_plugin_attestation() {
 
 #[test]
 fn editor_tsserver_topology_owns_no_semantic_child() {
-    let topology =
+    let selection =
         editor_tsserver_topology(&verter_lsp::editor_tsserver::EditorTsserverAttestation {
             pid: 4242,
             projects: vec!["C:/workspace/tsconfig.json".into()],
         });
 
-    assert!(topology.0.is_none());
-    assert_eq!(topology.1, TypeProviderKind::EditorTsserver);
+    assert!(selection.provider.is_none());
+    assert_eq!(selection.kind, TypeProviderKind::EditorTsserver);
     // The status surface must NAME this topology, not just its engine family.
-    assert_eq!(topology.2, TypeProviderTopology::EditorTsserver);
-    assert_eq!(topology.2.wire(), "editor-tsserver");
-    assert!(topology
-        .3
+    assert_eq!(selection.topology, TypeProviderTopology::EditorTsserver);
+    assert_eq!(selection.topology.wire(), "editor-tsserver");
+    assert!(selection
+        .reason
         .as_deref()
         .is_some_and(|reason| reason.contains("4242")));
+}
+
+/// A route that installs NO provider must not advertise an engine.
+///
+/// Every no-engine route in `create_type_provider` / `managed_fallback_topology`
+/// funnels through this one constructor, so the kind the editor sees can never
+/// drift into naming an engine family, a wiring topology, or a
+/// served-with-warning advisory for an engine that is not there — while the
+/// caller's reason is still carried through verbatim.
+#[test]
+fn a_route_with_no_engine_advertises_no_engine() {
+    let selection = TypeProviderSelection::verter_only("tsserver failed to start: ENOENT");
+
+    assert!(selection.provider.is_none());
+    assert_eq!(selection.kind, TypeProviderKind::None);
+    assert_eq!(selection.topology, TypeProviderTopology::None);
+    assert_eq!(
+        selection.reason.as_deref(),
+        Some("tsserver failed to start: ENOENT"),
+        "the caller's diagnosis reaches the editor unchanged"
+    );
+    assert!(
+        selection.advisory.is_none(),
+        "a served-with-warning advisory describes an ACTIVE engine; there is none here"
+    );
 }
 
 // ── DISCRIMINATING (H9): the configured-project admission gate runs BEFORE

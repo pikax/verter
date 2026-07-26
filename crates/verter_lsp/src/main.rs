@@ -112,23 +112,17 @@ async fn serve() {
 
     // Provider selection: identity-based serving order (editor tsgo → editor
     // tsserver plugin → managed tsgo), with explicit operator overrides.
-    let (
-        type_provider,
-        provider_kind,
-        provider_topology,
-        type_provider_reason,
-        type_provider_advisory,
-    ) = create_type_provider(&args, &client_cell, &host).await;
+    let selection = create_type_provider(&args, &client_cell, &host).await;
 
     let config = LspConfig {
         host,
-        type_provider,
+        type_provider: selection.provider,
         project_sync_mode: ProjectSyncMode::FullProject,
-        type_provider_kind: provider_kind,
-        type_provider_topology: provider_topology,
+        type_provider_kind: selection.kind,
+        type_provider_topology: selection.topology,
         mcp_port: mcp_actual_port,
-        type_provider_reason,
-        type_provider_advisory,
+        type_provider_reason: selection.reason,
+        type_provider_advisory: selection.advisory,
         // Production keeps the imported-carrier prewarm (test-only suppression seam).
         suppress_imported_carrier_prewarm: false,
     };
@@ -384,28 +378,52 @@ pub(crate) fn route_consumes_editor_tsserver_attestation(type_provider: &str) ->
     type_provider == "editor-tsserver"
 }
 
+/// The outcome of provider selection: which engine will serve, how it is wired,
+/// and what the editor is told about that choice.
+struct TypeProviderSelection {
+    /// The engine that will serve, or `None` for verter-only mode.
+    provider: Option<Arc<dyn TypeProvider>>,
+    /// The engine family reported to the editor — always the engine that will
+    /// ACTUALLY serve, never a nominal kind in front of a different engine.
+    kind: TypeProviderKind,
+    /// How that engine is wired, named for the status surface.
+    topology: TypeProviderTopology,
+    /// Selected-route provenance, or why no provider could be started.
+    reason: Option<String>,
+    /// The served-with-warning notice for the active provider (today: the
+    /// tsserver legacy/below-floor serving-tier advisory).
+    advisory: Option<String>,
+}
+
+impl TypeProviderSelection {
+    /// Verter-only mode: no engine serves, and `reason` says why.
+    ///
+    /// Every no-engine route lands here rather than assembling the fields by
+    /// hand, so a route that installs no provider can never report an engine
+    /// kind, a topology, or a served-with-warning advisory for an engine that
+    /// is not there.
+    fn verter_only(reason: impl Into<String>) -> Self {
+        Self {
+            provider: None,
+            kind: TypeProviderKind::None,
+            topology: TypeProviderTopology::None,
+            reason: Some(reason.into()),
+            advisory: None,
+        }
+    }
+}
+
 /// Create the type provider based on CLI args.
 ///
 /// Auto mode consumes neutral facts supplied by an editor client: an attested
 /// Native Preview rendezvous first, then a project-bound editor-tsserver plugin
 /// receipt. Without either fact it constructs a stateful managed TSGO fallback
 /// that remains cold until the first connected demand.
-///
-/// Returns `(provider, kind, topology, reason, advisory)` where `reason`
-/// preserves selected-route provenance or explains why no provider could be
-/// started, and `advisory` is the served-with-warning notice for the active
-/// provider (today: the tsserver legacy/below-floor serving-tier advisory).
 async fn create_type_provider(
     args: &CliArgs,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
     host: &Arc<VerterHost>,
-) -> (
-    Option<Arc<dyn TypeProvider>>,
-    TypeProviderKind,
-    TypeProviderTopology,
-    Option<String>,
-    Option<String>,
-) {
+) -> TypeProviderSelection {
     tracing::info!(
         "create_type_provider: type_provider={:?}, tsdk={:?}, workspace_root={:?}",
         args.type_provider,
@@ -439,13 +457,7 @@ async fn create_type_provider(
     match args.type_provider.as_str() {
         "off" => {
             tracing::info!("type provider: disabled by --type-provider=off");
-            (
-                None,
-                TypeProviderKind::None,
-                TypeProviderTopology::None,
-                Some("Disabled by configuration (--type-provider=off)".into()),
-                None,
-            )
+            TypeProviderSelection::verter_only("Disabled by configuration (--type-provider=off)")
         }
         "shared-tsgo" => {
             let has_editor_rendezvous = args.shared_rendezvous().is_some();
@@ -461,13 +473,13 @@ async fn create_type_provider(
             // bound query activates it.
             let provider =
                 wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
-            (
-                Some(provider),
-                TypeProviderKind::Tsgo,
-                TypeProviderTopology::SharedTsgo,
-                Some(editor_native_preview_reason()),
-                None,
-            )
+            TypeProviderSelection {
+                provider: Some(provider),
+                kind: TypeProviderKind::Tsgo,
+                topology: TypeProviderTopology::SharedTsgo,
+                reason: Some(editor_native_preview_reason()),
+                advisory: None,
+            }
         }
         "tsgo" => {
             // Explicit managed-tsgo operator override. This does not arm the editor
@@ -475,13 +487,13 @@ async fn create_type_provider(
             match try_spawn_tsgo(&ws_canonical, client_cell).await {
                 Ok(owned) => {
                     let tp = wrap_owned_admission(owned, host);
-                    (
-                        Some(tp),
-                        TypeProviderKind::Tsgo,
-                        TypeProviderTopology::ManagedTsgo,
-                        None,
-                        None,
-                    )
+                    TypeProviderSelection {
+                        provider: Some(tp),
+                        kind: TypeProviderKind::Tsgo,
+                        topology: TypeProviderTopology::ManagedTsgo,
+                        reason: None,
+                        advisory: None,
+                    }
                 }
                 Err(tsgo_reason) => {
                     // The serving order is capability-based, never a dead end:
@@ -498,16 +510,16 @@ async fn create_type_provider(
                         &ws_canonical,
                         client_cell,
                     ) {
-                        Ok((tp, advisory)) => (
-                            Some(tp),
-                            TypeProviderKind::Tsserver,
-                            TypeProviderTopology::ProjectTsserver,
-                            Some(format!(
+                        Ok((tp, advisory)) => TypeProviderSelection {
+                            provider: Some(tp),
+                            kind: TypeProviderKind::Tsserver,
+                            topology: TypeProviderTopology::ProjectTsserver,
+                            reason: Some(format!(
                                 "--type-provider=tsgo: no supported tsgo engine ({tsgo_reason}); \
                                  falling back to the per-project tsserver router"
                             )),
                             advisory,
-                        ),
+                        },
                         Err(tsserver_error) => {
                             let reason = format!(
                                 "{tsgo_reason}; the tsserver fallback is also unavailable: {}",
@@ -516,13 +528,7 @@ async fn create_type_provider(
                             tracing::warn!(
                                 "no TypeScript engine — running in verter-only mode: {reason}"
                             );
-                            (
-                                None,
-                                TypeProviderKind::None,
-                                TypeProviderTopology::None,
-                                Some(reason),
-                                None,
-                            )
+                            TypeProviderSelection::verter_only(reason)
                         }
                     }
                 }
@@ -550,13 +556,13 @@ async fn create_type_provider(
                 &ws_canonical,
                 client_cell,
             ) {
-                Ok((tp, advisory)) => (
-                    Some(tp),
-                    TypeProviderKind::Tsserver,
-                    TypeProviderTopology::ProjectTsserver,
-                    None,
+                Ok((tp, advisory)) => TypeProviderSelection {
+                    provider: Some(tp),
+                    kind: TypeProviderKind::Tsserver,
+                    topology: TypeProviderTopology::ProjectTsserver,
+                    reason: None,
                     advisory,
-                ),
+                },
                 Err(TsserverSpawnError::NativeFamily { major }) => {
                     // A TS7+ install is the native (tsgo) engine family — it is
                     // never served over the Node tsserver protocol. Reclassify
@@ -568,40 +574,28 @@ async fn create_type_provider(
                     match try_spawn_tsgo(&ws_canonical, client_cell).await {
                         Ok(owned) => {
                             let tp = wrap_owned_admission(owned, host);
-                            (
-                                Some(tp),
-                                TypeProviderKind::Tsgo,
-                                TypeProviderTopology::ManagedTsgo,
-                                Some(format!(
+                            TypeProviderSelection {
+                                provider: Some(tp),
+                                kind: TypeProviderKind::Tsgo,
+                                topology: TypeProviderTopology::ManagedTsgo,
+                                reason: Some(format!(
                                     "workspace TypeScript {major}.x is the native (TSGO) \
                                      family; tsserver override reclassified to managed TSGO"
                                 )),
-                                None,
-                            )
+                                advisory: None,
+                            }
                         }
                         Err(reason) => {
                             tracing::warn!(
                                 "TSGO unavailable — running in verter-only mode: {reason}"
                             );
-                            (
-                                None,
-                                TypeProviderKind::None,
-                                TypeProviderTopology::None,
-                                Some(reason),
-                                None,
-                            )
+                            TypeProviderSelection::verter_only(reason)
                         }
                     }
                 }
                 Err(TsserverSpawnError::Unavailable(reason)) => {
                     tracing::warn!("tsserver unavailable — running in verter-only mode: {reason}");
-                    (
-                        None,
-                        TypeProviderKind::None,
-                        TypeProviderTopology::None,
-                        Some(reason),
-                        None,
-                    )
+                    TypeProviderSelection::verter_only(reason)
                 }
             }
         }
@@ -614,13 +608,13 @@ async fn create_type_provider(
                 Arc::clone(client_cell),
                 &ws_canonical,
             );
-            (
-                Some(Arc::new(provider) as Arc<dyn TypeProvider>),
-                TypeProviderKind::Tsserver,
-                TypeProviderTopology::ExtensionHosted,
-                Some("extension-hosted TypeScript language service (Experiment E)".into()),
-                None,
-            )
+            TypeProviderSelection {
+                provider: Some(Arc::new(provider) as Arc<dyn TypeProvider>),
+                kind: TypeProviderKind::Tsserver,
+                topology: TypeProviderTopology::ExtensionHosted,
+                reason: Some("extension-hosted TypeScript language service (Experiment E)".into()),
+                advisory: None,
+            }
         }
         _ => {
             // Auto serving order is identity-based: the exact editor tsgo, then
@@ -630,13 +624,13 @@ async fn create_type_provider(
             if args.shared_rendezvous().is_some() {
                 let provider =
                     wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
-                return (
-                    Some(provider),
-                    TypeProviderKind::Tsgo,
-                    TypeProviderTopology::SharedTsgo,
-                    Some(editor_native_preview_reason()),
-                    None,
-                );
+                return TypeProviderSelection {
+                    provider: Some(provider),
+                    kind: TypeProviderKind::Tsgo,
+                    topology: TypeProviderTopology::SharedTsgo,
+                    reason: Some(editor_native_preview_reason()),
+                    advisory: None,
+                };
             }
 
             // The editor route is unavailable. Tier 2 admits tsgo OR tsserver,
@@ -878,25 +872,19 @@ async fn managed_fallback_topology(
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
     host: &Arc<VerterHost>,
     ws_canonical: &str,
-) -> (
-    Option<Arc<dyn TypeProvider>>,
-    TypeProviderKind,
-    TypeProviderTopology,
-    Option<String>,
-    Option<String>,
-) {
+) -> TypeProviderSelection {
     match probe_managed_engine(ws_canonical, args.tsdk.as_deref()) {
         ManagedEngineChoice::Tsgo { detail } => {
             tracing::info!("managed fallback: {detail}");
             let provider =
                 wrap_shared_first_admission(args, host, ws_canonical, Arc::clone(client_cell));
-            (
-                Some(provider),
-                TypeProviderKind::Tsgo,
-                TypeProviderTopology::ManagedTsgo,
-                Some(format!("{}; {detail}", lazy_managed_tsgo_reason())),
-                None,
-            )
+            TypeProviderSelection {
+                provider: Some(provider),
+                kind: TypeProviderKind::Tsgo,
+                topology: TypeProviderTopology::ManagedTsgo,
+                reason: Some(format!("{}; {detail}", lazy_managed_tsgo_reason())),
+                advisory: None,
+            }
         }
         ManagedEngineChoice::Tsserver { detail } => {
             tracing::info!("managed fallback: {detail}");
@@ -907,79 +895,58 @@ async fn managed_fallback_topology(
                 ws_canonical,
                 client_cell,
             ) {
-                Ok((tp, advisory)) => (
-                    Some(tp),
-                    TypeProviderKind::Tsserver,
-                    TypeProviderTopology::ProjectTsserver,
-                    Some(detail),
+                Ok((tp, advisory)) => TypeProviderSelection {
+                    provider: Some(tp),
+                    kind: TypeProviderKind::Tsserver,
+                    topology: TypeProviderTopology::ProjectTsserver,
+                    reason: Some(detail),
                     advisory,
-                ),
+                },
                 Err(TsserverSpawnError::NativeFamily { major }) => {
                     let reason = format!(
                         "workspace TypeScript {major}.x is the native (TSGO) family but no \
                          supported tsgo engine could be resolved — no TypeScript intellisense"
                     );
                     tracing::warn!("{reason}");
-                    (
-                        None,
-                        TypeProviderKind::None,
-                        TypeProviderTopology::None,
-                        Some(reason),
-                        None,
-                    )
+                    TypeProviderSelection::verter_only(reason)
                 }
                 Err(TsserverSpawnError::Unavailable(error)) => {
                     let reason =
                         format!("no supported tsgo engine, and tsserver failed to start: {error}");
                     tracing::warn!("{reason}");
-                    (
-                        None,
-                        TypeProviderKind::None,
-                        TypeProviderTopology::None,
-                        Some(reason),
-                        None,
-                    )
+                    TypeProviderSelection::verter_only(reason)
                 }
             }
         }
         ManagedEngineChoice::None { reason } => {
             tracing::warn!("no TypeScript type provider — running in verter-only mode: {reason}");
-            (
-                None,
-                TypeProviderKind::None,
-                TypeProviderTopology::None,
-                Some(reason),
-                None,
-            )
+            TypeProviderSelection::verter_only(reason)
         }
     }
 }
 
 fn editor_tsserver_topology(
     attestation: &verter_lsp::editor_tsserver::EditorTsserverAttestation,
-) -> (
-    Option<Arc<dyn TypeProvider>>,
-    TypeProviderKind,
-    TypeProviderTopology,
-    Option<String>,
-    Option<String>,
-) {
+) -> TypeProviderSelection {
     tracing::info!(
         "using attested editor-owned tsserver plugin: pid={} projects={:?}",
         attestation.pid,
         attestation.projects
     );
-    (
-        None,
-        TypeProviderKind::EditorTsserver,
-        TypeProviderTopology::EditorTsserver,
-        Some(format!(
+    // The editor owns the engine, so this route installs no LOCAL provider — but
+    // it is NOT verter-only: the kind/topology name the editor-owned tsserver
+    // that will actually serve.
+    TypeProviderSelection {
+        provider: None,
+        kind: TypeProviderKind::EditorTsserver,
+        topology: TypeProviderTopology::EditorTsserver,
+        reason: Some(format!(
             "attested editor tsserver process {} across {} project(s)",
             attestation.pid,
             attestation.projects.len()
         )),
-        None,
-    )
+        advisory: None,
+    }
 }
 
 /// Try to spawn the OWNED, project-bound dual-surface TSGO provider.
