@@ -1316,6 +1316,7 @@ composition table. Summary:
 | Typed-IR resolve | Content-addressed | `canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version` |
 | `MemberSemanticFactStore` | Content-addressed | `canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space` |
 | `MemberDisplayFactStore` | Content-addressed | `canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space` |
+| `BinderIdentityFactsStore` (family A, the binder-identity substrate) | Content-addressed | `canonical, parse_stable_hash, parse_env_hash` — the pre-reducer binder-identity substrate: per-file lexical scope tree with stable structural `BinderScopeId`s, env-free `DeclarationSlotSeed`s (exactly the four env-free fields of `ResolvedDeclSlotIdentity`; the env-bearing slot is derived ONLY at query-key construction via the `ProjectSemanticDispatch::finalize_slot_seed` choke point), and declaration-order / overload-group / augmentation-contribution provenance. Demand-produced from `IndexedReady` (no eager pass), value-side `ReadSetSignature` over eager parse-lane facts; negative name lookup stays `ReturnOnly` (no corpus-completeness store in this substrate). |
 | `RouteDb` per-name | Query-identity (multi-candidate) | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (content-free; routes are resolve-domain so no `parse_env`/`type_env`, but `lib_env` enters — augmentations stitch the surface). Value-side `ValidatedFactCache` fact validation. |
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }`. Value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature`. |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, scope_axis, projection_mode, normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash }` — content-free canonical SUBJECT (the slot, NOT a graph-instance `SemanticNodeId`); `normalized_type_args` carries `SemanticNodeId`s exactly as `SemanticQueryKey::Instantiate.args`. The per-thread recursion identity is the SEPARATE `MaterializeRuntimeKey { base: SemanticNodeId, scope_axis, mode }` (NOT a cache key). Root-less anonymous subject ⇒ uncached. Value-side `ReadSetSignature.facts` + `self_root_canonicals` (base node's decl-origin file) + `validated_at_generation`. |
@@ -1375,7 +1376,29 @@ Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain
 - `ExportAlias(exported_as, space)` — per `export {X as Y}`.
 - `ModuleAugmentation(specifier, owner, augmented_name, space)` — per augmented binding
   inside each `declare module "X" {…}` / `declare global {…}` block; `owner`
-  is the exact lexical authoring region.
+  is the exact lexical authoring region. `declare global` blocks key on the
+  `$global` sentinel specifier.
+- `AugmentationContributionSet(scope_kind_tag, specifier, owner)` — SET-shape
+  fingerprint of one augmentation target's contribution set in one file (growth
+  or a contribution shape edit moves it). Emitted for EVERY augmentation block,
+  EMPTY ones included, so an empty → first-contribution edit moves it.
+  `scope_kind_tag` (Global vs Module) keeps `declare global {…}` and
+  `declare module "$global" {…}` in distinct target identities.
+- `AugmentationContributionOrder(scope_kind_tag, specifier, owner)` —
+  ORDER-sensitive fingerprint of one augmentation target's authored contribution
+  sequence (ordered by each declaration's own source position; positions never
+  enter the hash). Also emitted for empty blocks.
+- `DeclContributionOrder(name, owner, space)` — ORDER-sensitive fingerprint of one
+  file-surface declaration slot's authored contributor sequence (an overload /
+  declaration swap moves it; comments between declarations do not). The
+  per-contributor shape hashes the comment-stripped, whitespace-dropped
+  declaration slice, so intra-declaration trivia edits stay cosmetic.
+- `AugmentationTargetSet` — whole-file augmentation target set fingerprint
+  (`(scope_kind_tag, specifier, owner)` blocks, EMPTY blocks included; a first
+  `declare module "m" {…}` moves it with an unchanged skeleton, and the tag
+  keeps `declare global` / `declare module "$global"` distinct).
+- `NamespaceScopeSet` — whole-file `namespace N {…}` block set fingerprint
+  (EMPTY blocks included).
 
 Lazy emission (member body, on first member-access query) lives in TWO separate
 stores keyed differently to physically separate semantic vs display:
@@ -1475,7 +1498,17 @@ The discrimination matrix:
   content-free query-identity slot used as `Instantiate.base` /
   `ResolveMacroPayload.owner`; the migration to it has LANDED — the former
   content-free `DeclKey` query-key struct and `to_decl_key()` were deleted in
-  the cutover).
+  the cutover). Also hosts `DeclarationSlotSeed` (the slot's env-free
+  four-field projection the family-A artifact stores), `BinderScopeId` /
+  `BinderScopeKind` (the stable structural lexical-scope id), and the
+  `ScopeId.binder_scope_id` query-identity discriminator.
+- `crates/verter_session/src/binder_identity_facts.rs` —
+  `BinderIdentityFacts` artifact payload, `BinderIdentityFactsStore` (family-A,
+  keyed `(canonical, parse_stable_hash, parse_env_hash)`),
+  `project_binder_identity_facts` (the shallow-inventory projection), and the
+  demand producer `produce_binder_identity_facts` (reached via
+  `for_tests::binder_identity_facts_get_or_compute_for_tests` until the U2
+  reducers consume it).
 
 ## Discriminating tests
 
@@ -1488,6 +1521,11 @@ The discrimination matrix:
   tests.
 - `crates/verter_session/tests/cases/g_misc1/parse_stable_hash_invariance.rs` —
   cosmetic-invariant + decl-shape-discriminating tests.
+- `crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs` — the
+  binder-identity substrate guard set (cosmetic-stable /
+  insertion-non-aliasing scope ids, symbol-space + owner-scoped env-free seeds,
+  slot finalization, cosmetic-warm / semantic-invalidate, authored-order
+  provenance, `binder_scope_id` query identity, negative lookup `ReturnOnly`).
 - `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
 - `crates/verter_semantic/src/facts/registry.rs` (`registry_tests` inline

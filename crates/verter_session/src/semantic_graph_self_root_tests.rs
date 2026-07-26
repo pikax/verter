@@ -84,6 +84,9 @@ fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
             canonical_id: Arc::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from(name),
     }
@@ -158,6 +161,9 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
                 canonical_id: Arc::from(c),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("val"),
         },

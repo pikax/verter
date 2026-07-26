@@ -178,6 +178,9 @@ fn root_only_projection_root_kind_matches_full_fold() {
                 canonical_id: StdArc::from("/p.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: StdArc::from("v"),
         },

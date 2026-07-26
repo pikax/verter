@@ -287,6 +287,10 @@ enum TypeInfoParityBlockId {
     // U2.QUERY_VALUE_DOMAIN owns the 2 index-signature publication lifts.
     U0ManifestSubstrate,
     U2QueryValueDomain,
+    // The pre-reducer binder-identity substrate (family-A
+    // `BinderIdentityFacts`): demand-produced from `IndexedReady`, consumed
+    // by the U2 reducers — owns no `IgnoredTestRow`s.
+    U2BinderIdentityFacts,
     U8WireSurfaceClosure,
     U12Exporter,
     U13Projection,
@@ -470,6 +474,7 @@ enum MechanismId {
     // Zero-row substrate mechanisms.
     LedgerCoverageGate,
     QueryValueDomainFoundation,
+    BinderIdentityFactsSubstrate,
     WireSurfaceClosure,
     ExporterPublication,
     StructuralProjectionDecode,
@@ -694,6 +699,7 @@ fn mechanism_owning_block(mech: MechanismId) -> TypeInfoParityBlockId {
     match mech {
         LedgerCoverageGate => U0ManifestSubstrate,
         QueryValueDomainFoundation => U2QueryValueDomain,
+        BinderIdentityFactsSubstrate => U2BinderIdentityFacts,
         WireSurfaceClosure => U8WireSurfaceClosure,
         ExporterPublication => U12Exporter,
         StructuralProjectionDecode => U13Projection,

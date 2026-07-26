@@ -213,6 +213,9 @@ fn realize_callable_member_inner(
                     canonical_id: Arc::clone(&identity.canonical_id),
                     owner: identity.owner,
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        identity.owner,
+                    ),
                 },
                 name: Arc::clone(&identity.decl_name),
             }));

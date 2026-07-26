@@ -640,6 +640,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         canonical_id: Arc::clone(canonical_id),
                         owner: *owner,
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(*owner),
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };

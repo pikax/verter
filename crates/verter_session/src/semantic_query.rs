@@ -224,6 +224,17 @@ pub struct ScopeId {
     /// path (the binder's `EvalEnv.augmentation_scopes`), not through this key —
     /// a `ResolveDecl` always targets the file top-level surface.
     pub local_scope: Option<u32>,
+    /// The stable structural scope id — the query-identity projection of
+    /// the family-A scope tree ([`BinderScopeId`]). A content-free
+    /// resolution-context discriminator (the role generic type-args play
+    /// in `Instantiate`), NOT a content/version hash and NOT a positional
+    /// ordinal: it is cosmetic-edit invariant and does not renumber when a
+    /// sibling scope is inserted above. It NEVER enters
+    /// [`SlotEnvIdentity`](crate::locator_identity::SlotEnvIdentity) or the
+    /// [`DeclarationSlotSeed`]. A file top-level scope carries
+    /// [`BinderScopeId::file_scope`]; a real local scope's id comes from
+    /// the family-A artifact's scope records.
+    pub binder_scope_id: BinderScopeId,
 }
 
 impl ScopeId {
@@ -233,6 +244,119 @@ impl ScopeId {
             canonical_id,
             owner,
             local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(owner),
+        }
+    }
+}
+
+/// The KIND of lexical scope a [`BinderScopeId`] names. Content-free: it
+/// carries the scope's own header (its qualified namespace path / ambient
+/// module specifier), never a span, ordinal, or content/version hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BinderScopeKind {
+    /// A file top-level scope. The owning
+    /// [`TopLevelOwnerId`](verter_type_expr::TopLevelOwnerId) folds into the
+    /// id's structural hash (module vs instance script never alias).
+    File,
+    /// A TS namespace body scope (`namespace NS { … }`), identified by its
+    /// dotted qualified name (`"NS"` / `"NS.Inner"`). Two same-name blocks
+    /// in one owner are ONE scope (TS declaration merging), so they share
+    /// the id by construction.
+    Namespace { qualified_name: Arc<str> },
+    /// A `declare global { … }` augmentation block.
+    AugmentationGlobal,
+    /// A `declare module "<specifier>" { … }` augmentation block,
+    /// identified by the raw authored specifier.
+    AugmentationModule { specifier: Arc<str> },
+}
+
+/// Stable STRUCTURAL lexical-scope id — the query-identity projection of
+/// the family-A scope tree (`binder_identity_facts`). This is the
+/// `binder_scope_id` a context-sensitive query identity carries as a
+/// content-free resolution-context discriminator (the role generic
+/// type-args play in `Instantiate`), NOT a content/version hash and NOT a
+/// positional ordinal.
+///
+/// **Derivation (R6-clean, cosmetic-stable, insertion-non-aliasing).**
+/// `structural_hash` is xxh3-128 over `(scope-kind tag, owner kind +
+/// ordinal, the scope's own header — qualified namespace path / ambient
+/// module specifier / nothing for `File`)`. Positions, spans, and
+/// sibling ORDINALS never enter:
+///
+/// - a whitespace / comment / JSDoc edit leaves every id unchanged (no
+///   byte offset participates);
+/// - inserting a sibling scope ABOVE an existing scope does not renumber
+///   or alias it (no positional counter participates) — unlike the
+///   legacy [`ScopeId::local_scope`] `u32`, which is a positional index
+///   into the lowered local-scope table and is NOT a substitute for this
+///   id.
+///
+/// The id is deliberately JUST the 16-byte structural identity (opaque —
+/// consumers compare whole ids, never the bytes): query-identity keys
+/// stay lean, and the scope-kind payload lives on the family-A
+/// artifact's scope RECORDS, not on the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BinderScopeId {
+    /// Content-derived structural identity (see the type doc).
+    pub structural_hash: HashValue,
+}
+
+impl BinderScopeId {
+    /// Salt keeping binder-scope hashes domain-separated from every
+    /// other `HashValue` consumer (a scope id is never a content hash).
+    const SALT: &'static [u8] = b"verter-binder-scope-id:v1";
+
+    fn derive(tag: u8, owner: verter_type_expr::TopLevelOwnerId, name: &str) -> HashValue {
+        let mut buf: Vec<u8> = Vec::with_capacity(32 + name.len());
+        buf.extend_from_slice(Self::SALT);
+        buf.push(tag);
+        buf.push(match owner.kind() {
+            verter_type_expr::TopLevelOwnerKind::Module => b'M',
+            verter_type_expr::TopLevelOwnerKind::Instance => b'I',
+            verter_type_expr::TopLevelOwnerKind::Frontmatter => b'F',
+        });
+        buf.extend_from_slice(&owner.ordinal().to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        xxhash_rust::xxh3::xxh3_128(&buf).to_le_bytes()
+    }
+
+    /// The file top-level scope id for `owner`.
+    #[must_use]
+    pub fn file_scope(owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        Self {
+            structural_hash: Self::derive(b'F', owner, ""),
+        }
+    }
+
+    /// The namespace body scope id for the dotted `qualified_name`
+    /// (`"NS"` / `"NS.Inner"`) declared in `owner`.
+    #[must_use]
+    pub fn namespace_scope(
+        owner: verter_type_expr::TopLevelOwnerId,
+        qualified_name: Arc<str>,
+    ) -> Self {
+        Self {
+            structural_hash: Self::derive(b'N', owner, qualified_name.as_ref()),
+        }
+    }
+
+    /// The `declare global { … }` augmentation scope id for `owner`.
+    #[must_use]
+    pub fn augmentation_global_scope(owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        Self {
+            structural_hash: Self::derive(b'G', owner, ""),
+        }
+    }
+
+    /// The `declare module "<specifier>" { … }` augmentation scope id
+    /// for `owner`.
+    #[must_use]
+    pub fn augmentation_module_scope(
+        owner: verter_type_expr::TopLevelOwnerId,
+        specifier: Arc<str>,
+    ) -> Self {
+        Self {
+            structural_hash: Self::derive(b'M', owner, specifier.as_ref()),
         }
     }
 }
@@ -752,6 +876,103 @@ impl ResolvedDeclSlotIdentity {
             merged_symbol_name: Arc::clone(&self.merged_symbol_name),
             symbol_space,
             env: self.env,
+        }
+    }
+
+    /// Project the env-free [`DeclarationSlotSeed`] this slot was
+    /// finalized from — the four content-free identity fields verbatim,
+    /// dropping the sealed env tail. The seed is what the family-A
+    /// `BinderIdentityFacts` artifact stores (an env-invariant,
+    /// parse-stable artifact never carries an env dimension).
+    #[must_use]
+    pub fn seed(&self) -> DeclarationSlotSeed {
+        DeclarationSlotSeed {
+            defining_canonical: Arc::clone(&self.defining_canonical),
+            owner: self.owner,
+            merged_symbol_name: Arc::clone(&self.merged_symbol_name),
+            symbol_space: self.symbol_space,
+        }
+    }
+}
+
+/// The env-free declaration-slot SEED — exactly the four env-free
+/// identity fields of the landed five-field
+/// [`ResolvedDeclSlotIdentity`], with every env dimension deliberately
+/// omitted. This is the `BinderDeclSlotFact` payload the family-A
+/// `BinderIdentityFacts` artifact stores.
+///
+/// **Contract (R7 + family-A keying):**
+///
+/// - EXACTLY four fields: `defining_canonical`, `owner`,
+///   `merged_symbol_name`, `symbol_space`. `owner` is MANDATORY — the
+///   same canonical may contain same-name same-space declarations in
+///   distinct owners (a `.vue` SFC's module vs instance scripts).
+/// - NEVER stores a [`ResolvedDeclSlotIdentity`], a
+///   [`SlotEnvIdentity`], or a standalone `project_identity` /
+///   `type_env_hash` / `lib_env_hash` — storing an env dimension in the
+///   parse-stable artifact would over-key it (an env-invariant artifact
+///   carrying an env-bearing payload) and be unsound.
+/// - NEVER carries a content / version / fact-signature field
+///   (`whole_hash`, `parse_stable_hash`, `ReadSetSignature`) — the seed
+///   is identity only.
+/// - Stable and symbol-space-scoped: a value and a type sharing a name
+///   occupy DISTINCT seeds (`symbol_space` discriminates); same-name
+///   declarations in distinct owners occupy distinct seeds (`owner`
+///   discriminates).
+///
+/// The env-bearing slot is DERIVED at query-key construction (and only
+/// there): [`DeclarationSlotSeed::finalize`] re-attaches the sealed
+/// [`SlotEnvIdentity`] read from the defining canonical's LIVE
+/// per-canonical env — the single production derivation is the
+/// [`ProjectSemanticDispatch::finalize_slot_seed`](crate::project_semantic_dispatch::ProjectSemanticDispatch::finalize_slot_seed)
+/// choke point.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeclarationSlotSeed {
+    /// Canonical id of the declaring file.
+    pub defining_canonical: Arc<str>,
+    /// Exact authored top-level owner inside `defining_canonical`.
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    /// Stable merged-symbol name (invariant under declaration
+    /// reordering and TS declaration merging).
+    pub merged_symbol_name: Arc<str>,
+    /// Type-space vs value-space vs namespace discriminator.
+    pub symbol_space: SemanticSymbolSpace,
+}
+
+impl DeclarationSlotSeed {
+    /// Build a seed from its four identity fields.
+    #[must_use]
+    pub const fn new(
+        defining_canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        merged_symbol_name: Arc<str>,
+        symbol_space: SemanticSymbolSpace,
+    ) -> Self {
+        Self {
+            defining_canonical,
+            owner,
+            merged_symbol_name,
+            symbol_space,
+        }
+    }
+
+    /// Finalize the seed into the env-bearing
+    /// [`ResolvedDeclSlotIdentity`]: the seed's four fields copy
+    /// verbatim and `env` is the sealed [`SlotEnvIdentity`] the caller
+    /// read from the defining canonical's live per-canonical env. This
+    /// is the ONLY seed→slot composition channel; production reaches it
+    /// exclusively through the
+    /// [`ProjectSemanticDispatch::finalize_slot_seed`](crate::project_semantic_dispatch::ProjectSemanticDispatch::finalize_slot_seed)
+    /// choke point (zero-env slots stay test/fixture-only via
+    /// [`ResolvedDeclSlotIdentity::type_slot_unscoped`]).
+    #[must_use]
+    pub fn finalize(self, env: SlotEnvIdentity) -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity {
+            defining_canonical: self.defining_canonical,
+            owner: self.owner,
+            merged_symbol_name: self.merged_symbol_name,
+            symbol_space: self.symbol_space,
+            env,
         }
     }
 }
@@ -6251,6 +6472,7 @@ mod tests {
                     canonical_id: Arc::from("/m.ts"),
                     owner: TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
+                    binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
                 },
                 name: Arc::from("factory"),
             },
@@ -6293,6 +6515,7 @@ mod tests {
             canonical_id: Arc::from("/w/src/types.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope.clone(),
@@ -6314,6 +6537,7 @@ mod tests {
                 canonical_id: Arc::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
             name: Arc::from("Foo"),
         });
@@ -6322,6 +6546,7 @@ mod tests {
                 canonical_id: Arc::from("/w/b.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
             name: Arc::from("Foo"),
         });

@@ -77,6 +77,9 @@ fn typeof_carrier_node(
             canonical_id: Arc::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from(name),
     };
@@ -280,6 +283,9 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
             canonical_id: Arc::from("/holder.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("C"),
     };
@@ -485,6 +491,9 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
             canonical_id: Arc::from("/one.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("g"),
     };

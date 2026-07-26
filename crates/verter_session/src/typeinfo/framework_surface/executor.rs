@@ -643,6 +643,9 @@ impl ExecutorResolveCtx<'_> {
                 canonical_id: Arc::from(base.owner_canonical.as_ref()),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from(base.symbol_name.as_ref()),
         })) {

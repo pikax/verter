@@ -456,6 +456,9 @@ fn evaluate_inner(
                     canonical_id: Arc::clone(&scratch_canonical),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
                 },
                 name: Arc::from(SCRATCH_ALIAS_NAME),
             });

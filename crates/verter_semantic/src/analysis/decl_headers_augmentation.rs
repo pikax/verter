@@ -24,6 +24,14 @@ pub(super) fn index_augmentation_block(
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
 ) {
+    // Record the augmentation BLOCK itself (EMPTY blocks included — an
+    // empty `declare module "X" {}` / `declare global {}` still
+    // introduces the augmentation scope + target).
+    index.augmentation_blocks.push(AugmentationBlockRecord {
+        scope: scope.clone(),
+        owner: ctx.anchor.owner,
+        span: block.span.into(),
+    });
     for stmt in &block.body {
         match stmt {
             Statement::TSInterfaceDeclaration(iface) => {

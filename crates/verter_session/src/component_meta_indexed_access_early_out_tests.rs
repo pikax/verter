@@ -228,6 +228,9 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
                     canonical_id: Arc::from("/workspace/src/button-types.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
                 },
                 name: Arc::from("ButtonSlots"),
             },

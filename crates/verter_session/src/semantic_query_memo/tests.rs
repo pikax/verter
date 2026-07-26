@@ -58,6 +58,9 @@ fn scope(canonical: &str) -> ScopeId {
         canonical_id: Arc::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
+        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            TopLevelOwnerId::ordinary_file(),
+        ),
     }
 }
 
@@ -246,6 +249,7 @@ fn resolve_decl_memo_key_discriminates_top_level_owner() {
                 canonical_id: Arc::from("/w/Component.vue"),
                 owner,
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
             name: Arc::from("Shared"),
         })

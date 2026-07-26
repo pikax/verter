@@ -607,6 +607,19 @@ pub fn app_config_no_override_proof_get_or_compute_for_tests(
     crate::component_meta_caches::app_config_no_override_proof_get_or_compute(host, key)
 }
 
+/// Drive the family-A `BinderIdentityFacts` production producer
+/// ([`crate::binder_identity_facts::produce_binder_identity_facts`])
+/// from integration tests. The producer takes a `&dyn ResolverContext`
+/// internally (per the seal contract); this wrapper accepts a concrete
+/// `&VerterHost` so `tests/cases/**` can drive the demand-produced
+/// artifact end-to-end (warm hit / cold recompute / invalidation).
+pub fn binder_identity_facts_get_or_compute_for_tests(
+    host: &crate::VerterHost,
+    canonical: &str,
+) -> Option<std::sync::Arc<crate::binder_identity_facts::BinderIdentityFactsEntry>> {
+    crate::binder_identity_facts::produce_binder_identity_facts(host, canonical)
+}
+
 /// Return the published `ComponentMetaResultEntry`'s
 /// `ReadSetSignature` for `owner_canonical`, or `None` when no
 /// entry is cached for the owner's current content.

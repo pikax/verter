@@ -2256,6 +2256,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         canonical_id: Arc::clone(&identity.canonical_id),
                         owner: identity.owner,
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                     };
                     let name = Arc::clone(&identity.decl_name);
                     drop(data);
@@ -2584,6 +2585,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     owner: identity.owner,
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        identity.owner,
+                    ),
                 };
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);
@@ -4174,6 +4178,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     owner: identity.owner,
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
                 let name = Arc::clone(&identity.decl_name);
                 let target_canonical = Arc::clone(&identity.canonical_id);

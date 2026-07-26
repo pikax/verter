@@ -1021,6 +1021,12 @@ pub struct ProjectTypeStore {
     /// Keyed on `content_hash` so cosmetic edits recompute display facts only.
     /// See [`crate::member_display_fact_store::MemberDisplayFactStore`].
     member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore,
+    /// Family-A `BinderIdentityFacts` artifact store — the pre-reducer
+    /// binder-identity substrate (scope tree / declaration-slot seeds /
+    /// provenance). Keyed `(canonical, parse_stable_hash, parse_env_hash)`
+    /// so cosmetic edits preserve the entry. See
+    /// [`crate::binder_identity_facts::BinderIdentityFactsStore`].
+    binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore,
     /// Host-owned mapped-binder ordinal registry. The
     /// registry hands out STABLE `param_index` ordinals for each
     /// `(canonical, display_name, fingerprint)` triple so two
@@ -1149,6 +1155,7 @@ impl ProjectTypeStore {
             member_semantic_facts: crate::member_semantic_fact_store::MemberSemanticFactStore::new(
             ),
             member_display_facts: crate::member_display_fact_store::MemberDisplayFactStore::new(),
+            binder_identity_facts: crate::binder_identity_facts::BinderIdentityFactsStore::new(),
             mapper_binder_registry: Arc::new(
                 crate::mapper_binder_registry::MapperBinderRegistry::new(),
             ),
@@ -1392,6 +1399,17 @@ impl ProjectTypeStore {
         &self.member_display_facts
     }
 
+    /// Family-A `BinderIdentityFacts` artifact store (the pre-reducer
+    /// binder-identity substrate). See
+    /// [`crate::binder_identity_facts::BinderIdentityFactsStore`] for the
+    /// producer contract.
+    #[must_use]
+    pub fn binder_identity_facts_store(
+        &self,
+    ) -> &crate::binder_identity_facts::BinderIdentityFactsStore {
+        &self.binder_identity_facts
+    }
+
     /// Host-owned mapped-binder ordinal registry. Hands
     /// out STABLE `param_index` ordinals for each `(canonical,
     /// display_name, fingerprint)` triple so two lowerings of the
@@ -1485,6 +1503,11 @@ impl ProjectTypeStore {
         self.member_semantic_facts
             .invalidate_canonical(canonical_id);
         self.member_display_facts.invalidate_canonical(canonical_id);
+        // Family-A binder-identity artifacts key on the canonical's
+        // parse-stable skeleton: a content edit drops them so the next
+        // demand re-projects from fresh shallow state.
+        self.binder_identity_facts
+            .invalidate_canonical(canonical_id);
         // Drop the per-canonical mapper-binder
         // registry slot. The next lowering of any mapper in this
         // file starts with a fresh `Arc::as_ptr` keyspace so a
@@ -1534,6 +1557,8 @@ impl ProjectTypeStore {
         self.member_semantic_facts
             .invalidate_canonical(canonical_id);
         self.member_display_facts.invalidate_canonical(canonical_id);
+        self.binder_identity_facts
+            .invalidate_canonical(canonical_id);
         self.mapper_binder_registry
             .clear_for_canonical(canonical_id);
     }

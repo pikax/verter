@@ -981,6 +981,7 @@ fn value_root_scope(scope: &NodeScopeId) -> Result<ScopeId, StructuralLowerError
             canonical_id: Arc::clone(canonical_id),
             owner: *owner,
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(*owner),
         }),
         NodeScopeId::Global => Err(StructuralLowerError::UnsupportedWithoutResolution {
             shape: "TypeOf in a scope-less (Global) context",

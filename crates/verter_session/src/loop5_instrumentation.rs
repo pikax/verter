@@ -798,6 +798,9 @@ mod tests {
             canonical_id: Arc::clone(&dummy_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         };
         let identity = crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::clone(&dummy_id),

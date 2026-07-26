@@ -56,6 +56,9 @@ fn type_resolution_audit_long_chain_terminates_without_stack_overflow() {
             canonical_id: Arc::from("/chain.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("T0"),
     });

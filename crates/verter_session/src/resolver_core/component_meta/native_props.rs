@@ -99,6 +99,7 @@ pub(crate) fn named_native_props_outcome(
             canonical_id: Arc::from(root_canonical),
             owner: root_owner,
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(root_owner),
         },
         name: Arc::from(root_name),
     }));

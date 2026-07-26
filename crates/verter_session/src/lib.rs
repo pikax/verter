@@ -57,6 +57,7 @@ mod audit_warm_cache_tests;
 pub mod audited_request;
 #[cfg(test)]
 mod audited_request_tests;
+pub mod binder_identity_facts;
 #[cfg(test)]
 mod block_6c_view_hoist_tests;
 mod cache;

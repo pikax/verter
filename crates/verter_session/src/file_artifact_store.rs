@@ -2855,6 +2855,13 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
         FactKey::ImportRef { .. } => FactKeyKindTag::ImportRef,
         FactKey::SyntacticReexportRef { .. } => FactKeyKindTag::SyntacticReexportRef,
         FactKey::ModuleAugmentation { .. } => FactKeyKindTag::ModuleAugmentation,
+        FactKey::AugmentationContributionSet { .. } => FactKeyKindTag::AugmentationContributionSet,
+        FactKey::AugmentationContributionOrder { .. } => {
+            FactKeyKindTag::AugmentationContributionOrder
+        }
+        FactKey::DeclContributionOrder { .. } => FactKeyKindTag::DeclContributionOrder,
+        FactKey::AugmentationTargetSet => FactKeyKindTag::AugmentationTargetSet,
+        FactKey::NamespaceScopeSet => FactKeyKindTag::NamespaceScopeSet,
         // Resolve-imports + route-surface domain keys live on the
         // parallel `ResolvedImportFacts` / `RouteDb` admission paths
         // and emit their own typed events. They are not admitted to

@@ -316,6 +316,9 @@ fn typeof_default_construct_return_node(
                 canonical_id: Arc::from(canonical_id),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::instance(0),
+                ),
             },
             name: Arc::from("default"),
         },

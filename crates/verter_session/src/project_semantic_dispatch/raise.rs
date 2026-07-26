@@ -1347,6 +1347,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     canonical_id: Arc::clone(&identity.canonical_id),
                     owner: identity.owner,
                     local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
                 let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope,

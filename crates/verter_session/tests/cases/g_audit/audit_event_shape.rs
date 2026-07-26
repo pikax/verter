@@ -322,7 +322,7 @@ fn r23_cache_subsystem_audit_event_variants_exist() {
     let _ = format!("{route}");
 }
 
-/// `FactKeyKindTag` enumerates the 12 parse-domain `FactKey`
+/// `FactKeyKindTag` enumerates the 17 parse-domain `FactKey`
 /// structural shapes. Compile-time enumeration check via
 /// exhaustive match.
 #[test]
@@ -342,6 +342,11 @@ fn fact_key_kind_tag_covers_parse_domain_factkey_shapes() {
             FactKeyKindTag::ImportRef => "ImportRef",
             FactKeyKindTag::SyntacticReexportRef => "SyntacticReexportRef",
             FactKeyKindTag::ModuleAugmentation => "ModuleAugmentation",
+            FactKeyKindTag::AugmentationContributionSet => "AugmentationContributionSet",
+            FactKeyKindTag::AugmentationContributionOrder => "AugmentationContributionOrder",
+            FactKeyKindTag::DeclContributionOrder => "DeclContributionOrder",
+            FactKeyKindTag::AugmentationTargetSet => "AugmentationTargetSet",
+            FactKeyKindTag::NamespaceScopeSet => "NamespaceScopeSet",
         }
     }
     // Touch every variant so the match is exhaustive in both
@@ -367,6 +372,26 @@ fn fact_key_kind_tag_covers_parse_domain_factkey_shapes() {
     assert_eq!(
         classify(FactKeyKindTag::ModuleAugmentation),
         "ModuleAugmentation"
+    );
+    assert_eq!(
+        classify(FactKeyKindTag::AugmentationContributionSet),
+        "AugmentationContributionSet"
+    );
+    assert_eq!(
+        classify(FactKeyKindTag::AugmentationContributionOrder),
+        "AugmentationContributionOrder"
+    );
+    assert_eq!(
+        classify(FactKeyKindTag::DeclContributionOrder),
+        "DeclContributionOrder"
+    );
+    assert_eq!(
+        classify(FactKeyKindTag::AugmentationTargetSet),
+        "AugmentationTargetSet"
+    );
+    assert_eq!(
+        classify(FactKeyKindTag::NamespaceScopeSet),
+        "NamespaceScopeSet"
     );
 }
 

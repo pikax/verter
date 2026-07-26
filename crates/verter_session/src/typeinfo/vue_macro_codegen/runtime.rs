@@ -106,6 +106,9 @@ pub(super) fn direct_member_dependency_is_missing(
                         canonical_id: Arc::clone(&identity.canonical_id),
                         owner: identity.owner,
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            identity.owner,
+                        ),
                     },
                     name: Arc::clone(&identity.decl_name),
                 })) {
@@ -256,6 +259,9 @@ fn is_definitely_non_object_root(
                             canonical_id: Arc::clone(&identity.canonical_id),
                             owner: identity.owner,
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                identity.owner,
+                            ),
                         },
                         name: Arc::clone(&identity.decl_name),
                     }));

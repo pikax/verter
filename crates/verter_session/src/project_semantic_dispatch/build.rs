@@ -397,6 +397,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 canonical_id: Arc::clone(&target.canonical_id),
                                 owner: target.owner,
                                 local_scope: None,
+                                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                    target.owner,
+                                ),
                             },
                             name: Arc::clone(&target.symbol_name),
                         };
@@ -1017,6 +1020,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             canonical_id: Arc::from(dep_canonical),
                             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            ),
                         },
                         name: assign_target,
                     },
@@ -1047,6 +1053,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             canonical_id: Arc::from(dep_canonical),
                             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            ),
                         },
                         name: Arc::clone(name),
                     },
@@ -9261,6 +9270,9 @@ mod carrier_type_param_descent_tests {
                         canonical_id: Arc::from("/v.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
                     },
                     name: Arc::from("factory"),
                 },

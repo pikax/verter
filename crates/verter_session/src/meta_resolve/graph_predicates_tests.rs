@@ -543,6 +543,9 @@ mod carrier_descent_tests {
                         canonical_id: Arc::from("/v.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
                     },
                     name: Arc::from("factory"),
                 },

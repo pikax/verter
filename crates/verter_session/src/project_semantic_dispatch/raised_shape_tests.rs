@@ -684,6 +684,9 @@ fn parity_lazy_carriers() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -1707,6 +1710,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -1732,6 +1738,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -2544,6 +2553,9 @@ fn publication_score_corpus(
                         canonical_id: Arc::from("/m.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
                     },
                     name: Arc::from("factory"),
                 },

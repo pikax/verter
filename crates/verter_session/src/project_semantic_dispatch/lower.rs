@@ -1525,6 +1525,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             canonical_id: Arc::clone(&scope_canonical_id),
                             owner: scope_owner,
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                scope_owner,
+                            ),
                         },
                         name: Arc::clone(&single_root),
                     },
@@ -1548,6 +1551,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     canonical_id: scope_canonical_id,
                                     owner: scope_owner,
                                     local_scope: None,
+                                    binder_scope_id:
+                                        crate::semantic_query::BinderScopeId::file_scope(
+                                            scope_owner,
+                                        ),
                                 },
                                 name: joined,
                             },

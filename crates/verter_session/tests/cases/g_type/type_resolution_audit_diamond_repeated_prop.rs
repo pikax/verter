@@ -51,6 +51,9 @@ fn type_resolution_audit_diamond_intra_request_interning() {
             canonical_id: Arc::from("/diamond.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("AB"),
     });

@@ -5547,6 +5547,11 @@ mod foundations_guards {
         // ─── public modules: cited consumers ────────────────────────
         // tests/cases/g_misc0/audited_request_e2e.rs
         "pub mod audited_request",
+        // Family-A `BinderIdentityFacts` substrate (scope tree /
+        // `DeclarationSlotSeed`s / provenance + the artifact store).
+        // Public so `tests/cases/g_binder/binder_identity_facts.rs` can
+        // drive the demand producer + read the artifact payload.
+        "pub mod binder_identity_facts",
         // Workspace-wide cache-cluster schema-version constant + the
         // `CacheSchemaVersioned` trait. Public so
         // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)
@@ -11749,11 +11754,17 @@ fn tier_2_split_preserves_semantic_query_key_hashes() {
         canonical_id: Arc::from("/test/scope-a.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         local_scope: None,
+        binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            verter_type_expr::TopLevelOwnerId::instance(0),
+        ),
     };
     let scope_b = ScopeId {
         canonical_id: Arc::from("/test/scope-b.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         local_scope: None,
+        binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            verter_type_expr::TopLevelOwnerId::instance(0),
+        ),
     };
 
     let key_a1 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {

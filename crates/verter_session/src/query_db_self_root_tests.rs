@@ -5763,6 +5763,9 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                             canonical_id: Arc::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::instance(0),
+                            ),
                         },
                         name: Arc::from("definitelyMissingSeamValue"),
                     },
@@ -5895,6 +5898,9 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
                             canonical_id: Arc::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::instance(0),
+                            ),
                         },
                         name: Arc::from("definitelyMissingOverflowValue"),
                     },

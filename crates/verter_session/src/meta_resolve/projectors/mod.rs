@@ -710,6 +710,10 @@ pub(crate) fn resolve_macro_payload(
                                         canonical_id: std::sync::Arc::clone(&identity.canonical_id),
                                         owner: identity.owner,
                                         local_scope: None,
+                                        binder_scope_id:
+                                            crate::semantic_query::BinderScopeId::file_scope(
+                                                identity.owner,
+                                            ),
                                     },
                                     name: std::sync::Arc::clone(&identity.decl_name),
                                 },

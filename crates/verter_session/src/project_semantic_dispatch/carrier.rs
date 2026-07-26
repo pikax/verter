@@ -752,6 +752,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 canonical_id: Arc::clone(&resolved_root.canonical_id),
                 owner: resolved_root.owner,
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    resolved_root.owner,
+                ),
             },
             name: Arc::clone(&resolved_root.symbol_name),
         })) {

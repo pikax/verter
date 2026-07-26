@@ -107,6 +107,7 @@ impl VerterHost {
                 canonical_id: Arc::clone(&request.canonical_id),
                 owner: default_owner,
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(default_owner),
             },
             name: Arc::clone(&request.name),
         })) {

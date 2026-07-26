@@ -75,6 +75,30 @@ pub struct DeclHeaderContributor {
     pub name_span: Span,
 }
 
+/// A `namespace N { … }` block recorded by the shallow walk — one record
+/// per namespace block with its dotted qualified name (`"NS"` /
+/// `"NS.Inner"`), in source order. EMPTY blocks are recorded too: a
+/// block with zero members is still a named lexical scope, and the
+/// family-A binder-identity projection needs the complete scope
+/// inventory (it must not derive scopes only from registered members).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceBlockRecord {
+    pub owner: TopLevelOwnerId,
+    pub qualified_name: String,
+    pub span: Span,
+}
+
+/// A `declare module "X" { … }` / `declare global { … }` augmentation
+/// block recorded by the shallow walk, in source order. EMPTY blocks
+/// are recorded too (an empty augmentation block still introduces the
+/// augmentation scope + target).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AugmentationBlockRecord {
+    pub scope: AugmentationScopeKind,
+    pub owner: TopLevelOwnerId,
+    pub span: Span,
+}
+
 /// Exact parser-authored locator for a JSDoc typedef declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsdocTypedefHeader {
@@ -132,9 +156,12 @@ pub struct TypeDeclHeader {
     /// first-seen order (matching `TypeDeclGroup::merged_member_header_facts`'
     /// own-member inventory: heritage members are NOT included).
     pub member_headers: Vec<MemberHeader>,
-    /// Source-order top-level statement indices of every contributing
-    /// statement (deduplicated; one statement can contribute several
-    /// same-name declarations).
+    /// Source-order locators of every contributing declaration
+    /// (deduplicated by `(statement anchor, declaration span)` — one
+    /// statement can contribute several same-name declarations; DISTINCT
+    /// declarations in one statement or block, e.g. a repeated
+    /// `interface A` inside one `declare module`, are each recorded at
+    /// their authored positions).
     pub contributors: Vec<DeclHeaderContributor>,
     /// Vue runtime-only heritage suppression, addressed against the exact
     /// lowered contributor/heritage-arm shape. This is parser-authored
@@ -190,6 +217,16 @@ pub struct DeclHeaderIndex {
     pub enum_headers: DeclMap<EnumDeclHeader>,
     pub augmentation_type_headers: FxHashMap<AugmentationScopeKind, DeclMap<TypeDeclHeader>>,
     pub augmentation_value_headers: FxHashMap<AugmentationScopeKind, DeclMap<ValueDeclHeader>>,
+    /// Every `namespace N { … }` block in source order, EMPTY blocks
+    /// included (recorded at block entry, before any member registers).
+    /// Empty in the `from_eval_env` mirror (that env-seeded construction
+    /// has no block-level view; consumers of the scope inventory go
+    /// through the real parse path).
+    pub namespace_blocks: Vec<NamespaceBlockRecord>,
+    /// Every `declare module "X" { … }` / `declare global { … }` block
+    /// in source order, EMPTY blocks included. Empty in the
+    /// `from_eval_env` mirror (same block-level-view limitation).
+    pub augmentation_blocks: Vec<AugmentationBlockRecord>,
 }
 
 impl DeclHeaderIndex {
@@ -753,6 +790,16 @@ fn index_module_declaration(
         return;
     };
 
+    // Record the namespace BLOCK itself (EMPTY blocks included — a
+    // block with zero members is still a named lexical scope). Recorded
+    // at block entry so the scope inventory is complete even when no
+    // member registers.
+    index.namespace_blocks.push(NamespaceBlockRecord {
+        owner: ctx.anchor.owner,
+        qualified_name: module_name.clone(),
+        span: decl.span.into(),
+    });
+
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
             index_module_declaration(inner, ctx, index, Some(module_name.as_str()));
@@ -1235,10 +1282,18 @@ fn push_contributor(
     declaration_span: Span,
     name_span: Span,
 ) {
-    if contributors
-        .last()
-        .is_some_and(|entry| entry.anchor == ctx.anchor)
-    {
+    // Dedup TRUE duplicates only (same statement anchor AND same
+    // declaration span — one statement re-registering the SAME
+    // declaration). Two DISTINCT declarations in one statement or block
+    // (e.g. `interface A {} interface B {} interface A {}` inside one
+    // `declare module "m"`) share the anchor but have distinct spans:
+    // BOTH are recorded, at their authored positions. The lazy
+    // body-lowering consumers dedup statement anchors at consumption
+    // (`decl_body_memo`), so a same-anchor duplicate never lowers the
+    // same statement twice.
+    if contributors.last().is_some_and(|entry| {
+        entry.anchor == ctx.anchor && entry.declaration_span == declaration_span
+    }) {
         return;
     }
     contributors.push(DeclHeaderContributor {

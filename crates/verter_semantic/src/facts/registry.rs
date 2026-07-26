@@ -327,6 +327,65 @@ pub enum FactKey {
         augmented_name: InternedName,
         space: SymbolSpace,
     },
+    /// SET-shape fingerprint of one augmentation target's contribution
+    /// set in ONE file: every `(name, space)` contribution a single
+    /// lexical owner makes to the target (a `declare module "X" {…}` /
+    /// `declare global {…}` scope — global blocks key on the
+    /// `$global` sentinel specifier, mirroring
+    /// [`ModuleAugmentation`](Self::ModuleAugmentation)). HEADER-level:
+    /// folds each contribution's header fingerprint; set growth or a
+    /// contribution shape edit moves this fact, a pure reorder does not
+    /// (that is [`AugmentationContributionOrder`](Self::AugmentationContributionOrder)'s
+    /// job). Emitted for EVERY augmentation block, EMPTY ones included
+    /// (an empty set hash), so an empty → first-contribution edit moves
+    /// it. `scope_kind_tag` keeps `declare global {…}` and
+    /// `declare module "$global" {…}` in DISTINCT identities (the raw
+    /// specifier alone cannot separate them).
+    AugmentationContributionSet {
+        scope_kind_tag: AugmentationScopeKindTag,
+        specifier: InternedSpecifier,
+        owner: TopLevelOwnerId,
+    },
+    /// ORDER-sensitive fingerprint of one augmentation target's
+    /// contribution sequence in ONE file: the AUTHORED
+    /// `(statement index, name, space, header fingerprint)` sequence per
+    /// `(specifier, owner)`. Reordering, growing, or editing a
+    /// contribution moves this fact; comments / whitespace BETWEEN the
+    /// contributing declarations do not. Emitted for EVERY augmentation
+    /// block, EMPTY ones included; `scope_kind_tag` separates
+    /// `declare global {…}` from `declare module "$global" {…}`.
+    AugmentationContributionOrder {
+        scope_kind_tag: AugmentationScopeKindTag,
+        specifier: InternedSpecifier,
+        owner: TopLevelOwnerId,
+    },
+    /// ORDER-sensitive fingerprint of one file-surface declaration
+    /// slot's contributor sequence: the AUTHORED
+    /// `(statement index, contributing declaration shape)` sequence per
+    /// `(owner, name, space)`. Reordering an overload group, swapping
+    /// two same-file declarations, growing a merge group, or editing a
+    /// contributing declaration moves this fact; comments / whitespace
+    /// BETWEEN the contributing declarations do not. HEADER-level in the
+    /// parse-stable sense — it never forces a declaration body lowering.
+    DeclContributionOrder {
+        name: InternedName,
+        owner: TopLevelOwnerId,
+        space: SymbolSpace,
+    },
+    /// Whole-file augmentation TARGET set fingerprint: the sorted set of
+    /// `(specifier, owner)` augmentation blocks this file declares
+    /// (`declare module "X" {…}` / `declare global {…}` — the
+    /// `$global` sentinel for global blocks), EMPTY blocks included.
+    /// Adding a NEW target (a first `declare module "m" {…}` in a file
+    /// that had none) moves this fact even when the parse-stable
+    /// skeleton is unchanged.
+    AugmentationTargetSet,
+    /// Whole-file namespace-block set fingerprint: the sorted set of
+    /// `(owner, qualified name)` `namespace N { … }` blocks this file
+    /// declares, EMPTY blocks included. Adding or removing a namespace
+    /// block moves this fact even when no member registers (a block
+    /// with zero members is still a named lexical scope).
+    NamespaceScopeSet,
 
     // ────────────────────────────────────────────────────────────────
     // Resolve-imports domain (ResolvedImportFacts; resolve_env_hash
@@ -378,6 +437,34 @@ pub enum AugmentationTargetKindTag {
     ResolvedRelativeCanonical,
     WildcardAmbient,
     GlobalAugmentation,
+}
+
+/// The scope-kind discriminator of an augmentation BLOCK as authored:
+/// `declare global {…}` vs `declare module "X" {…}`. The block's
+/// specifier alone cannot separate `declare global {…}` from
+/// `declare module "$global" {…}` (the global block's sentinel
+/// specifier IS the string `"$global"`), so the parse-domain
+/// augmentation contribution keys carry this tag alongside the
+/// specifier — the two forms occupy DISTINCT target identities without
+/// any consumer string-matching the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum AugmentationScopeKindTag {
+    /// A `declare global {…}` block.
+    Global,
+    /// A `declare module "X" {…}` block (any specifier, including a
+    /// literal `"$global"`).
+    Module,
+}
+
+impl AugmentationScopeKindTag {
+    /// Stable byte tag for serialisation into a structural hash.
+    #[must_use]
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Global => 0x01,
+            Self::Module => 0x02,
+        }
+    }
 }
 
 /// `defineProps` / `defineEmits` / etc. macro kind, used by
@@ -433,7 +520,12 @@ impl FactKey {
             | Self::TemplateRoot
             | Self::ImportRef { .. }
             | Self::SyntacticReexportRef { .. }
-            | Self::ModuleAugmentation { .. } => FactDomain::ParseFile,
+            | Self::ModuleAugmentation { .. }
+            | Self::AugmentationContributionSet { .. }
+            | Self::AugmentationContributionOrder { .. }
+            | Self::DeclContributionOrder { .. }
+            | Self::AugmentationTargetSet
+            | Self::NamespaceScopeSet => FactDomain::ParseFile,
 
             Self::ResolvedImportClause { .. } | Self::ResolvedReexportBinding { .. } => {
                 FactDomain::ResolveImports

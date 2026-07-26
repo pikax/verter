@@ -131,6 +131,9 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
             canonical_id: Arc::from("/w/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("Foo"),
     });

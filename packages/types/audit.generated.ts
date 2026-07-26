@@ -813,7 +813,7 @@ export type ExactnessTag = "ExactResolved" | "ExactSymbolic" | "UnresolvedGeneri
  * facts use the parallel `ResolvedImportFacts` / `RouteDb`
  * admission paths and emit their own typed events.
  */
-export type FactKeyKindTag = "Export" | "ExportAlias" | "SyntacticExportSet" | "LocalDecl" | "Member" | "MemberPresence" | "MemberShape" | "MacroSurface" | "TemplateRoot" | "ImportRef" | "SyntacticReexportRef" | "ModuleAugmentation";
+export type FactKeyKindTag = "Export" | "ExportAlias" | "SyntacticExportSet" | "LocalDecl" | "Member" | "MemberPresence" | "MemberShape" | "MacroSurface" | "TemplateRoot" | "ImportRef" | "SyntacticReexportRef" | "ModuleAugmentation" | "AugmentationContributionSet" | "AugmentationContributionOrder" | "DeclContributionOrder" | "AugmentationTargetSet" | "NamespaceScopeSet";
 
 /**
  * Which lane (`Semantic` or `Display`) a fact carries. Audit-side

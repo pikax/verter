@@ -1086,6 +1086,9 @@ fn typeof_carrier_renders_type_args() {
             canonical_id: Arc::from("/m.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("factory"),
     };

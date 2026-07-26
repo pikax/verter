@@ -185,6 +185,9 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from(name),
     })) {

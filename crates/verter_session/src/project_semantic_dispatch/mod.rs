@@ -827,16 +827,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The ONE generalized slot-finalization choke point: derive the
+    /// env-bearing, content-free
+    /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
+    /// from an env-free
+    /// [`DeclarationSlotSeed`](crate::semantic_query::DeclarationSlotSeed)
+    /// at query-key construction —
+    /// `ResolvedDeclSlotIdentity = DeclarationSlotSeed + SlotEnvIdentity`.
+    ///
+    /// The seed's four fields copy verbatim; `env` is filled from the
+    /// DEFINING canonical's live per-canonical slot environment —
+    /// `project_identity` (`J`) folds from
+    /// `host_view_project_identity_for`, `type_env_hash` (`T`) and
+    /// `lib_env_hash` (`L`) come from `host_view_env_hashes_for` — and is
+    /// attached through the sealed `SlotEnvIdentity` constructor. The
+    /// env dimensions enter ONLY the (content-free, R21-scoped)
+    /// `SemanticQueryKey`, never the family-A artifact. Every production
+    /// slot derivation routes through here (`type_slot_for`,
+    /// `builtin_type_slot`, …); the zero-env constructors stay
+    /// test/fixture-only.
+    #[must_use]
+    pub(crate) fn finalize_slot_seed(
+        &self,
+        seed: crate::semantic_query::DeclarationSlotSeed,
+    ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(seed.defining_canonical.as_ref());
+        let project_identity = host
+            .host_view_project_identity_for(seed.defining_canonical.as_ref())
+            .fold_u32();
+        seed.finalize(crate::locator_identity::SlotEnvIdentity::from_raw(
+            project_identity,
+            env.type_env_hash,
+            env.lib_env_hash,
+        ))
+    }
+
     /// Build the env-bearing, content-free type-space
     /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
     /// for the declaration `name` defined in `canonical`.
     ///
     /// This is the SINGLE production derivation point for an
-    /// `Instantiate` / `ResolveMacroPayload` base/owner slot: it reads
-    /// the DEFINING file's per-canonical env
-    /// (`type_env_hash` = `T`, `lib_env_hash` = `L`) and folds the project
-    /// identity (`J`) from `host_view_project_identity_for`, building the
-    /// slot DIRECTLY (no `DeclBindingKey` ↔ slot adapter). `symbol_space` is
+    /// `Instantiate` / `ResolveMacroPayload` base/owner slot: it builds
+    /// the env-free TYPE-space seed for `(canonical, owner, name)` and
+    /// routes it through the
+    /// [`Self::finalize_slot_seed`] choke point, which reads the
+    /// DEFINING file's per-canonical env (`type_env_hash` = `T`,
+    /// `lib_env_hash` = `L`) and folds the project identity (`J`) from
+    /// `host_view_project_identity_for`. `symbol_space` is
     /// always `Type` — an `Instantiate` base / macro owner is a
     /// type-space carrier (interface / type alias / class-type / builtin
     /// utility / synthetic SFC owner). The slot stays content-free (R6);
@@ -848,19 +886,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         owner: verter_type_expr::TopLevelOwnerId,
         name: Arc<str>,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let env = host.host_view_env_hashes_for(canonical.as_ref());
-        let project_identity = host
-            .host_view_project_identity_for(canonical.as_ref())
-            .fold_u32();
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+        self.finalize_slot_seed(crate::semantic_query::DeclarationSlotSeed::new(
             canonical,
             owner,
             name,
-            project_identity,
-            env.type_env_hash,
-            env.lib_env_hash,
-        )
+            crate::semantic_query::SemanticSymbolSpace::Type,
+        ))
     }
 
     /// Build the env-bearing type-space slot for a built-in utility
@@ -2862,6 +2893,7 @@ pub fn resolve_decl_key(
             canonical_id: Arc::from(canonical_id),
             owner,
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
         },
         name: Arc::from(name),
     }

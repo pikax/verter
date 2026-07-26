@@ -241,6 +241,7 @@ const FILE_TO_SUBSTRATE = new Map([
 const BLOCK_TEXT_TO_VARIANT = new Map([
   ["U0.MANIFEST_SUBSTRATE", "U0ManifestSubstrate"],
   ["U2.QUERY_VALUE_DOMAIN", "U2QueryValueDomain"],
+  ["U2.BINDER_IDENTITY_FACTS", "U2BinderIdentityFacts"],
   ["U8.WIRE_SURFACE_CLOSURE", "U8WireSurfaceClosure"],
   ["U12.EXPORTER", "U12Exporter"],
   ["U13.PROJECTION", "U13Projection"],
@@ -287,6 +288,7 @@ const BLOCK_TEXT_TO_VARIANT = new Map([
 const BLOCK_TO_MECHANISM = new Map([
   ["U0ManifestSubstrate", "LedgerCoverageGate"],
   ["U2QueryValueDomain", "QueryValueDomainFoundation"],
+  ["U2BinderIdentityFacts", "BinderIdentityFactsSubstrate"],
   ["U8WireSurfaceClosure", "WireSurfaceClosure"],
   ["U12Exporter", "ExporterPublication"],
   ["U13Projection", "StructuralProjectionDecode"],
@@ -335,7 +337,8 @@ const MECHANISM_OWNING_BLOCK = new Map([...BLOCK_TO_MECHANISM].map(([b, m]) => [
 const BLOCK_PREREQS = new Map([
   ["U0ManifestSubstrate", []],
   ["U2QueryValueDomain", ["U0ManifestSubstrate"]],
-  ["U2RelationInfer", ["U2QueryValueDomain"]],
+  ["U2BinderIdentityFacts", ["U2QueryValueDomain"]],
+  ["U2RelationInfer", ["U2QueryValueDomain", "U2BinderIdentityFacts"]],
   ["U2IndexedAccess", ["U2QueryValueDomain", "U2RelationInfer"]],
   ["U2MappedTemplate", ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess"]],
   ["U2Utilities", ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess", "U2MappedTemplate"]],
@@ -431,6 +434,7 @@ const BLOCK_PREREQS = new Map([
 const BLOCK_TO_UBLOCK = new Map([
   ["U0ManifestSubstrate", "U0"],
   ["U2QueryValueDomain", "U2"],
+  ["U2BinderIdentityFacts", "U2"],
   ["U8WireSurfaceClosure", "U8"],
   ["U12Exporter", "U12"],
   ["U13Projection", "U13"],
@@ -468,6 +472,7 @@ const BLOCK_TO_UBLOCK = new Map([
 const BLOCK_TO_ORGAN = new Map([
   ["U0ManifestSubstrate", "LedgerSubstrate"],
   ["U2QueryValueDomain", "QueryValueDomain"],
+  ["U2BinderIdentityFacts", "QueryValueDomain"],
   ["U8WireSurfaceClosure", "WireSurface"],
   ["U12Exporter", "Exporter"],
   ["U13Projection", "Projection"],
@@ -553,6 +558,20 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "query_modes_are_presets_over_projection_demand_eval_policy",
       "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
       "cache_key_axes_are_minimal_and_normalized",
+    ],
+  ],
+  [
+    "U2BinderIdentityFacts",
+    [
+      _DAG,
+      "binder_identity_facts_are_pre_u2_and_not_n0_owned",
+      "declaration_slots_are_stable_symbol_space_scoped_facts",
+      "binder_scope_ids_are_cosmetic_stable_and_insertion_non_aliasing",
+      "slot_finalization_enters_env_only_in_query_key",
+      "binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit",
+      "binder_provenance_served_from_artifact_in_authored_order",
+      "binder_scope_id_enters_context_sensitive_query_identity",
+      "negative_name_lookup_requires_recorded_completeness_or_returnonly",
     ],
   ],
   [
@@ -1666,6 +1685,9 @@ const MECHANISM_TO_KEYS = new Map([
     "QueryValueDomainFoundation",
     ["ResolveDecl", "TypeOf", "NormalizeUnion", "NormalizeIntersection"],
   ],
+  // The binder-identity substrate feeds the scope-carrying decl/value
+  // lookup keys (its `binder_scope_id` rides their `ScopeId`).
+  ["BinderIdentityFactsSubstrate", ["ResolveDecl", "TypeOf"]],
   ["WireSurfaceClosure", []],
   ["ExporterPublication", []],
   ["StructuralProjectionDecode", []],

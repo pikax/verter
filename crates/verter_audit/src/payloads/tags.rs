@@ -209,6 +209,21 @@ pub enum FactKeyKindTag {
     /// `FactKey::ModuleAugmentation` — one `declare module "X" {}`
     /// augmenting declaration.
     ModuleAugmentation,
+    /// `FactKey::AugmentationContributionSet` — set-shape fingerprint
+    /// of one augmentation target's contribution set in one file.
+    AugmentationContributionSet,
+    /// `FactKey::AugmentationContributionOrder` — order-sensitive
+    /// fingerprint of one augmentation target's contribution sequence.
+    AugmentationContributionOrder,
+    /// `FactKey::DeclContributionOrder` — order-sensitive fingerprint
+    /// of one file-surface declaration slot's contributor sequence.
+    DeclContributionOrder,
+    /// `FactKey::AugmentationTargetSet` — whole-file augmentation
+    /// target set fingerprint.
+    AugmentationTargetSet,
+    /// `FactKey::NamespaceScopeSet` — whole-file namespace-block set
+    /// fingerprint.
+    NamespaceScopeSet,
 }
 
 /// Caller-requested compile cache mode — mirror of

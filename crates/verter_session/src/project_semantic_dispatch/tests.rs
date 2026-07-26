@@ -1551,6 +1551,9 @@ fn type_of_resolves_value_binding() {
             canonical_id: Arc::from("/w/v.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("foo"),
     };
@@ -1565,6 +1568,9 @@ fn type_of_resolves_value_binding() {
             canonical_id: Arc::from("/w/v.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from("notThere"),
     };
@@ -7687,6 +7693,9 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
                 canonical_id: Arc::from("/w/fns.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("makeLabel"),
         },
@@ -9952,6 +9961,9 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
                 canonical_id: Arc::from("/w/open_carrier.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("make"),
         },
@@ -16808,6 +16820,9 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
                 canonical_id: Arc::from("/consumer.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("Derived"),
         },
@@ -19248,6 +19263,9 @@ fn substitute_and_walker_descend_carrier_type_args() {
                 canonical_id: Arc::from("/w/carrier_args.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("factory"),
         },
@@ -19387,6 +19405,9 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
                 canonical_id: Arc::from("/w/absorb_carrier.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("make"),
         },
@@ -19460,6 +19481,9 @@ fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
                 canonical_id: Arc::from("/w/deferred.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
             },
             name: Arc::from("make"),
         },

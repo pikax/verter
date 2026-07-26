@@ -18,6 +18,9 @@ fn key(name: &'static str) -> SemanticQueryKey {
             canonical_id: Arc::from("/w/cancel.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
+            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                TopLevelOwnerId::ordinary_file(),
+            ),
         },
         name: Arc::from(name),
     })

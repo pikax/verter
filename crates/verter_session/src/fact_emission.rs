@@ -54,6 +54,12 @@ use crate::file_artifact_store::{
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
 
+/// The contribution-set / order-sensitive fact family: augmentation
+/// contribution set+order, declaration contribution order, and the
+/// whole-file scope-inventory set facts (split out of this file to keep
+/// each emission module under the file-size ceiling).
+mod contribution_facts;
+
 /// parse-time emission result: a populated [`FileFacts`] plus the
 /// per-file augmentation list.
 ///
@@ -114,6 +120,15 @@ pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
             display_hash: body_hash,
         });
     }
+
+    // ── Order-sensitive contributor-sequence facts + augmentation
+    //    contribution set/order facts (all HEADER-level) ──
+    contribution_facts::emit_decl_contribution_order_facts(&mut registry, shallow, indexed);
+    contribution_facts::emit_augmentation_contribution_facts(&mut registry, shallow);
+
+    // ── Whole-file scope-inventory set facts (augmentation targets +
+    //    namespace blocks, EMPTY blocks included) ──
+    contribution_facts::emit_scope_inventory_facts(&mut registry, shallow);
 
     let lazy = LazyBodyFactSource {
         memo: Arc::clone(shallow.decl_bodies()),
@@ -797,15 +812,6 @@ fn compute_display_hash(semantic: &Hash16) -> Hash16 {
 /// augmentation-index producer populates it lazily on first
 /// augmentation-sensitive query.
 fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFact> {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
-
-    let specifier_for = |scope: &AugmentationScopeKind| -> InternedSpecifier {
-        match scope {
-            AugmentationScopeKind::Global => InternedSpecifier::from(GLOBAL_AUGMENTATION_TAG),
-            AugmentationScopeKind::Module(spec) => InternedSpecifier::from(spec.as_str()),
-        }
-    };
-
     let header_index = shallow.decl_bodies().header_index();
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
 
@@ -814,7 +820,7 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
         for (key, header) in names {
             let name = key.name.as_ref();
             out.push(ModuleAugmentationFact {
-                specifier: specifier_for(scope),
+                specifier: contribution_facts::specifier_for(scope),
                 owner: key.owner,
                 augmented_name: InternedName::from(name),
                 space: SymbolSpace::Type,
@@ -835,7 +841,7 @@ fn collect_augmentations(shallow: &ShallowFileState) -> Vec<ModuleAugmentationFa
         for (key, header) in names {
             let name = key.name.as_ref();
             out.push(ModuleAugmentationFact {
-                specifier: specifier_for(scope),
+                specifier: contribution_facts::specifier_for(scope),
                 owner: key.owner,
                 augmented_name: InternedName::from(name),
                 space: SymbolSpace::Value,
@@ -878,7 +884,7 @@ fn hash16_from_pair(lo: u64, hi: u64) -> Hash16 {
 /// names/kinds/flags, contributor count. Moves on any skeleton edit
 /// (member add/remove/rename, kind change, contributor add/remove);
 /// body-VALUE sensitivity is the per-contributor `FileWholeHash` rail.
-fn augmentation_header_fingerprint(
+pub(super) fn augmentation_header_fingerprint(
     scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
