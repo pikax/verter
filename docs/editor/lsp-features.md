@@ -82,7 +82,8 @@ tools. They are Verter protocol extensions, not standard LSP methods:
 The server validates request parameters and returns normal JSON-RPC errors for
 invalid or unavailable inputs. Projection safety limits retain their typed
 partial reason internally and are also published through the document
-diagnostic path; see [Release State and Known Limitations](/arch/release-state).
+diagnostic path; see
+[Release State and Known Limitations](https://github.com/pikax/verter/blob/main/docs/arch/release-state.md).
 
 ## Document Synchronization
 

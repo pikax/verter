@@ -6,6 +6,13 @@ export default withMermaid(
     title: "Verter",
     description: "Fast Next Gen Unofficial Vue Tools",
 
+    // `docs/arch/**` is internal design material — design docs, plans, deferral
+    // ledgers and memos written for contributors reading the repository, not
+    // pages of the public site. They live under `docs/` so they sit beside the
+    // code they describe, but they are not built or published. Link to them by
+    // their GitHub URL from a published page, never by site path.
+    srcExclude: ["arch/**"],
+
     head: [
       ["meta", { property: "og:type", content: "website" }],
       ["meta", { property: "og:title", content: "Verter" }],
