@@ -1663,7 +1663,13 @@ impl Scheduler {
         let _gate = self.scoped_cache_gate.lock();
         let lost_all_owners = flight.detach_owner(owner_id);
         if lost_all_owners || flight.terminal().is_some() {
-            let _ = self.dag.lock().cancel(identity);
+            // Incarnation-scoped teardown: the DAG node is keyed by identity
+            // alone, so cancelling it from a SUPERSEDED flight would tear down
+            // the node a later incarnation already owns. See
+            // `scoped_flight_is_current`.
+            if self.scoped_flight_is_current(identity, flight) {
+                let _ = self.dag.lock().cancel(identity);
+            }
             self.remove_scoped_flight_locked(identity, flight);
         }
     }
@@ -1680,7 +1686,12 @@ impl Scheduler {
     ) {
         let _gate = self.scoped_cache_gate.lock();
         if flight.terminal().is_some() {
-            let _ = self.dag.lock().cancel(identity);
+            // Already terminal: this flight owns no live DAG node of its own.
+            // It may also already have been SUPERSEDED, in which case the
+            // identity's node belongs to a newer incarnation and must survive.
+            if self.scoped_flight_is_current(identity, flight) {
+                let _ = self.dag.lock().cancel(identity);
+            }
             self.remove_scoped_flight_locked(identity, flight);
             return;
         }
@@ -1702,6 +1713,31 @@ impl Scheduler {
             let _ = flight.set_terminal(effective);
         }
         self.remove_scoped_flight_locked(identity, flight);
+    }
+
+    /// Is `flight` still the registry's CURRENT incarnation for `identity`?
+    ///
+    /// The scoped-cache rendezvous is per-incarnation but the DAG node it
+    /// drives is keyed by [`WorkNodeIdentity`] alone. A retired incarnation
+    /// that tore the node down by identity would therefore cancel the node a
+    /// LATER incarnation had already been admitted onto: the successor's
+    /// aggregate token latches cancelled, its `by_identity` entry disappears,
+    /// and — when the cancel lands before the successor's dispatch — no
+    /// `mark_dispatched` ever arrives, so every caller parked in
+    /// [`Self::wait_for_scoped_cache_node`] waits forever. Every teardown that
+    /// can run on a superseded flight gates its DAG cancel on this predicate.
+    ///
+    /// The caller holds `scoped_cache_gate`, which serializes incarnation
+    /// replacement against teardown. The registry `Ref` is dropped before
+    /// return so no shard guard is held across the subsequent `dag.lock()`.
+    fn scoped_flight_is_current(
+        &self,
+        identity: &WorkNodeIdentity,
+        flight: &Arc<ScopedCacheFlight>,
+    ) -> bool {
+        self.scoped_cache_flights
+            .get(identity)
+            .is_some_and(|current| Arc::ptr_eq(current.value(), flight))
     }
 
     /// Remove only `flight`'s registry incarnation. Caller holds
@@ -6421,6 +6457,120 @@ mod tests {
                 completed: 1,
                 cancelled: 0,
             }
+        );
+    }
+
+    /// A superseded scoped-cache flight must never cancel the DAG node that a
+    /// LATER incarnation of the same `WorkNodeIdentity` owns.
+    ///
+    /// The flight registry is per-incarnation but the DAG node is keyed by
+    /// identity alone. When a stale flight tore its DAG node down by identity,
+    /// it removed the successor's freshly-admitted node: the successor's
+    /// aggregate token latched cancelled and its `by_identity` entry vanished,
+    /// so the successor was either force-cancelled (this test) or — when the
+    /// stale cancel landed BEFORE the successor's dispatch — never dispatched
+    /// at all, leaving `wait_for_scoped_cache_node` parked forever. That
+    /// unbounded park is the >10s `VerterHost::ensure_ide_compiled` block
+    /// observed under concurrent LSP load.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stale_flight_teardown_leaves_the_current_incarnations_node_alive() {
+        let scheduler = Scheduler::test_new(
+            SchedulerConfig {
+                cpu_threads: 4,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(MemorySourceLoader::new()),
+        );
+        let (stale_builder_context, stale_builder_token) = scoped_test_context(21);
+        let (stale_follower_context, stale_follower_token) = scoped_test_context(22);
+        let (successor_context, _successor_token) = scoped_test_context(23);
+        let stale_builder_request = scoped_test_request(stale_builder_context);
+        let stale_follower_request = scoped_test_request(stale_follower_context);
+        let successor_request = scoped_test_request(successor_context);
+        let identity = stale_builder_request.identity();
+
+        let (stale_entered_tx, stale_entered_rx) = std::sync::mpsc::channel();
+        let (stale_release_tx, stale_release_rx) = std::sync::mpsc::channel();
+
+        // 1. The stale incarnation's builder claims the flight and parks
+        //    inside its producer, holding the flight open.
+        let stale_builder = {
+            let scheduler = Arc::clone(&scheduler);
+            std::thread::spawn(move || {
+                scheduler.execute_scoped_cache_node(stale_builder_request, move |_| {
+                    stale_entered_tx.send(()).unwrap();
+                    stale_release_rx.recv().unwrap();
+                    41_u64
+                })
+            })
+        };
+        stale_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the stale builder must enter its producer");
+
+        // 2. A second owner joins the SAME flight, then both requests are
+        //    cancelled. Cancelling the builder first means that when the
+        //    follower observes its own cancellation the aggregate is already
+        //    latched, so the follower's detach retires this incarnation.
+        let stale_follower = {
+            let scheduler = Arc::clone(&scheduler);
+            std::thread::spawn(move || {
+                scheduler.execute_scoped_cache_node(stale_follower_request, |_| -> u64 {
+                    panic!("the joined follower must not execute its own closure")
+                })
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while scheduler.test_scoped_cache_owner_count(&identity) != 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(scheduler.test_scoped_cache_owner_count(&identity), 2);
+        stale_builder_token.cancel();
+        stale_follower_token.cancel();
+        assert_eq!(
+            stale_follower.join().unwrap(),
+            Err(ScopedCacheNodeError::Cancelled),
+            "the cancelled follower retires the stale incarnation on detach"
+        );
+
+        // 3. A fresh request for the SAME identity admits a NEW flight and a
+        //    NEW DAG node, and its builder parks inside its producer.
+        let (successor_entered_tx, successor_entered_rx) = std::sync::mpsc::channel();
+        let (successor_release_tx, successor_release_rx) = std::sync::mpsc::channel();
+        let successor = {
+            let scheduler = Arc::clone(&scheduler);
+            std::thread::spawn(move || {
+                scheduler.execute_scoped_cache_node(successor_request, move |_| {
+                    successor_entered_tx.send(()).unwrap();
+                    successor_release_rx.recv().unwrap();
+                    99_u64
+                })
+            })
+        };
+        successor_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the successor must enter its producer");
+
+        // 4. Only NOW does the stale builder finish. Its teardown runs against
+        //    an incarnation that is no longer the registry's current one, so it
+        //    must leave the successor's DAG node untouched.
+        stale_release_tx.send(()).unwrap();
+        assert_eq!(
+            stale_builder.join().unwrap(),
+            Err(ScopedCacheNodeError::Cancelled),
+            "the stale builder observes its own cancellation"
+        );
+
+        successor_release_tx.send(()).unwrap();
+        assert_eq!(
+            *successor
+                .join()
+                .unwrap()
+                .expect("the successor must publish its own value, not inherit a stale cancel"),
+            99
         );
     }
 
