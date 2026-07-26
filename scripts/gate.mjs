@@ -92,6 +92,30 @@
 //      Default stall 12m (--stall). On stall: reap + sweep; exit 125.
 //   7. Spotlight marker (macOS): a <runnerTarget>/.metadata_never_index file is written so Spotlight does
 //      not index the build tree (a harmless no-op file on Linux/Windows).
+//   8. Terminal-outcome accounting: a test that did not PASS fails the gate and is NAMED, whatever its
+//      outcome class. nextest reports several non-`FAIL` terminal outcomes — `N timed out`, `N exec
+//      failed`, a crash status (SIGABRT/SIGSEGV/LEAK-FAIL/…) — and reports a cancelled or interrupted run
+//      as `A/B tests run`, meaning B-A selected tests NEVER EXECUTED. None of those are in nextest's
+//      `failed` count, so the verdict is derived from `runCount - passed` (label-independent: an outcome
+//      class this gate has never heard of still lands there) plus the unrun count. A run whose only
+//      problem is a timeout is a FAIL, never a PASS: a timed-out test has not passed, it has not even
+//      finished.
+//      TRUST MODEL. The verdict rests on nextest's own counts, not on the names: `runCount - passed`
+//      cannot be lowered by anything a test prints, whereas the status lines share a stream with
+//      captured test output and are forgeable. Naming is therefore advisory and the count is
+//      authoritative; the one route from `failures exist in the log` to a green verdict is the
+//      tolerance allowlist, so tolerance is refused outright whenever a failure was superseded by a
+//      pass. Residual, named rather than claimed away: no text-level rule can fully separate runner
+//      output from test output on a shared stream - see GI-19 in docs/arch/gate-integrity-ledger.md.
+//      NAMING, and its honest limit. Failing tests are listed by name with their status, including the
+//      compound (`FAIL + LEAK`) and retried (`TRY 3 FAIL`, `TRY 3 FL+LK`) status fields, with the LAST
+//      status per test deciding — so a flaky test that failed attempt 1 and passed attempt 2 is not a
+//      failure, and three attempts of one test are one failure. But naming is best-effort where the
+//      VERDICT is not: a status spelling the parser does not recognise is not named, and surfaces through
+//      the unaccounted tripwire as `<run exit N; unaccounted failure(s) …>` instead. That still FAILS the
+//      gate — no silent pass — it just costs the operator the test's name. The recognised vocabulary is
+//      pinned in `NEXTEST_FAILURE_STATUSES` + `classifyNextestStatusField` from nextest's own status
+//      literals; widen it there, and only there, if a future nextest adds a spelling.
 //
 // FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
 //   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
@@ -1085,14 +1109,19 @@ async function runGate(opts, ctx) {
   }
   const nextestText = runRes.stdout + "\n" + runRes.stderr;
   // SURFACE-1 verdict via the shared analyzer (the same code the self-test drives in-process). It consults
-  // the run exit code + the summary `failed` total, NOT just the `FAIL [` lines, so a crash
-  // (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) or a setup/harness error in ANY crate fails the gate.
+  // the run exit code + the summary's run-but-did-not-pass total (`runCount - passed`), NOT just the
+  // `FAIL [` lines, so a crash (SIGABRT/SIGSEGV/LEAK-FAIL/…), a TIMEOUT, an `exec failed`, a cancelled run
+  // that left tests unexecuted, or a setup/harness error in ANY crate fails the gate — and each such test
+  // is NAMED in the verdict, not folded into an opaque "unaccounted" line.
   const s1 = analyzeNextestSurface(nextestText, runRes.code, freshnessToleranceAllowed);
   for (const f of s1.failures) failures.push(f);
   if (s1.toleratedCount > 0) toleratedOccurred = true;
   log(
     `SURFACE 1 done in ${Math.round(runRes.durationMs / 1000)}s: ` +
-      `${s1.summary.passed} passed, ${s1.summary.failed} failed ` +
+      `${s1.summary.runCount}${s1.summary.unrun > 0 ? `/${s1.summary.initialCount}` : ""} run, ` +
+      `${s1.summary.passed} passed, ${s1.summary.nonPassed} did not pass ` +
+      `(${s1.summary.failed} failed, ${s1.summary.timedOut} timed out, ${s1.summary.execFailed} exec failed` +
+      `${s1.summary.unrun > 0 ? `, ${s1.summary.unrun} NEVER RAN` : ""}) ` +
       `(${s1.namedCount} named, ${s1.toleratedCount} tolerated), ${s1.summary.skipped} skipped; ` +
       `run exit ${runRes.code}`,
   );

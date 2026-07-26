@@ -773,6 +773,13 @@ export async function preflightFreshnessTooling(opts) {
 // the line — so a real regression in a differently-named test that merely CONTAINS one of these tokens
 // still FAILS, and a name equal to an allowlisted one PLUS a suffix still FAILS.
 // ----------------------------------------------------------------------------------------------------
+// The binary that OWNS the tolerated tests. Tolerance is scoped to it, because a bare test PATH is not
+// an identity: named failures already key on `<binary-id> <name>` so two binaries owning
+// `cases::shared::same_name` stay two distinct failures, and the exemption has to use the same identity
+// or any crate that happens to define a test at the allowlisted path inherits the exemption - several
+// at once, all tolerated together.
+export const TOLERATED_TEST_BINARY_ID = "verter_protocol::main";
+
 export const TOLERATED_TEST_NAMES = new Set([
   // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
   // integration binary under the module path `cases::typeinfo_proto_ts_freshness::<fn>`. nextest renders
@@ -784,6 +791,12 @@ export const TOLERATED_TEST_NAMES = new Set([
   "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
   "cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
 ]);
+
+// Is `<binaryId, name>` the deliberately-exempt freshness pair? BOTH halves must match: the path alone
+// is not an identity (see TOLERATED_TEST_BINARY_ID).
+export function isToleratedIdentity(binaryId, name) {
+  return binaryId === TOLERATED_TEST_BINARY_ID && TOLERATED_TEST_NAMES.has(name);
+}
 
 // ----------------------------------------------------------------------------------------------------
 // Logging helpers (all to stderr so a piped JSON capture stays clean).
@@ -1768,9 +1781,14 @@ export async function runContainedStep(opts) {
 // non-`FAIL` failure statuses too so the in-process classifier agrees with the live path.
 // ----------------------------------------------------------------------------------------------------
 
-// Terminal status tokens nextest uses for a FAILED test (anything that is not PASS and counts toward the
-// summary `failed` total). Informational prefixes (SLOW / TRY / RETRY / START / SETUP) are NOT terminal
-// failure statuses and are excluded.
+// Terminal status tokens nextest uses for a FAILED test — a test that did NOT pass. Informational
+// prefixes (SLOW / TRY / RETRY / START / SETUP / TERMINATING) are NOT terminal statuses and are excluded.
+//
+// `LEAK` is deliberately NOT here. Outside leak-fail-mode nextest reports a test that leaked a handle or
+// subprocess as `LEAK [ … ]` while COUNTING IT AS PASSED — the summary reads `… 2 passed (1 leaky) …` and
+// the run exits 0. Treating `LEAK` as a failure turns a green run red (a false positive this repo would
+// hit: several suites launch tsgo/tsserver children). Leak-fail-mode renders the DISTINCT `LEAK-FAIL`
+// status, which IS a failure and IS in the set.
 export const NEXTEST_FAILURE_STATUSES = new Set([
   "FAIL",
   "ABORT",
@@ -1784,46 +1802,163 @@ export const NEXTEST_FAILURE_STATUSES = new Set([
   "SIGQUIT",
   "SIGTERM",
   "SIGKILL",
-  "LEAK",
   "LEAK-FAIL",
   "TIMEOUT",
+  // Abbreviated spellings nextest uses in its compact status column. Taken from the status literal blob
+  // in the cargo-nextest binary itself (`status: LK FAIL FL+LK TMT TM PASS`), not inferred: `FL` is the
+  // abbreviated FAIL (observed live as the compound `FL+LK`, which decomposes to `FL` + `LK`), and
+  // `TMT`/`TM` are the abbreviated TIMEOUT. `LK` and `PASS` are NOT here - see the passing-token set.
+  "FL",
+  "TMT",
+  "TM",
 ]);
 
-// All failed-test names from a nextest log, across EVERY terminal failure status (not just `FAIL`).
-// Returns the EXACT test name (final whitespace token after the timing bracket) for each failure line.
-export function extractNextestFailureStatusNames(text) {
-  const names = [];
-  for (const line of text.split("\n")) {
-    const m = /^\s*([A-Z][A-Z-]*) \[/.exec(line);
-    if (!m) continue;
-    if (!NEXTEST_FAILURE_STATUSES.has(m[1])) continue;
-    const idx = line.indexOf("] ");
-    if (idx < 0) continue;
-    const after = line.slice(idx + 2).trim();
-    if (!after) continue;
-    const parts = after.split(/\s+/);
-    names.push(parts[parts.length - 1]);
+// Terminal statuses for a test that DID pass. `XFAIL` is an EXPECTED failure, i.e. a success.
+const NEXTEST_PASSING_STATUS_TOKENS = new Set(["PASS", "LEAK", "LK", "XFAIL"]);
+
+// Non-terminal progress statuses. They are parsed (so the resolution below sees them in order) but never
+// classify as a failure; a real terminal line for the same test always follows.
+const NEXTEST_PROGRESS_STATUS_TOKENS = new Set(["SLOW", "TERMINATING", "START", "SETUP"]);
+
+// nextest right-aligns the status into a FIXED-WIDTH column, so the text before the timing bracket is
+// always exactly this many characters. Verified 44/44 across every real cargo-nextest 0.9.130 log captured
+// for this work, from a 2-test run to a 41-test run:
+//
+//     "        PASS [   0.015s] (1/5) gb6status::t plain_pass"        8 spaces + "PASS"    = 12
+//     " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail"     1 space  + 11 chars  = 12
+//     "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails"      2 spaces + 10 chars  = 12
+//     " TERMINATING [>  2.000s] (___) gb6status::t hangs"             1 space  + 11 chars  = 12
+//
+// Requiring the EXACT width is a cheap, load-bearing guard against captured test OUTPUT impersonating a
+// status line: nextest indents captured output by 4 spaces, so an echoed status line lands at width 16 and
+// is rejected outright. It is a hardening layer, NOT the correctness argument - see the transition rule
+// below for that. If a future nextest changes this width the failure mode is LOUD, never silent: no line
+// parses and every failure falls through to the unaccounted tripwire, so a run WITH failures goes red with
+// an opaque reason rather than green. Stated precisely, because the weaker half matters: a fully GREEN
+// run would still pass with zero named lines, since there is nothing to name. The loudness is on failing
+// runs only - it is not a claim that a width change is self-announcing on a passing tree.
+const NEXTEST_STATUS_FIELD_WIDTH = 12;
+
+// The status LINE grammar: <status field, right-aligned to NEXTEST_STATUS_FIELD_WIDTH> [<timing>] <rest>.
+// The field is NOT a single uppercase token (which is what a `^([A-Z][A-Z-]*) \[` scan assumed) - it may
+// carry spaces, digits and `+`, as the compound and retry spellings above show.
+const NEXTEST_STATUS_LINE = /^(.{12}) \[[^\]]*\]\s+(.+)$/;
+const NEXTEST_STATUS_FIELD = /^\s*[A-Z][A-Z0-9+\-/ ]*$/;
+
+// Classify a raw status FIELD as "fail" | "pass" | "progress" | "unknown".
+//
+// A `TRY <n> ` prefix is stripped first: it names the ATTEMPT, not the outcome. The remainder splits on
+// whitespace and `+`, so `FAIL + LEAK` and its abbreviation `FL+LK` both decompose, and any failure token
+// makes the whole field a failure.
+//
+// An UNRECOGNIZED field returns "unknown" and is deliberately NOT named. This is the honest boundary of
+// the naming claim: the summary-derived `runCount - passed` count remains the authority for WHETHER a
+// test failed, so a status spelling this parser has never seen still fails the gate through the
+// unaccounted tripwire, just without its name. Guessing here could only add a false positive on a green
+// run; it could never hide a failure.
+function classifyNextestStatusField(field) {
+  const bare = field.replace(/^TRY\s+\d+\s+/, "").trim();
+  if (!bare) return "unknown";
+  const tokens = bare.split(/[\s+]+/).filter(Boolean);
+  let sawPass = false;
+  let sawProgress = false;
+  for (const tok of tokens) {
+    if (tok.startsWith("SIG")) return "fail";
+    if (NEXTEST_FAILURE_STATUSES.has(tok)) return "fail";
+    if (NEXTEST_PASSING_STATUS_TOKENS.has(tok)) sawPass = true;
+    else if (NEXTEST_PROGRESS_STATUS_TOKENS.has(tok)) sawProgress = true;
+    else return "unknown";
   }
-  return names;
+  if (sawPass) return "pass";
+  return sawProgress ? "progress" : "unknown";
 }
 
-// The EXACT failed-test names from the plain `FAIL [` lines only — the names the tolerated-allowlist
-// accounting operates over on the live path. A crash status (SIGABRT/LEAK/…) is intentionally NOT in this
-// set: a crash is never tolerated, and it is surfaced via the summary-count tripwire.
-export function extractNextestFailedNames(text) {
-  const names = [];
+// The attempt number of a `TRY <n> …` field, or null when the field is not retry-tagged.
+function nextestRetryAttempt(field) {
+  const m = /^TRY\s+(\d+)\s+/.exec(field.trim());
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// May `next` replace `prev` as a test's terminal status?
+//
+// A HARDENING RULE, NOT THE LOAD-BEARING ONE. Read this before relying on it: it stops the BARE-`PASS`
+// forgery only, and it does NOT stop a forged retry. The parser reads a stream that is not exclusively
+// the runner's - nextest relays a test's CAPTURED OUTPUT alongside its own status lines - so a test can
+// print BOTH halves of a `TRY 1 FAIL` / `TRY 2 PASS` pair, which is exactly the transition this rule
+// permits. That was demonstrated, twice, with two different token spellings.
+//
+// What actually holds the verdict: the summary-derived COUNT (a cleared failure leaves a shortfall) and,
+// for the one path that turns `failures exist` into green, TOLERANCE-REFUSAL whenever any failure was
+// superseded by a pass. See analyzeNextestSurface and GI-19.
+//
+// The rule itself: a FAILURE is not cleared by a PASS unless the transition looks like a RETRY - both
+// sides `TRY <n>`-tagged with a strictly INCREASING attempt number - which is the only fail-to-pass
+// transition nextest itself produces. It is kept because it raises the cost of the trivial forgery and
+// because a blanket "a PASS may never follow a FAIL" rule would break the genuine flaky case. With
+// `NEXTEST_RETRIES` now pinned to 0 by buildCargoEnv, no GENUINE supersession occurs in this gate at all.
+//
+// Every other transition stays permissive, because none of them can HIDE a failure: progress -> anything,
+// pass -> fail (surfacing a failure is always allowed; an invented one is caught by the named-count
+// reconciliation), and fail -> fail (a later attempt or the trailing recap restating the same failure).
+function nextestStatusSupersedes(prev, next) {
+  if (prev.kind !== "fail") return true;
+  if (next.kind === "fail") return true;
+  if (next.kind === "progress") return false;
+  const prevTry = nextestRetryAttempt(prev.status);
+  const nextTry = nextestRetryAttempt(next.status);
+  return prevTry !== null && nextTry !== null && nextTry > prevTry;
+}
+
+// Every terminal failure in a nextest log as `{ status, name, binaryId }`, across EVERY failure status
+// (not just `FAIL`). `name` is the EXACT test name (final whitespace token after the timing bracket).
+//
+// Tests are keyed by `<binary-id> <test-name>`, so one test name appearing in two binaries stays two
+// distinct tests. Resolution is last-status-per-test SUBJECT TO `nextestStatusSupersedes`, which is what
+// makes retries, progress lines and the trailing recap all resolve correctly: `SLOW` then `PASS`,
+// `TERMINATING` then `TIMEOUT`, `TRY 1 FAIL` / `TRY 2 FAIL` / `TRY 3 FAIL` collapsing to ONE failure, and
+// the recap restating a failure onto the same entry.
+export function extractNextestTerminalFailures(text) {
+  const terminal = new Map();
+  // Every test whose FAILURE was superseded by a PASS. Captured output can supply BOTH sides of a
+  // `TRY 1 FAIL` / `TRY 2 PASS` pair, so a supersession is NOT evidence of a genuine retry - it is
+  // evidence that the named set was REDUCED and the reduction cannot be attributed. Callers use this
+  // to refuse tolerance, the one path from `failures exist in the log` to a green verdict.
+  const clearedFailures = [];
   for (const line of text.split("\n")) {
-    if (!/^\s*FAIL \[/.test(line)) continue;
-    // Drop everything up to and including the "] " that closes the timing bracket, then take the LAST
-    // whitespace token.
-    const idx = line.indexOf("] ");
-    if (idx < 0) continue;
-    const after = line.slice(idx + 2).trim();
-    if (!after) continue;
-    const parts = after.split(/\s+/);
-    names.push(parts[parts.length - 1]);
+    const m = NEXTEST_STATUS_LINE.exec(line);
+    if (!m) continue;
+    if (!NEXTEST_STATUS_FIELD.test(m[1])) continue;
+    const status = m[1].trim();
+    const kind = classifyNextestStatusField(status);
+    if (kind === "unknown") continue;
+    const parts = m[2].trim().split(/\s+/);
+    if (!parts.length) continue;
+    const name = parts[parts.length - 1];
+    // Prefer `<binary-id> <name>` as the identity. The progress column (`(3/5)`, `(___)`) is dropped: it
+    // is not part of a test's identity and it changes between attempts of the same test.
+    const prev = parts.length >= 2 ? parts[parts.length - 2] : "";
+    const binaryId = /^\(.*\)$/.test(prev) ? "" : prev;
+    const key = `${binaryId} ${name}`;
+    const existing = terminal.get(key);
+    const entry = { status, name, binaryId, kind };
+    if (existing && !nextestStatusSupersedes(existing, entry)) continue;
+    if (existing && existing.kind === "fail" && kind !== "fail") {
+      clearedFailures.push({ name: existing.name, from: existing.status, to: status });
+    }
+    terminal.set(key, entry);
   }
-  return names;
+  const out = [];
+  for (const entry of terminal.values()) {
+    if (entry.kind === "fail") {
+      out.push({ status: entry.status, name: entry.name, binaryId: entry.binaryId });
+    }
+  }
+  return { failures: out, clearedFailures };
+}
+
+// The deduped failed-test names across EVERY terminal failure status (not just `FAIL`).
+export function extractNextestFailureStatusNames(text) {
+  return extractNextestTerminalFailures(text).failures.map((f) => f.name);
 }
 
 // Classify a nextest log's failures (used by the in-process classifier so the testable path mirrors the
@@ -1841,18 +1976,27 @@ export function extractNextestFailedNames(text) {
 // `false` (fail-closed): when the freshness tools are present or were installed, an allowlisted `FAIL` name
 // is treated as a regression, NOT tolerated — so a stale-binding break is caught instead of swallowed.
 export function classifyNextestFailures(text, freshnessToleranceAllowed = false) {
-  const failNames = extractNextestFailedNames(text);
-  const allFailureNames = extractNextestFailureStatusNames(text);
-  // A non-`FAIL` failure status (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) is present whenever the broader scan
-  // finds more failure lines than the `FAIL`-only scan — those extras are crashes, never tolerated.
-  const nonFailFailures = allFailureNames.length - failNames.length;
+  const { failures: terminal, clearedFailures } = extractNextestTerminalFailures(text);
+  const plainFails = terminal.filter((f) => f.status === "FAIL");
+  // A non-`FAIL` terminal status (SIGABRT/SIGSEGV/LEAK-FAIL/TIMEOUT/…) is a crash, a hang, or an
+  // unexecutable test — never tolerated.
+  const nonFailFailures = terminal.filter((f) => f.status !== "FAIL").length;
   const summary = parseNextestSummary(text);
-  const unaccounted = summary.failed - failNames.length;
-  if (nonFailFailures > 0 || unaccounted > 0) return "regression";
-  if (failNames.length === 0) return "none";
-  for (const nm of failNames) {
-    // An allowlisted name is tolerated ONLY when the preflight allowed it; otherwise it is a regression.
-    if (!(freshnessToleranceAllowed && TOLERATED_TEST_NAMES.has(nm))) return "regression";
+  // The summary's authoritative run-but-did-not-pass total vs what we could NAME. A shortfall means a
+  // failure class hides in the counts beyond the named lines (a `timed out` / `exec failed` count with no
+  // parseable status line, say) — unaccounted, so a regression. `unrun > 0` means the run was cancelled or
+  // interrupted and some selected tests never executed at all.
+  const unaccounted = summary.runCountFound ? summary.nonPassed - terminal.length : 0;
+  if (nonFailFailures > 0 || unaccounted > 0 || summary.unrun > 0) return "regression";
+  if (plainFails.length === 0) return "none";
+  // A failure cleared by a supersession means the named set was reduced and the reduction cannot be
+  // attributed to a genuine retry rather than to forged output - so tolerance is unreachable.
+  if (clearedFailures.length > 0) return "regression";
+  for (const f of plainFails) {
+    // Tolerated ONLY when the preflight allowed it AND the failure is the exempt pair in its OWN
+    // binary; otherwise it is a regression.
+    if (!(freshnessToleranceAllowed && isToleratedIdentity(f.binaryId, f.name)))
+      return "regression";
   }
   return "tolerated";
 }
@@ -1879,32 +2023,107 @@ export function classifyNextestFailures(text, freshnessToleranceAllowed = false)
 export function analyzeNextestSurface(text, code, freshnessToleranceAllowed = false) {
   const failures = [];
   let toleratedCount = 0;
-  const failNames = [...new Set(extractNextestFailedNames(text))];
+  const { failures: terminal, clearedFailures } = extractNextestTerminalFailures(text);
+  // TOLERANCE TRUST. `nonPassed` is nextest's own count and cannot be lowered by anything printed into
+  // the stream, so a cleared failure normally shows up as a shortfall and fails the run. The one way to
+  // hide it is to also supply a replacement name that balances the count - and a replacement only
+  // produces a GREEN verdict if it is ALLOWLISTED, because any other name is itself a named failure.
+  // That makes the tolerance path the entire residual attack surface, so tolerance is refused whenever
+  // any failure was superseded by a pass. Refusing costs nothing real here (`retries = 0`, so no genuine
+  // supersession occurs) and it fails closed when the gate cannot prove the supersession was genuine.
+  const toleranceTrusted = clearedFailures.length === 0;
+  // `terminal` is already one entry per test (keyed by `<binary-id> <name>`), so it must NOT be
+  // re-deduplicated by bare NAME here: two binaries can each own a test called `cases::shared::x`, and
+  // collapsing them would drop one real failure and leave an opaque unaccounted entry standing in for it.
+  const plainFails = terminal.filter((f) => f.status === "FAIL");
+  const nonFail = terminal.filter((f) => f.status !== "FAIL");
   const summary = parseNextestSummary(text);
-  for (const nm of failNames) {
-    if (freshnessToleranceAllowed && TOLERATED_TEST_NAMES.has(nm)) toleratedCount++;
-    else failures.push({ surface: "nextest", name: nm });
+  let refusedTolerations = 0;
+  for (const f of plainFails) {
+    const allowlisted = freshnessToleranceAllowed && isToleratedIdentity(f.binaryId, f.name);
+    if (allowlisted && toleranceTrusted) toleratedCount++;
+    else {
+      if (allowlisted) refusedTolerations++;
+      failures.push({ surface: "nextest", name: f.name });
+    }
   }
-  const unaccounted = summary.failed - failNames.length;
-  // A non-zero run exit is authoritative: it must be EXACTLY accounted for by the parsed `FAIL` names,
-  // PROVEN by the summary. We accept a non-zero exit as accounted-for ONLY when ALL of:
-  //   - a `Summary [` line was actually parsed (summary.found) — a missing/unparseable summary (a setup or
-  //     harness error, or a killed/interrupted run) cannot prove what failed, so it must FAIL; AND
-  //   - the summary `failed` count EQUALS the parsed `FAIL` name count (no crash/leak/timeout class hides in
-  //     the summary total beyond the accounted `FAIL [` lines), AND that count is non-zero (a non-zero exit
-  //     with zero parsed failures is unexplained — fail it).
-  // Otherwise the run is unaccounted and we trip a hard failure. Keying the prior tripwire on
-  // `unaccounted > 0` swallowed the no-summary case: with tolerated `FAIL` lines and no summary,
-  // summary.failed defaulted to 0 so `unaccounted` went NEGATIVE and never fired. Requiring an exact,
-  // summary-proven accounting closes that swallow.
-  const accounted = summary.found && summary.failed === failNames.length && failNames.length > 0;
-  if (code !== 0 && !accounted) {
+  if (refusedTolerations > 0) {
+    const cleared = clearedFailures.map((c) => `${c.name} (${c.from} -> ${c.to})`).join(", ");
     failures.push({
       surface: "nextest",
-      name: `<run exit ${code}; unaccounted failure(s) (summary ${summary.found ? `failed=${summary.failed}` : "MISSING"}, parsed FAIL names=${failNames.length})>`,
+      name: `<tolerance refused: ${clearedFailures.length} failure(s) were superseded by a pass, so the named set cannot be trusted: ${cleared}>`,
     });
   }
-  return { failures, toleratedCount, summary, namedCount: failNames.length, unaccounted };
+  // A NON-`FAIL` terminal status is a crash, a hang (TIMEOUT), or an unexecutable test. It is NEVER
+  // tolerance-eligible and it is NAMED with the same visibility as an ordinary failure — the operator has
+  // to be told WHICH test hung, not merely that the run was "unaccounted". The status rides on the surface
+  // tag so the verdict line reads e.g. `[nextest:TIMEOUT] cases::foo::hangs`.
+  for (const f of nonFail) failures.push({ surface: `nextest:${f.status}`, name: f.name });
+  const namedCount = plainFails.length + nonFail.length;
+
+  // ACCOUNTING. The summary's `runCount - passed` is the authoritative count of tests that ran and did not
+  // pass, independent of how nextest labelled each one. Anything it counts beyond what we could NAME is an
+  // unaccounted failure — that is what catches a `timed out` / `exec failed` count with no parseable status
+  // line, and any future outcome class this parser has never heard of.
+  //
+  // The non-zero-exit precondition is deliberate and load-bearing (locked in by the (xiv) self-test): a
+  // CLEAN exit-0 run is never forced to FAIL by the summary requirement, so a code-0 tolerated `FAIL` log
+  // with no or contradictory summary stays tolerated. A crash/timeout status line is always hard, above,
+  // regardless of exit code.
+  const unaccounted = summary.runCountFound ? summary.nonPassed - namedCount : 0;
+  if (code !== 0) {
+    if (!summary.found || !summary.runCountFound) {
+      // A missing/unparseable summary (a setup or harness error, a killed or interrupted run) cannot prove
+      // what failed, so a non-zero exit must FAIL even if every parsed name is allowlisted.
+      failures.push({
+        surface: "nextest",
+        name: `<run exit ${code}; unaccounted failure(s) (summary MISSING or unparseable, named failures=${namedCount})>`,
+      });
+    } else if (unaccounted > 0 || namedCount === 0) {
+      // The summary counts more non-passing tests than we could name, or a non-zero exit reported no
+      // failure at all — either way the run is not accounted for.
+      failures.push({
+        surface: "nextest",
+        name:
+          `<run exit ${code}; unaccounted failure(s) (summary ${summary.runCount} run / ${summary.passed} passed` +
+          `${summary.failed ? `, ${summary.failed} failed` : ""}` +
+          `${summary.timedOut ? `, ${summary.timedOut} timed out` : ""}` +
+          `${summary.execFailed ? `, ${summary.execFailed} exec failed` : ""}` +
+          ` => ${summary.nonPassed} did not pass; named failures=${namedCount})>`,
+      });
+    }
+  }
+  // More than one layout-valid Summary line. nextest emits exactly one per run, so a second is not an
+  // ambiguity to resolve by position - it means something other than the runner authored a Summary, and
+  // the run's accounting cannot be trusted at all.
+  if (summary.count > 1) {
+    failures.push({
+      surface: "nextest",
+      name: `<${summary.count} Summary lines in one run; nextest emits exactly one, so the run accounting was forged or interleaved>`,
+    });
+  }
+  // The log NAMED more failures than nextest COUNTED. `nonPassed` comes from nextest's own accounting;
+  // `namedCount` is read out of a stream that also carries captured test output. An excess means
+  // something which is not a runner status line was parsed as one, so this run's naming cannot be
+  // trusted - surface it rather than quietly keeping the extra name.
+  if (summary.runCountFound && namedCount > summary.nonPassed) {
+    failures.push({
+      surface: "nextest",
+      name:
+        `<log named ${namedCount} failing test(s) but nextest counted ${summary.nonPassed} non-passing ` +
+        `(${summary.runCount} run / ${summary.passed} passed); a non-status line parsed as a status line>`,
+    });
+  }
+  // A cancelled/interrupted run (`A/B tests run`) left B-A selected tests UNEXECUTED. Those tests have no
+  // result at all, so the run cannot certify the tree no matter what the executed ones did. Checked
+  // independently of the exit code: a run that did not run its own test universe is never a pass.
+  if (summary.runCountFound && summary.unrun > 0) {
+    failures.push({
+      surface: "nextest",
+      name: `<run did not complete: ${summary.unrun} of ${summary.initialCount} selected test(s) never ran (cancelled or interrupted)>`,
+    });
+  }
+  return { failures, toleratedCount, summary, namedCount, unaccounted };
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -1967,10 +2186,9 @@ export function parseLibtestSummary(text) {
 export function analyzeLibtestSurface(text, code, binaryId, freshnessToleranceAllowed = false) {
   const failNames = extractLibtestFailedNames(text);
   const summary = parseLibtestSummary(text);
-  const qualify = (nm) => `${String(binaryId || "").replace(/^verter_session::?/, "")}::${nm}`;
-  const isTolerated = (nm) =>
-    freshnessToleranceAllowed &&
-    (TOLERATED_TEST_NAMES.has(nm) || TOLERATED_TEST_NAMES.has(qualify(nm)));
+  // Scoped to the OWNING binary on this surface too: a verter_session suite that happens to define a
+  // test at the allowlisted path is a real failure, not an inherited exemption.
+  const isTolerated = (nm) => freshnessToleranceAllowed && isToleratedIdentity(binaryId, nm);
 
   // Clean pass: exited 0 with no parsed FAILED lines. (A non-zero exit with zero FAILED names is a
   // crash/abort and falls through to the hard-fail accounting below.)
@@ -2246,7 +2464,70 @@ export function buildCargoEnv(baseEnv, runnerTarget, windows = IS_WINDOWS) {
   // Force non-TTY / CI-style output so progress lands in the captured log, not a TTY spinner.
   env.CARGO_TERM_COLOR = "never";
   env.CARGO_TERM_PROGRESS_WHEN = "never";
-  env.NEXTEST_HIDE_PROGRESS_BAR = "1";
+  // RUNNER ENVIRONMENT: CONSTRUCTED, NOT INHERITED.
+  //
+  // The SURFACE-1 verdict is parsed out of nextest's output, so any variable that changes that output
+  // changes the verdict. Pinning them one at a time as each is discovered is a DENYLIST and it lost
+  // three times running: `NEXTEST_FINAL_STATUS_LEVEL` (suppresses the failure recap), then
+  // `NEXTEST_NO_OUTPUT_INDENT` (strips the capture indent the layout rule rests on), then
+  // `NEXTEST_FAILURE_OUTPUT`/`NEXTEST_SUCCESS_OUTPUT` (move captured output AFTER the real Summary, so a
+  // test can print a Summary that the parser reads instead) and `NEXTEST_RETRIES` (makes a genuine
+  // supersession possible, turning tolerance-refusal into a false RED on a legitimate flaky run).
+  //
+  // So the `NEXTEST_*` namespace is STRIPPED and exactly the required set is written back. A variable
+  // nobody has named yet is closed by construction rather than by the next review round.
+  //
+  // BUT THE STRIP OWNS OUTPUT FORMAT, NOT CALLER INTENT. `NEXTEST_PROFILE` selects WHICH CONFIGURATION
+  // RUNS; it does not change how output is formatted. That is the same category as `CARGO_*`, `PATH`,
+  // `TMPDIR` and `RUST*`, none of which are stripped either. Swallowing it broke a contract in the
+  // WORSE direction - a broken GREEN run: CI runs this gate with `NEXTEST_PROFILE: ci`, junit is
+  // declared ONLY under `[profile.ci.junit]`, and the workflow step after the gate locates that file
+  // and fails when it is missing, so every passing CI run would exit 1 on a missing artifact.
+  //
+  // Preserving it cannot reopen the parse, and that is MEASURED rather than assumed: against the real
+  // binary, a hostile profile (`status-level`/`final-status-level = none`, `failure-output = final`,
+  // `retries = 3`) yields ZERO `FAIL [` lines unopposed, and the SAME profile under the pins below
+  // yields the correct FAIL lines, one Summary and no TRY lines. The pins beat the profile for every
+  // parser-facing setting, so the profile decides which config runs and the pins decide what is
+  // printed. Guarded by the CI junit contract in the self-test, derived from ci.yml + nextest.toml so
+  // it follows a profile rename and still catches a future strip.
+  // The fold is PLATFORM-ACCURATE, exactly as the PATH handling below already is. Windows env names
+  // fold case-INSENSITIVELY, so `Nextest_Profile` and `NEXTEST_PROFILE` are ONE variable to a Windows
+  // child and a case-SENSITIVE strip would leave every mixed-case spelling alive - the allowlist would
+  // have exactly the hole it exists to close, on the one platform this host cannot run. POSIX is
+  // case-EXACT: there `Nextest_Profile` is a genuinely DIFFERENT variable that nextest never reads, so
+  // deleting it would be this gate reaching outside its own contract.
+  const inNamespace = (k) => (windows ? k.toUpperCase() : k).startsWith("NEXTEST_");
+  const isProfileKey = (k) => (windows ? k.toUpperCase() : k) === "NEXTEST_PROFILE";
+  // Read the caller's profile from whatever spelling they used, then collapse every variant onto the
+  // ONE canonical key, so a Windows child never sees two colliding spellings of it.
+  let callerProfile;
+  for (const k of Object.keys(env)) {
+    if (isProfileKey(k)) callerProfile = env[k];
+  }
+  for (const k of Object.keys(env)) {
+    if (inNamespace(k)) delete env[k];
+  }
+  if (callerProfile !== undefined) env.NEXTEST_PROFILE = callerProfile;
+  // Colour FORCING would inject ANSI escapes into the status column and break the 12-column field the
+  // parser gates on. These only ever force colour ON, so deleting them is enough; `NO_COLOR` is
+  // deliberately NOT set, because that is a variable the TESTS themselves may legitimately read.
+  const COLOUR_FORCING = new Set(["CLICOLOR_FORCE", "CLICOLOR", "FORCE_COLOR"]);
+  for (const k of Object.keys(env)) {
+    if (COLOUR_FORCING.has(windows ? k.toUpperCase() : k)) delete env[k];
+  }
+  // The declared set, each with the reason the parser depends on it:
+  env.NEXTEST_HIDE_PROGRESS_BAR = "1"; // no spinner interleaved into the captured log
+  env.NEXTEST_NO_OUTPUT_INDENT = "0"; // keep the 4-space capture indent (the layout layer's basis)
+  env.NEXTEST_STATUS_LEVEL = "retry"; // terminal status for every test, including retry attempts
+  env.NEXTEST_FINAL_STATUS_LEVEL = "fail"; // the trailing failure recap the parser reads
+  env.NEXTEST_RETRIES = "0"; // no genuine fail->pass supersession, so tolerance-refusal cannot false-RED
+  env.NEXTEST_SUCCESS_OUTPUT = "never"; // captured output of PASSING tests never enters the stream
+  env.NEXTEST_FAILURE_OUTPUT = "immediate"; // and failing output stays INLINE, never after the Summary
+  // NOTHING else from the namespace is passed through. `NEXTEST_PROFILE` is the single exception above,
+  // and it is an exception on a stated ground: it expresses which configuration the caller asked to
+  // run, and every parser-facing setting is pinned here regardless of what that configuration says.
+
   // Sanitize the PATH var to its CWD-INDEPENDENT ABSOLUTE components so the executed tests obey the SAME
   // no-CWD-tool-source rule the verdict preflight resolver uses (closes every cwd-relative fail-open, not just
   // the empty/CWD-buf one). On both platforms the sanitized value is computed from the PATH var the Rust
@@ -2382,22 +2663,109 @@ export function mapStepReason(res) {
 // `found === true` to treat a non-zero run exit as accounted-for — a missing/unparseable Summary (a setup
 // or harness error, a killed run) cannot prove the failures are accounted for, so it must FAIL the gate
 // rather than fall through to PASS-WITH-TOLERATED on the parsed `FAIL` names alone.
+// nextest emits, at the end of a run:
+//     Summary [  63.890s] 15543 tests run: 15541 passed, 547 skipped
+//     Summary [ 900.014s] 12 tests run: 8 passed, 2 failed, 2 timed out, 5 skipped
+//     Summary [   1.003s] 4 tests run: 2 passed (1 leaky), 2 timed out, 2 skipped
+//     Summary [   1.516s] 2/41 tests run: 1 passed, 1 failed, 0 skipped
+//
+// THREE facts that the naive `(\d+) failed` read gets wrong, each a way for the gate to certify a tree it
+// must not:
+//   1. `failed` is the PLAIN-assertion-failure count only. A test that TIMED OUT or that nextest could not
+//      EXECUTE is reported under its own separate count (`N timed out`, `N exec failed`) and is NOT in
+//      `failed`. A timed-out test has not passed — it has not even finished.
+//   2. `A/B tests run` (the cancelled/interrupted form) means B-A tests NEVER RAN. `A tests run` alone
+//      means every selected test finished.
+//   3. `N passed (M leaky)` / `(M slow)` / `(M flaky)` are ANNOTATIONS on the passed count, not extra
+//      outcomes — those tests are inside `passed`.
+//
+// So the authoritative failure total is derived, not label-matched: `nonPassed = runCount - passed` counts
+// every test that ran and did not pass, WHATEVER nextest labelled it. A failure class this parser has never
+// heard of still lands in `nonPassed`, which is what makes the accounting fail-closed rather than a
+// perpetually-incomplete list of label regexes. `unrun = initialCount - runCount` is the never-executed
+// count. `failed` / `timedOut` / `execFailed` are kept for reporting only.
+//
+// Returns `found`: whether a `Summary [` line was present at all — the live SURFACE-1 accounting REQUIRES
+// `found === true` to treat a non-zero run exit as accounted-for, since a missing/unparseable Summary (a
+// setup or harness error, a killed run) cannot prove the failures are accounted for. `runCountFound` is the
+// same guarantee for the `N tests run` clause the derivation above depends on.
 export function parseNextestSummary(text) {
   let passed = 0;
   let skipped = 0;
   let failed = 0;
-  // nextest emits: "Summary [  63.890s] 15543 tests run: 15541 passed, 547 skipped" and may include
-  // "N failed" when there are failures.
-  const lines = text.split("\n").filter((l) => /Summary \[/.test(l));
+  let timedOut = 0;
+  let execFailed = 0;
+  let runCount = 0;
+  let initialCount = 0;
+  let runCountFound = false;
+  // AUTHORSHIP. A `Summary [` substring match anywhere on any line trusted whatever the stream happened
+  // to contain: with captured output placed after the run, a failing test printing its own Summary line
+  // REPLACED the runner's accounting and `nonPassed` went to 0 with a real FAIL still in the log. The
+  // real Summary occupies the SAME 12-column field as a status line (verified 8/8 on real runs), so it
+  // carries the SAME layout gate, which rejects the 4-space-indented captured copy. And a run emits
+  // EXACTLY ONE Summary (also 8/8), so a second layout-valid one is not something to disambiguate by
+  // position - it is proof the accounting was forged, reported via `count` for the caller to fail on.
+  const lines = text.split("\n").filter((l) => {
+    const m = NEXTEST_STATUS_LINE.exec(l);
+    return m !== null && m[1].trim() === "Summary";
+  });
   const found = lines.length > 0;
-  const line = found ? lines[lines.length - 1] : "";
+  // REFUSE, do not choose. With more than one layout-valid Summary the parser has no basis to prefer
+  // either, so it derives NO accounting from them: `runCountFound` stays false and every derived count
+  // stays zero. `count` is reported so the caller fails with a Summary-specific reason. Taking the last
+  // one was a positional choice the parser was not entitled to make, even though the live path already
+  // failed closed on the duplicate.
+  if (lines.length > 1) {
+    return {
+      count: lines.length,
+      passed: 0,
+      skipped: 0,
+      failed: 0,
+      timedOut: 0,
+      execFailed: 0,
+      runCount: 0,
+      initialCount: 0,
+      runCountFound: false,
+      nonPassed: 0,
+      unrun: 0,
+      found,
+    };
+  }
+  const line = found ? lines[0] : "";
   let m = /(\d+)\s+passed/.exec(line);
   if (m) passed = parseInt(m[1], 10);
   m = /(\d+)\s+skipped/.exec(line);
   if (m) skipped = parseInt(m[1], 10);
+  // `(\d+)\s+failed` cannot match inside "3 exec failed" (the digits are followed by " exec ", not by
+  // whitespace + "failed"), so the plain and exec-failed counts stay distinct.
   m = /(\d+)\s+failed/.exec(line);
   if (m) failed = parseInt(m[1], 10);
-  return { passed, skipped, failed, found };
+  m = /(\d+)\s+timed\s+out/.exec(line);
+  if (m) timedOut = parseInt(m[1], 10);
+  m = /(\d+)\s+exec\s+failed/.exec(line);
+  if (m) execFailed = parseInt(m[1], 10);
+  m = /(\d+)(?:\/(\d+))?\s+tests?\s+run/.exec(line);
+  if (m) {
+    runCountFound = true;
+    runCount = parseInt(m[1], 10);
+    initialCount = m[2] != null ? parseInt(m[2], 10) : runCount;
+  }
+  const nonPassed = Math.max(0, runCount - passed);
+  const unrun = Math.max(0, initialCount - runCount);
+  return {
+    count: lines.length,
+    passed,
+    skipped,
+    failed,
+    timedOut,
+    execFailed,
+    runCount,
+    initialCount,
+    runCountFound,
+    nonPassed,
+    unrun,
+    found,
+  };
 }
 
 // ----------------------------------------------------------------------------------------------------

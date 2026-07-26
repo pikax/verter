@@ -31,6 +31,24 @@
 //   macOS and Linux and EXCLUDES the `bash -c "<string>"` wrapper (its argv CONTAINS the sentinels so a
 //   substring search finds it, but its argv[0] basename is `bash`, not `sleep_…`).
 //
+// A RED RUN HERE MAY NOT BE A REGRESSION — check which scenario failed first. Two distinct environment
+// sensitivities are known and tracked as GI-18 in docs/arch/gate-integrity-ledger.md:
+//   (a) `(viii)` asserts a whole-gate budget against an ABSOLUTE ~6s window and IS load-sensitive.
+//       Measured on this 8-core host: green at load 2-27, fails at load 67-102 (12x oversubscription)
+//       with `took 11s ... did NOT bound the sequence near 6s`.
+//   (b) `i-survival`, `vi` and `xvii` spawn processes and observe them in the process table. These are
+//       NOT load-sensitive — they PASSED at that same load 67-102 — but four independent reviewer runs
+//       saw them fail at load 1.6-7.6 inside restricted sandboxes. The mechanism is ESTABLISHED, not
+//       inferred: one reported `mkdtemp` denial, and a later run ABORTED at `(i) MUTEX` with a direct
+//       `EPERM` from `mkdtemp` at load 2.72, never reaching those three at all. If you are in a
+//       container or a sandboxed shell, expect this and do not read it as a gate regression.
+// The two sets are DISJOINT and inversely correlated with load, which is how load was ruled OUT for (b).
+// Neither is a correctness signal about the gate itself: the classifier / verdict / parser scenarios are
+// pure in-process computation with no clock, no spawn and no filesystem, and they are unaffected by both.
+// This note is an INTERIM, and an inadequate one by design — a self-test whose job is detecting exactly
+// this class cannot discharge it by asking the reader to notice. GI-18 owes the real fix: skip under a
+// measured precondition, counted in SKIP and never in PASS.
+//
 // Properties proven (acceptance criteria — they MUST discriminate, not always-pass):
 //   (i)    MUTEX        — a second concurrent run REFUSES with the LOCK-REFUSED code (126).
 //   (ii)   STALE        — a SIGKILL'd holder's lockdir is reclaimed; a fresh run PASSes.
@@ -58,7 +76,7 @@
 //                           env set, NO `node gate.mjs` argv returns the gate success contract without
 //                           running the real gate. The discriminating control: a removed flag exits 127,
 //                           while `--help` (a legitimate non-gate mode) still exits 0.
-//   (ix)   SURFACE-1 NON-FAIL — a crash/leak (SIGABRT/LEAK) or a setup/harness error (non-zero exit, no
+//   (ix)   SURFACE-1 NON-FAIL — a crash (SIGABRT/SIGSEGV/…) or a setup/harness error (non-zero exit, no
 //                           `FAIL [` line) classifies FAIL on both the classifier and the live-aggregation
 //                           hook; the tolerated baseline stays PASS-WITH-TOLERATED.
 //   (x)    FAIL-CLOSED MUTEX — an alive holder with an EMPTY/uncheckable start-identity REFUSES (126); a
@@ -164,6 +182,7 @@ import { fileURLToPath } from "node:url";
 import {
   classifyNextestFailures,
   analyzeNextestSurface,
+  parseNextestSummary,
   analyzeLibtestSurface,
   selectSessionSuites,
   ensureRequiredWindowsDebugSidecars,
@@ -981,23 +1000,23 @@ async function main() {
     //     single verter_protocol::main binary: cases::typeinfo_proto_ts_freshness::<fn>.
     writeFileSync(
       A,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
     );
     // (b) an allowlisted test PLUS a non-allowlisted test failed => FAIL.
     writeFileSync(
       B,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n",
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "        FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n",
     );
     // (c) a NON-allowlisted test whose name merely CONTAINS an allowlisted substring failed => FAIL.
     writeFileSync(
       C,
-      "    FAIL [   0.041s] verter_session::main cases::typeinfo_proto_ts_freshness_lookalike::regresses\n",
+      "        FAIL [   0.041s] verter_session::main cases::typeinfo_proto_ts_freshness_lookalike::regresses\n",
     );
     // (d) a NON-allowlisted test whose exact final token is an ENTIRE allowlisted name PLUS a suffix => FAIL.
     writeFileSync(
       D,
-      "    FAIL [   0.044s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
+      "        FAIL [   0.044s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
     );
     const classify = (file) => verdictClassifyNextestFile(file);
     const va = classify(A);
@@ -1140,24 +1159,26 @@ async function main() {
   {
     const fixDir = freshTmpDir("gatetest-nxfix-");
     const sigabrt = join(fixDir, "sigabrt.log");
-    const leakPlusTolerated = join(fixDir, "leak_plus_tolerated.log");
+    const unaccountedPlusTolerated = join(fixDir, "unaccounted_plus_tolerated.log");
     const setupError = join(fixDir, "setup_error.log");
     const tolerated = join(fixDir, "tolerated.log");
     // A SIGABRT crash with NO `FAIL [` line; the summary still counts it as failed and the run exits
     // non-zero. Pre-fix: classified PASS (no FAIL line). Post-fix: FAIL.
     writeFileSync(
       sigabrt,
-      "    PASS [   0.010s] verter_compiler template::renders\n" +
-        "    SIGABRT [   0.204s] verter_other crash::aborts_in_drop\n" +
+      "        PASS [   0.010s] verter_compiler template::renders\n" +
+        "     SIGABRT [   0.204s] verter_other crash::aborts_in_drop\n" +
         "     Summary [   1.230s] 2 tests run: 1 passed, 1 failed, 0 skipped\n",
     );
-    // A tolerated `FAIL` PLUS an unaccounted LEAK: summary failed=2 but only 1 `FAIL` name parses, so the
-    // unaccounted shortfall trips. Pre-fix: classified PASS-WITH-TOLERATED (only the tolerated FAIL name
-    // was checked). Post-fix: FAIL.
+    // A tolerated `FAIL` PLUS a failure the log does NOT name: the summary counts 2 non-passing tests
+    // (3 run, 1 passed) but only 1 status line is present, so the accounting is short by one and the
+    // shortfall trips. This is the realistic shape of a lost / interleaved / truncated status line under
+    // a parallel run — NOT a `LEAK` line, which nextest emits for a test it counts as PASSED (see GB6.6);
+    // pinning the tripwire on a leak claimed the opposite of what nextest does.
+    // Pre-fix: classified PASS-WITH-TOLERATED (only the tolerated FAIL name was checked). Post-fix: FAIL.
     writeFileSync(
-      leakPlusTolerated,
-      "    FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    LEAK [   0.300s] verter_other::main resource::leaks_a_handle\n" +
+      unaccountedPlusTolerated,
+      "        FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
         "     Summary [   1.500s] 3 tests run: 1 passed, 2 failed, 0 skipped\n",
     );
     // A nextest harness/setup error: non-zero exit, NO `FAIL [` line, NO Summary line. Pre-fix: PASS.
@@ -1166,8 +1187,8 @@ async function main() {
     // The real tolerated baseline shape (the 2 env FAILs, summary failed=2): still PASS-WITH-TOLERATED.
     writeFileSync(
       tolerated,
-      "    FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    FAIL [   0.207s] verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
+      "        FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "        FAIL [   0.207s] verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
         "     Summary [  62.968s] 15543 tests run: 15541 passed, 2 failed, 547 skipped\n",
     );
     const classify = (file) => verdictClassifyNextestFile(file);
@@ -1178,17 +1199,17 @@ async function main() {
     // setup/harness error has NO content markers and is indistinguishable from a clean log WITHOUT the exit
     // code, so it is asserted ONLY on the live-aggregation hook below (which has the code).
     const cSig = classify(sigabrt);
-    const cLeak = classify(leakPlusTolerated);
+    const cUnacc = classify(unaccountedPlusTolerated);
     const cTol = classify(tolerated);
-    note(`classify: sigabrt=${cSig} leak+tol=${cLeak} tolerated=${cTol}`);
+    note(`classify: sigabrt=${cSig} unaccounted+tol=${cUnacc} tolerated=${cTol}`);
     if (cSig !== "FAIL") {
       fail(
         `(ix) classifier: SIGABRT crash => '${cSig}', expected FAIL (a non-FAIL status must not pass)`,
       );
       ok = false;
     }
-    if (cLeak !== "FAIL") {
-      fail(`(ix) classifier: tolerated-FAIL + unaccounted LEAK => '${cLeak}', expected FAIL`);
+    if (cUnacc !== "FAIL") {
+      fail(`(ix) classifier: tolerated-FAIL + an unnamed unaccounted failure => '', expected FAIL`);
       ok = false;
     }
     if (cTol !== "PASS-WITH-TOLERATED") {
@@ -1201,16 +1222,20 @@ async function main() {
     // failures, non-100 on internal errors; a crash run is non-zero either way. This path consults the run
     // exit code, so it ALSO catches a content-less setup/harness error (nonzero exit, no FAIL line).
     const rSig = classifyRun(101, sigabrt);
-    const rLeak = classifyRun(100, leakPlusTolerated);
+    const rUnacc = classifyRun(100, unaccountedPlusTolerated);
     const rSetup = classifyRun(1, setupError);
     const rTol = classifyRun(100, tolerated);
-    note(`live-agg: sigabrt=${rSig} leak+tol=${rLeak} setup-error=${rSetup} tolerated=${rTol}`);
+    note(
+      `live-agg: sigabrt=${rSig} unaccounted+tol=${rUnacc} setup-error=${rSetup} tolerated=${rTol}`,
+    );
     if (rSig !== "FAIL") {
       fail(`(ix) live-agg: SIGABRT (exit 101) => '${rSig}', expected FAIL`);
       ok = false;
     }
-    if (rLeak !== "FAIL") {
-      fail(`(ix) live-agg: tolerated-FAIL + LEAK (exit 100) => '${rLeak}', expected FAIL`);
+    if (rUnacc !== "FAIL") {
+      fail(
+        `(ix) live-agg: tolerated-FAIL + an unnamed unaccounted failure (exit 100) => '', expected FAIL`,
+      );
       ok = false;
     }
     if (rSetup !== "FAIL") {
@@ -1225,7 +1250,7 @@ async function main() {
     }
     if (ok) {
       pass(
-        "(ix) SURFACE-1: SIGABRT crash, unaccounted LEAK, and setup/harness error ALL => FAIL on both the " +
+        "(ix) SURFACE-1: SIGABRT crash, an unnamed unaccounted failure, and a setup/harness error ALL => FAIL on both the " +
           "classifier and the live-aggregation hook; tolerated baseline => PASS-WITH-TOLERATED (discriminating)",
       );
     }
@@ -1850,13 +1875,13 @@ async function main() {
     // One tolerated FAIL line, NO Summary line. A non-zero exit cannot be proven accounted-for => FAIL.
     writeFileSync(
       tolNoSummary,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
     );
     // The same tolerated FAIL line WITH a matching Summary (failed=1 == 1 parsed FAIL name) => accounted =>
     // PASS-WITH-TOLERATED. Proves the requirement is summary-PRESENCE + exact-count, not a blanket fail.
     writeFileSync(
       tolWithSummary,
-      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+      "        FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
         "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n",
     );
     const classifyRun = (code, file) => verdictNextestRunFile(code, file);
@@ -4825,7 +4850,7 @@ async function main() {
       "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
 
     // (1) nextest content classifier — pair-only FAIL line.
-    const nxPairLog = `    FAIL [   0.012s] ${BIN} ${NX_NAME}\n`;
+    const nxPairLog = `        FAIL [   0.012s] ${BIN} ${NX_NAME}\n`;
     const c1Off = verdictClassifyNextest(nxPairLog, false);
     const c1On = verdictClassifyNextest(nxPairLog, true);
     if (c1Off !== "FAIL") {
@@ -4843,7 +4868,7 @@ async function main() {
 
     // (2) nextest LIVE aggregation — pair FAIL + exit 100 + matching Summary (failed=1).
     const nxPairRun =
-      `    FAIL [   0.012s] ${BIN} ${NX_NAME}\n` +
+      `        FAIL [   0.012s] ${BIN} ${NX_NAME}\n` +
       "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n";
     const r2Off = verdictNextestRun(100, nxPairRun, false);
     const r2On = verdictNextestRun(100, nxPairRun, true);
@@ -4888,7 +4913,7 @@ async function main() {
     }
     // Also a nextest crash (SIGABRT status) whose only failure is the pair name => FAIL regardless.
     const nxCrash =
-      `    SIGABRT [   0.204s] ${BIN} ${NX_NAME}\n` +
+      `     SIGABRT [   0.204s] ${BIN} ${NX_NAME}\n` +
       "     Summary [   1.230s] 1 tests run: 0 passed, 1 failed, 0 skipped\n";
     const ncOff = verdictNextestRun(101, nxCrash, false);
     const ncOn = verdictNextestRun(101, nxCrash, true);
@@ -4900,7 +4925,7 @@ async function main() {
     }
 
     // (5) a non-allowlisted FAIL => FAIL regardless of the flag.
-    const nxReal = `    FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n`;
+    const nxReal = `        FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n`;
     const re5Off = verdictClassifyNextest(nxReal, false);
     const re5On = verdictClassifyNextest(nxReal, true);
     if (re5Off !== "FAIL" || re5On !== "FAIL") {
@@ -4916,6 +4941,1213 @@ async function main() {
           "tolerance=true on BOTH the nextest classifier/live-agg AND the libtest analyzer; a crash on the pair " +
           "name and a non-allowlisted FAIL are FAIL regardless of the flag (discriminating — pre-change the " +
           "libtest analyzer had no gate and always tolerated the pair)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6) TERMINAL-OUTCOME ACCOUNTING — a nextest run is accounted for by its SUMMARY, not by its `FAIL [`
+  //       lines. nextest reports several terminal outcomes that are NOT `FAIL`: `N timed out`, `N exec
+  //       failed`, and an interrupted/cancelled run's `A/B tests run` (B-A tests that never ran at all). A
+  //       timed-out test has not passed — it has not even finished — so it MUST count toward the verdict and
+  //       MUST be NAMED with the same visibility as an ordinary failure. Pre-fix the analyzer keyed on
+  //       `summary.failed === parsedFailNames.length`, and nextest's `failed` count EXCLUDES `timed out` /
+  //       `exec failed`; so a run whose ONLY problem was a timeout (or whose plain failures were all
+  //       allowlisted) reported PASS / PASS-WITH-TOLERATED with ZERO named failures, and a run with real
+  //       failures PLUS timeouts named only the failures. The accounting below derives the failure total
+  //       from `runCount - passed`, which is label-INDEPENDENT (a future nextest outcome nextest counts as
+  //       run-but-not-passed is caught without this parser knowing its name).
+  //       DISCRIMINATION: GB6.6 is the inverse control — a `LEAK` line marks a test nextest counts as
+  //       PASSED (leaky, not fatal, outside leak-fail-mode), so a green run with a leak must stay PASS. A
+  //       change that simply failed on every non-`FAIL` status line would fail GB6.6.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(GB6) TERMINAL-OUTCOME ACCOUNTING (timed out / exec failed / never ran)\n",
+  );
+  {
+    // The EXACT allowlisted freshness-pair name (the only tolerated name) — reused so the tolerance path is
+    // genuinely reachable in the scenarios that must NOT be tolerated for an unrelated reason.
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const T1 = "cases::g_compile::compile_fail::hot_materialize_structural_rails_smoke";
+    const T2 =
+      "cases::tracked_paths_no_machine_roots::tracked_files_contain_no_machine_specific_path_markers";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("\n");
+    let ok = true;
+
+    // GB6.1 — REAL-RUN SHAPE: plain failures AND timeouts. Every terminal failure must be NAMED.
+    //   Pre-fix: failures.length === 2 (the two `FAIL` names only) — the timeouts were invisible.
+    const mixed =
+      "        FAIL [   0.204s] ( 1/12) verter_session::main cases::a::alpha\n" +
+      "        FAIL [   0.207s] ( 2/12) verter_session::main cases::b::beta\n" +
+      `     TIMEOUT [ 180.008s] ( 3/12) verter_session::main ${T1}\n` +
+      `     TIMEOUT [ 180.005s] ( 4/12) verter_session::main ${T2}\n` +
+      "     Summary [ 900.014s] 12 tests run: 8 passed, 2 failed, 2 timed out, 5 skipped\n";
+    const rMixed = analyzeNextestSurface(mixed, 100, true);
+    note(`GB6.1 mixed failures=${rMixed.failures.length}\n${names(rMixed)}`);
+    if (rMixed.failures.length !== 4) {
+      fail(
+        `(GB6.1) 2 FAIL + 2 TIMEOUT => ${rMixed.failures.length} named failure(s), expected 4 (a timed-out ` +
+          `test has not passed; it must be counted AND named)`,
+      );
+      ok = false;
+    }
+    for (const t of [T1, T2]) {
+      if (!rMixed.failures.some((f) => f.name === t)) {
+        fail(`(GB6.1) timed-out test '${t}' is NOT in the named failure list: ${names(rMixed)}`);
+        ok = false;
+      }
+    }
+    if (!rMixed.failures.some((f) => /TIMEOUT/.test(f.surface) && f.name === T1)) {
+      fail(
+        `(GB6.1) the timed-out entry does not carry a TIMEOUT-tagged surface (the verdict line must say ` +
+          `WHY it failed): ${names(rMixed)}`,
+      );
+      ok = false;
+    }
+
+    // GB6.2 — THE SILENT PASS (headline). Every plain `FAIL` is allowlisted AND a test timed out. Pre-fix
+    //   the summary `failed` count (1) matched the one parsed `FAIL` name, so the run was "accounted for"
+    //   and the timeout never entered the verdict => PASS-WITH-TOLERATED with a test that never finished.
+    const tolPlusTimeout =
+      `        FAIL [   0.204s] ( 1/12) verter_protocol::main ${TOL}\n` +
+      `     TIMEOUT [ 180.008s] ( 2/12) verter_session::main ${T1}\n` +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 1 failed, 1 timed out, 5 skipped\n";
+    const vTolTimeout = verdictNextestRun(100, tolPlusTimeout, true);
+    const rTolTimeout = analyzeNextestSurface(tolPlusTimeout, 100, true);
+    note(`GB6.2 tolerated-FAIL + TIMEOUT => ${vTolTimeout}`);
+    if (vTolTimeout !== "FAIL") {
+      fail(
+        `(GB6.2) an allowlisted FAIL plus a TIMEOUT => '${vTolTimeout}', expected FAIL — a timeout is NEVER ` +
+          `tolerated, and a run whose only problem is a timeout must not certify the tree`,
+      );
+      ok = false;
+    }
+    if (!rTolTimeout.failures.some((f) => f.name === T1)) {
+      fail(`(GB6.2) the timed-out test is not named in the verdict: ${names(rTolTimeout)}`);
+      ok = false;
+    }
+
+    // GB6.3 — TIMEOUT ONLY, no `FAIL [` line at all. Pre-fix this did fail, but ONLY through the opaque
+    //   `<run exit …; unaccounted failure(s)>` catch-all — the operator was never told WHICH test hung.
+    const timeoutOnly =
+      `     TIMEOUT [ 180.002s] ( 4/4) verter_session::main ${T2}\n` +
+      "     Summary [ 900.003s] 4 tests run: 3 passed, 1 timed out, 2 skipped\n";
+    const rTimeoutOnly = analyzeNextestSurface(timeoutOnly, 100, true);
+    const vTimeoutOnly = verdictNextestRun(100, timeoutOnly, true);
+    note(`GB6.3 timeout-only => ${vTimeoutOnly}\n${names(rTimeoutOnly)}`);
+    if (vTimeoutOnly !== "FAIL") {
+      fail(`(GB6.3) a timeout-only run => '${vTimeoutOnly}', expected FAIL`);
+      ok = false;
+    }
+    if (!rTimeoutOnly.failures.some((f) => f.name === T2)) {
+      fail(
+        `(GB6.3) a timeout-only run must NAME the timed-out test, not only report an opaque unaccounted ` +
+          `catch-all: ${names(rTimeoutOnly)}`,
+      );
+      ok = false;
+    }
+
+    // GB6.4 — `N exec failed` is a terminal outcome nextest reports SEPARATELY from `N failed`; pre-fix the
+    //   `(\d+)\s+failed` scan never saw it, so a tolerated FAIL alongside an exec-failed test passed.
+    const execFailed =
+      `        FAIL [   0.204s] ( 1/6) verter_protocol::main ${TOL}\n` +
+      "     Summary [  12.000s] 6 tests run: 4 passed, 1 failed, 1 exec failed, 0 skipped\n";
+    const vExec = verdictNextestRun(100, execFailed, true);
+    note(`GB6.4 tolerated-FAIL + exec-failed => ${vExec}`);
+    if (vExec !== "FAIL") {
+      fail(
+        `(GB6.4) an allowlisted FAIL plus an 'exec failed' test => '${vExec}', expected FAIL (the exec-failed ` +
+          `test is unaccounted for by the parsed FAIL names)`,
+      );
+      ok = false;
+    }
+
+    // GB6.5 — INTERRUPTED/CANCELLED run: nextest's `A/B tests run` form means B-A tests NEVER RAN. Pre-fix
+    //   the parser ignored the `A/B` form entirely, so a cancelled run with one tolerated failure certified
+    //   a tree where 39 of 41 tests never executed.
+    const cancelled =
+      `        FAIL [   0.009s] ( 1/41) verter_protocol::main ${TOL}\n` +
+      "  Cancelling due to test failure: 1 test still running\n" +
+      "     Summary [   1.516s] 2/41 tests run: 1 passed, 1 failed, 0 skipped\n";
+    const vCancelled = verdictNextestRun(100, cancelled, true);
+    const rCancelled = analyzeNextestSurface(cancelled, 100, true);
+    note(`GB6.5 cancelled 2/41 => ${vCancelled}\n${names(rCancelled)}`);
+    if (vCancelled !== "FAIL") {
+      fail(
+        `(GB6.5) a cancelled run (2 of 41 tests run) with only an allowlisted failure => '${vCancelled}', ` +
+          `expected FAIL — 39 tests never ran, so the run cannot certify the tree`,
+      );
+      ok = false;
+    }
+    if (!rCancelled.failures.some((f) => /never ran|39/.test(f.name))) {
+      fail(`(GB6.5) the unrun-test count is not surfaced in the verdict: ${names(rCancelled)}`);
+      ok = false;
+    }
+
+    // GB6.6 — INVERSE CONTROL (false-positive guard). `LEAK` is the terminal status of a test nextest counts
+    //   as PASSED (it leaked a handle/subprocess; fatal only under leak-fail-mode, which renders `LEAK-FAIL`).
+    //   A green run containing a LEAK line must stay PASS on BOTH the classifier and the live analyzer.
+    //   This is what stops the fix from degenerating into "any non-FAIL status line fails the gate".
+    const leakyGreen =
+      "        PASS [   0.013s] ( 1/2) verter_session::main cases::ok::fine\n" +
+      "        LEAK [   0.215s] ( 2/2) verter_session::main cases::ok::leaks_a_child\n" +
+      "     Summary [   1.003s] 2 tests run: 2 passed (1 leaky), 0 skipped\n";
+    const cLeaky = verdictClassifyNextest(leakyGreen, true);
+    const rLeaky = verdictNextestRun(0, leakyGreen, true);
+    note(`GB6.6 leaky-but-green: classifier=${cLeaky} live-agg=${rLeaky}`);
+    if (cLeaky !== "PASS" || rLeaky !== "PASS") {
+      fail(
+        `(GB6.6) a GREEN run with a leaky (passed) test => classifier='${cLeaky}' live-agg='${rLeaky}', ` +
+          `expected PASS on both — LEAK marks a test nextest counted as PASSED; only LEAK-FAIL is a failure`,
+      );
+      ok = false;
+    }
+    // …and LEAK-FAIL (leak-fail-mode) IS a failure, named.
+    const leakFail =
+      "   LEAK-FAIL [   0.215s] ( 2/2) verter_session::main cases::ok::leaks_a_child\n" +
+      "     Summary [   1.003s] 2 tests run: 1 passed, 1 failed, 0 skipped\n";
+    const rLeakFail = analyzeNextestSurface(leakFail, 100, true);
+    if (!rLeakFail.failures.some((f) => f.name === "cases::ok::leaks_a_child")) {
+      fail(`(GB6.6) a LEAK-FAIL test must be named as a failure: ${names(rLeakFail)}`);
+      ok = false;
+    }
+
+    // GB6.7 — CLEAN CONTROL: a fully green run stays PASS (the accounting must not blanket-fail).
+    const green =
+      "        PASS [   0.013s] ( 1/2) verter_session::main cases::ok::fine\n" +
+      "     Summary [  63.890s] 15543 tests run: 15543 passed, 547 skipped\n";
+    const vGreen = verdictNextestRun(0, green, true);
+    if (vGreen !== "PASS") {
+      fail(`(GB6.7) a fully green run => '${vGreen}', expected PASS`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6) TERMINAL-OUTCOME ACCOUNTING: timed-out and exec-failed tests are COUNTED and NAMED (a " +
+          "timeout is never tolerated, even alongside an allowlisted FAIL), an interrupted run's never-ran " +
+          "tests fail the verdict, and the inverse controls hold — a leaky-but-PASSED test and a fully " +
+          "green run both stay PASS (discriminating: pre-fix the analyzer keyed on nextest's `failed` " +
+          "count, which excludes `timed out`/`exec failed`, so a timeout-only problem reported PASS)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6b) COMPOUND AND RETRY STATUS FIELDS. The (GB6) accounting above is only as good as its NAMING: a
+  //        terminal failure the status parser cannot read still fails the gate (the derived count catches
+  //        it) but surfaces as an opaque `<unaccounted>` line instead of the test's name, which is exactly
+  //        what (GB6) set out to end. nextest's status field is NOT a single uppercase token. Every fixture
+  //        below is a VERBATIM line captured from a real `cargo-nextest 0.9.130` run, not a guess:
+  //
+  //          " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail"   — a test that failed AND leaked
+  //          "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails"    — final attempt under `retries`
+  //          " TRY 3 FL+LK [   1.028s] (3/3) gb6status::t leak_and_fail"   — abbreviated compound + retry
+  //
+  //        A `^([A-Z][A-Z-]*) \[` scan reads NONE of them: `FAIL` is followed by " + LEAK [", and a `TRY N`
+  //        prefix pushes the real status off the line start.
+  //
+  //        DISCRIMINATION — and the reason this cannot be fixed by broad substring matching. A FLAKY test
+  //        renders `TRY 1 FAIL` and then `TRY 2 PASS`, is counted `1 passed (1 flaky)`, and the run EXITS
+  //        0. Any parser that names every line containing "FAIL" reddens that GREEN run. GB6b.4 is that
+  //        control, and GB6b.5 pins the count: intermediate attempts must not each become a failure. The
+  //        terminal status per test is what counts, so the parser keeps the LAST status line per test.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6b) COMPOUND + RETRY STATUS FIELDS (FAIL + LEAK, TRY N …)\n");
+  {
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("\n");
+    let ok = true;
+
+    // GB6b.1 — compound `FAIL + LEAK`: the failing test must be NAMED, not folded into `<unaccounted>`.
+    const compound =
+      "        PASS [   0.015s] (1/5) gb6status::t plain_pass\n" +
+      "        FAIL [   0.016s] (2/5) gb6status::t always_fails_for_retry\n" +
+      "        LEAK [   1.019s] (3/5) gb6status::t leak_and_pass\n" +
+      " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail\n" +
+      "     TIMEOUT [   2.004s] (5/5) gb6status::t hangs\n" +
+      "     Summary [   2.004s] 5 tests run: 2 passed (1 leaky), 2 failed, 1 timed out, 0 skipped\n" +
+      "        FAIL [   0.016s] (2/5) gb6status::t always_fails_for_retry\n" +
+      " FAIL + LEAK [   1.019s] (4/5) gb6status::t leak_and_fail\n" +
+      "     TIMEOUT [   2.004s] (5/5) gb6status::t hangs\n";
+    const rCompound = analyzeNextestSurface(compound, 100, true);
+    note(`GB6b.1 compound failures=${rCompound.failures.length}\n${names(rCompound)}`);
+    // 5 run - 2 passed = 3 non-passing: the plain FAIL, the FAIL+LEAK, and the TIMEOUT. All three named,
+    // and NOTHING else (the leaky-but-PASSED test is not a failure, and no `<unaccounted>` filler).
+    if (rCompound.failures.length !== 3) {
+      fail(
+        `(GB6b.1) FAIL + (FAIL + LEAK) + TIMEOUT => ${rCompound.failures.length} named, expected exactly 3`,
+      );
+      ok = false;
+    }
+    if (!rCompound.failures.some((f) => f.name === "leak_and_fail")) {
+      fail(`(GB6b.1) the compound 'FAIL + LEAK' test is not named: ${names(rCompound)}`);
+      ok = false;
+    }
+    if (rCompound.failures.some((f) => f.name === "leak_and_pass")) {
+      fail(`(GB6b.1) a leaky-but-PASSED test was named as a failure: ${names(rCompound)}`);
+      ok = false;
+    }
+    if (rCompound.failures.some((f) => /unaccounted/.test(f.name))) {
+      fail(
+        `(GB6b.1) every failure was nameable, so no opaque <unaccounted> entry may appear: ${names(rCompound)}`,
+      );
+      ok = false;
+    }
+
+    // GB6b.2/3 — `TRY N FAIL` and `TRY N FL+LK` (the `retries` profile). Only the TERMINAL attempt counts.
+    const retried =
+      "        PASS [   0.011s] (1/3) gb6status::t plain_pass\n" +
+      "  TRY 1 FAIL [   0.014s] (───) gb6status::t always_fails_for_retry\n" +
+      "  TRY 2 FAIL [   0.011s] (───) gb6status::t always_fails_for_retry\n" +
+      "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails_for_retry\n" +
+      " TRY 1 FL+LK [   1.032s] (───) gb6status::t leak_and_fail\n" +
+      " TRY 2 FL+LK [   1.024s] (───) gb6status::t leak_and_fail\n" +
+      " TRY 3 FL+LK [   1.028s] (3/3) gb6status::t leak_and_fail\n" +
+      "     Summary [   3.090s] 3 tests run: 1 passed, 2 failed, 2 skipped\n" +
+      "  TRY 3 FAIL [   0.008s] (2/3) gb6status::t always_fails_for_retry\n" +
+      " TRY 3 FL+LK [   1.028s] (3/3) gb6status::t leak_and_fail\n";
+    const rRetried = analyzeNextestSurface(retried, 100, true);
+    note(`GB6b.2/3 retried failures=${rRetried.failures.length}\n${names(rRetried)}`);
+    for (const t of ["always_fails_for_retry", "leak_and_fail"]) {
+      if (!rRetried.failures.some((f) => f.name === t)) {
+        fail(`(GB6b.2/3) retried failure '${t}' is not named: ${names(rRetried)}`);
+        ok = false;
+      }
+    }
+    // GB6b.5 — COUNT PIN: 3 run - 1 passed = 2 non-passing, so EXACTLY 2 named. Six `TRY` lines plus two
+    // recap lines must not inflate this — a per-line counter would report 8.
+    if (rRetried.failures.length !== 2) {
+      fail(
+        `(GB6b.5) six TRY attempts over two tests => ${rRetried.failures.length} named, expected exactly 2 ` +
+          `(the terminal attempt per test, not one failure per attempt line)`,
+      );
+      ok = false;
+    }
+
+    // GB6b.4 — THE CONTROL. A flaky test fails its first attempt, PASSES its second, is counted
+    // `1 passed (1 flaky)`, and the run EXITS 0. It must stay PASS: naming any line containing "FAIL"
+    // would redden this green run.
+    const flakyGreen =
+      "  TRY 1 FAIL [   0.022s] (───) gb6status::flaky flaky_passes_on_retry\n" +
+      "  TRY 2 PASS [   0.019s] (1/1) gb6status::flaky flaky_passes_on_retry\n" +
+      "     Summary [   0.049s] 1 test run: 1 passed (1 flaky), 5 skipped\n";
+    const vFlaky = verdictNextestRun(0, flakyGreen, true);
+    const cFlaky = verdictClassifyNextest(flakyGreen, true);
+    note(`GB6b.4 flaky-pass: live-agg=${vFlaky} classifier=${cFlaky}`);
+    if (vFlaky !== "PASS" || cFlaky !== "PASS") {
+      fail(
+        `(GB6b.4) a FLAKY test that failed attempt 1 and PASSED attempt 2 (exit 0, '1 passed (1 flaky)') ` +
+          `=> live-agg='${vFlaky}' classifier='${cFlaky}', expected PASS on both — the terminal status is ` +
+          `PASS, and a parser that matches any line containing "FAIL" reddens this green run`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6b) COMPOUND + RETRY STATUS FIELDS: a compound `FAIL + LEAK` and a retried `TRY N FAIL` / " +
+          "`TRY N FL+LK` are each NAMED (not folded into an opaque <unaccounted> entry), the named count " +
+          "equals the summary's non-passing count so retry attempts do not inflate it, and the inverse " +
+          "controls hold — a leaky-but-PASSED test and a FLAKY test that passed on retry both stay PASS " +
+          "(discriminating: a `^([A-Z][A-Z-]*) \\[` scan reads none of these status fields, and broad " +
+          "substring matching reddens the green flaky run)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6c) STATUS-LINE IMPERSONATION. The parser reads a channel that is NOT exclusively the runner's:
+  //        nextest relays a test's CAPTURED OUTPUT on the same stream as its own status lines. So any
+  //        parse that trusts line SHAPE alone is parsing data a test can influence — and the "attacker"
+  //        need only be a test that legitimately prints nextest-shaped text, or a fixture containing one.
+  //
+  //        THE ATTACK, reproduced against the pre-fix parser: because naming resolved last-status-wins
+  //        UNCONDITIONALLY, a captured `PASS` line naming a test that genuinely FAILED overwrote the real
+  //        FAIL. A second captured line naming the ALLOWLISTED test then rebalanced the arithmetic
+  //        (namedCount=1, nonPassed=1, no shortfall), so the run reported PASS-WITH-TOLERATED while a real
+  //        failure sat in the log. Clearing the named set alone does not do this — the count still trips;
+  //        it is BALANCING the count that produces the green verdict.
+  //
+  //        THE LOAD-BEARING LAYER IS THE COUNT, not the transition rule. `nonPassed` comes from nextest's
+  //        own accounting and cannot be lowered by anything printed into the stream, so clearing a failure
+  //        leaves a shortfall that fails the run. The transition rule below only raises the cost of the
+  //        BARE-`PASS` forgery; a forged `TRY n` pair defeats it outright (see GB6d), because captured
+  //        output can supply both sides of the one transition it permits. Two further layers: a named
+  //        count EXCEEDING nextest's non-passing count is surfaced as impersonation; and a status line
+  //        must occupy nextest's exact 12-column status field (verified 44/44 against real runs), which
+  //        the 4-space capture indent breaks for echoed output. The tolerance path - the only route from
+  //        `failures exist` to green - is closed separately in GB6d.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(GB6c) STATUS-LINE IMPERSONATION (captured output cannot clear a failure)\n",
+  );
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const REAL = "cases::real::genuine_failure";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6c.1 — THE S0. The captured `PASS` is COLUMN-EXACT (8-space pad, the genuine 12-column field), so
+    // the layout check cannot save us here; only the transition rule can. Pre-fix: PASS-WITH-TOLERATED.
+    const impersonated =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      "  stdout ───\n" +
+      `        PASS [   0.010s] ( 1/12) verter_session::main ${REAL}\n` +
+      `        FAIL [   0.011s] ( 2/12) verter_protocol::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const vImp = verdictNextestRun(100, impersonated, true);
+    const rImp = analyzeNextestSurface(impersonated, 100, true);
+    note(`GB6c.1 impersonated-PASS => ${vImp} | ${names(rImp)}`);
+    if (vImp !== "FAIL") {
+      fail(
+        `(GB6c.1) a CAPTURED 'PASS' line naming a genuinely FAILED test, plus a captured line naming the ` +
+          `allowlisted test to balance the count => '${vImp}', expected FAIL — captured test output must ` +
+          `never be able to clear a real failure`,
+      );
+      ok = false;
+    }
+    if (!rImp.failures.some((f) => f.name === REAL)) {
+      fail(`(GB6c.1) the genuinely failed test is not named in the verdict: ${names(rImp)}`);
+      ok = false;
+    }
+
+    // GB6c.2 — the other half: a captured line ADDING a failure nextest never counted. The named count
+    // exceeds the summary's non-passing count, which is only possible if something impersonated a status
+    // line, so it must be surfaced rather than silently ignored.
+    const overCount =
+      "        FAIL [   0.204s] ( 1/12) verter_session::main cases::real::one_true_failure\n" +
+      "  stdout ───\n" +
+      "        FAIL [   0.010s] ( 2/12) verter_session::main cases::fake::invented_by_stdout\n" +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const rOver = analyzeNextestSurface(overCount, 100, true);
+    note(`GB6c.2 over-count named=${rOver.namedCount} nonPassed=${rOver.summary.nonPassed}`);
+    if (
+      !rOver.failures.some((f) => /nextest counted \d+ non-passing/.test(f.name)) ||
+      !rOver.failures.some((f) => f.name === "cases::real::one_true_failure")
+    ) {
+      fail(
+        `(GB6c.2) the log named ${rOver.namedCount} failures but nextest counted ` +
+          `${rOver.summary.nonPassed} non-passing — that mismatch must be surfaced: ${names(rOver)}`,
+      );
+      ok = false;
+    }
+
+    // GB6c.3 — CONTROL: the genuine retry sequence must survive the transition rule. A blanket
+    // "a PASS may never clear a FAIL" rule would break exactly this, which is why the rule is scoped to
+    // TRY-tagged, strictly-increasing attempts.
+    const genuineRetry =
+      "  TRY 1 FAIL [   0.022s] (───) gb6status::flaky flaky_passes_on_retry\n" +
+      "  TRY 2 PASS [   0.019s] (1/1) gb6status::flaky flaky_passes_on_retry\n" +
+      "     Summary [   0.049s] 1 test run: 1 passed (1 flaky), 5 skipped\n";
+    const vRetry = verdictNextestRun(0, genuineRetry, true);
+    if (vRetry !== "PASS") {
+      fail(
+        `(GB6c.3) a GENUINE retry (TRY 1 FAIL -> TRY 2 PASS, exit 0, '1 passed (1 flaky)') => '${vRetry}', ` +
+          `expected PASS — the transition rule must permit the one legitimate fail-to-pass transition`,
+      );
+      ok = false;
+    }
+
+    // GB6c.4 — CONTROL: a SLOW progress line followed by a real PASS is an ordinary green test.
+    const slowThenPass =
+      "        SLOW [> 60.000s] (───) verter_session::main cases::slow::big_scan\n" +
+      "        PASS [  64.584s] (2/2) verter_session::main cases::slow::big_scan\n" +
+      "     Summary [  64.587s] 2 tests run: 2 passed, 0 skipped\n";
+    const vSlow = verdictNextestRun(0, slowThenPass, true);
+    if (vSlow !== "PASS") {
+      fail(`(GB6c.4) SLOW followed by PASS => '${vSlow}', expected PASS`);
+      ok = false;
+    }
+
+    // GB6c.5 — LAYOUT LAYER. The realistic accidental case: a test echoes a genuine-looking status line,
+    // and nextest indents captured output by 4 spaces, pushing the status field off its 12-column slot.
+    // Such a line must not parse as a status line AT ALL, so it neither clears nor invents a failure.
+    const indentedEcho =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      "  stdout ───\n" +
+      `            PASS [   0.010s] ( 1/12) verter_session::main ${REAL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const rEcho = analyzeNextestSurface(indentedEcho, 100, true);
+    note(`GB6c.5 indented-echo named=${rEcho.namedCount} | ${names(rEcho)}`);
+    if (rEcho.failures.length !== 1 || rEcho.failures[0].name !== REAL) {
+      fail(
+        `(GB6c.5) a 4-space-indented captured echo must not parse as a status line; expected exactly the ` +
+          `one real failure, got: ${names(rEcho)}`,
+      );
+      ok = false;
+    }
+
+    // GB6c.6 — [MINOR] identical test NAMES in two different binaries are two distinct tests. Collapsing
+    // them by bare name loses one and leaves an opaque unaccounted entry in its place.
+    const twoBinaries =
+      "        FAIL [   0.204s] ( 1/12) verter_session::main cases::shared::same_name\n" +
+      "        FAIL [   0.207s] ( 2/12) verter_protocol::main cases::shared::same_name\n" +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 2 failed, 0 skipped\n";
+    const rTwo = analyzeNextestSurface(twoBinaries, 100, true);
+    note(`GB6c.6 two-binaries named=${rTwo.namedCount} failures=${rTwo.failures.length}`);
+    if (rTwo.failures.length !== 2 || rTwo.failures.some((f) => /unaccounted/.test(f.name))) {
+      fail(
+        `(GB6c.6) the same test name in TWO binaries is two failures; expected 2 named and no opaque ` +
+          `unaccounted entry, got: ${names(rTwo)}`,
+      );
+      ok = false;
+    }
+
+    // GB6c.7 — [ENV] the gate must not let an inherited env var disable the signal its parser depends on.
+    // `NEXTEST_FINAL_STATUS_LEVEL=none` suppresses the failure recap; a gate whose correctness silently
+    // depends on that being unset is one `export` away from certifying a broken tree. buildCargoEnv must
+    // OVERRIDE it to a known value, exactly as it already does for CARGO_TARGET_DIR.
+    const hostileEnv = buildCargoEnv(
+      { PATH: "/usr/bin", NEXTEST_FINAL_STATUS_LEVEL: "none", NEXTEST_STATUS_LEVEL: "none" },
+      "/tmp/runner-target",
+      false,
+    );
+    note(
+      `GB6c.7 env: final=${hostileEnv.NEXTEST_FINAL_STATUS_LEVEL} status=${hostileEnv.NEXTEST_STATUS_LEVEL}`,
+    );
+    if (hostileEnv.NEXTEST_FINAL_STATUS_LEVEL === "none") {
+      fail(
+        `(GB6c.7) an inherited NEXTEST_FINAL_STATUS_LEVEL=none survived buildCargoEnv — it suppresses the ` +
+          `failure recap the parser reads, so the gate's correctness would depend on an unset env var`,
+      );
+      ok = false;
+    }
+    if (hostileEnv.NEXTEST_STATUS_LEVEL === "none") {
+      fail(`(GB6c.7) an inherited NEXTEST_STATUS_LEVEL=none survived buildCargoEnv`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6c) STATUS-LINE IMPERSONATION: a captured `PASS` cannot clear a genuine FAIL (a fail-to-pass " +
+          "transition requires a TRY-tagged, strictly-increasing retry), a named count exceeding nextest's " +
+          "own non-passing count is surfaced, an indented captured echo does not parse as a status line, " +
+          "one test name in two binaries stays two failures, and buildCargoEnv overrides a hostile " +
+          "NEXTEST_*_STATUS_LEVEL — while the genuine retry and SLOW-then-PASS controls stay PASS",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6d) FORGED RETRY PAIRS, AND WHICH LAYER ACTUALLY BEARS THE LOAD.
+  //
+  //        The (GB6c) transition rule permits ONE fail-to-pass transition: a `TRY <n>`-tagged pair with a
+  //        strictly increasing attempt number. Captured output can supply BOTH SIDES of that pair, so the
+  //        rule's defining case is trivially forgeable and the rule is NOT the load-bearing layer. Two
+  //        reviewer-executed payloads, both of which cleared a genuine failure and reported
+  //        PASS-WITH-TOLERATED:
+  //
+  //          FAIL … genuine_failure / TRY 1 FAIL … genuine_failure / TRY 2 PASS … genuine_failure
+  //          FAIL … genuine_failure / TRY 1 FL   … genuine_failure / TRY 2 LK   … genuine_failure
+  //
+  //        WHAT ACTUALLY BEARS THE LOAD is the COUNT reconciliation: `nonPassed` comes from nextest's own
+  //        accounting and cannot be lowered by anything printed into the stream. Clearing a failure creates
+  //        a shortfall, which fails the run — UNLESS the forger also supplies a replacement name to balance
+  //        the count. And a replacement only produces a GREEN verdict if it is ALLOWLISTED, because any
+  //        other name is itself a named failure. So the entire residual attack surface is the tolerance
+  //        path, and that is where the fail-closed check belongs: tolerance is refused whenever any test's
+  //        failure was superseded by a pass, because the gate cannot prove whether that supersession was a
+  //        genuine retry or a forgery. Refusing costs nothing real (this repo runs `retries = 0`, so no
+  //        genuine supersession occurs) and it closes both payloads.
+  //
+  //        GB6d.3 pins the LAYER ATTRIBUTION rather than asserting it in prose: the same forged pair is
+  //        stopped by tolerance-refusal when column-exact, and by the layout rule when carrying nextest's
+  //        4-space capture indent. GB6d.4/5 are the controls that keep the fix from being a blanket denial.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6d) FORGED RETRY PAIRS (layer attribution)\n");
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const REAL = "cases::real::genuine_failure";
+    const SUM = "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const realFail = `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n`;
+    const tolFail = `        FAIL [   0.011s] ( 2/12) verter_protocol::main ${TOL}\n`;
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6d.1 / GB6d.2 — both reviewer payloads. Column-exact, so layout cannot stop them.
+    const forgedPass =
+      realFail +
+      `  TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `  TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      tolFail +
+      SUM;
+    const forgedAbbrev =
+      realFail +
+      `    TRY 1 FL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `    TRY 2 LK [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      tolFail +
+      SUM;
+    for (const [label, log] of [
+      ["GB6d.1 forged TRY n PASS", forgedPass],
+      ["GB6d.2 forged TRY n FL/LK", forgedAbbrev],
+    ]) {
+      const v = verdictNextestRun(100, log, true);
+      const r = analyzeNextestSurface(log, 100, true);
+      note(`${label} => ${v} | ${names(r)}`);
+      if (v !== "FAIL") {
+        fail(
+          `(${label}) a forged retry pair supplying BOTH sides cleared a genuine failure => '${v}', ` +
+            `expected FAIL — captured output can fabricate the one fail-to-pass transition the ` +
+            `transition rule permits, so tolerance must refuse when any failure was superseded by a pass`,
+        );
+        ok = false;
+      }
+    }
+
+    // GB6d.3 — LAYER ATTRIBUTION. Same forged pair, but carrying nextest's real 4-space capture indent:
+    // the layout rule rejects the lines outright, so the genuine FAIL is never cleared and the run fails
+    // by NAME rather than by tolerance-refusal. This is what makes the two layers separately observable.
+    const forgedIndented =
+      realFail +
+      `      TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `      TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      SUM;
+    const rIndent = analyzeNextestSurface(forgedIndented, 100, true);
+    note(`GB6d.3 indented forged pair => ${names(rIndent)}`);
+    if (!rIndent.failures.some((f) => f.name === REAL)) {
+      fail(
+        `(GB6d.3) an INDENTED forged retry pair must be rejected by the layout rule, leaving the genuine ` +
+          `failure named: ${names(rIndent)}`,
+      );
+      ok = false;
+    }
+
+    // GB6d.4 — CONTROL: a genuine flaky retry with NO allowlisted name, exit 0. Tolerance is not involved,
+    // so the run stays PASS. A blanket "any supersession fails the run" rule would break this.
+    const flakyGreen =
+      "  TRY 1 FAIL [   0.022s] (───) gb6status::flaky flaky_passes_on_retry\n" +
+      "  TRY 2 PASS [   0.019s] (1/1) gb6status::flaky flaky_passes_on_retry\n" +
+      "     Summary [   0.049s] 1 test run: 1 passed (1 flaky), 5 skipped\n";
+    const vFlaky = verdictNextestRun(0, flakyGreen, true);
+    if (vFlaky !== "PASS") {
+      fail(`(GB6d.4) a genuine flaky retry with no allowlisted name => '${vFlaky}', expected PASS`);
+      ok = false;
+    }
+
+    // GB6d.5 — CONTROL: the ordinary tolerated baseline, with NO supersession anywhere, must still
+    // tolerate. The refusal must be scoped to runs where a failure was actually cleared.
+    const cleanTolerated =
+      `        FAIL [   0.204s] verter_protocol::main ${TOL}\n` +
+      "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n";
+    const vClean = verdictNextestRun(100, cleanTolerated, true);
+    if (vClean !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(GB6d.5) the tolerated baseline with NO supersession => '${vClean}', expected ` +
+          `PASS-WITH-TOLERATED — tolerance-refusal must be scoped to runs where a failure was cleared`,
+      );
+      ok = false;
+    }
+
+    // GB6d.6 — ENV. `NEXTEST_NO_OUTPUT_INDENT=1` removes the 4-space capture indent (verified against the
+    // real binary: unset/0/false => 4 spaces, 1 => 0 spaces), which is the layout layer's entire basis.
+    // Leaving it inherited is the same hazard as leaving NEXTEST_FINAL_STATUS_LEVEL inherited.
+    const env = buildCargoEnv(
+      { PATH: "/usr/bin", NEXTEST_NO_OUTPUT_INDENT: "1" },
+      "/tmp/runner-target",
+      false,
+    );
+    note(`GB6d.6 env: NEXTEST_NO_OUTPUT_INDENT=${JSON.stringify(env.NEXTEST_NO_OUTPUT_INDENT)}`);
+    if (env.NEXTEST_NO_OUTPUT_INDENT === "1") {
+      fail(
+        `(GB6d.6) an inherited NEXTEST_NO_OUTPUT_INDENT=1 survived buildCargoEnv — it strips the capture ` +
+          `indent the layout rule depends on, leaving one export between the gate and a forged status line`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6d) FORGED RETRY PAIRS: both reviewer payloads (TRY n PASS and the abbreviated TRY n FL/LK) " +
+          "now FAIL — tolerance is refused whenever a failure was superseded by a pass, since captured " +
+          "output can forge the transition rule's defining case; layer attribution is pinned (column-exact " +
+          "forgery stopped by tolerance-refusal, indented forgery stopped by layout); the genuine flaky " +
+          "control and the no-supersession tolerated baseline both still hold; and buildCargoEnv pins " +
+          "NEXTEST_NO_OUTPUT_INDENT so the layout layer cannot be switched off by an inherited export",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6e) ENVIRONMENT ALLOWLIST, SUMMARY AUTHORSHIP, AND EXPLICIT LAYER ATTRIBUTION.
+  //
+  //        THREE ROUNDS OF THE SAME BUG. Round 1 pinned `NEXTEST_FINAL_STATUS_LEVEL`; round 2 found
+  //        `NEXTEST_NO_OUTPUT_INDENT` unpinned and pinned it; round 3 found `NEXTEST_FAILURE_OUTPUT`,
+  //        `NEXTEST_SUCCESS_OUTPUT` and `NEXTEST_RETRIES` unpinned. Each round pinned the variable the last
+  //        reviewer happened to name. That is a DENYLIST, and it loses by construction: the gate's parse
+  //        depended on an environment it INHERITED. GB6e.1 asserts the inverse — every `NEXTEST_*` is
+  //        stripped and only an explicitly declared set is put back — so the class is closed regardless of
+  //        which variable is discovered next.
+  //
+  //        SUMMARY AUTHORSHIP. The reduction that justifies this whole design was: "`nonPassed` comes from
+  //        nextest's own accounting and cannot be lowered by anything printed into the stream." That
+  //        sentence was FALSE. `parseNextestSummary` took the LAST unanchored `Summary [` match with no
+  //        layout gate, so with `NEXTEST_FAILURE_OUTPUT=final` a failing test's own captured output lands
+  //        AFTER the real Summary and replaces it — `nonPassed` becomes 0 with a real FAIL still in the
+  //        log. The real Summary line occupies the SAME 12-column field as a status line (verified 8/8 on
+  //        real runs), so the same layout gate applies; and since a run emits EXACTLY ONE Summary (also
+  //        8/8), a second layout-valid Summary is itself proof of forgery rather than something to
+  //        disambiguate by position.
+  //
+  //        LAYER ATTRIBUTION, AUTOMATED. GB6e.4-6 pin which layer stops which attack by its DISTINCTIVE
+  //        diagnostic, so the three-way claim rests on in-tree assertions rather than on a mutation probe
+  //        run by hand and reported in prose.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6e) ENV ALLOWLIST + SUMMARY AUTHORSHIP + LAYER ATTRIBUTION\n");
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const REAL = "cases::real::genuine_failure";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6e.1 — THE ALLOWLIST, over the FORMAT half of the namespace. Every NEXTEST_* that affects what
+    // the parser SEES must be gone, including ones this file has never heard of — the hostile set below
+    // deliberately includes a fabricated variable to prove the rule is "strip the namespace", not
+    // "strip these names".
+    //
+    // `NEXTEST_PROFILE` is deliberately EXEMPT and is asserted separately in GB6g: it selects which
+    // CONFIGURATION runs rather than how output is formatted, CI depends on it for the junit artifact,
+    // and stripping it broke every green CI run. Keeping it in the hostile input below (while excluding
+    // it from the expected-leak set) pins that the exemption is exactly one variable wide.
+    const hostile = {
+      PATH: "/usr/bin",
+      NEXTEST_FAILURE_OUTPUT: "final",
+      NEXTEST_SUCCESS_OUTPUT: "final",
+      NEXTEST_RETRIES: "3",
+      NEXTEST_PROFILE: "ci",
+      NEXTEST_NO_OUTPUT_INDENT: "1",
+      NEXTEST_FINAL_STATUS_LEVEL: "none",
+      NEXTEST_STATUS_LEVEL: "none",
+      NEXTEST_SOME_FUTURE_KNOB_NOBODY_HAS_NAMED_YET: "hostile",
+      CLICOLOR_FORCE: "1",
+    };
+    const env = buildCargoEnv(hostile, "/tmp/runner-target", false);
+    const FORMAT_EXEMPT = new Set(["NEXTEST_PROFILE"]); // caller intent, not output format — see GB6g
+    const leaked = Object.keys(env).filter(
+      (k) =>
+        k.startsWith("NEXTEST_") &&
+        !FORMAT_EXEMPT.has(k) &&
+        env[k] === hostile[k] &&
+        hostile[k] !== undefined,
+    );
+    note(`GB6e.1 leaked NEXTEST_* = ${JSON.stringify(leaked)}`);
+    if (leaked.length > 0) {
+      fail(
+        `(GB6e.1) inherited format-affecting NEXTEST_* survived buildCargoEnv: ${leaked.join(", ")} — the ` +
+          `child environment must be CONSTRUCTED from an allowlist, not filtered against a list of names ` +
+          `someone remembered`,
+      );
+      ok = false;
+    }
+    // …and the exemption is exactly one variable wide, not a hole someone can widen by habit.
+    if (env.NEXTEST_PROFILE !== "ci") {
+      fail(
+        `(GB6e.1) NEXTEST_PROFILE = ${JSON.stringify(env.NEXTEST_PROFILE)}, expected 'ci' — the format ` +
+          `strip must not swallow which configuration the caller asked to run (see GB6g)`,
+      );
+      ok = false;
+    }
+    // …and the ones the gate genuinely requires are set back, to the values the parser depends on.
+    const required = {
+      NEXTEST_NO_OUTPUT_INDENT: "0",
+      NEXTEST_STATUS_LEVEL: "retry",
+      NEXTEST_FINAL_STATUS_LEVEL: "fail",
+      NEXTEST_RETRIES: "0",
+      NEXTEST_HIDE_PROGRESS_BAR: "1",
+    };
+    for (const [k, v] of Object.entries(required)) {
+      if (env[k] !== v) {
+        fail(`(GB6e.1) required ${k} = ${JSON.stringify(env[k])}, expected ${JSON.stringify(v)}`);
+        ok = false;
+      }
+    }
+    // Captured output must never be able to land AFTER the real Summary.
+    if (env.NEXTEST_SUCCESS_OUTPUT === "final" || env.NEXTEST_FAILURE_OUTPUT === "final") {
+      fail(
+        `(GB6e.1) output placement still allows captured output after the Summary ` +
+          `(success=${env.NEXTEST_SUCCESS_OUTPUT} failure=${env.NEXTEST_FAILURE_OUTPUT})`,
+      );
+      ok = false;
+    }
+
+    // GB6e.2 — SUMMARY AUTHORSHIP. A forged Summary in captured output (indented, as nextest indents it)
+    // must not be read as the run's accounting.
+    const forgedSummaryIndented =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n" +
+      "  stdout ───\n" +
+      "         Summary [   0.001s] 100 tests run: 100 passed, 0 skipped\n";
+    const sumIndented = parseNextestSummary(forgedSummaryIndented);
+    note(`GB6e.2 indented forged Summary => nonPassed=${sumIndented.nonPassed}`);
+    if (sumIndented.nonPassed !== 1) {
+      fail(
+        `(GB6e.2) an INDENTED forged Summary replaced the runner's accounting (nonPassed=` +
+          `${sumIndented.nonPassed}, expected 1) — the Summary line must carry the same layout gate as a ` +
+          `status line`,
+      );
+      ok = false;
+    }
+
+    // GB6e.3 — a COLUMN-EXACT forged Summary cannot be told apart from the real one by shape, but a run
+    // emits EXACTLY ONE Summary, so a second layout-valid Summary is proof of forgery and must fail.
+    const twoSummaries =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n" +
+      "     Summary [   0.001s] 100 tests run: 100 passed, 0 skipped\n";
+    const rTwo = analyzeNextestSurface(twoSummaries, 100, true);
+    const vTwo = verdictNextestRun(100, twoSummaries, true);
+    note(`GB6e.3 two Summary lines => ${vTwo} | ${names(rTwo)}`);
+    if (vTwo !== "FAIL" || !rTwo.failures.some((f) => /Summary/i.test(f.name))) {
+      fail(
+        `(GB6e.3) two layout-valid Summary lines => '${vTwo}' — a run emits exactly one, so a second is ` +
+          `proof the accounting was forged and must fail with a Summary-specific reason: ${names(rTwo)}`,
+      );
+      ok = false;
+    }
+
+    // ---- LAYER ATTRIBUTION: each payload stopped by exactly ONE layer, asserted by its diagnostic. ----
+    const SUM12 = "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const TOLERANCE_MARK = /tolerance refused/;
+    const SHORTFALL_MARK = /unaccounted failure/;
+
+    // GB6e.4 — COUNT-ONLY. The failure is simply ABSENT from the log; the summary still counts it. No
+    // supersession (tolerance-refusal N/A) and no forged line to reject (layout N/A). Only the count
+    // reconciliation can catch this, so it is the exclusive stopper.
+    const countOnly =
+      `        FAIL [   0.204s] ( 1/12) verter_protocol::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 2 failed, 0 skipped\n";
+    const rCount = analyzeNextestSurface(countOnly, 100, true);
+    note(`GB6e.4 count-only => ${names(rCount)}`);
+    if (!rCount.failures.some((f) => SHORTFALL_MARK.test(f.name))) {
+      fail(`(GB6e.4) a failure absent from the log must trip the COUNT rail: ${names(rCount)}`);
+      ok = false;
+    }
+    if (rCount.failures.some((f) => TOLERANCE_MARK.test(f.name))) {
+      fail(
+        `(GB6e.4) the count rail must be the stopper here, not tolerance-refusal: ${names(rCount)}`,
+      );
+      ok = false;
+    }
+
+    // GB6e.5 — TOLERANCE-REFUSAL-ONLY. Column-exact forged supersession, count balanced by the allowlisted
+    // name. Layout cannot reject it (correct columns) and the count reconciles, so only tolerance-refusal
+    // stops it.
+    const tolOnly =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      `  TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `  TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      `        FAIL [   0.011s] ( 2/12) verter_protocol::main ${TOL}\n` +
+      SUM12;
+    const rTol = analyzeNextestSurface(tolOnly, 100, true);
+    note(`GB6e.5 tolerance-only => ${names(rTol)}`);
+    if (!rTol.failures.some((f) => TOLERANCE_MARK.test(f.name))) {
+      fail(
+        `(GB6e.5) a column-exact forged supersession must trip TOLERANCE-REFUSAL: ${names(rTol)}`,
+      );
+      ok = false;
+    }
+    if (rTol.failures.some((f) => SHORTFALL_MARK.test(f.name))) {
+      fail(
+        `(GB6e.5) the count reconciles here, so the count rail must NOT be the stopper: ${names(rTol)}`,
+      );
+      ok = false;
+    }
+
+    // GB6e.6 — LAYOUT-ONLY. The same forgery carrying nextest's 4-space capture indent is rejected before
+    // it can supersede anything, so the genuine failure is simply NAMED and neither other rail fires.
+    const layoutOnly =
+      `        FAIL [   0.204s] ( 1/12) verter_session::main ${REAL}\n` +
+      `      TRY 1 FAIL [   0.010s] (───) verter_session::main ${REAL}\n` +
+      `      TRY 2 PASS [   0.011s] (1/1) verter_session::main ${REAL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const rLay = analyzeNextestSurface(layoutOnly, 100, true);
+    note(`GB6e.6 layout-only => ${names(rLay)}`);
+    if (!rLay.failures.some((f) => f.name === REAL)) {
+      fail(
+        `(GB6e.6) LAYOUT must reject the indented forgery, leaving the real failure named: ${names(rLay)}`,
+      );
+      ok = false;
+    }
+    if (rLay.failures.some((f) => TOLERANCE_MARK.test(f.name) || SHORTFALL_MARK.test(f.name))) {
+      fail(`(GB6e.6) layout is the exclusive stopper here; no other rail may fire: ${names(rLay)}`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6e) ENV ALLOWLIST + SUMMARY AUTHORSHIP + LAYER ATTRIBUTION: every inherited NEXTEST_* is " +
+          "stripped (including a fabricated one, proving the rule is the namespace and not a remembered " +
+          "list) and only the declared set is restored; a forged Summary cannot replace the runner's " +
+          "accounting (indented => layout-rejected, column-exact duplicate => proof of forgery); and each " +
+          "of the three rails is pinned as the EXCLUSIVE stopper for its payload by distinctive diagnostic",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6f) TOLERANCE KEYS ON BINARY IDENTITY, NOT ON A BARE TEST PATH.
+  //
+  //        Named failures were moved to a `<binary-id> <name>` identity so two binaries owning
+  //        `cases::shared::same_name` stay two distinct failures. The TOLERANCE check did not come along:
+  //        it still matched `TOLERATED_TEST_NAMES` against the bare path. So the one deliberately-exempt
+  //        failure in this repo was exempt BY PATH, and any crate that happens to define a test at that
+  //        path inherited the exemption — including several at once, all tolerated together.
+  //
+  //        The allowlist is scoped to the binary that actually owns those tests (`verter_protocol::main`),
+  //        so the exemption cannot be acquired by coincidence of naming.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6f) TOLERANCE IS BINARY-SCOPED\n");
+  {
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const names = (r) => r.failures.map((f) => `${f.surface}|${f.name}`).join("  ");
+    let ok = true;
+
+    // GB6f.1 — the SAME test path in a DIFFERENT binary is a different test, and is not exempt.
+    const impostor =
+      `        FAIL [   0.204s] ( 1/12) unrelated_crate::different_binary ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const vImp = verdictNextestRun(100, impostor, true);
+    const rImp = analyzeNextestSurface(impostor, 100, true);
+    note(`GB6f.1 foreign-binary same-path => ${vImp} | ${names(rImp)}`);
+    if (vImp !== "FAIL") {
+      fail(
+        `(GB6f.1) a genuine failure in unrelated_crate::different_binary whose path merely MATCHES the ` +
+          `allowlisted name => '${vImp}', expected FAIL — tolerance must key on the owning binary, not on ` +
+          `a bare test path any crate can define`,
+      );
+      ok = false;
+    }
+
+    // GB6f.2 — duplicates of that path across several foreign binaries are each a real failure.
+    const manyImpostors =
+      `        FAIL [   0.204s] ( 1/12) crate_a::main ${TOL}\n` +
+      `        FAIL [   0.205s] ( 2/12) crate_b::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 10 passed, 2 failed, 0 skipped\n";
+    const rMany = analyzeNextestSurface(manyImpostors, 100, true);
+    note(
+      `GB6f.2 two foreign binaries => failures=${rMany.failures.length} tolerated=${rMany.toleratedCount}`,
+    );
+    if (rMany.failures.length !== 2 || rMany.toleratedCount !== 0) {
+      fail(
+        `(GB6f.2) the same path in two foreign binaries is two real failures; got ` +
+          `${rMany.failures.length} failure(s) / ${rMany.toleratedCount} tolerated: ${names(rMany)}`,
+      );
+      ok = false;
+    }
+
+    // GB6f.3 — CONTROL: in its OWN binary the pair is still tolerated, so the scoping is a narrowing and
+    // not a removal of the exemption.
+    const genuine =
+      `        FAIL [   0.204s] ( 1/12) verter_protocol::main ${TOL}\n` +
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n";
+    const vGen = verdictNextestRun(100, genuine, true);
+    if (vGen !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(GB6f.3) the freshness pair in its OWN binary => '${vGen}', expected PASS-WITH-TOLERATED — the ` +
+          `scoping must narrow the exemption, not delete it`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6f) TOLERANCE IS BINARY-SCOPED: the allowlisted path in a foreign binary is a real failure " +
+          "(singly and in duplicate), while the pair in its own verter_protocol::main binary still " +
+          "tolerates — the exemption cannot be acquired by coincidence of test naming",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6g) THE ALLOWLIST OWNS OUTPUT FORMAT, NOT CALLER INTENT.
+  //
+  //        Stripping the whole `NEXTEST_*` namespace closed the pin-one-variable-per-round treadmill, but
+  //        it also swallowed `NEXTEST_PROFILE`, which is a DIFFERENT category: it selects WHICH
+  //        CONFIGURATION RUNS, not HOW OUTPUT IS FORMATTED. `CARGO_*`, `PATH`, `TMPDIR` and `RUST*` were
+  //        never stripped for exactly that reason; the namespace rule was applied without making the same
+  //        distinction inside it.
+  //
+  //        The cost was a BROKEN GREEN RUN, which is the worse failure direction: CI sets
+  //        `NEXTEST_PROFILE: ci`, `.config/nextest.toml` defines junit ONLY under `[profile.ci.junit]`, and
+  //        the workflow step after the gate locates that file and fails loudly when it is missing. Strip
+  //        the variable and every perfectly green CI run exits 1 on a missing artifact.
+  //
+  //        SAFETY OF PRESERVING IT is earned, not assumed. Measured against the real binary: a hostile
+  //        profile (`status-level`/`final-status-level = none`, `failure-output = final`, `retries = 3`)
+  //        unopposed yields ZERO `FAIL [` lines, and the SAME profile under this gate's env pins yields the
+  //        correct 2 FAIL lines, 1 Summary and 0 TRY lines. The pins beat the profile for every
+  //        parser-facing setting, so the profile cannot alter what the parser sees.
+  //
+  //        THE GUARD IS THE CONTRACT, NOT THE VARIABLE NAME. GB6g.1 derives the profile from the workflow
+  //        and the nextest config rather than hardcoding `ci`, so it follows a rename and still catches a
+  //        future strip.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6g) ENV ALLOWLIST OWNS FORMAT, NOT CALLER INTENT\n");
+  {
+    let ok = true;
+    const repoRoot = join(SELFTEST_DIR, "..");
+    const ciYml = join(repoRoot, ".github", "workflows", "ci.yml");
+    const nextestToml = join(repoRoot, ".config", "nextest.toml");
+
+    // GB6g.1 — TREE-DERIVED CI CONTRACT. Read the profile CI asks for, confirm the artifact contract that
+    // depends on it, then assert the gate preserves it. Nothing here hardcodes the profile NAME.
+    if (!existsSync(ciYml) || !existsSync(nextestToml)) {
+      skip("(GB6g.1) ci.yml / nextest.toml not present — cannot derive the CI profile contract");
+    } else {
+      const yml = readFileSync(ciYml, "utf8");
+      const toml = readFileSync(nextestToml, "utf8");
+      // The profile the workflow sets for the gate step.
+      const m = /NEXTEST_PROFILE:\s*([A-Za-z0-9_-]+)/.exec(yml);
+      if (!m) {
+        skip("(GB6g.1) no NEXTEST_PROFILE in ci.yml — contract not expressed, nothing to guard");
+      } else {
+        const profile = m[1];
+        // The nextest.toml leg: an EXACT section header, not a pattern that could match a neighbour.
+        const junitDeclared = toml.includes(`[profile.${profile}.junit]`);
+        // The workflow leg must bind the `nextest/<profile>/` PATH SEGMENT, not merely mention a junit
+        // file. A bare /junit\.xml/ ALSO matched this workflow's VITEST report
+        // (`test-results/vitest-junit.xml`), so the guard would have passed with the nextest locate step
+        // deleted outright - it read as proving the whole contract while proving one leg of it. Binding
+        // the segment is what makes all three legs move together on a profile rename: the env key, the
+        // `[profile.<x>.junit]` declaration, and the `*/nextest/<x>/junit.xml` the workflow looks for.
+        const profileRe = profile.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+        const locatesJunit = new RegExp(`nextest/${profileRe}/junit\\.xml`).test(yml);
+        note(
+          `GB6g.1 CI asks for profile '${profile}'; [profile.${profile}.junit] declared = ` +
+            `${junitDeclared}; workflow locates nextest/${profile}/junit.xml = ${locatesJunit}`,
+        );
+        // The contract only binds if BOTH halves are present in the tree.
+        if (junitDeclared && locatesJunit) {
+          const env = buildCargoEnv(
+            { PATH: "/usr/bin", NEXTEST_PROFILE: profile },
+            "/tmp/runner-target",
+            false,
+          );
+          if (env.NEXTEST_PROFILE !== profile) {
+            fail(
+              `(GB6g.1) buildCargoEnv dropped NEXTEST_PROFILE (got ${JSON.stringify(env.NEXTEST_PROFILE)}, ` +
+                `expected '${profile}'). CI sets that profile, junit is declared ONLY under ` +
+                `[profile.${profile}.junit], and the workflow step after the gate locates junit.xml and ` +
+                `fails when it is missing — so dropping it breaks every GREEN run. The env allowlist owns ` +
+                `output FORMAT; it must not swallow which CONFIGURATION the caller asked to run.`,
+            );
+            ok = false;
+          }
+          // …and preserving it must NOT reopen the parse: the format pins still apply.
+          const pins = {
+            NEXTEST_STATUS_LEVEL: "retry",
+            NEXTEST_FINAL_STATUS_LEVEL: "fail",
+            NEXTEST_FAILURE_OUTPUT: "immediate",
+            NEXTEST_SUCCESS_OUTPUT: "never",
+            NEXTEST_RETRIES: "0",
+            NEXTEST_NO_OUTPUT_INDENT: "0",
+          };
+          for (const [k, v] of Object.entries(pins)) {
+            if (env[k] !== v) {
+              fail(
+                `(GB6g.1) with NEXTEST_PROFILE preserved, format pin ${k} = ${JSON.stringify(env[k])}, ` +
+                  `expected ${JSON.stringify(v)} — preserving caller intent must not reopen the parse`,
+              );
+              ok = false;
+            }
+          }
+        } else {
+          // Named per leg on purpose: a guard that stops matching must say WHICH half went missing,
+          // otherwise narrowing its pattern silently turns it off - the failure mode this block exists
+          // to prevent.
+          skip(
+            `(GB6g.1) profile '${profile}' does not carry the full junit contract here ` +
+              `(declared in nextest.toml = ${junitDeclared}, workflow locates nextest/${profile}/junit.xml ` +
+              `= ${locatesJunit}) — nothing to guard`,
+          );
+        }
+      }
+    }
+
+    // GB6g.2 — the FORMAT half of the namespace is still stripped, profile preservation notwithstanding.
+    const env2 = buildCargoEnv(
+      {
+        PATH: "/usr/bin",
+        NEXTEST_PROFILE: "ci",
+        NEXTEST_FAILURE_OUTPUT: "final",
+        NEXTEST_STATUS_LEVEL: "none",
+        NEXTEST_SOME_FUTURE_FORMAT_KNOB: "hostile",
+      },
+      "/tmp/runner-target",
+      false,
+    );
+    if (
+      env2.NEXTEST_SOME_FUTURE_FORMAT_KNOB !== undefined ||
+      env2.NEXTEST_STATUS_LEVEL === "none"
+    ) {
+      fail(
+        `(GB6g.2) preserving NEXTEST_PROFILE must not weaken the format strip ` +
+          `(future knob=${JSON.stringify(env2.NEXTEST_SOME_FUTURE_FORMAT_KNOB)}, ` +
+          `status level=${JSON.stringify(env2.NEXTEST_STATUS_LEVEL)})`,
+      );
+      ok = false;
+    }
+
+    // GB6g.3 — FORCE_COLOR is colour-forcing too. ANSI escapes in the status column break the 12-column
+    // field the parser gates on; CLICOLOR_FORCE and CLICOLOR were deleted and this one was missed, which
+    // is exactly the residue an allowlist is supposed to make impossible to have.
+    const env3 = buildCargoEnv(
+      { PATH: "/usr/bin", FORCE_COLOR: "3", CLICOLOR_FORCE: "1", CLICOLOR: "1" },
+      "/tmp/runner-target",
+      false,
+    );
+    const colourLeaks = ["FORCE_COLOR", "CLICOLOR_FORCE", "CLICOLOR"].filter(
+      (k) => env3[k] !== undefined,
+    );
+    note(`GB6g.3 colour-forcing leaks = ${JSON.stringify(colourLeaks)}`);
+    if (colourLeaks.length > 0) {
+      fail(
+        `(GB6g.3) colour-FORCING variables survived buildCargoEnv: ${colourLeaks.join(", ")} — ANSI escapes ` +
+          `in the status column break the 12-column field the parser gates on`,
+      );
+      ok = false;
+    }
+
+    // GB6g.4 — the Summary parser must REFUSE rather than choose. The live path already fails closed on a
+    // dual Summary, but the selection rule inside the parser was still positional (last wins), which is a
+    // choice it has no basis to make.
+    const twoSummaries =
+      "     Summary [ 900.014s] 12 tests run: 11 passed, 1 failed, 0 skipped\n" +
+      "     Summary [   0.001s] 100 tests run: 100 passed, 0 skipped\n";
+    const parsed = parseNextestSummary(twoSummaries);
+    note(
+      `GB6g.4 dual-Summary parse => count=${parsed.count} runCountFound=${parsed.runCountFound}`,
+    );
+    if (parsed.runCountFound !== false) {
+      fail(
+        `(GB6g.4) with ${parsed.count} Summary lines the parser still derived accounting positionally ` +
+          `(runCountFound=${parsed.runCountFound}) — it must refuse, not pick one`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6g) ALLOWLIST OWNS FORMAT, NOT CALLER INTENT: NEXTEST_PROFILE is preserved, guarded by all " +
+          "THREE legs of the CI junit contract read from the tree — the NEXTEST_PROFILE value in ci.yml, " +
+          "the [profile.<x>.junit] declaration in nextest.toml, and the nextest/<x>/junit.xml path " +
+          "segment the workflow locates — so a profile rename moves all three together and a future " +
+          "strip is caught; every format variable including a fabricated one stays stripped; FORCE_COLOR " +
+          "joins the colour-forcing deletions; and the Summary parser refuses to choose between duplicate " +
+          "Summary lines instead of taking the last",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB6h) THE NAMESPACE STRIP MUST FOLD CASE THE WAY THE PLATFORM DOES.
+  //
+  //        Windows environment variable names fold case-INSENSITIVELY, so `Nextest_Profile` and
+  //        `NEXTEST_PROFILE` are ONE variable to a Windows child. The strip matched with a case-SENSITIVE
+  //        `startsWith("NEXTEST_")` on both platforms, so on Windows every mixed-case spelling survived —
+  //        the allowlist had precisely the hole it exists to close, and the fabricated-variable plant
+  //        proved the namespace rule only in the canonical case. Cross-Platform Portability is a CRITICAL
+  //        rule in CLAUDE.md and says platform-assuming code is a defect rather than a nit; this is that.
+  //
+  //        The fold is PLATFORM-ACCURATE in both directions, mirroring what `buildCargoEnv` already does
+  //        for PATH: Windows collapses every case-variant onto ONE canonical key, while POSIX is
+  //        case-EXACT, because on POSIX `Nextest_Profile` is a genuinely DIFFERENT variable that nextest
+  //        never reads — deleting it there would be this gate reaching outside its own contract.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB6h) NAMESPACE STRIP FOLDS CASE PER PLATFORM\n");
+  {
+    let ok = true;
+    const hostile = () => ({
+      PATH: "/usr/bin",
+      Nextest_Profile: "ci",
+      Nextest_Some_Future_Knob: "hostile",
+      nextest_failure_output: "final",
+      NEXTEST_STATUS_LEVEL: "none",
+      Force_Color: "3",
+      CliColor_Force: "1",
+      CLICOLOR: "1",
+    });
+
+    // GB6h.1 — WINDOWS: every case-variant in the namespace is gone, and the caller's profile survives
+    // exactly once under the canonical key (not as two colliding spellings).
+    const win = buildCargoEnv(hostile(), "C:\\runner-target", true);
+    const nsSurvivors = Object.keys(win).filter(
+      (k) => /^nextest_/i.test(k) && !/^NEXTEST_[A-Z_]+$/.test(k),
+    );
+    const colourSurvivors = Object.keys(win).filter((k) =>
+      /^(force_color|clicolor|clicolor_force)$/i.test(k),
+    );
+    note(
+      `GB6h.1 windows: non-canonical NEXTEST_* = ${JSON.stringify(nsSurvivors)}; ` +
+        `colour-forcing = ${JSON.stringify(colourSurvivors)}; profile = ${JSON.stringify(win.NEXTEST_PROFILE)}`,
+    );
+    if (nsSurvivors.length > 0) {
+      fail(
+        `(GB6h.1) mixed-case NEXTEST_* survived the Windows strip: ${nsSurvivors.join(", ")} — Windows env ` +
+          `names fold case-insensitively, so these ARE the variables nextest reads`,
+      );
+      ok = false;
+    }
+    if (colourSurvivors.length > 0) {
+      fail(
+        `(GB6h.1) mixed-case colour-forcing variables survived the Windows strip: ${colourSurvivors.join(", ")}`,
+      );
+      ok = false;
+    }
+    if (win.NEXTEST_PROFILE !== "ci") {
+      fail(
+        `(GB6h.1) the caller's profile must survive the fold under the canonical key; got ` +
+          `${JSON.stringify(win.NEXTEST_PROFILE)}, expected 'ci' (caller spelled it Nextest_Profile)`,
+      );
+      ok = false;
+    }
+    // …and the format pins still win over whatever spelling the caller used.
+    if (win.NEXTEST_STATUS_LEVEL !== "retry" || win.NEXTEST_FAILURE_OUTPUT !== "immediate") {
+      fail(
+        `(GB6h.1) format pins lost to a case-variant: status=${JSON.stringify(win.NEXTEST_STATUS_LEVEL)} ` +
+          `failure-output=${JSON.stringify(win.NEXTEST_FAILURE_OUTPUT)}`,
+      );
+      ok = false;
+    }
+
+    // GB6h.2 — POSIX CONTROL (the discrimination). Case-EXACT: a `Nextest_Profile` on POSIX is a DIFFERENT
+    // variable that nextest never reads, so it is left alone — the same rule buildCargoEnv already applies
+    // to a POSIX `Path`. A blanket case-insensitive strip would fail this.
+    const posix = buildCargoEnv(hostile(), "/tmp/runner-target", false);
+    if (posix.Nextest_Some_Future_Knob !== "hostile" || posix.Nextest_Profile !== "ci") {
+      fail(
+        `(GB6h.2) POSIX must be case-EXACT — a mixed-case name is a different variable nextest never ` +
+          `reads, so this gate must not delete it (knob=${JSON.stringify(posix.Nextest_Some_Future_Knob)}, ` +
+          `profile=${JSON.stringify(posix.Nextest_Profile)})`,
+      );
+      ok = false;
+    }
+    // …while the canonical-case format variable IS stripped on POSIX.
+    if (posix.NEXTEST_STATUS_LEVEL !== "retry") {
+      fail(
+        `(GB6h.2) the canonical NEXTEST_STATUS_LEVEL must still be pinned on POSIX; got ` +
+          `${JSON.stringify(posix.NEXTEST_STATUS_LEVEL)}`,
+      );
+      ok = false;
+    }
+    // The lowercase colour-forcing spellings are left on POSIX for the same reason.
+    if (posix.CLICOLOR !== undefined) {
+      fail(`(GB6h.2) the exact-case CLICOLOR must still be deleted on POSIX`);
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB6h) NAMESPACE STRIP FOLDS CASE PER PLATFORM: on Windows every mixed-case NEXTEST_* and " +
+          "colour-forcing spelling is collapsed away and the caller's profile survives once under the " +
+          "canonical key with the format pins intact; on POSIX the strip stays case-EXACT, because a " +
+          "mixed-case name there is a different variable nextest never reads (discriminating — a blanket " +
+          "case-insensitive strip fails the POSIX control, and the previous case-sensitive strip left " +
+          "Nextest_Profile / Nextest_Some_Future_Knob / Force_Color alive on Windows)",
       );
     }
   }
