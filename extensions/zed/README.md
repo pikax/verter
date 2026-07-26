@@ -22,7 +22,9 @@ to the languages those official extensions define, so you need:
    server; the grammar and language are theirs.
 
 2. **`verter-lsp`** — the native server binary. v0 does **not** auto-download it
-   (managed download is a roadmap item). You provide it via one of:
+   (managed download is a roadmap item). Get it with `pnpm add -D verter-lsp`
+   (`npx verter-lsp --print-server-path` prints the native binary path) or
+   `cargo build -p verter_lsp --release`, then provide it via one of:
    - an explicit path in your settings (`lsp.verter.binary.path`), or
    - a `verter-lsp` on your `PATH` plus the explicit PATH opt-in (below).
 

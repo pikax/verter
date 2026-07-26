@@ -371,11 +371,17 @@ jobs:
         # specs (packageManifest*/ssrReadiness) that block a blanket package run.
         run: |
           pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts packages/vue-vscode/src/carrier-routing-no-vue-gate.spec.ts
-      - name: Rust build-tooling helper self-tests (sccache-env)
+      - name: Rust build-tooling helper self-tests (sccache-env, publish set)
         # Explicit-path root vitest run: scripts/ is not a workspace package,
         # so `pnpm -r run test` never reaches these specs — same convention as
         # the carrier-routing guards step above.
         run: pnpm run test:scripts
+      - name: verter-lsp distribution guards (platform packages + release wiring)
+        # The launcher's platform matrix reconciled against its platform
+        # packages, the release build matrix, and the derived publish set. Run
+        # by explicit path for the same reason as the steps above — this job
+        # does not run `pnpm -r run test`, so an unreferenced spec never runs.
+        run: pnpm vitest run packages/verter-lsp
       - name: Extension-provider headless guards (auto-import + diagnostics)
         # Regression-guards the in-process EXTENSION type provider headlessly (no
         # VS Code, no LSP) via `ExtensionTsService`:

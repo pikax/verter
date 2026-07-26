@@ -14,7 +14,9 @@ Requires **Neovim ≥ 0.11** (for `vim.lsp.config` / `vim.lsp.enable`).
 ## Prerequisites
 
 - `verter-lsp` on your `PATH` (or pass an absolute `cmd_path`). There is **no
-  managed download** — install it through your package manager, or build it with
+  managed download** — install it with `pnpm add -D verter-lsp` (which puts the
+  launcher on the project's `node_modules/.bin`, and prints the native binary
+  path via `npx verter-lsp --print-server-path`), or build it with
   `cargo build -p verter_lsp --release`. A mason.nvim registry entry is a planned follow-up
   (see the [Roadmap in the Neovim support design](../../docs/arch/neovim-support-design.md#91-roadmap-out-of-v0-scope)).
 - For full type features, the project should have **TypeScript 7 (`typescript@7`)**

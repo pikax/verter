@@ -80,6 +80,8 @@ tmp/
 scratchpad/
 
 # Platform binaries are staged by CI at package time, never committed.
+packages/verter-lsp/npm/*/verter-lsp
+packages/verter-lsp/npm/*/verter-lsp.exe
 packages/verter-tsc/npm/*/verter-tsc
 packages/verter-tsc/npm/*/verter-tsc.exe
 packages/native/npm/*/*.node

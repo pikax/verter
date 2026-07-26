@@ -1,0 +1,57 @@
+{
+  "name": "verter-lsp",
+  "version": "0.0.1-beta.2",
+  "description": "Language Server Protocol server for Vue and Svelte single-file components",
+  "keywords": [
+    "language-server",
+    "lsp",
+    "svelte",
+    "typescript",
+    "vue"
+  ],
+  "homepage": "https://verterjs.dev/",
+  "license": "MIT",
+  "author": "pikax",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "bin": {
+    "verter-lsp": "./bin/run.js"
+  },
+  "files": [
+    "bin",
+    "index.js",
+    "index.d.ts",
+    "platforms.js",
+    "platforms.d.ts"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "scripts": {
+    "build": "echo 'no build step — the server binary is distributed via optionalDependencies'",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "vitest": "^4.1.7"
+  },
+  "optionalDependencies": {
+    "@verter/lsp-darwin-arm64": "workspace:*",
+    "@verter/lsp-darwin-x64": "workspace:*",
+    "@verter/lsp-linux-arm64-gnu": "workspace:*",
+    "@verter/lsp-linux-arm64-musl": "workspace:*",
+    "@verter/lsp-linux-x64-gnu": "workspace:*",
+    "@verter/lsp-linux-x64-musl": "workspace:*",
+    "@verter/lsp-win32-x64-msvc": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

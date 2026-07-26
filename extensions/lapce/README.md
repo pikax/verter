@@ -23,9 +23,16 @@ servers. It ships **no grammar of its own** and attaches to Lapce's `vue` /
    rustup target add wasm32-wasip1
    ```
 
-2. **A built `verter-lsp` binary.** v0 does **not** auto-download it (managed
-   download is a roadmap item — see [Troubleshooting](#troubleshooting)). Build
-   it from the repo root:
+2. **A `verter-lsp` binary.** v0 does **not** auto-download it (managed download
+   is a roadmap item — see [Troubleshooting](#troubleshooting)). Install it from
+   npm:
+
+   ```bash
+   pnpm add -D verter-lsp
+   npx verter-lsp --print-server-path   # the absolute path for the config below
+   ```
+
+   Or build it from the repo root:
 
    ```bash
    cargo build -p verter_lsp --release

@@ -42,9 +42,41 @@ and the **config override** (how to point it at `verter-lsp`):
 
 ## Install `verter-lsp`
 
-All four clients need the native `verter-lsp` binary. v0 does **not** auto-download
-it (managed download is a roadmap item), so build it from source. From a checkout
-of the repository:
+All four clients need the native `verter-lsp` binary. There are two ways to get
+it; no editor auto-downloads it (managed download is a roadmap item).
+
+### From npm (recommended)
+
+Install it as a dev dependency of the project you open, so the server version is
+pinned alongside the rest of your Verter tooling:
+
+```bash
+pnpm add -D verter-lsp
+```
+
+The `verter-lsp` package is a launcher: the native server ships in a
+per-platform optional dependency (`@verter/lsp-<platform>`) and your package
+manager installs only the one matching your OS, architecture and libc (glibc and
+musl builds are separate). Supported platforms are macOS x64/arm64, Linux
+x64/arm64 (glibc and musl) and Windows x64.
+
+That gives you two entry points:
+
+- `node_modules/.bin/verter-lsp` — a launch command for editors that spawn a
+  bare command. It hands the process stdio straight to the native server, so it
+  adds no proxy to the per-message path.
+- `npx verter-lsp --print-server-path` — prints the absolute path of the native
+  binary, for editor settings that want an explicit path.
+
+Programmatic consumers should skip the shim entirely and spawn the resolved path:
+
+```js
+const { serverBinaryPath } = require("verter-lsp");
+```
+
+### From source
+
+From a checkout of the repository:
 
 ```bash
 git clone https://github.com/pikax/verter.git
@@ -72,12 +104,15 @@ Every client uses the **same** discovery model (the same concept VS Code's
 binary path takes precedence; otherwise you can opt into `PATH` discovery.
 
 1. **Explicit path (simplest, recommended).** Set the editor's binary-path key to
-   the absolute path of the `verter-lsp` you built:
+   the absolute path of the server binary — from an npm install, get it with
+   `npx verter-lsp --print-server-path`; from a source build, use the
+   `target/release` path above:
    - Lapce: `lsp.serverPath`
    - Zed: `lsp.verter.binary.path`
    - Helix: `command` in `[language-server.verter]`
    - Neovim: `cmd_path` in `require("verter").setup({ ... })`
-2. **`PATH` opt-in.** Put `verter-lsp` on your `PATH` and opt in. `PATH` discovery
+2. **`PATH` opt-in.** Put `verter-lsp` on your `PATH` — an npm install already
+   puts the launcher on a project-local `node_modules/.bin` — and opt in. `PATH` discovery
    is **opt-in** (Lapce/Zed: `serverSource = "path"`) so a stale binary on `PATH`
    can't silently break version coupling; Helix/Neovim launch the bare
    `verter-lsp` name directly when no absolute path is set.

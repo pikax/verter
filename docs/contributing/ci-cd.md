@@ -58,16 +58,38 @@ Triggered on push of tags matching `v*` (e.g., `v0.0.1-beta.1`, `v1.0.0`).
 
 ```
 validate
-  +-- build-native (matrix: 7 targets)   <- parallel
-  +-- build-wasm                          <- parallel
-        |
-        +-- publish-crates (needs: validate)
-        |
-        +-- publish-npm (needs: validate, build-native, build-wasm)
-              |
-              +-- github-release (needs: build-native, build-wasm, publish-npm)
-              +-- deploy-playground (needs: build-wasm)
+  +-- test                                  <- blocking; gates publishing AND the release
+  +-- build-native      (matrix: 7 targets) <- parallel
+  +-- build-lsp         (matrix: 7 targets) <- parallel
+  +-- build-tsc         (matrix: 7 targets) <- parallel
+  +-- build-mcp-server  (matrix: 5 targets) <- parallel
+  +-- build-wasm                            <- parallel
+  +-- build-editor-lsp
+        +-- editor-helix / editor-lapce / editor-zed / editor-neovim
+
+build-vsix (needs: validate, test, build-lsp, build-native)
+  +-- github-release (needs: validate, build-native, build-wasm, build-mcp-server, build-vsix)
+  +-- publish-vscode (needs: validate, build-vsix, publish-npm)
+
+publish-crates (needs: validate, test, editor matrix)
+publish-npm    (needs: validate, test, editor matrix, build-native, build-lsp, build-tsc, build-wasm)
+  +-- integration-test (consumes the published npm packages)
 ```
+
+**The GitHub Release is gated on builds, not on publishing.** Every asset it
+uploads — native bindings, WASM, the `verter-mcp-server` binaries and the
+platform VSIXes — is build output, so a failed npm or Marketplace publish no
+longer withholds the release and its downloadable assets; publishing runs in
+parallel and is retried on its own. Packaging the VSIXes is therefore a build
+job (`build-vsix`); `publish-vscode` only pushes the prebuilt artifact, and stays
+ordered after `publish-npm` so the extension never lands on the Marketplace
+before the packages of the same version reach the registry. The release remains
+test-gated transitively, through `build-vsix`.
+
+Consequence to be aware of: the release (and the `CHANGELOG.md` commit it pushes
+to `main`) can now exist for a version whose npm publish failed. That is the
+intended trade — the assets are the durable artifact, and a failed publish job is
+re-runnable — but it means a red `publish-npm` needs acting on, not ignoring.
 
 **Native build matrix:**
 
@@ -81,12 +103,41 @@ validate
 | `aarch64-apple-darwin`       | macos-latest   | Direct        |
 | `x86_64-pc-windows-msvc`     | windows-latest | Direct        |
 
+**Binary build matrices:** `build-lsp` (the `verter-lsp` server) and `build-tsc`
+(`verter-tsc`) cover the same 7 targets as `build-native`. `build-lsp` names each
+artifact after the npm platform package it feeds (`lsp-<npm-pkg>`, e.g.
+`lsp-linux-x64-gnu`), so `publish-npm` stages them by directory name;
+`build-vsix` maps its five VSIX targets onto those same artifacts (the two
+musl legs serve the npm channel only -- the VSIX has no musl target).
+
 **Publishing process:**
 
 1. **Rust crates** -- only `verter_compiler` is published to crates.io (binding crates are consumed via npm)
-2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`)
+2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`, `@verter/lsp-linux-x64-gnu`). The directory list is derived, not hand-listed per family: `scripts/publish-platform-dirs.mjs` prints every `packages/<pkg>/npm/<platform>` dir in the publish set, and the workflow loops over that output
 3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`; the publish set is derived from the product dependency closure by `scripts/lib/publish-set.mjs` (marketplace-only packages such as `verter-vscode` are excluded)
-4. **GitHub Release** -- created with changelog (via git-cliff) and all binary assets
+4. **GitHub Release** -- created with the changelog (via git-cliff) and the staged binary assets
+
+**Release assets (26).** Each one is staged under an explicit, platform-qualified
+name before `gh release create` runs, and the step writes the full list -- name
+and size -- to the workflow run summary:
+
+| Family                        | Count | Asset names                              |
+| ----------------------------- | ----- | ---------------------------------------- |
+| Native bindings               | 7     | `verter-native.<triple>.node`            |
+| LSP server                    | 7     | `verter-lsp-<platform>[.exe]`            |
+| MCP server                    | 5     | `verter-mcp-server-<target>[.exe]`       |
+| VS Code extension             | 5     | `verter-vscode-<target>.vsix`            |
+| WASM                          | 2     | `verter_wasm_bg.wasm`, `verter_wasm.js`  |
+
+Staging **fails the job** on a missing source, a duplicate asset name, or a
+family whose count is short -- a partial release is a failed release. The summary
+is written before that check, so a failed run still shows what it managed to
+stage. Two things deliberately do *not* ship as assets: the `native-loader`
+artifact (`index.js`, an npm-only file that a blanket extension sweep used to
+attach as an opaque asset) and the relay shim inside the LSP artifacts (a VSIX
+internal). `verter-tsc` is npm-only -- its only consumption path is `npx` inside
+a Node project, whereas `verter-lsp` must be launchable by editors on machines
+with no Node at all.
 
 ### Release Tag (`release-tag.yml`)
 
@@ -144,7 +195,7 @@ Releases start from a local version bump and end with an automatic tag:
    `scripts/set-version.mjs`: the `Cargo.toml` workspace version (which every
    crate inherits), `Cargo.lock`, and every package in the npm publish set —
    the publishable `packages/*` packages plus the platform sub-packages under
-   `packages/{native,verter-tsc}/npm/*`. The target set comes from
+   `packages/{native,verter-lsp,verter-tsc}/npm/*`. The target set comes from
    `scripts/lib/publish-set.mjs`, the same authority the release workflow
    publishes from; private packages are never touched.
 3. `pnpm bump` requires `scripts/check-versions.mjs` to pass, refuses to run

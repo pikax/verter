@@ -13,9 +13,11 @@ once at startup and spawns one `verter-lsp` per workspace root.
 ## Prerequisites
 
 - `verter-lsp` on your `PATH` (or set `command` to an absolute path in the
-  snippet). There is **no managed download** — install it via your package
-  manager / `cargo build -p verter_lsp --release`. Helix does not fetch
-  language-server binaries.
+  snippet). There is **no managed download** — Helix does not fetch
+  language-server binaries. Install it with `pnpm add -D verter-lsp` (which puts
+  the launcher on the project's `node_modules/.bin`, and prints the native
+  binary path via `npx verter-lsp --print-server-path`), or build it with
+  `cargo build -p verter_lsp --release`.
 - For full type features, the project should have **TypeScript 7 (`typescript@7`)**
   installed (the normal case for a typed Vue/Svelte project). The default type
   provider is `tsgo`, which discovers the native

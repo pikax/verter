@@ -308,7 +308,13 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Build LSP binary (matrix — for VS Code extension bundling)
+  # Build LSP binary (matrix — the `verter-lsp` npm platform packages plus the
+  # binary the VS Code extension bundles)
+  #
+  # Artifacts are named after the npm platform package they feed
+  # (`lsp-<npm-pkg>`), so publish-npm stages each one by directory name with no
+  # mapping table. publish-vscode maps its five vsce targets onto those names.
+  # The musl legs exist for the npm channel only — the VSIX has no musl target.
   # ---------------------------------------------------------------------------
   build-lsp:
     name: Build LSP (${{ matrix.target }})
@@ -321,28 +327,40 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
-            vsce-target: linux-x64
+            npm-pkg: linux-x64-gnu
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-x64-musl
             binary: verter-lsp
             shim-binary: verter-relay-shim
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use-cross: true
-            vsce-target: linux-arm64
+            npm-pkg: linux-arm64-gnu
+            binary: verter-lsp
+            shim-binary: verter-relay-shim
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-arm64-musl
             binary: verter-lsp
             shim-binary: verter-relay-shim
           - target: x86_64-apple-darwin
             os: macos-15-intel
-            vsce-target: darwin-x64
+            npm-pkg: darwin-x64
             binary: verter-lsp
             shim-binary: verter-relay-shim
           - target: aarch64-apple-darwin
             os: macos-15
-            vsce-target: darwin-arm64
+            npm-pkg: darwin-arm64
             binary: verter-lsp
             shim-binary: verter-relay-shim
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            vsce-target: win32-x64
+            npm-pkg: win32-x64-msvc
             binary: verter-lsp.exe
             shim-binary: verter-relay-shim.exe
     runs-on: ${{ matrix.os }}
@@ -378,7 +396,7 @@ jobs:
         shell: bash
       - uses: actions/upload-artifact@v6
         with:
-          name: lsp-${{ matrix.vsce-target }}
+          name: lsp-${{ matrix.npm-pkg }}
           path: |
             target/${{ matrix.target }}/release/${{ matrix.binary }}
             target/${{ matrix.target }}/release/${{ matrix.shim-binary }}
@@ -1040,7 +1058,19 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-npm:
     name: Publish npm
-    needs: [validate, test, editor-helix, editor-lapce, editor-zed, editor-neovim, build-native, build-tsc, build-wasm]
+    needs:
+      [
+        validate,
+        test,
+        editor-helix,
+        editor-lapce,
+        editor-zed,
+        editor-neovim,
+        build-native,
+        build-lsp,
+        build-tsc,
+        build-wasm,
+      ]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -1104,6 +1134,56 @@ jobs:
               echo "Warning: no tsc platform dir for $platform"
             fi
           done
+
+      # Download all LSP artifacts into platform package dirs. The artifact
+      # names are the npm platform-package directory names, so this is a
+      # by-name stage with no mapping table.
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: lsp-*
+          path: /tmp/lsp-artifacts
+
+      - name: Move lsp artifacts to platform packages
+        run: |
+          for dir in /tmp/lsp-artifacts/lsp-*/; do
+            platform=$(basename "$dir")
+            platform=${platform#lsp-}  # strip "lsp-" prefix
+            target_dir="packages/verter-lsp/npm/${platform}"
+            if [ ! -d "$target_dir" ]; then
+              echo "Warning: no lsp platform dir for $platform"
+              continue
+            fi
+            if [ "$platform" = "win32-x64-msvc" ]; then
+              bin="verter-lsp.exe"
+            else
+              bin="verter-lsp"
+            fi
+            # Only the server binary — the relay shim in the same artifact is
+            # VSIX-only and is not part of the npm platform package.
+            cp "${dir}${bin}" "${target_dir}/${bin}"
+            chmod +x "${target_dir}/${bin}" 2>/dev/null || true
+            echo "Copied ${bin} -> ${target_dir}/"
+          done
+
+          # Every platform package must carry its binary: publishing an empty
+          # one produces an install that resolves and then cannot start.
+          missing=0
+          for dir in packages/verter-lsp/npm/*/; do
+            platform=$(basename "$dir")
+            if [ "$platform" = "win32-x64-msvc" ]; then
+              bin="verter-lsp.exe"
+            else
+              bin="verter-lsp"
+            fi
+            if [ ! -f "${dir}${bin}" ]; then
+              echo "::error::verter-lsp platform package ${platform} has no ${bin}"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::$missing verter-lsp platform package(s) missing a binary"
+            exit 1
+          fi
 
       # Download WASM artifact
       - uses: actions/download-artifact@v7
@@ -1208,18 +1288,19 @@ jobs:
             return 1
           }
 
-          # Publish native platform packages first
-          for platform_dir in packages/native/npm/*/; do
-            if [ -f "$platform_dir/package.json" ]; then
-              pkg_name=$(node -p "require('./$platform_dir/package.json').name")
-              cd "$platform_dir"
-              publish_pkg "$pkg_name" || HAD_FAILURE=true
-              cd "$GITHUB_WORKSPACE"
-            fi
-          done
+          # Publish every per-platform binary package first, so a launcher's
+          # optionalDependencies resolve the moment the launcher itself lands.
+          # The directory list is DERIVED from the publish set (the same
+          # authority the topological order below comes from), not hand-listed
+          # per binary family — a new family is published as soon as it enters
+          # the product dependency closure.
+          PLATFORM_DIRS=$(node scripts/publish-platform-dirs.mjs)
+          if [ -z "$PLATFORM_DIRS" ]; then
+            echo "::error::the derived platform publish set is empty"
+            exit 1
+          fi
 
-          # Publish tsc platform packages
-          for platform_dir in packages/verter-tsc/npm/*/; do
+          for platform_dir in $PLATFORM_DIRS; do
             if [ -f "$platform_dir/package.json" ]; then
               pkg_name=$(node -p "require('./$platform_dir/package.json').name")
               cd "$platform_dir"
@@ -1275,6 +1356,7 @@ jobs:
             "@verter/native"
             "@verter/types"
             "@verter/unplugin"
+            "verter-lsp"
           )
 
           MISSING=0
@@ -1298,17 +1380,21 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---------------------------------------------------------------------------
-  # Publish VS Code Extension (platform-specific VSIX)
+  # Package VS Code Extension (platform-specific VSIX)
+  #
+  # Packaging is a BUILD, not a publish. The VSIXes are GitHub Release assets,
+  # so github-release is assembled from build output alone and a failed npm or
+  # Marketplace publish cannot withhold the release. publish-vscode consumes the
+  # `vsix` artifact this job uploads and does nothing but push it.
   # ---------------------------------------------------------------------------
-  publish-vscode:
-    name: Publish VS Code Extension
-    needs: [validate, test, build-lsp, build-native, publish-npm]
+  build-vsix:
+    name: Package VS Code Extension
+    needs: [validate, test, build-lsp, build-native]
+    # Skipped in a rehearsal, as the publish job it feeds always has been —
+    # packaging five platform VSIXes is cost the dry run does not pay today.
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    environment:
-      name: vscode-marketplace
-      url: https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v6
@@ -1334,8 +1420,8 @@ jobs:
           pattern: native-*
           path: /tmp/native-artifacts
 
-      # Package and publish per platform
-      - name: Package and publish VSIX
+      # Package per platform
+      - name: Package VSIX
         run: |
           IS_PRE="${{ needs.validate.outputs.is-prerelease }}"
 
@@ -1344,7 +1430,7 @@ jobs:
             PRE_RELEASE_FLAG="--pre-release"
           fi
 
-          # Map: vsce-target → rust-target → native .node filename → lsp binary name
+          # Map: vsce target → rust target → native .node filename → lsp artifact
           declare -A RUST_TARGET=(
             [linux-x64]="x86_64-unknown-linux-gnu"
             [linux-arm64]="aarch64-unknown-linux-gnu"
@@ -1359,6 +1445,15 @@ jobs:
             [darwin-arm64]="verter-native.darwin-arm64.node"
             [win32-x64]="verter-native.win32-x64-msvc.node"
           )
+          # build-lsp names its artifacts after the npm platform package they
+          # feed, so the VSIX targets map onto those names here.
+          declare -A LSP_PKG=(
+            [linux-x64]="linux-x64-gnu"
+            [linux-arm64]="linux-arm64-gnu"
+            [darwin-x64]="darwin-x64"
+            [darwin-arm64]="darwin-arm64"
+            [win32-x64]="win32-x64-msvc"
+          )
 
           for platform in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
             echo ""
@@ -1368,6 +1463,7 @@ jobs:
 
             rust_target="${RUST_TARGET[$platform]}"
             native_file="${NATIVE_FILE[$platform]}"
+            lsp_pkg="${LSP_PKG[$platform]}"
 
             # --- LSP binary ---
             mkdir -p packages/vue-vscode/bin
@@ -1378,13 +1474,13 @@ jobs:
               LSP_BIN="verter-lsp"
               SHIM_BIN="verter-relay-shim"
             fi
-            cp "/tmp/lsp-artifacts/lsp-${platform}/${LSP_BIN}" "packages/vue-vscode/bin/${LSP_BIN}"
+            cp "/tmp/lsp-artifacts/lsp-${lsp_pkg}/${LSP_BIN}" "packages/vue-vscode/bin/${LSP_BIN}"
             chmod +x "packages/vue-vscode/bin/${LSP_BIN}" 2>/dev/null || true
 
             # package.mjs validates the target-specific relay executable's
             # format, architecture, and embedded Verter identity before it
             # mutates the extension dependency tree.
-            SHIM_SOURCE="/tmp/lsp-artifacts/lsp-${platform}/${SHIM_BIN}"
+            SHIM_SOURCE="/tmp/lsp-artifacts/lsp-${lsp_pkg}/${SHIM_BIN}"
             test -f "$SHIM_SOURCE"
             export VERTER_RELAY_SHIM_BINARY="$(realpath "$SHIM_SOURCE")"
 
@@ -1414,9 +1510,6 @@ jobs:
 
             echo "  VSIX: /tmp/${VSIX_NAME} ($(du -h "/tmp/${VSIX_NAME}" | cut -f1))"
 
-            # --- Publish to VS Code Marketplace ---
-            pnpm exec vsce publish --packagePath "/tmp/${VSIX_NAME}" $PRE_RELEASE_FLAG
-
             # --- Clean up for next platform ---
             rm -rf packages/vue-vscode/bin
           done
@@ -1424,10 +1517,8 @@ jobs:
           echo ""
           echo "All platform VSIXes:"
           ls -lh /tmp/verter-vscode-*.vsix
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
-      # Upload all VSIX files for GitHub Release
+      # Upload all VSIX files for publish-vscode and the GitHub Release
       - uses: actions/upload-artifact@v6
         with:
           name: vsix
@@ -1435,19 +1526,77 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Publish VS Code Extension
+  #
+  # Push-only: every VSIX was packaged by build-vsix. Still ordered after
+  # publish-npm so the extension never lands on the Marketplace before the
+  # packages of the same version exist on the registry.
+  # ---------------------------------------------------------------------------
+  publish-vscode:
+    name: Publish VS Code Extension
+    needs: [validate, build-vsix, publish-npm]
+    if: needs.validate.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: vscode-marketplace
+      url: https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # `vsce` itself is the only thing needed here — the VSIXes are prebuilt.
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: vsix
+          path: /tmp/vsix
+
+      - name: Publish VSIXes to the Marketplace
+        run: |
+          IS_PRE="${{ needs.validate.outputs.is-prerelease }}"
+
+          PRE_RELEASE_FLAG=""
+          if [ "$IS_PRE" = "true" ]; then
+            PRE_RELEASE_FLAG="--pre-release"
+          fi
+
+          # One VSIX per platform packaged by build-vsix. A short count is a
+          # partial release, not something to publish quietly.
+          EXPECTED=5
+          shopt -s nullglob
+          vsixes=(/tmp/vsix/verter-vscode-*.vsix)
+          echo "Found ${#vsixes[@]} VSIX(es):"
+          ls -lh /tmp/vsix/ || true
+
+          if [ "${#vsixes[@]}" -ne "$EXPECTED" ]; then
+            echo "::error::expected $EXPECTED platform VSIXes, found ${#vsixes[@]}"
+            exit 1
+          fi
+
+          for vsix in "${vsixes[@]}"; do
+            echo ""
+            echo "--- Publishing $(basename "$vsix") ---"
+            pnpm exec vsce publish --packagePath "$vsix" $PRE_RELEASE_FLAG
+          done
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  # ---------------------------------------------------------------------------
   # GitHub Release
+  #
+  # Gated on the BUILD jobs only — every asset it uploads (native bindings,
+  # WASM, the mcp-server binaries, the platform VSIXes) is build output. A
+  # failed npm or Marketplace publish no longer withholds the release and its
+  # downloadable assets; publishing runs in parallel and is retried on its own.
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs:
-      [
-        validate,
-        build-native,
-        build-wasm,
-        build-mcp-server,
-        publish-npm,
-        publish-vscode,
-      ]
+    needs: [validate, build-native, build-lsp, build-wasm, build-mcp-server, build-vsix]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1519,6 +1668,15 @@ jobs:
           name: vsix
           path: /tmp/release-assets/vsix
 
+      # The editor server binary, so an editor that cannot install from npm
+      # (Helix, Zed, Lapce on a machine without Node) has a download to point
+      # at. The relay shim in the same artifact is a VSIX internal and is
+      # deliberately NOT a release asset.
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: lsp-*
+          path: /tmp/release-assets/lsp
+
       # `verter-mcp-server` ships as a separate per-platform binary so
       # downstream consumers (IDE integrations, container images,
       # automation) can pick it up without pulling the LSP binary or
@@ -1529,23 +1687,129 @@ jobs:
           pattern: mcp-server-*
           path: /tmp/release-assets/mcp-server
 
-      - name: Stage and rename verter-mcp-server binaries
+      # Stage every asset under an explicit, platform-qualified name.
+      #
+      # This replaced a blanket extension sweep across the whole download tree,
+      # capped at the first fifty hits. That shipped whatever happened to match
+      # — the NAPI JS loader arrived as an opaque `index.js` asset — and dropped
+      # everything past the cap with no error. Naming each asset explicitly,
+      # asserting a per-family count, and rejecting duplicate names turns a
+      # partial release into a failed one.
+      - name: Stage release assets
         run: |
-          mkdir -p /tmp/release-assets/staged
-          for dir in /tmp/release-assets/mcp-server/mcp-server-*; do
-            [ -d "$dir" ] || continue
-            target=$(basename "$dir" | sed 's/^mcp-server-//')
-            if [ "$target" = "win32-x64" ]; then
-              src="$dir/verter-mcp-server.exe"
-              dest="/tmp/release-assets/staged/verter-mcp-server-${target}.exe"
-            else
-              src="$dir/verter-mcp-server"
-              dest="/tmp/release-assets/staged/verter-mcp-server-${target}"
+          STAGED=/tmp/release-assets/staged
+          rm -rf "$STAGED"
+          mkdir -p "$STAGED"
+
+          EXPECTED_NATIVE=7
+          EXPECTED_LSP=7
+          EXPECTED_MCP=5
+          EXPECTED_VSIX=5
+
+          FAILURES=0
+
+          stage() {
+            src="$1"
+            name="$2"
+            if [ ! -f "$src" ]; then
+              echo "::error::release asset source missing: $src (intended name: $name)"
+              FAILURES=$((FAILURES + 1))
+              return
             fi
-            cp "$src" "$dest"
-            chmod +x "$dest" 2>/dev/null || true
+            if [ -e "$STAGED/$name" ]; then
+              echo "::error::duplicate release asset name: $name"
+              FAILURES=$((FAILURES + 1))
+              return
+            fi
+            cp "$src" "$STAGED/$name"
+            chmod +x "$STAGED/$name" 2>/dev/null || true
+          }
+
+          expect_count() {
+            label="$1"
+            want="$2"
+            got="$3"
+            if [ "$got" -ne "$want" ]; then
+              echo "::error::expected $want $label asset(s), staged $got"
+              FAILURES=$((FAILURES + 1))
+            fi
+          }
+
+          # --- native bindings ---
+          # Scoped to *.node: the `native-loader` artifact downloaded by the
+          # same `native-*` pattern is an npm-only JS file, not an asset.
+          count=0
+          for f in $(find /tmp/release-assets/native -name '*.node' | sort); do
+            stage "$f" "$(basename "$f")"
+            count=$((count + 1))
           done
-          ls -la /tmp/release-assets/staged/
+          expect_count "native binding" "$EXPECTED_NATIVE" "$count"
+
+          # --- verter-lsp ---
+          count=0
+          for dir in /tmp/release-assets/lsp/lsp-*/; do
+            [ -d "$dir" ] || continue
+            platform=$(basename "$dir")
+            platform=${platform#lsp-}
+            if [ "$platform" = "win32-x64-msvc" ]; then
+              stage "${dir}verter-lsp.exe" "verter-lsp-${platform}.exe"
+            else
+              stage "${dir}verter-lsp" "verter-lsp-${platform}"
+            fi
+            count=$((count + 1))
+          done
+          expect_count "verter-lsp" "$EXPECTED_LSP" "$count"
+
+          # --- verter-mcp-server ---
+          count=0
+          for dir in /tmp/release-assets/mcp-server/mcp-server-*/; do
+            [ -d "$dir" ] || continue
+            target=$(basename "$dir")
+            target=${target#mcp-server-}
+            if [ "$target" = "win32-x64" ]; then
+              stage "${dir}verter-mcp-server.exe" "verter-mcp-server-${target}.exe"
+            else
+              stage "${dir}verter-mcp-server" "verter-mcp-server-${target}"
+            fi
+            count=$((count + 1))
+          done
+          expect_count "verter-mcp-server" "$EXPECTED_MCP" "$count"
+
+          # --- WASM: the module plus its bindgen glue, by name ---
+          for wasm_file in verter_wasm_bg.wasm verter_wasm.js; do
+            found=$(find /tmp/release-assets/wasm -name "$wasm_file" | head -1)
+            stage "${found:-/tmp/release-assets/wasm/$wasm_file}" "$wasm_file"
+          done
+
+          # --- platform VSIXes ---
+          count=0
+          for f in $(find /tmp/release-assets/vsix -name 'verter-vscode-*.vsix' | sort); do
+            stage "$f" "$(basename "$f")"
+            count=$((count + 1))
+          done
+          expect_count "VSIX" "$EXPECTED_VSIX" "$count"
+
+          echo ""
+          echo "Staged release assets:"
+          ls -lh "$STAGED"
+
+          # Report before failing, so a bad run still shows what it managed to
+          # stage rather than an empty summary.
+          {
+            echo "### Release assets — \`${GITHUB_REF_NAME}\`"
+            echo ""
+            echo "| Asset | Size |"
+            echo "| ----- | ---- |"
+            for f in "$STAGED"/*; do
+              [ -f "$f" ] || continue
+              printf '| `%s` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "::error::$FAILURES release-asset problem(s) — refusing to create a partial release"
+            exit 1
+          fi
 
       - name: Create GitHub Release
         run: |
@@ -1557,22 +1821,11 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          # Collect all .node, .wasm, .js, .vsix files PLUS the
-          # platform-renamed verter-mcp-server binaries staged above.
-          ASSETS=""
-          for f in $(find /tmp/release-assets -name '*.node' -o -name '*.wasm' -o -name '*.js' -o -name '*.vsix' | head -50); do
-            ASSETS="$ASSETS $f"
-          done
-          for f in /tmp/release-assets/staged/verter-mcp-server-*; do
-            [ -f "$f" ] || continue
-            ASSETS="$ASSETS $f"
-          done
-
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file /tmp/RELEASE_NOTES.md \
             $PRERELEASE_FLAG \
-            $ASSETS
+            /tmp/release-assets/staged/*
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
