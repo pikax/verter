@@ -6634,6 +6634,63 @@ fn custom_directive_static_arg_maps_to_authored_arg() {
     assert_mapped_run(&output, &tokens, "foo", arg_src, "static argument");
 }
 
+/// A STATIC directive argument is emitted as a QUOTED string literal
+/// (`…,"theArg",{…}`), and TypeScript anchors an argument-type diagnostic
+/// (`TS2345`) on the WHOLE string literal — the opening quote through the closing
+/// quote.
+///
+/// Synthetic, unmapped quotes therefore drop the invalid-argument diagnostic
+/// entirely: its range both starts and ends outside any mapped run, so a strict
+/// range mapper (which composes a carrier range only from runs contiguous in BOTH
+/// spaces) rejects it and the user sees no squiggle on a real type error. Each
+/// quote owns the authored delimiter it stands for — the `:` that introduces the
+/// argument and the token that terminates it — so the quoted argument composes ONE
+/// contiguous carrier range covering the authored `:theArg`.
+///
+/// The sibling `custom_directive_static_arg_maps_to_authored_arg` asserts only the
+/// NAME anchor, so it stays green while the diagnostic is still being dropped —
+/// which is exactly how this defect survived the first mapping pass.
+#[test]
+fn custom_directive_static_arg_maps_including_its_quotes() {
+    let source = r#"<template><div v-color:theArg="'red'" /></template>"#;
+    let (output, tokens) =
+        gen_tsx_template_with_map(source, &[("vColor", BindingType::SetupConst)]);
+
+    let colon_src = source.find(":theArg").expect("fixture argument");
+    let name_src = colon_src + 1;
+    let after_name_src = name_src + "theArg".len();
+
+    // The OPENING quote — where the TS2345 range STARTS — owns the authored `:`.
+    assert_mapped_run(
+        &output,
+        &tokens,
+        r#""theArg""#,
+        colon_src,
+        "static argument opening quote",
+    );
+
+    let arg_gen = output
+        .find(r#""theArg""#)
+        .expect("quoted static argument in the relocated payload");
+    // The argument name keeps its own run (hover / definition on the argument).
+    assert_token_at(
+        &output,
+        &tokens,
+        arg_gen + 1,
+        name_src,
+        "static argument name",
+    );
+    // The CLOSING quote — where the TS2345 range ENDS — owns the authored token
+    // that terminates the argument, so the range's exclusive end resolves.
+    assert_token_at(
+        &output,
+        &tokens,
+        arg_gen + 1 + "theArg".len(),
+        after_name_src,
+        "static argument closing quote",
+    );
+}
+
 #[test]
 fn custom_directive_dynamic_arg_identifier_maps_to_authored_expression() {
     let source = r#"<template><div v-color:[dyn]="'red'" /></template>"#;

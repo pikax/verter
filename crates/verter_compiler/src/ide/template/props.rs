@@ -437,14 +437,30 @@ pub fn process_element_props<'alloc>(
                                     ExprOptions::default(),
                                 )));
                             } else {
-                                // Static arg: the quotes are synthetic, the name
-                                // inside them owns the authored arg span.
-                                pieces.push(DirectivePiece::Syn("\"".to_string()));
+                                // Static arg: emitted as a QUOTED string literal, and
+                                // TypeScript spans an argument-type diagnostic over the
+                                // WHOLE string literal — both quotes included. Synthetic,
+                                // unmapped quotes therefore drop the invalid-argument
+                                // diagnostic entirely (its range starts AND ends outside
+                                // any mapped run). So each quote owns the authored
+                                // delimiter it stands for: the opening quote maps to the
+                                // `:` that introduces the argument, the closing quote to
+                                // the token that terminates it. The quoted argument is
+                                // then one run chain contiguous in BOTH the generated and
+                                // the authored space, and the diagnostic composes onto the
+                                // authored argument.
+                                pieces.push(DirectivePiece::Mapped {
+                                    text: "\"".to_string(),
+                                    source_start: SourceByteOffset(as_.saturating_sub(1)),
+                                });
                                 pieces.push(DirectivePiece::Mapped {
                                     text: raw_arg.to_string(),
                                     source_start: SourceByteOffset(as_),
                                 });
-                                pieces.push(DirectivePiece::Syn("\"".to_string()));
+                                pieces.push(DirectivePiece::Mapped {
+                                    text: "\"".to_string(),
+                                    source_start: SourceByteOffset(ae),
+                                });
                             }
                         }
                         _ => pieces.push(DirectivePiece::Syn("undefined".to_string())),

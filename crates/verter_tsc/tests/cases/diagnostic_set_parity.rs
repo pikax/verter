@@ -11,7 +11,7 @@
 //!
 //! Multiplicity is pinned (a `BTreeMap<key, count>`, not a `BTreeSet`): dropping
 //! one of two duplicate diagnostics at the same `(file,line,col,code)` MUST fail,
-//! so the current 70 raw diagnostics are asserted, not a deduped 69.
+//! so the current 73 raw diagnostics are asserted, not a deduped 72.
 //!
 //! WHY THIS EXISTS (the parity oracle): the perf campaign (see
 //! `docs/arch/host-mode-perf-design.md` §3/§4) will run verter-tsc as a Batch host
@@ -67,7 +67,7 @@ use std::process::Command;
 // Captured from the current `verter-tsc` run over
 // `crates/verter_tsc/tests/cases/fixtures/diagnostics/`. Tuple =
 // `(fixture_relative_path, line, col, ts_code, count, stable_message_substring)`.
-// `count` pins multiplicity (raw total = 70; one key repeats:
+// `count` pins multiplicity (raw total = 73; one key repeats:
 // `src/GenericComp.vue(1,1) TS6196` x2).
 // The final entry is the whole-program non-root diagnostic in `src/nonRootBad.ts` (the
 // old per-root loop dropped it; the whole-program call surfaces it).
@@ -84,7 +84,7 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     ("src/CrossComponentErrors.vue", 9, 1, 2322, 1, "'string' is not assignable to type 'number'"),
     ("src/CrossComponentErrors.vue", 13, 7, 2322, 1, "'\"unknown\"' is not assignable to type 'Status'"),
     ("src/CrossComponentErrors.vue", 16, 7, 2322, 1, "'number' is not assignable to type 'string'"),
-    // CUSTOM-DIRECTIVE IDE PAYLOAD — these three tuples are the CARRIER-POSITION
+    // CUSTOM-DIRECTIVE IDE PAYLOAD — these five tuples are the CARRIER-POSITION
     // rail, and their coordinates are the assertion, not incidental detail:
     //   * The synthetic `v-directive` callback parameter now carries an explicit
     //     annotation, so the three `Parameter '___VERTER___slotInstance' implicitly
@@ -93,16 +93,29 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     //     regression: it is a diagnostic about compiler-synthesized scaffolding that
     //     no author can act on.
     //   * The invalid-modifier TS2353 lands on the AUTHORED modifier
-    //     (`v-color.green`, line 10 col 17), not the `(1,1)` source-map-gap
+    //     (`v-color.green`, line 13 col 17), not the `(1,1)` source-map-gap
     //     fallback. The generated key is BARE for an identifier-shaped modifier, so
     //     TypeScript's property-name anchor is the mapped modifier token itself —
     //     which is why the message pins `'green'` and not the quoted `'"green"'`.
     //   * The value-type TS2345 lands on the AUTHORED value expression
-    //     (`v-color.blue="123"`, line 11 col 23).
+    //     (`v-color.blue="123"`, line 14 col 23).
+    //   * The invalid-ARGUMENT TS2345 lands on the AUTHORED argument
+    //     (`v-theme:badarg`, line 18 col 16 — the `:` the generated string
+    //     literal's opening quote stands for, because TypeScript spans an
+    //     argument-type diagnostic over the WHOLE quoted literal). It exists at all
+    //     only because the directive type's `Arg` parameter is carried into the
+    //     generated `runCustomDirective` signature; a run with no TS2345 on line 18
+    //     means the `Arg` parameter was dropped again.
+    //   * The invalid-modifier TS2353s still land on their authored modifiers when
+    //     an ARGUMENT is present too (line 19 col 20 bare, line 20 col 19 quoted —
+    //     the quoted key's range starts on the authored `.`).
     // Any of these drifting back to `(1,1)` means the custom-directive payload
     // stopped mapping its authored tokens and every IDE feature on it fails closed.
-    ("src/DirectiveErrors.vue", 10, 17, 2353, 1, "'green' does not exist in type"),
-    ("src/DirectiveErrors.vue", 11, 23, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
+    ("src/DirectiveErrors.vue", 13, 17, 2353, 1, "'green' does not exist in type"),
+    ("src/DirectiveErrors.vue", 14, 23, 2345, 1, "'number' is not assignable to parameter of type 'string'"),
+    ("src/DirectiveErrors.vue", 18, 16, 2345, 1, "'\"badarg\"' is not assignable to parameter of type"),
+    ("src/DirectiveErrors.vue", 19, 20, 2353, 1, "'badmod' does not exist in type"),
+    ("src/DirectiveErrors.vue", 20, 19, 2353, 1, "does not exist in type"),
     ("src/EmitErrors.vue", 8, 1, 2769, 1, "No overload matches this call"),
     ("src/EmitErrors.vue", 10, 1, 2769, 1, "No overload matches this call"),
     ("src/EmitErrors.vue", 12, 1, 2769, 1, "No overload matches this call"),
@@ -489,7 +502,7 @@ fn verter_tsc_diagnostic_set_parity() {
 
     // MULTISET equality over `(file, line, col, ts_code)` WITH per-key count. A
     // `BTreeSet` would dedup multiplicity (dropping 1 of the 2 duplicate TS6196
-    // stays green); the count map pins the exact 70 raw diagnostics.
+    // stays green); the count map pins the exact 73 raw diagnostics.
     type Key = (String, u32, u32, u32);
     let mut actual_counts: BTreeMap<Key, usize> = BTreeMap::new();
     for (f, l, c, code, _) in &actual {
