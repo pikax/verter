@@ -109,10 +109,10 @@ export declare function runCustomDirective<
   instance: TInstance,
   directive: TDirective,
 ): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
-  ? TDirective extends Directive<infer TElement, infer TValue, infer M extends string>
+  ? TDirective extends Directive<infer TElement, infer TValue, infer M extends string, infer TArg>
     ? El extends TElement
-      ? (instance: TInstance, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void
-      : (instance: TElement, value: TValue, arg: string | undefined, modifiers: { [K in M]?: true }) => void
+      ? (instance: TInstance, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void
+      : (instance: TElement, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void
     : false
   : false;
 export declare function retrieveSetupDirectives<T>(

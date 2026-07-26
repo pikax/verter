@@ -128,6 +128,113 @@ void strictRenderSlot;
 void checkRequiredSlots;
 `;
 
+// The `v-color:badarg` contract. `runCustomDirective` must carry the FOURTH
+// type parameter of Vue's `Directive<HostElement, Value, Modifiers, Arg>` into
+// the `arg` parameter of the call signature it returns. Hardcoding
+// `arg: string | undefined` discards it and every string argument type-checks
+// clean — the bug a real user hits in a real editor.
+//
+// The second half is the negative: a 3-parameter `Directive` leaves `Arg` at
+// Vue's `any` default, so ANY argument must still be accepted. Over-tightening
+// to `string` (or to the modifier union) would break Vue's own contract.
+const DIRECTIVE_ARG_CONTRACT = `
+import { runCustomDirective } from "@verter/types";
+import type { Directive } from "vue";
+
+declare const host: HTMLDivElement;
+
+declare const vColor: Directive<HTMLDivElement, string, "lazy", "fg" | "bg">;
+const applyColor = runCustomDirective(host, vColor);
+applyColor(host, "red", "fg", {});
+applyColor(host, "red", "bg", { lazy: true });
+applyColor(host, "red", undefined, {});
+// @ts-expect-error "badarg" is not an allowed argument for this directive
+applyColor(host, "red", "badarg", {});
+
+declare const vLoose: Directive<HTMLDivElement, string, "lazy">;
+const applyLoose = runCustomDirective(host, vLoose);
+applyLoose(host, "red", "anything-at-all", {});
+applyLoose(host, "red", undefined, { lazy: true });
+`;
+
+function diagnosticMessages(diagnostics: readonly ts.Diagnostic[]): string[] {
+  return diagnostics.map(
+    (diagnostic) =>
+      `TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
+  );
+}
+
+const LSP_STUB_PATH = path.resolve(
+  __dirname,
+  "../../../../crates/verter_lsp/src/verter_types_stub.d.ts",
+);
+const GENERATED_STANDALONE_DTS_PATH = path.resolve(__dirname, "../../../types/index.d.ts");
+
+/** Diagnostics that belong to no individual copy (shared `vue` stub, program level). */
+const UNATTRIBUTED = "«unattributed»";
+
+/**
+ * Compile ONE contract against SEVERAL `@verter/types` declaration copies in a
+ * SINGLE TypeScript program (each copy installed under its own package name,
+ * each with its own consumer file), and return the diagnostics per copy.
+ *
+ * One program, not one per copy: `lib.dom.d.ts` dominates the cost and would
+ * otherwise be re-checked for every copy.
+ */
+function typecheckStubCopies(
+  copies: ReadonlyArray<readonly [string, string]>,
+  contract: string,
+): Map<string, string[]> {
+  const root = path.join(
+    tmpdir(),
+    `verter-types-stub-parity-${process.pid}-${roots.length}-${Date.now()}`,
+  );
+  roots.push(root);
+  const vue = path.join(root, "node_modules", "vue");
+  const vueJsxRuntime = path.join(vue, "jsx-runtime");
+  mkdirSync(vueJsxRuntime, { recursive: true });
+  writeFileSync(path.join(vue, "index.d.ts"), VUE_STUB);
+  writeFileSync(path.join(vueJsxRuntime, "index.d.ts"), VUE_JSX_RUNTIME_STUB);
+  writeFileSync(path.join(vue, "package.json"), '{"name":"vue","types":"index.d.ts"}');
+
+  const consumers: string[] = [];
+  copies.forEach(([, stub], index) => {
+    const pkg = path.join(root, "node_modules", "@verter", `types-${index}`);
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(path.join(pkg, "index.d.ts"), stub);
+    writeFileSync(
+      path.join(pkg, "package.json"),
+      `{"name":"@verter/types-${index}","types":"index.d.ts"}`,
+    );
+    const consumer = path.join(root, `contract-${index}.ts`);
+    writeFileSync(consumer, contract.replaceAll('"@verter/types"', `"@verter/types-${index}"`));
+    consumers.push(consumer);
+  });
+
+  const program = ts.createProgram(consumers, {
+    lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    skipLibCheck: false,
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+  });
+
+  const perCopy = new Map<string, string[]>(copies.map(([name]) => [name, []]));
+  perCopy.set(UNATTRIBUTED, []);
+  for (const diagnostic of ts.getPreEmitDiagnostics(program)) {
+    const fileName = diagnostic.file?.fileName ?? "";
+    const owner = copies.findIndex(
+      (_copy, index) =>
+        fileName.includes(`contract-${index}.ts`) || fileName.includes(`types-${index}/`),
+    );
+    const bucket = owner === -1 ? UNATTRIBUTED : copies[owner][0];
+    perCopy.get(bucket)!.push(...diagnosticMessages([diagnostic]));
+  }
+  return perCopy;
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -286,5 +393,54 @@ describe("VERTER_TYPES_STUB", () => {
       NO_AUGMENTATION_CONTRACT,
     );
     expect(diagnostics.length).toBeGreaterThan(0);
+  });
+});
+
+// ── Declaration-surface parity ──────────────────────────────────────────────
+//
+// The `@verter/types` declaration surface is hand-maintained in several copies
+// (this virtual module, the LSP/provider virtual module, the generated
+// standalone `.d.ts`). A fix landing in some of them and not the others is the
+// defect class that let `runCustomDirective` keep discarding the directive's
+// `Arg` type parameter for real editor users long after the compiler copies
+// were fixed.
+//
+// The guard is behavioural, not textual: the same contract is compiled against
+// every copy through the real TypeScript compiler, so cosmetic differences
+// between the copies are invisible and a semantic divergence in ANY of them
+// fails.
+describe("declaration-surface parity", () => {
+  it("every copy carries the directive Arg type parameter, and a pre-fix copy is caught", () => {
+    const pluginStub = VERTER_TYPES_STUB;
+    const lspStub = readFileSync(LSP_STUB_PATH, "utf8");
+    const generatedStandalone = readFileSync(GENERATED_STANDALONE_DTS_PATH, "utf8");
+
+    // Negative control, carried in the SAME program as the real copies: one
+    // copy is reverted to the pre-fix `arg: string | undefined` shape. If the
+    // contract could not tell the copies apart, this would come back clean and
+    // the parity legs would prove nothing. Prove the revert applied first — a
+    // no-op `replace` exits happily and reports a false pass.
+    const preFix = pluginStub.replaceAll("arg: TArg | undefined", "arg: string | undefined");
+    expect(pluginStub).toContain("arg: TArg | undefined");
+    expect(preFix).not.toContain("arg: TArg | undefined");
+    expect(preFix).not.toEqual(pluginStub);
+
+    const perCopy = typecheckStubCopies(
+      [
+        ["typescript-plugin virtual module", pluginStub],
+        ["LSP/provider virtual module", lspStub],
+        ["@verter/types generated standalone .d.ts", generatedStandalone],
+        ["pre-fix control", preFix],
+      ],
+      DIRECTIVE_ARG_CONTRACT,
+    );
+
+    expect(perCopy.get("typescript-plugin virtual module")).toEqual([]);
+    expect(perCopy.get("LSP/provider virtual module")).toEqual([]);
+    expect(perCopy.get("@verter/types generated standalone .d.ts")).toEqual([]);
+    expect(perCopy.get(UNATTRIBUTED)).toEqual([]);
+    expect(perCopy.get("pre-fix control")).toContain(
+      "TS2578: Unused '@ts-expect-error' directive.",
+    );
   });
 });
