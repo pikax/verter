@@ -135,6 +135,14 @@ message SemanticTypeGraph {
   // workspace-scale snapshots. See the typeinfo wire-surface
   // intern-table rule for the round-trip contract.
   GraphStringTable strings = 12;
+  // The payload-side relation-proof table (schema 5, add-only). Indexed
+  // by the opaque proof id a relation payload references
+  // (`RelationProofId`; `GraphConditionalResolutionSelected.proof_ref`).
+  // The proof witness rides this table BY ID — it is never embedded on
+  // the type-values surface (no `GraphTypeNode` arm; the retired tag-28
+  // arm is reserved at `GraphTypeNode` scope). A consumer that ignores
+  // the new field keeps working.
+  repeated GraphRelationProofEntry relation_proofs = 13;
 }
 
 // GraphQueryIdentity — identifies the query that produced the snapshot.
@@ -186,6 +194,17 @@ message GraphTypeNode {
   // at the enclosing message level because proto3 forbids
   // `reserved` inside an `oneof` block.
   reserved 33 to 100;
+  // Tag 28 / name `relation_proof` held the retired relation-proof
+  // oneof arm. The proof witness moved OFF the type-values surface to
+  // the payload-side `SemanticTypeGraph.relation_proofs` table (field
+  // 13, schema 5), referenced by opaque proof id. The tag and name are
+  // reserved so off-tree clients that decoded the original schema keep
+  // round-tripping the retired arm as an unknown field, and so neither
+  // the tag nor the name is ever reused. The directive lives at the
+  // enclosing message level because proto3 forbids `reserved` inside
+  // an `oneof` block.
+  reserved 28;
+  reserved "relation_proof";
   oneof kind {
     GraphPrimitive primitive = 1;
     GraphLiteral literal = 2;
@@ -218,7 +237,6 @@ message GraphTypeNode {
     GraphGlobalAugmentation global_augmentation = 25;
     GraphFlowNarrowing flow_narrowing = 26;
     GraphContextualType contextual_type = 27;
-    GraphRelationProof relation_proof = 28;
     GraphInfer infer_node = 29;
     GraphEnum enum_node = 30;
     GraphOpaque opaque = 31;
@@ -450,16 +468,64 @@ message GraphContextualType {
   uint32 contextual_node_id = 2;
 }
 
-message GraphRelationProof {
-  GraphRelationOutcome outcome = 1;
-  // Opaque proof representation interned by the producer.
-  repeated GraphRelationStep steps = 2;
+// ----------- Relation proofs (schema 5) -----------
+
+// GraphRelationProofEntry — one entry of the payload-side relation-proof
+// table (`SemanticTypeGraph.relation_proofs` field 13), addressed by the
+// opaque proof id a relation payload references. FOUR shapes, mirroring
+// the value-domain relation-proof taxonomy: the derivation / failure /
+// cycle witness rides this table BY ID — it is never embedded on the
+// type-values surface (no `GraphTypeNode` arm).
+message GraphRelationProofEntry {
+  oneof kind {
+    GraphRelationDerivation assignable = 1;
+    GraphRelationFailure not_assignable = 2;
+    GraphRelationBudgetCap budget_exceeded = 3;
+    GraphRelationCycleKeys coinductive_cycle = 4;
+  }
 }
 
-message GraphRelationStep {
-  GraphRelationStepKind kind = 1;
-  uint32 source_node_id = 2;
-  uint32 target_node_id = 3;
+// Positive structural derivation: which sub-relations held, member by
+// member and across variance arms.
+message GraphRelationDerivation {
+  repeated GraphSubRelationRef sub_derivations = 1;
+}
+
+// Negative: the failure reason plus the failing structural sub-relation.
+// CONTENT-FREE — the sub-relation reference carries no session-bearing
+// full relation key (the negative carve-out).
+message GraphRelationFailure {
+  GraphRelationFailureCode reason = 1;
+  GraphSubRelationRef failing_sub = 2;
+}
+
+// The budget / recursion cap that stopped the relate (rides a public but
+// never-warm BudgetExceeded payload).
+message GraphRelationBudgetCap {
+  GraphBudgetExceededKind kind = 1;
+  uint32 limit = 2;
+}
+
+// The set of COMPLETED full relation keys that co-discharged a
+// coinductive cycle, referenced by opaque key id — never a
+// session-bearing key.
+message GraphRelationCycleKeys {
+  repeated uint32 keys = 1;
+}
+
+// Content-free reference to a structural sub-relation: the source /
+// target graph nodes plus the structural position they relate at.
+message GraphSubRelationRef {
+  uint32 source_node_id = 1;
+  uint32 target_node_id = 2;
+  GraphSubRelationPositionKind position_kind = 3;
+  // Interned member name (the graph string table) when position_kind is
+  // GRAPH_SUB_RELATION_POSITION_KIND_MEMBER; 0 otherwise.
+  uint32 position_name_id = 4;
+  // The parameter / type-argument index when position_kind is
+  // GRAPH_SUB_RELATION_POSITION_KIND_PARAMETER or
+  // GRAPH_SUB_RELATION_POSITION_KIND_TYPE_ARGUMENT; 0 otherwise.
+  uint32 position_index = 5;
 }
 
 message GraphInfer {
@@ -1155,18 +1221,31 @@ enum GraphOriginEdgeKind {
   GRAPH_ORIGIN_EDGE_KIND_AUGMENTATION_STITCH = 9;
 }
 
-enum GraphRelationOutcome {
-  GRAPH_RELATION_OUTCOME_TRUE = 0;
-  GRAPH_RELATION_OUTCOME_FALSE = 1;
-  GRAPH_RELATION_OUTCOME_UNKNOWN = 2;
+enum GraphRelationFailureCode {
+  GRAPH_RELATION_FAILURE_CODE_PRIMITIVE_KIND_MISMATCH = 0;
+  GRAPH_RELATION_FAILURE_CODE_LITERAL_VALUE_MISMATCH = 1;
+  GRAPH_RELATION_FAILURE_CODE_MISSING_PROPERTY = 2;
+  GRAPH_RELATION_FAILURE_CODE_PROPERTY_TYPE_MISMATCH = 3;
+  GRAPH_RELATION_FAILURE_CODE_SIGNATURE_ARITY_MISMATCH = 4;
+  GRAPH_RELATION_FAILURE_CODE_SIGNATURE_PARAMETER_MISMATCH = 5;
+  GRAPH_RELATION_FAILURE_CODE_SIGNATURE_RETURN_MISMATCH = 6;
+  GRAPH_RELATION_FAILURE_CODE_VARIANCE_MISMATCH = 7;
+  GRAPH_RELATION_FAILURE_CODE_EXCESS_PROPERTY = 8;
+  GRAPH_RELATION_FAILURE_CODE_STRUCTURAL = 9;
 }
 
-enum GraphRelationStepKind {
-  GRAPH_RELATION_STEP_KIND_DECLARED = 0;
-  GRAPH_RELATION_STEP_KIND_STRUCTURAL = 1;
-  GRAPH_RELATION_STEP_KIND_VARIANCE = 2;
-  GRAPH_RELATION_STEP_KIND_CONDITIONAL_BRANCH = 3;
-  GRAPH_RELATION_STEP_KIND_INDEXED_ACCESS = 4;
+enum GraphBudgetExceededKind {
+  GRAPH_BUDGET_EXCEEDED_KIND_RELATION_BUDGET = 0;
+  GRAPH_BUDGET_EXCEEDED_KIND_CALL_RESOLUTION_BUDGET = 1;
+  GRAPH_BUDGET_EXCEEDED_KIND_FLOW_SLICE_BUDGET = 2;
+}
+
+enum GraphSubRelationPositionKind {
+  GRAPH_SUB_RELATION_POSITION_KIND_ROOT = 0;
+  GRAPH_SUB_RELATION_POSITION_KIND_MEMBER = 1;
+  GRAPH_SUB_RELATION_POSITION_KIND_PARAMETER = 2;
+  GRAPH_SUB_RELATION_POSITION_KIND_RETURN = 3;
+  GRAPH_SUB_RELATION_POSITION_KIND_TYPE_ARGUMENT = 4;
 }
 
 enum GraphRelationUnknownReason {

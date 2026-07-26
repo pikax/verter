@@ -197,6 +197,114 @@ fn relate_family_execute_stays_an_explicit_miss() {
     );
 }
 
+/// WARM-leak discriminator (the activation leak): after a relation
+/// judgement is planted through the PRODUCTION admission path
+/// (`relate_nodes`), a warm relation entry exists in the family memo's
+/// `Relate` family. `execute(SemanticQueryKey::Relate)` on the SAME full
+/// identity must STILL be an explicit `Miss` — never the stored compute
+/// verdict — and `execute_type_node` must keep its pre-rehome behavior
+/// (explicit `Miss`, NOT a `ValueDomainMismatch` raised on the stored
+/// `RelationVerdict`).
+///
+/// DISCRIMINATES against the warm-serve leak: without the
+/// execute-invisibility fence, the execute warm path resolves the same
+/// `(FamilyKey::Relate, ModeSlot::Single)` slot the admission planted
+/// and serves it — `execute` returns `Value(RelationVerdict(..))` and
+/// `execute_type_node` returns `Error(ValueDomainMismatch)`; both
+/// assertions fail. The cold-probe guard above stays: it covers the
+/// no-warm-entry case.
+#[test]
+fn relate_family_execute_stays_miss_with_warm_relation_entry() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        ProjectionMode, QueryError, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+    use std::sync::Arc;
+
+    let host = make_host_with_footprint();
+    let canonical = "/fixtures/relate_family_warm_leak.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        "type __WarmRelateSource = string;\ntype __WarmRelateTarget = number;\n",
+    );
+    let resolve = |name: &str| {
+        let (outcome, _record) = host
+            .resolve_named_symbol_with_audit(canonical, name, Some(ProjectionMode::Expanded))
+            .into_parts();
+        outcome
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("{name} must resolve"))
+    };
+    let source = resolve("__WarmRelateSource");
+    let target = resolve("__WarmRelateTarget");
+
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    // Plant through the PRODUCTION admission path: `relate_nodes`
+    // computes and admits the judgement into the family memo's `Relate`
+    // family. The warm entry must really exist, else this test would not
+    // discriminate.
+    let (verdict, _fence) = dispatch.relate_nodes(source, target);
+    let key = dispatch.relate_memo_key(source, target);
+    let graph = host.project_type_store().semantic_graph();
+    assert_eq!(
+        graph.relation_memo_count(),
+        1,
+        "fixture: the production admission path planted one relation entry",
+    );
+    assert!(
+        graph.get_relation(host.as_ref(), &key).is_some(),
+        "fixture: the planted entry warm-serves through `get_relation`",
+    );
+
+    let query_key = SemanticQueryKey::Relate {
+        source: key.source,
+        target: key.target,
+        relation: key.relation,
+        policy: key.policy,
+        source_freshness: key.source_freshness,
+        inference_context: key.inference_context.clone(),
+        context: key.context,
+    };
+    let _ = verdict;
+
+    // `execute(Relate)` on the SAME full identity: explicit Miss, never
+    // the stored verdict.
+    let executed = dispatch.execute(query_key.clone());
+    assert!(
+        matches!(executed, QueryResult::Error(QueryError::Miss)),
+        "with a warm relation entry planted, `execute(Relate)` must STILL be an explicit \
+         Miss — the stored compute verdict must not warm-serve the family execute path \
+         (activation leak), got {executed:?}",
+    );
+
+    // `execute_type_node(Relate)`: unchanged pre-rehome behavior — an
+    // explicit Miss, NOT a `ValueDomainMismatch` raised on the stored
+    // `RelationVerdict`.
+    let executed_node = dispatch.execute_type_node(query_key);
+    assert!(
+        matches!(executed_node, QueryResult::Error(QueryError::Miss)),
+        "with a warm relation entry planted, `execute_type_node(Relate)` must keep its \
+         pre-rehome explicit Miss (never a ValueDomainMismatch on the stored verdict), \
+         got {executed_node:?}",
+    );
+
+    // The relation entry itself is untouched by the execute misses.
+    assert!(
+        matches!(
+            graph.get_relation(host.as_ref(), &key),
+            Some((_, crate::semantic_query::RelationResult::NotAssignable))
+        ),
+        "the planted judgement stays readable through `get_relation` (the sole relation \
+         read surface)",
+    );
+}
+
 // =====================================================================
 // F1 — the stored identity is authenticated against the stored
 // `snapshot_id`: a tampered identity axis whose top-level id + filename

@@ -98,6 +98,11 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // payload), and v3 remains the floor the framework-surface operation
     // requires.
     3,
+    // Schema 4 stays accepted: a v4 payload is still a valid decode (the
+    // v5 `relation_proofs` table is add-only, absent on a v4 payload; the
+    // retired tag-28 arm was never emitted by any encoder, so no v4
+    // payload carries a relation proof to lose).
+    4,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 

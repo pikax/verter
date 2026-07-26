@@ -43,14 +43,9 @@
 //!   `QueryError::Miss` (`Opaque(Miss)`). The current PRODUCTION authority is
 //!   `ProjectSemanticDispatch::relate_nodes(source, target) ->
 //!   (RelationResult, DepSignature)`, which produces and dep-signature-fences
-//!   every judgement in the dedicated `SemanticGraphStore::relation_memo` —
-//!   NOT the family singleflight. That is why this row's `admission` is
-//!   [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
-//!   records [`SemanticQueryValueTag::OverloadSet`] as its LIVE value
-//!   domain: the execute arm projects the callee's ordered VISIBLE
-//!   signature group and the cold build converts the group-bearing node
-//!   into the memoized `OverloadSet(Arc<[SignatureRef]>)` value — a
-//!   signature-less callee is an honest `Miss`, never a fabricated empty
+//!   every judgement in the family memo's `Relate` family (the rehomed
+//!   relation memo) — NOT the family singleflight. That is why this row's
+//!   `admission` is [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
 //!   set. `ClassifyBroadRuntime` records the live terminal
 //!   [`SemanticQueryValueTag::BroadRuntime`] domain. `FlowNarrowingAt`
 //!   and `ContextualTypeAt` both record
@@ -353,8 +348,8 @@ pub enum AdmissionSpec {
     Singleflight,
     /// Dedicated relation-memo path: the judgement is produced and cached by
     /// `ProjectSemanticDispatch::relate_nodes`, which memoises every outcome in
-    /// the standalone `SemanticGraphStore::relation_memo` under dep-signature
-    /// fencing. The family `execute` path for `Relate` is intentionally
+    /// the family memo's `Relate` family (the rehomed relation memo) under
+    /// dep-signature fencing. The family `execute` path for `Relate` is intentionally
     /// non-producing — it returns `QueryResult::Error(QueryError::Miss)`
     /// (`Opaque(Miss)`) — so this key never flows through the `Singleflight`
     /// family materialiser. Used by `Relate`.
@@ -707,9 +702,11 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // (`SemanticQueryValue::Relation(RelationPayload)`), NOT `TypeNode`.
         // The family `execute` path is intentionally non-producing (returns
         // `Opaque(Miss)`); the authoritative judgement is produced + cached by
-        // `relate_nodes` in the dedicated dep-signature-fenced `relation_memo`,
-        // now re-keyed on the full `RelateMemoKey` identity (admission
-        // `RelationMemo`, not the family singleflight). `env_dims` is `R T L J`:
+        // `relate_nodes` in the family memo's `Relate` family (the rehomed
+        // relation memo, keyed on the full `RelateMemoKey` identity; the
+        // stored value is the compute-side `RelationVerdict` encoding) —
+        // admission `RelationMemo`, not the family singleflight. `env_dims` is
+        // `R T L J`:
         // the `RelationContext` carries the `R T L J` env the relation outcome
         // depends on (relating imported surfaces resolves their references on
         // the relation's own step — the `R` the bare `{source,target}` key
@@ -981,6 +978,9 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::DeclarationAnalysis => "DeclarationAnalysis",
         SemanticQueryValueTag::OverloadSet => "OverloadSet",
         SemanticQueryValueTag::Relation => "Relation",
+        // Engine-internal memo encoding (the `Relate` family memo) — no key
+        // spec row maps to it, so the rendered table never carries it.
+        SemanticQueryValueTag::RelationVerdict => "RelationVerdict",
         SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }

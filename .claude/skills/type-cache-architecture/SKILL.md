@@ -567,7 +567,9 @@ rather than minting fresh top-level keys. The bounded caches:
 `RefCycleResultDb` (content-free `RefCycleResultKey`; per-version state on the
 value's `self_root_canonicals`), `MaterializeStructureDb` (content-free
 `MaterializationCacheKey`; per-version state on the value's `self_root_canonicals`),
-the `SemanticGraphStore` family memo + relation memo + named-type index
+the `SemanticGraphStore` family memo (which also carries the relation memo's
+entries under its `Relate` family — the retired dedicated `BudgetedRelationMemo`
+folded into the family substrate) + named-type index
 (`ResolvedDeclSlotIdentity` slots; per-version state on the value) + the
 `SemanticGraphStore` derivation/origin store (`DerivationStore` — `edges` keyed by
 `(SemanticNodeId, OriginEdgeKind)`, plus its `signature_pool` fence interner;
@@ -616,13 +618,16 @@ continuously-held slot `Mutex` critical section (the `retention_gate` is only a
 reset fence — a shared read guard does not serialise two admits of the same
 content-free slot); global-budget victim eviction runs after that slot lock is
 released (lock order `retention_gate.read → DashMap shard/slot → slot Mutex →
-budget Mutex`, victim slot lock last — no AB-BA). The `SemanticGraphStore`
-relation memo / named-type index (`BudgetedRelationMemo` /
-`BudgetedNamedTypeIndex`) each hold a per-wrapper `admission_lock` across the
-`DashMap::entry` decision + `record_admission` + victim `remove_if` (and, for
-the named-type index, across `retain_for_canonical`'s map removal + `forget_seq`
-loop), making their single-write-domain structural rather than
-"safe-by-construction". The `MaterializeStructureDb` / `RefCycleResultDb`
+budget Mutex`, victim slot lock last — no AB-BA). The named-type index
+(`BudgetedNamedTypeIndex`) holds a per-wrapper `admission_lock` across the
+`DashMap::entry` decision + `record_admission` + victim `remove_if` (and
+across `retain_for_canonical`'s map removal + `forget_seq`
+loop), making its single-write-domain structural rather than
+"safe-by-construction". (The `SemanticGraphStore` relation memo rode the
+same pattern as the retired `BudgetedRelationMemo`; it is now rehomed into
+the family memo's `Relate` family, whose write domain is the single global
+`entries` lock — see `semantic_query_memo/mod.rs`.) The
+`MaterializeStructureDb` / `RefCycleResultDb`
 cooperative publish holds the `publish_fence` (the Db's `retention_gate`)
 across `entries.insert` + `post_publish`, and `post_publish` does
 `bump_live_counter` + `record_admission` together — so the map insert, the
@@ -685,8 +690,9 @@ publication completes under a 5s watchdog — it hangs against the linearized
 shape).
 
 `SemanticGraphStore::invalidate_all` (the project-generation bump) clears EVERY
-`SemanticNodeId`-keyed semantic cache on the store — the family memo, the
-in-flight admission table, the relation memo, the named-type index, the
+`SemanticNodeId`-keyed semantic cache on the store — the family memo (whose
+clear also drops the relation memo's `Relate`-family entries), the
+in-flight admission table, the named-type index, the
 `DerivationStore` (edges + signature pool), and the Γ.B reverse index — so no
 stale judgement survives a tsconfig / SDK / workspace-folder change. Each
 cleared `SemanticNodeId`-keyed cache has its retention ledger cleared in

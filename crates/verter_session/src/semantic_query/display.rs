@@ -106,6 +106,13 @@ pub fn display(
             DisplayString(rendered.join("; "))
         }
         SemanticQueryValue::Relation(payload) => display_relation(payload),
+        // The engine-internal compute-side verdict lives only inside the
+        // `Relate` family memo (never an `execute` output — the `Relate`
+        // execute arm is `Miss`), so reaching it here is a logic error.
+        // Matched explicitly — NOT via a `_` wildcard.
+        SemanticQueryValue::RelationVerdict(_) => unreachable!(
+            "display: RelationVerdict is an engine-internal memo encoding — no execute output carries it"
+        ),
         SemanticQueryValue::BroadRuntime(classification) => DisplayString(
             classification
                 .kinds()

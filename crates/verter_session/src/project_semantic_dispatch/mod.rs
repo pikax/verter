@@ -2186,13 +2186,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::NormalizeIntersection { members } => {
                     self.build_normalize_intersection(members)
                 }
-                // The relation engine routes through its dedicated
-                // `SemanticGraphStore::relation_memo` (keyed on the full
-                // `RelateMemoKey`) via `relate_nodes`, not the family memo.
-                // The family `execute` path for `Relate` is therefore
-                // degenerate: it owns no relation logic and always yields
-                // `Opaque(Miss)`, fenced on the project generation so a stale
-                // miss never warms.
+                // The relation engine routes through the family memo's
+                // `Relate` family (keyed on the full `RelateMemoKey`) via
+                // `relate_nodes` — `get_relation` /
+                // `compute_relation_and_admit` — not the cooperative
+                // `execute` path. The family `execute` path for `Relate` is
+                // therefore degenerate: it owns no relation logic and always
+                // yields `Opaque(Miss)`, fenced on the project generation so
+                // a stale miss never warms.
                 SemanticQueryKey::Relate { .. } => {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()

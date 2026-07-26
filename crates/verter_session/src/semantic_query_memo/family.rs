@@ -370,32 +370,29 @@ pub(super) enum FamilyKey {
     /// target / relation kind / policy / source freshness / inference context /
     /// env+substitution+projection-reduction context).
     ///
-    /// No production code constructs a [`SemanticQueryKey::Relate`] value, so
-    /// this variant is never published into or read from the family memo at
-    /// runtime — the production relation authority is `relate_nodes`, which keys
-    /// the dedicated `relation_memo` on the same `RelateMemoKey` and never
-    /// enters `execute_cooperative` / the family memo. The variant exists SOLELY
-    /// so `family_and_slot` stays total and honest over every
-    /// [`SemanticQueryKey`] variant (a real distinct identity, never a
-    /// placeholder reusing another family's shape).
+    /// This is the LIVE relation-memo family: the production relation
+    /// authority `relate_nodes` reads and writes it through
+    /// [`super::SemanticGraphStore::get_relation`] /
+    /// [`super::SemanticGraphStore::compute_relation_and_admit`] (the
+    /// storage rehome — the retired dedicated `BudgetedRelationMemo` folded
+    /// into this family). The `execute` path for a `Relate` key stays an
+    /// explicit `Miss` and never publishes here; the family is served by
+    /// the relation engine's own read/write path only.
     ///
-    /// It carries the FULL relation identity (NOT just source/target): even
-    /// though nothing is admitted under it, a `Relate` key can NEVER collide
-    /// with a live [`Self::IndexedAccess`] slot over the same `(source, target)`
-    /// nodes — the prior arm aliased `IndexedAccess` and was a latent
-    /// wrong-domain warm-hit hazard. Carrying the whole `RelateMemoKey` also
-    /// keeps the family identity faithful to the relation memo's own key, so two
-    /// `Relate` keys differing in any relation-identity axis map to distinct
-    /// family identities.
+    /// It carries the FULL relation identity (NOT just source/target): a
+    /// `Relate` key can NEVER collide with a live [`Self::IndexedAccess`]
+    /// slot over the same `(source, target)` nodes, and two `Relate` keys
+    /// differing in any relation-identity axis map to distinct family
+    /// identities.
     ///
     /// The `RelateMemoKey` payload is BOXED: a Rust
     /// enum is sized to its largest variant, and `RelateMemoKey` is 144B, so
     /// embedding it BY VALUE would inflate EVERY entry key of the hot
-    /// single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
-    /// NEVER admitted in production. `Box<RelateMemoKey>` is 8 bytes and
-    /// delegates `Hash`/`Eq`/`Clone` to the inner key, so the family IDENTITY
-    /// (and `variant_label`) is UNCHANGED — two `Relate` keys differing in any
-    /// relation-identity axis still map to distinct family identities.
+    /// single-node `FamilyKey → FamilySlots` keyspace. `Box<RelateMemoKey>`
+    /// is 8 bytes and delegates `Hash`/`Eq`/`Clone` to the inner key, so the
+    /// family IDENTITY (and `variant_label`) is UNCHANGED — two `Relate`
+    /// keys differing in any relation-identity axis still map to distinct
+    /// family identities.
     Relate {
         key: Box<crate::semantic_query::RelateMemoKey>,
     },
@@ -541,8 +538,10 @@ impl FamilyKey {
     /// content-free identity of those families legitimately coexists
     /// across many live substitution / inference-context / overlay
     /// variants, so the floor would thrash a hot inference loop.
-    /// Content-light projection and modeless families, and every
-    /// non-producing variant (nothing is ever admitted under `Relate` /
+    /// Content-light projection and modeless families — including the
+    /// live `Relate` family (one content-free relation identity coexists
+    /// across few view variants) — and every
+    /// non-producing variant (nothing is ever admitted under
     /// `ApparentType` / `FlowNarrowingAt` / `ContextualTypeAt` /
     /// `ResolveAmbientNamespace` / `ResolveEnum`), keep the floor.
     ///
@@ -1506,8 +1505,10 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // carrying the FULL relation identity. No production code constructs a
         // `SemanticQueryKey::Relate`, so this arm is exercised only by identity
         // guards; the production relation authority is `relate_nodes`, which
-        // keys the dedicated `relation_memo` on the same `RelateMemoKey` and
-        // never enters `execute_cooperative` / `family_and_slot`.
+        // reads / writes the SAME `FamilyKey::Relate` family through
+        // `get_relation` / `compute_relation_and_admit` (the rehomed relation
+        // memo — the retired dedicated memo folded into the family substrate)
+        // and never enters `execute_cooperative`.
         //
         // `family_and_slot` is consulted UNCONDITIONALLY by
         // `try_warm_hit_fast_path` BEFORE any admission short-circuit, so this

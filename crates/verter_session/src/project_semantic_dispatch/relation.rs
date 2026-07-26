@@ -5,10 +5,14 @@
 //! [`SemanticGraphStore::get_relation`] keyed by the FULL relation identity
 //! [`crate::semantic_query::RelateMemoKey`] (source / target / relation kind /
 //! policy / source freshness / inference context / env+substitution+
-//! projection-reduction context), with dep-signature fencing. The current
-//! engine computes [`RelationKind::Assignable`]; the other identity axes carry
-//! their fixed default (per-axis algorithms land with the relation-inference
-//! reducer, not yet implemented).
+//! projection-reduction context), with dep-signature fencing. Storage is the
+//! family memo's `Relate` family (the rehomed relation memo — the retired
+//! dedicated `BudgetedRelationMemo` folded into the family substrate); the
+//! stored value is the compute-side verdict
+//! [`crate::semantic_query::RelationComputeResult`] (the compute/public
+//! split). The current engine computes [`RelationKind::Assignable`]; the
+//! other identity axes carry their fixed default (per-axis algorithms land
+//! with the relation-inference reducer, not yet implemented).
 //!
 //! All three [`RelationResult`] variants cache-with-fence:
 //! `Assignable`/`NotAssignable`/`Unknown`. `Unknown` covers genuinely

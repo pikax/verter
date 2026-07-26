@@ -1807,25 +1807,26 @@ fn resolver_core_mod_no_longer_reexports_type_surface_db() {
 }
 
 #[test]
-fn semantic_graph_store_has_relation_memo_field() {
-    // SemanticGraphStore must carry a single `relation_memo` field for
-    // the relation engine. The field is a `BudgetedRelationMemo` — a
-    // wrapper owning the full-identity `RelateMemoKey` map, its retention
-    // budget, and the `retention_gate` that keeps the map and the budget
-    // in one lock domain — so the relation memo and its retention ledger
-    // cannot desync (`clear` is exclusive against concurrent inserts).
+fn relation_memo_lives_in_the_family_memo() {
+    // The dedicated `BudgetedRelationMemo` wrapper is DELETED. Relation
+    // judgements live in the family memo's `FamilyKey::Relate` family
+    // (the `ModeSlot::Single` slot) inside `SemanticGraphStore::entries` —
+    // the ONE memo substrate every warm semantic-query entry rides, with
+    // the per-family cap / invalid-first / LRU eviction, the family
+    // `memo_budget` global bound, and the reverse-index drains. The store
+    // must NOT carry a dedicated `relation_memo` field, and the retired
+    // wrapper type must not exist.
     let memo_src = include_str!("semantic_query_memo/mod.rs");
     assert!(
-        memo_src.contains("relation_memo: BudgetedRelationMemo"),
-        "SemanticGraphStore must have a `relation_memo: BudgetedRelationMemo` field"
+        !memo_src.contains("relation_memo: BudgetedRelationMemo"),
+        "SemanticGraphStore must NOT carry a dedicated `relation_memo` field — \
+         relation judgements live in the family memo's `Relate` family"
     );
-    // The relation memo's `DashMap` is owned by `BudgetedRelationMemo`.
-    let budgeted_src = include_str!("semantic_query_memo/budgeted_caches.rs");
     assert!(
-        budgeted_src.contains("memo: DashMap<"),
-        "BudgetedRelationMemo must own the relation memo's DashMap"
+        !memo_src.contains("BudgetedRelationMemo"),
+        "the dedicated `BudgetedRelationMemo` wrapper is retired — no dual memo may remain"
     );
-    // Behavioural verification: the field is accessible via the
+    // Behavioural verification: the relation entries route through the
     // `get_relation` / `insert_relation` API used by
     // `ProjectSemanticDispatch::relate_nodes`.
     let host = host_for_relation_tests();
@@ -2003,24 +2004,27 @@ fn semantic_node_to_type_expr_has_exactly_one_path() {
 
 #[test]
 fn relation_memo_has_exactly_one_owner() {
-    // The `relation_memo` field must appear exactly once in production
-    // code — on `SemanticGraphStore`, typed `BudgetedRelationMemo`. The
-    // memo's backing `DashMap` is owned by that wrapper (which also
-    // owns the retention budget + `retention_gate`), so the relation
-    // memo still has exactly one owner.
+    // The dedicated `BudgetedRelationMemo` wrapper is RETIRED — relation
+    // judgements have exactly ONE owner: the family memo
+    // (`SemanticGraphStore::entries`) under the `FamilyKey::Relate`
+    // family. No dedicated field, no wrapper type, no relation-local
+    // `DashMap`, no dual memo path.
     let field_count = count_def_in_crates("relation_memo: BudgetedRelationMemo");
     assert_eq!(
-        field_count, 1,
-        "relation_memo field must have exactly one owner; got {field_count}"
+        field_count, 0,
+        "the dedicated relation_memo field is retired — relation judgements live in the \
+         family memo's `Relate` family; got {field_count}"
     );
-    // The wrapper owns the backing map exactly once. Keyed by the full
-    // relation identity `RelateMemoKey`, NOT the retired bare
-    // `(SemanticNodeId, SemanticNodeId)` pair.
+    let wrapper_count = count_def_in_crates("BudgetedRelationMemo");
+    assert_eq!(
+        wrapper_count, 0,
+        "the BudgetedRelationMemo wrapper type is retired; got {wrapper_count}"
+    );
     let map_count = count_def_in_crates("memo: DashMap<RelateMemoKey,");
     assert_eq!(
-        map_count, 1,
-        "the relation memo's DashMap must have exactly one owner \
-         (BudgetedRelationMemo); got {map_count}"
+        map_count, 0,
+        "no dedicated relation `DashMap` may remain — the family memo is the single \
+         owner; got {map_count}"
     );
     // The retired bare-pair relation memo key must not survive anywhere.
     let bare_pair_count = count_def_in_crates("memo: DashMap<(SemanticNodeId, SemanticNodeId)");

@@ -17,7 +17,8 @@
 //!    is added/removed without regenerating.
 //! 3. **Per-row sanity** — every row is `Live`; the value domain is `TypeNode`
 //!    for every variant EXCEPT `Relate` (`Relation` — its execute arm is
-//!    non-producing and its judgement lives in the dedicated relation_memo),
+//!    non-producing and its judgement lives in the family memo's `Relate`
+//!    family, the rehomed relation memo),
 //!    `ResolveOverloadSet` (`OverloadSet` — the LIVE ordered visible
 //!    signature group), `ClassifyBroadRuntime` (`BroadRuntime` — the LIVE
 //!    terminal constructor classification), and `FlowNarrowingAt` /
@@ -123,7 +124,8 @@ fn semantic_query_key_spec_table_equals_enum() {
     // (3) PER-ROW SANITY + triangulation against SemanticQueryKeyTag::ALL.
     // Every row is `Live`. The value-domain mapping is:
     //   - `Relate`            → `Relation` (execute arm non-producing; the
-    //                            tri-state judgement lives in `relation_memo`).
+    //                            tri-state judgement lives in the family memo's
+    //                            `Relate` family, the rehomed relation memo).
     //   - `ResolveOverloadSet`→ `OverloadSet` (LIVE producer: the ordered
     //                            VISIBLE signature group; a signature-less
     //                            callee is an honest `Miss`, NEVER a fake

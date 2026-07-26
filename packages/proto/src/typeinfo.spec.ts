@@ -25,8 +25,9 @@ import {
   GraphMappedModifier,
   GraphSymbolNamespace,
   GraphDeclarationPartKind,
-  GraphRelationOutcome,
-  GraphRelationStepKind,
+  GraphRelationFailureCode,
+  GraphBudgetExceededKind,
+  GraphSubRelationPositionKind,
   GraphExactness,
   GraphOriginEdgeKind,
   FrameworkTag,
@@ -364,21 +365,6 @@ describe("typeinfo proto TS bindings", () => {
           value: { siteSpanRef: 18, contextualNodeId: 0 },
         },
       },
-      {
-        kind: {
-          case: "relationProof",
-          value: {
-            outcome: GraphRelationOutcome.TRUE,
-            steps: [
-              {
-                kind: GraphRelationStepKind.STRUCTURAL,
-                sourceNodeId: 0,
-                targetNodeId: 0,
-              },
-            ],
-          },
-        },
-      },
       { kind: { case: "inferNode", value: { nameId: 19, constraintNodeId: 0 } } },
       {
         kind: {
@@ -404,7 +390,7 @@ describe("typeinfo proto TS bindings", () => {
       { kind: { case: "cycle", value: { cycleRootNodeId: 0, participants: [22] } } },
     ];
 
-    expect(cases.length).toBe(32);
+    expect(cases.length).toBe(31);
 
     const seen = new Set<string>();
     for (const init of cases) {
@@ -417,7 +403,7 @@ describe("typeinfo proto TS bindings", () => {
       expect(decoded).toEqual(node);
       seen.add(decoded.kind.case as string);
     }
-    expect(seen.size).toBe(32);
+    expect(seen.size).toBe(31);
   });
 
   it("TypeInfoGraphRequest roundtrips every payload arm", () => {
@@ -731,13 +717,71 @@ describe("typeinfo proto TS bindings", () => {
     expect(decodedUnsupported.status?.diagnostics.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("wire schema version is 4 with the framework-surface member default/origin fields", () => {
-    // Schema 3→4: the add-only `FrameworkSurfaceMember.default_value_id` +
-    // `origin` fields landed under a schema bump per the closed-enum rule
-    // (3 added the framework_surface response arm + per-kind status). The TS
+  it("wire schema version is 5 with the payload-side relation_proofs table", () => {
+    // Schema 4→5: the `GraphTypeNode.relation_proof = 28` oneof arm is
+    // retired (tag + name reserved at message scope) and the relation-proof
+    // witness relocated OFF the type-values surface to the payload-side
+    // `SemanticTypeGraph.relation_proofs` table (field 13, add-only). The TS
     // facade constant tracks the Rust `TYPEINFO_GRAPH_SCHEMA_VERSION` in
     // lock-step.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(4);
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(5);
+  });
+
+  it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {
+    // All four relation-proof shapes ride the payload-side table by opaque
+    // proof id — never a GraphTypeNode arm (tag 28 is reserved).
+    const graph = create(SemanticTypeGraphSchema, {
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      relationProofs: [
+        {
+          kind: {
+            case: "assignable",
+            value: {
+              subDerivations: [
+                {
+                  sourceNodeId: 0,
+                  targetNodeId: 1,
+                  positionKind: GraphSubRelationPositionKind.ROOT,
+                  positionNameId: 0,
+                  positionIndex: 0,
+                },
+              ],
+            },
+          },
+        },
+        {
+          kind: {
+            case: "notAssignable",
+            value: {
+              reason: GraphRelationFailureCode.PROPERTY_TYPE_MISMATCH,
+              failingSub: {
+                sourceNodeId: 2,
+                targetNodeId: 3,
+                positionKind: GraphSubRelationPositionKind.MEMBER,
+                positionNameId: 7,
+                positionIndex: 0,
+              },
+            },
+          },
+        },
+        {
+          kind: {
+            case: "budgetExceeded",
+            value: { kind: GraphBudgetExceededKind.RELATION_BUDGET, limit: 500 },
+          },
+        },
+        {
+          kind: { case: "coinductiveCycle", value: { keys: [0, 1, 2] } },
+        },
+      ],
+    });
+
+    const bytes = toBinary(SemanticTypeGraphSchema, graph);
+    const decoded = fromBinary(SemanticTypeGraphSchema, bytes);
+    // Deep equality across the whole proof table — every arm's nested
+    // payload must survive identically.
+    expect(decoded).toEqual(graph);
+    expect(decoded.relationProofs.length).toBe(4);
   });
 
   it("deep-equality roundtrip detects nested field corruption that case-match misses", () => {

@@ -20,8 +20,10 @@ fn graph_type_node_roundtrip_covers_every_oneof_variant() {
     let variants = build_every_type_node_variant();
     assert_eq!(
         variants.len(),
-        32,
-        "GraphTypeNode covers exactly 32 oneof variants — the audited closed taxonomy",
+        31,
+        "GraphTypeNode covers exactly 31 oneof variants — the audited closed taxonomy \
+         (the tag-28 relation_proof arm is retired + reserved; proofs ride the payload-side \
+         relation_proofs table)",
     );
 
     for (idx, original) in variants.iter().enumerate() {
@@ -98,6 +100,10 @@ fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
         strings: Some(g::StringTable {
             entries: vec!["a".to_string(), "b".to_string()],
         }),
+        // The payload-side relation-proof table (schema 5, field 13) —
+        // populated with all four proof shapes so the roundtrip pins the
+        // table emission + decode.
+        relation_proofs: build_every_relation_proof_entry(),
     };
 
     let bytes = graph.encode_to_vec();
@@ -105,7 +111,79 @@ fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
         g::SemanticTypeGraph::decode(bytes.as_slice()).expect("SemanticTypeGraph must roundtrip");
     assert_eq!(decoded, graph);
     assert_eq!(decoded.schema_version, g::TYPEINFO_GRAPH_SCHEMA_VERSION);
-    assert_eq!(decoded.nodes.len(), 32);
+    assert_eq!(decoded.nodes.len(), 31);
+    assert_eq!(
+        decoded.relation_proofs.len(),
+        4,
+        "the relation_proofs table carries all four proof shapes"
+    );
+}
+
+/// A v4-encoded envelope (no `relation_proofs` field on the wire) decodes
+/// cleanly under the v5 schema with an empty proof table — the v5 table is
+/// add-only, so old payloads remain valid decodes
+/// (`SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` keeps 4).
+#[test]
+fn semantic_type_graph_v4_payload_decodes_under_v5_with_empty_relation_proofs() {
+    // A v4 payload: schema_version 4, no field-13 bytes on the wire. The
+    // retired tag-28 arm was never emitted by any encoder, so a real v4
+    // payload never carried a relation proof.
+    let v4_graph = g::SemanticTypeGraph {
+        schema_version: 4,
+        nodes: build_every_type_node_variant(),
+        ..Default::default()
+    };
+    let bytes = v4_graph.encode_to_vec();
+    let decoded =
+        g::SemanticTypeGraph::decode(bytes.as_slice()).expect("a v4 payload must decode under v5");
+    assert_eq!(decoded.schema_version, 4);
+    assert!(
+        decoded.relation_proofs.is_empty(),
+        "a v4 payload carries no relation_proofs — the v5 table decodes as empty"
+    );
+    assert_eq!(decoded.nodes.len(), 31);
+}
+
+/// One `GraphRelationProofEntry` of each of the four proof shapes — the
+/// payload-side relation-proof taxonomy (schema 5).
+fn build_every_relation_proof_entry() -> Vec<g::RelationProofEntry> {
+    use verter_protocol::typeinfo::graph::RelationProofEntryKind as PK;
+    vec![
+        g::RelationProofEntry {
+            kind: Some(PK::Assignable(g::RelationDerivationProof {
+                sub_derivations: vec![g::SubRelationRefWire {
+                    source_node_id: 0,
+                    target_node_id: 1,
+                    position_kind: g::SubRelationPositionKindWire::Root as i32,
+                    position_name_id: 0,
+                    position_index: 0,
+                }],
+            })),
+        },
+        g::RelationProofEntry {
+            kind: Some(PK::NotAssignable(g::RelationFailureProof {
+                reason: g::RelationFailureCodeWire::PropertyTypeMismatch as i32,
+                failing_sub: Some(g::SubRelationRefWire {
+                    source_node_id: 2,
+                    target_node_id: 3,
+                    position_kind: g::SubRelationPositionKindWire::Member as i32,
+                    position_name_id: 7,
+                    position_index: 0,
+                }),
+            })),
+        },
+        g::RelationProofEntry {
+            kind: Some(PK::BudgetExceeded(g::RelationBudgetCapProof {
+                kind: g::BudgetExceededKindWire::RelationBudget as i32,
+                limit: 500,
+            })),
+        },
+        g::RelationProofEntry {
+            kind: Some(PK::CoinductiveCycle(g::RelationCycleKeysProof {
+                keys: vec![0, 1, 2],
+            })),
+        },
+    ]
 }
 
 #[test]
@@ -456,8 +534,11 @@ fn supported_empty_and_unsupported_empty_decode_to_distinct_states() {
 #[test]
 fn closed_taxonomies_have_the_documented_cardinalities() {
     // Any drop / unintended add lights up immediately because the
-    // variant constructors below must match these numbers.
-    assert_eq!(build_every_type_node_variant().len(), 32);
+    // variant constructors below must match these numbers. The
+    // GraphTypeNode taxonomy is 31: the tag-28 `relation_proof` arm is
+    // retired + reserved (schema 5) — proofs ride the payload-side
+    // `relation_proofs` table, never the type-values surface.
+    assert_eq!(build_every_type_node_variant().len(), 31);
     assert_eq!(build_every_structured_type_expression_variant().len(), 22);
 
     // Primitive kinds: 12 (ANY..OBJECT).
@@ -697,14 +778,6 @@ fn build_every_type_node_variant() -> Vec<g::TypeNode> {
         K::ContextualType(g::ContextualTypeNode {
             site_span_ref: 18,
             contextual_node_id: 0,
-        }),
-        K::RelationProof(g::RelationProofNode {
-            outcome: g::RelationOutcome::True as i32,
-            steps: vec![g::RelationStep {
-                kind: g::RelationStepKind::Structural as i32,
-                source_node_id: 0,
-                target_node_id: 0,
-            }],
         }),
         K::InferNode(g::InferNode {
             name_id: 19,

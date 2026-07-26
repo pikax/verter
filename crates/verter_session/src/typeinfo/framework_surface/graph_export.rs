@@ -474,6 +474,12 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
         node_id_map: Vec::new(),
         symbol_id_map: Vec::new(),
         strings: Some(strings),
+        // The payload-side relation-proof table (schema 5). No live
+        // relation-proof producer exists yet (the relation-inference
+        // reducer populates it when it lands), so the exporter emits the
+        // empty table — the emission seam is wired, the witness stays OFF
+        // the type-values surface.
+        relation_proofs: Vec::new(),
     };
 
     // The encoder performs ZERO dispatch by construction; assert it here so the

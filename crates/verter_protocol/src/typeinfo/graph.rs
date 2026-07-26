@@ -76,10 +76,12 @@ pub use wire::ResolveSymbolGraphRequest;
 pub use wire::graph_type_node::Kind as TypeNodeKind;
 pub use wire::GraphTypeNode as TypeNode;
 
+pub use wire::graph_relation_proof_entry::Kind as RelationProofEntryKind;
 pub use wire::GraphAliasInstantiation as AliasInstantiationNode;
 pub use wire::GraphAmbientModule as AmbientModuleNode;
 pub use wire::GraphAmbientNamespace as AmbientNamespaceNode;
 pub use wire::GraphArray as ArrayNode;
+pub use wire::GraphBudgetExceededKind as BudgetExceededKindWire;
 pub use wire::GraphClass as ClassNode;
 pub use wire::GraphConditional as ConditionalNode;
 pub use wire::GraphConditionalResolution as ConditionalResolution;
@@ -108,9 +110,15 @@ pub use wire::GraphObjectMember as ObjectMember;
 pub use wire::GraphOpaque as OpaqueNode;
 pub use wire::GraphPrimitive as PrimitiveNode;
 pub use wire::GraphReference as ReferenceNode;
-pub use wire::GraphRelationProof as RelationProofNode;
-pub use wire::GraphRelationStep as RelationStep;
+pub use wire::GraphRelationBudgetCap as RelationBudgetCapProof;
+pub use wire::GraphRelationCycleKeys as RelationCycleKeysProof;
+pub use wire::GraphRelationDerivation as RelationDerivationProof;
+pub use wire::GraphRelationFailure as RelationFailureProof;
+pub use wire::GraphRelationFailureCode as RelationFailureCodeWire;
+pub use wire::GraphRelationProofEntry as RelationProofEntry;
 pub use wire::GraphSatisfies as SatisfiesNode;
+pub use wire::GraphSubRelationPositionKind as SubRelationPositionKindWire;
+pub use wire::GraphSubRelationRef as SubRelationRefWire;
 pub use wire::GraphTemplateLiteral as TemplateLiteralNode;
 pub use wire::GraphThisType as ThisTypeNode;
 pub use wire::GraphTuple as TupleNode;
@@ -182,8 +190,6 @@ pub use wire::GraphProjectionKind as ProjectionKind;
 pub use wire::GraphProjectionMode as ProjectionMode;
 pub use wire::GraphReductionDemand as ReductionDemand;
 pub use wire::GraphRelateEndpoint as RelateEndpoint;
-pub use wire::GraphRelationOutcome as RelationOutcome;
-pub use wire::GraphRelationStepKind as RelationStepKind;
 pub use wire::GraphRelationUnknownReason as RelationUnknownReason;
 pub use wire::GraphSignatureKind as SignatureKind;
 pub use wire::GraphSignatureOrigin as SignatureOrigin;
@@ -275,7 +281,18 @@ pub use wire::TypePredicateExpr;
 /// default source text and its resolver-known per-member declaration
 /// provenance. A consumer that ignores the new fields keeps working;
 /// the framework-surface operation requires 4 for them to be present.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 4;
+///
+/// v5 retires the `GraphTypeNode.relation_proof = 28` oneof arm (tag and
+/// name reserved at `GraphTypeNode` scope — the tag-28 body messages
+/// `GraphRelationProof` / `GraphRelationStep` and their enums leave the
+/// schema with it) and relocates the relation-proof witness OFF the
+/// type-values surface to the payload-side
+/// `SemanticTypeGraph.relation_proofs` table (field 13, add-only): the
+/// four relation-proof shapes ride that table by opaque proof id. No
+/// encoder ever emitted the tag-28 arm, so a v4 payload carries no
+/// relation proof to lose; v4 stays accepted (the v5 table is add-only,
+/// absent on a v4 payload).
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 5;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The

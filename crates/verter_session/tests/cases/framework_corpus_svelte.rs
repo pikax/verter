@@ -537,12 +537,13 @@ fn svelte_prop_default_and_origin_are_on_the_public_framework_surface_wire() {
     let strings = string_table(payload);
     let resolve = |id: u32| strings.get(id as usize).cloned().unwrap_or_default();
 
-    // The response graph carries schema 4 (the version that introduced the
-    // default/origin member fields).
+    // The response graph carries schema 5 (the current wire schema: the
+    // payload-side `relation_proofs` table was added add-only at field 13;
+    // the default/origin member fields landed at schema 4).
     assert_eq!(
         payload.graph.as_ref().unwrap().schema_version,
-        4,
-        "the framework-surface graph is schema 4"
+        5,
+        "the framework-surface graph is schema 5"
     );
 
     // `size = 'md'` — the runtime DEFAULT VALUE source text rides the wire

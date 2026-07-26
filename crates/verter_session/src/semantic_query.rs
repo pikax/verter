@@ -3394,8 +3394,20 @@ pub enum SemanticQueryValue {
     /// visible overload.
     OverloadSet(Arc<[SignatureRef]>),
     /// The tri-state outcome of a relation query. No live producer; the
-    /// live relation path is the separate relation memo.
+    /// live relation path is the `Relate` family of the family memo (the
+    /// rehomed relation memo), which stores the compute-side
+    /// [`RelationVerdict`](Self::RelationVerdict) encoding instead.
     Relation(RelationPayload),
+    /// ENGINE-INTERNAL compute-side relation verdict — the value encoding
+    /// the `Relate` family memo stores (the compute/public split).
+    /// NOT the public [`Relation`](Self::Relation) domain: it carries the
+    /// compute tri-state [`RelationComputeResult`], including the
+    /// no-public-form `Undecided` arm, so the current `Unknown` admission
+    /// is preserved honestly rather than stuffed into a fake
+    /// [`RelationPayload`]. Never produced by `execute` (the `Relate`
+    /// execute arm is `Miss`), never narrowed to a type node, never on the
+    /// wire. Future admission work deletes the `Undecided` admission.
+    RelationVerdict(RelationComputeResult),
     /// Ordered, terminal broad runtime classification used by Vue macro
     /// runtime lowering. The classifier is a semantic query, not a consumer-
     /// local graph walk.
@@ -3416,6 +3428,7 @@ pub enum SemanticQueryValueTag {
     DeclarationAnalysis,
     OverloadSet,
     Relation,
+    RelationVerdict,
     BroadRuntime,
     DiagnosticAnalysis,
 }
@@ -3430,6 +3443,7 @@ impl SemanticQueryValue {
             Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
             Self::Relation(_) => SemanticQueryValueTag::Relation,
+            Self::RelationVerdict(_) => SemanticQueryValueTag::RelationVerdict,
             Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
@@ -3546,8 +3560,9 @@ pub struct DeclarationAnalysisValue {
 ///
 /// SHAPE only: no live `execute` producer fills it yet —
 /// `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`, and the
-/// production authority `relate_nodes` emits the engine's transient
-/// [`RelationResult`] into the dedicated relation memo. The relation-inference
+/// production authority `relate_nodes` stores the compute-side
+/// [`RelationComputeResult`] verdict in the family memo's `Relate` family
+/// (the rehomed relation memo). The relation-inference
 /// reducer (not yet implemented) populates this payload and its proof table
 /// once it lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4677,8 +4692,8 @@ impl SubstitutionCanonicalHash {
 /// The relation memo's query-identity key — the full `Relate` identity.
 ///
 /// Mirrors the [`SemanticQueryKey::Relate`] identity fields exactly: the
-/// relation memo
-/// ([`BudgetedRelationMemo`](crate::semantic_query_memo::SemanticGraphStore))
+/// relation memo (the `Relate` family of the family memo inside
+/// [`crate::semantic_query_memo::SemanticGraphStore`])
 /// is keyed by THIS, never by the bare `(source, target)` pair. Two relation
 /// judgements over the same nodes but a different relation kind / policy /
 /// source freshness / inference context / env are DISTINCT and occupy distinct
@@ -4873,9 +4888,9 @@ pub enum SemanticQueryKey {
     /// `inference_context` (the inference session the relation runs within), and
     /// the `R T L J` env `context`. Two judgements over the same nodes that
     /// differ in any of these are DISTINCT and occupy distinct memo slots —
-    /// `relate_nodes` keys the dedicated
-    /// [`relation_memo`](crate::semantic_query_memo::SemanticGraphStore) by the
-    /// full [`RelateMemoKey`], dep-signature fenced.
+    /// `relate_nodes` keys the relation memo (the `Relate` family inside
+    /// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore))
+    /// by the full [`RelateMemoKey`], dep-signature fenced.
     ///
     /// **Forward-declared value domain.** The spec row records value domain
     /// [`SemanticQueryValueTag::Relation`]
@@ -5528,11 +5543,114 @@ pub struct InferBinding {
 /// All three variants memoise with dep-signature fencing — `Unknown` is
 /// included so repeated cyclic re-entry short-circuits without recomputing
 /// the undecidable judgement.
+///
+/// This is the relation ENGINE's transient return type (`relate_nodes` /
+/// `decide_relation`). The compute/public split (design "Decision 4") keeps
+/// it DISTINCT from the memo-stored compute verdict
+/// [`RelationComputeResult`] and from the public value-domain
+/// [`RelationPayload`] / [`RelationOutcome`] (no public `Unknown`); the
+/// conversion into the stored compute verdict happens at the relation-memo
+/// publish path (`SemanticGraphStore::insert_relation_owned`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelationResult {
     Assignable { bindings: Arc<[InferBinding]> },
     NotAssignable,
     Unknown,
+}
+
+/// Compute-side relation verdict — the type the `Relate` family memo
+/// STORES (the compute/public split).
+///
+/// DISTINCT from the public value-domain [`RelationPayload`] /
+/// [`RelationOutcome`] (two-state plus `BudgetExceeded`, NO `Unknown`): the
+/// public payload is what `SemanticQueryValue::Relation` surfaces once the
+/// relation-inference reducer (not yet implemented) produces it, and it has
+/// no form for an undecided judgement. The compute side keeps the tri-state
+/// honestly: a decided verdict rides [`RelationComputeResult::Decided`]
+/// (the publicly-representable subset — it maps 1:1 onto
+/// [`RelationOutcome::Assignable`] / [`RelationOutcome::NotAssignable`]),
+/// while an undecidable judgement rides
+/// [`RelationComputeResult::Undecided`] and has NO public value-domain
+/// form. The decided arm does NOT embed a [`RelationPayload`] — no proof
+/// table is populated yet, so fabricating a `relation_proof` id would be a
+/// lie; the reducer owns that conversion when it lands.
+///
+/// The conversion layer: the engine's transient [`RelationResult`] converts
+/// into this type at the publish path
+/// (`SemanticGraphStore::insert_relation_owned`), and back on the warm read
+/// (`SemanticGraphStore::get_relation`) — both conversions are total and
+/// lossless, so the current admission semantics are preserved exactly
+/// (a clean `Unknown` judgement is still admitted today; future admission
+/// work deletes that admission in favour of `ReturnOnly` — not the current
+/// contract).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RelationComputeResult {
+    /// A decided judgement — the publicly-representable subset.
+    Decided(DecidedRelationVerdict),
+    /// An undecidable judgement — no public value-domain form.
+    Undecided(UndecidedReason),
+}
+
+/// The decided (publicly-representable) relation verdict. Maps 1:1 onto the
+/// public [`RelationOutcome::Assignable`] / [`RelationOutcome::NotAssignable`]
+/// arms; `BudgetExceeded` is the reducer's outcome, never produced by
+/// the current engine.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DecidedRelationVerdict {
+    /// The source relates to the target (with the inference bindings a
+    /// binding-producing judgement deposited).
+    Assignable { bindings: Arc<[InferBinding]> },
+    /// The source provably does NOT relate to the target.
+    NotAssignable,
+}
+
+/// Why a relation judgement could not be decided — the compute-side states
+/// with no `SemanticQueryValue::Relation` surfacing.
+///
+/// Today's engine produces a bare [`RelationResult::Unknown`] from every
+/// undecided site — deferred shells (`KeyOf` / `IndexedAccess` / `Mapped` /
+/// `Conditional` / `TypeOf` / `TemplateLiteral`), opaque carriers, cyclic
+/// re-entry via the relation guard, unresolvable identity carriers, and
+/// work-budget exhaustion — so the honest taxonomy is the single
+/// [`UndecidedReason::Unknown`] arm covering exactly those sites. The
+/// fine-grained split (deferred-vs-cycle-vs-budget) and the
+/// `OpenAssumption` arm are the future activation/admission work, when the
+/// engine threads reasons through `decide_relation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UndecidedReason {
+    /// The judgement could not be decided (any of the sites above). No
+    /// public value-domain form; admitted to the relation memo today
+    /// exactly as `RelationResult::Unknown` was (future admission work
+    /// deletes that admission).
+    Unknown,
+}
+
+impl From<RelationResult> for RelationComputeResult {
+    fn from(result: RelationResult) -> Self {
+        match result {
+            RelationResult::Assignable { bindings } => {
+                RelationComputeResult::Decided(DecidedRelationVerdict::Assignable { bindings })
+            }
+            RelationResult::NotAssignable => {
+                RelationComputeResult::Decided(DecidedRelationVerdict::NotAssignable)
+            }
+            RelationResult::Unknown => RelationComputeResult::Undecided(UndecidedReason::Unknown),
+        }
+    }
+}
+
+impl From<RelationComputeResult> for RelationResult {
+    fn from(verdict: RelationComputeResult) -> Self {
+        match verdict {
+            RelationComputeResult::Decided(DecidedRelationVerdict::Assignable { bindings }) => {
+                RelationResult::Assignable { bindings }
+            }
+            RelationComputeResult::Decided(DecidedRelationVerdict::NotAssignable) => {
+                RelationResult::NotAssignable
+            }
+            RelationComputeResult::Undecided(UndecidedReason::Unknown) => RelationResult::Unknown,
+        }
+    }
 }
 
 /// One element of a [`SemanticNodeData::Tuple`] shell.
@@ -6847,6 +6965,12 @@ mod tests {
                 SemanticQueryValueTag::Relation,
             ),
             (
+                SemanticQueryValue::RelationVerdict(RelationComputeResult::Undecided(
+                    UndecidedReason::Unknown,
+                )),
+                SemanticQueryValueTag::RelationVerdict,
+            ),
+            (
                 SemanticQueryValue::BroadRuntime(BroadRuntimeClassification::new([
                     BroadRuntimeKind::Object,
                 ])),
@@ -6860,13 +6984,13 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: seven cases, seven unique tags. Sort before dedup so
+        // Distinctness: eight cases, eight unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 7, "every value domain must have a distinct tag");
+        assert_eq!(tags.len(), 8, "every value domain must have a distinct tag");
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

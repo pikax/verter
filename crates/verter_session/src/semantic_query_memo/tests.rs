@@ -7,7 +7,7 @@ use crate::semantic_query::SemanticGraphRead;
 
 #[test]
 fn production_relation_admission_is_semantic_store_owned() {
-    let store_source = include_str!("mod.rs");
+    let store_source = include_str!("relation_memo.rs");
     let producer_source = include_str!("../project_semantic_dispatch/relation.rs");
 
     let owner_start = store_source
@@ -2230,6 +2230,326 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         0,
         "CLEAR BUG: invalidate_all must clear the DerivationStore edge \
          buckets on a project-generation bump",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Relation-memo rehome — the relation judgements live in the family
+// memo's `Relate` family. These guards pin the family-rail behaviors the
+// retired dedicated `BudgetedRelationMemo` did NOT have (per-family
+// multi-candidate retention with invalid-first / LRU eviction, reverse-index
+// drains) AND the behaviors that must stay byte-equivalent across the rehome
+// (full-identity dedup, strict self-root warm reads, the `Unknown`
+// admission). Each guard names the discrimination it makes.
+// ---------------------------------------------------------------------------
+
+/// RELATION FAMILY DEDUP — a cold insert of a full relation identity is
+/// warm-served, and a same-discriminant re-publish dedups in place (no
+/// second candidate).
+///
+/// DISCRIMINATES against a rehome that lost the full-identity keying: a
+/// warm miss on the same key, or a same-key/same-generation/same-carrier
+/// re-publish that appended instead of replacing, fails the assertions.
+#[test]
+fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let gen0 = host.project_type_store().current_project_generation();
+
+    // Cold insert → warm hit on the SAME full identity (no recompute).
+    store.insert_relation(
+        key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        crate::semantic_query::RelationResult::NotAssignable,
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "cold insert lands one entry"
+    );
+    assert!(
+        matches!(
+            store.get_relation(ctx, &key),
+            Some((_, crate::semantic_query::RelationResult::NotAssignable))
+        ),
+        "the same full identity must warm-hit after the cold insert",
+    );
+
+    // Same key + same generation + same carrier facts ⇒ same
+    // discriminant ⇒ in-place replace, never a second candidate.
+    store.insert_relation(
+        key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        crate::semantic_query::RelationResult::NotAssignable,
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "DEDUP: a same-discriminant re-publish must replace in place",
+    );
+}
+
+/// RELATION FAMILY RSS RAILS — a content invalidation drains relation
+/// entries through the SAME reverse-index rail every family uses: the
+/// publish registers the carrier's canonicals in `canonical_to_entries`,
+/// and `invalidate_canonical` drains the matching entries.
+///
+/// DISCRIMINATES against the retired dedicated memo (which had NO reverse
+/// index — an `invalidate_canonical` never touched relation entries): the
+/// pre-rehome shape leaves the touched entry behind and fails the count
+/// assertions.
+#[test]
+fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let gen0 = host.project_type_store().current_project_generation();
+
+    let touched = "/w/relation_touched.ts";
+    let touched_carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: touched.to_string(),
+            hash: [0xAB; 16],
+        },
+    ]));
+    let touched_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation(
+        touched_key,
+        touched_carrier,
+        Arc::from(vec![Arc::<str>::from(touched)]),
+        crate::semantic_query::RelationResult::NotAssignable,
+        gen0,
+    );
+    // An unrelated relation entry (empty carrier — references no
+    // canonical) must survive the drain.
+    let untouched_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        source,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation(
+        untouched_key,
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        crate::semantic_query::RelationResult::NotAssignable,
+        gen0,
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        2,
+        "fixture: two relation entries"
+    );
+
+    let _ = store.invalidate_canonical(touched);
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "RSS RAILS: invalidate_canonical must drain the relation entry whose \
+         carrier references the touched canonical (the family reverse-index rail); \
+         the retired dedicated memo had no reverse index and would leave it behind",
+    );
+}
+
+/// RELATION FAMILY BOUNDED RETENTION — the per-family candidate cap with
+/// invalid-first / LRU eviction applies to the `Relate` family: at cap
+/// pressure the INVALID candidate (a carrier whose self-root fails
+/// validation) is evicted ahead of any still-valid candidate, even when a
+/// valid candidate sits at the LRU front.
+///
+/// DISCRIMINATES against (a) plain LRU eviction (which would drop the
+/// gen-1 valid LRU front and keep the invalid gen-2 candidate) and (b)
+/// the retired relation-local FIFO (one slot per key — five publishes of
+/// the same key would collapse to a single entry, so the multi-candidate
+/// count assertions fail).
+#[test]
+fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let query_key = crate::semantic_query::SemanticQueryKey::Relate {
+        source: key.source,
+        target: key.target,
+        relation: key.relation,
+        policy: key.policy,
+        source_freshness: key.source_freshness,
+        inference_context: key.inference_context.clone(),
+        context: key.context,
+    };
+    assert_eq!(
+        store.family_candidate_cap_for_tests(&query_key),
+        4,
+        "fixture: the Relate family cap is the floor cap 4",
+    );
+
+    let valid_carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
+    let valid_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
+    // The invalid candidate: self-rooted on a canonical the live store
+    // view never tracked — strict self-root validation always fails.
+    let invalid_carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: "/w/relation_never_tracked.ts".to_string(),
+            hash: [0xCD; 16],
+        },
+    ]));
+    let invalid_roots: Arc<[Arc<str>]> =
+        Arc::from(vec![Arc::<str>::from("/w/relation_never_tracked.ts")]);
+
+    // Distinct generations ⇒ distinct candidates in ONE family (the
+    // multi-candidate substrate the retired memo lacked).
+    let publish = |generation: u64, invalid: bool| {
+        store.insert_relation_with_view_for_tests(
+            &host,
+            key.clone(),
+            if invalid {
+                invalid_carrier.clone()
+            } else {
+                valid_carrier.clone()
+            },
+            if invalid {
+                Arc::clone(&invalid_roots)
+            } else {
+                Arc::clone(&valid_roots)
+            },
+            crate::semantic_query::RelationResult::NotAssignable,
+            generation,
+        );
+    };
+    publish(1, false); // valid — sits at the LRU front at cap pressure
+    publish(2, true); // INVALID
+    publish(3, false);
+    publish(4, false);
+    assert_eq!(
+        store.slot_candidate_generations_for_tests(&query_key),
+        vec![1, 2, 3, 4],
+        "fixture: four distinct-discriminant candidates coexist in one Relate family",
+    );
+
+    // Cap pressure: a fifth distinct candidate must evict the INVALID
+    // gen-2 candidate — NOT the gen-1 valid LRU front.
+    publish(5, false);
+    assert_eq!(
+        store.slot_candidate_generations_for_tests(&query_key),
+        vec![1, 3, 4, 5],
+        "INVALID-FIRST: cap pressure must evict the invalid gen-2 candidate ahead of \
+         the valid gen-1 LRU front (plain LRU would keep 2 and drop 1; the retired \
+         relation-local FIFO would hold a single entry)",
+    );
+    assert_eq!(store.relation_memo_count(), 4);
+}
+
+/// UNKNOWN-ADMISSION BYTE-EQUIVALENCE across the rehome — both
+/// directions: a publish that WAS admitted under the dedicated memo (a
+/// clean `Unknown` judgement) stays admitted AND warm-served as
+/// `RelationResult::Unknown`; a publish that was REFUSED (a `ReturnOnly`
+/// row — here `PartialResult`) stays refused. The `Unknown` rides the
+/// compute-side `RelationComputeResult::Undecided` encoding honestly —
+/// never a fabricated public payload.
+///
+/// DISCRIMINATES against an admission-semantics change smuggled in with
+/// the rehome: dropping the `Unknown` admission (the future admission
+/// work's `ReturnOnly` transition, not the current contract) fails the
+/// admit assertions; admitting a `ReturnOnly` row fails the refuse
+/// assertions.
+#[test]
+fn relation_unknown_admission_is_byte_equivalent_across_the_rehome() {
+    let host = ctx_host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let store = SemanticGraphStore::new();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let gen0 = host.project_type_store().current_project_generation();
+
+    // ADMIT direction — a clean `Unknown` publish (the same row the
+    // dedicated memo admitted at relation.rs's decide closure).
+    let admit_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let admitted = store.compute_relation_and_admit(
+        ctx,
+        admit_key.clone(),
+        || crate::semantic_query::RelationResult::Unknown,
+        |result| {
+            crate::semantic_query_memo::RelationPublishDecision::publish(
+                Vec::<ObservedGraphSelfRoot>::new(),
+                result.clone(),
+                gen0,
+            )
+        },
+    );
+    assert_eq!(
+        admitted,
+        crate::semantic_query::RelationResult::Unknown,
+        "the computed value returns regardless of admission",
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "ADMIT: a clean Unknown judgement stays admitted across the rehome",
+    );
+    assert!(
+        matches!(
+            store.get_relation(ctx, &admit_key),
+            Some((_, crate::semantic_query::RelationResult::Unknown))
+        ),
+        "ADMIT: the admitted Unknown warm-serves as `RelationResult::Unknown` \
+         (the compute-side verdict round-trips losslessly)",
+    );
+
+    // REFUSE direction — a `ReturnOnly(PartialResult)` row never enters
+    // the memo (a distinct key so the count is attributable).
+    let refuse_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        source,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let refused = store.compute_relation_and_admit(
+        ctx,
+        refuse_key.clone(),
+        || crate::semantic_query::RelationResult::Unknown,
+        |_result| {
+            crate::semantic_query_memo::RelationPublishDecision::return_only(
+                crate::cache_runtime::NonAdmissionReason::PartialResult,
+            )
+        },
+    );
+    assert_eq!(
+        refused,
+        crate::semantic_query::RelationResult::Unknown,
+        "a ReturnOnly row still returns the computed value to the caller",
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "REFUSE: a ReturnOnly row must NOT enter the relation memo",
+    );
+    assert!(
+        store.get_relation(ctx, &refuse_key).is_none(),
+        "REFUSE: the refused key has no warm entry to serve",
     );
 }
 
