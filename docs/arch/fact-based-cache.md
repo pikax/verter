@@ -198,7 +198,7 @@ comments, JSDoc, generic param rename). Computed once per
 `(canonical, content_hash, parse_env_hash)` and lives alongside
 `IndexedReady` in `FileArtifactStore.FileArtifacts`.
 
-## Multi-candidate `FamilySlots` — per-family adaptive caps + eviction
+## Multi-candidate `FamilySlots` — per-family bounded retention
 
 Each query-identity cache slot in the multi-candidate `FamilySlots`
 substrate (`crates/verter_session/src/semantic_query_memo/mod.rs`;
@@ -207,61 +207,72 @@ version/env variants of the same query identity coexist as candidates, and
 validity is decided per-candidate by `ReadSetSignature.validate_with_self_roots`
 against the caller's live view (`validated_at_generation` is recency metadata
 only, never a validity oracle). The candidate-list **capacity and eviction
-policy is per-family, not a uniform cap of 4 with FIFO eviction**:
+policy is per-family** (`U3.ADAPTIVE_FAMILY_RETENTION`, LANDED), replacing the
+legacy uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` with front-removal (FIFO)
+eviction:
 
-- **`candidate_cap()` is per-family.** Each query family declares its own
-  candidate cap via a `candidate_cap()` function on the family descriptor
-  rather than a single global `FAMILY_SLOT_CANDIDATE_CAP = 4`. The
-  inference/substitution-heavy families — **`Relate`, `ResolveCall`,
-  `Instantiate`, `Conditional`, `MappedType`, `FlowReturn`** — get **higher**
-  adaptive caps (the same identity legitimately coexists across many live
-  substitution / inference-context / env variants, so a small cap would thrash
-  a hot inference loop). Content-light families (e.g. `ResolveEnum`,
-  `KeyOf`, `ResolveOverloadSet`) keep a **small** cap. The cap is *adaptive*:
-  it may grow toward the family's ceiling under sustained valid-hit pressure
-  and shrink back, never exceeding the family ceiling or the global memory
-  ceiling below.
-- **Eviction = invalid-first, then LRU-by-valid-hit.** When a slot is at its
-  cap and a new candidate must be admitted, eviction is **two-tier**: (1) evict
-  any candidate that is **invalid** under the current live view first (an
-  invalid candidate can never warm-hit, so it is pure overhead); (2) only if
-  every candidate is still valid, evict the **least-recently valid-hit**
-  candidate (LRU keyed on the last generation at which the candidate served a
-  validated warm hit), not the oldest-inserted (FIFO). FIFO evicts a
-  freshly-inserted-but-hot candidate; LRU-by-valid-hit retains the candidates
-  that are actually serving the workload. Same-discriminant re-publish
-  (matching `validated_at_generation` + `facts`) replaces in place and does
-  not consume a slot.
-- **Global memory ceiling.** Per-family caps are bounded by a process-wide
-  **global memory ceiling** over the whole multi-candidate substrate: the sum
-  of admitted candidates across all families and slots cannot exceed the
-  ceiling. When the global ceiling is reached, admission applies the same
-  invalid-first / LRU-by-valid-hit eviction **across** slots (globally, not
-  just within the target slot) before admitting, so one hot family cannot
-  starve memory from the rest. A candidate that cannot be admitted without
-  breaching the ceiling and whose eviction victims are all still valid +
-  more-recently-hit is **not admitted** — the value is returned to the caller
-  through the typed `ReturnOnly`/`ComputeAdmission` path, never published
-  (consistent with the substrate's existing non-admission discipline).
-- **Benched fallback-count bound per family.** Each family carries a
-  **benchmarked fallback-count bound** — the maximum tolerated cold-recompute
-  ("fallback") rate for that family's representative workload — regression-
-  gated through the existing `BenchResultRow`, which already reports cache
-  mode, hit count, and fallback count. The bench asserts the per-family
-  fallback count stays at or below its declared bound for the representative
-  batch; a cap regression (e.g. silently reverting a hot family to a small cap)
-  shows up as a fallback-count regression and fails the bench gate. This makes
-  the per-family caps an empirically-tuned, regression-protected contract
-  rather than a hand-picked constant.
+- **`candidate_cap()` is per-family (LANDED).** Every `FamilyKey` declares its
+  own candidate cap via an exhaustive, wildcard-free `candidate_cap()` on the
+  family identity — no uniform constant. The floor is **4**. The live
+  inference/substitution-heavy families — **`Instantiate`, `TypeOf`,
+  `Conditional`, `MappedType`** — hold **8**: the same content-free identity
+  legitimately coexists across many live substitution / inference-context /
+  env variants, so the floor would thrash a hot inference loop. (The earlier
+  design list named `Relate` / `ResolveCall` / `FlowReturn` here; in the landed
+  family taxonomy those have no live `FamilyKey` producer — `Relate` is
+  non-producing in the family memo and the flow/call families are U6-future —
+  so the higher cap attaches to the live inference/substitution families.)
+  Content-light projection and modeless families (e.g. `ResolveEnum`, `KeyOf`,
+  `ResolveOverloadSet`, `NormalizeUnion`) and every non-producing variant keep
+  the floor. The *adaptive* half of the design — growing a family's cap toward
+  a ceiling under sustained valid-hit pressure and shrinking back — is
+  **deferred to full `U3.CACHE_FACT_MODEL`**; the landed caps are fixed.
+- **Eviction = invalid-first, then LRU-by-valid-hit (LANDED).** When a slot is
+  at its family cap and a new candidate must be admitted, eviction is
+  **two-tier**: (1) evict the first candidate (front-to-back) that is
+  **invalid** against the publishing caller's stable store view — planned
+  snapshot/validate/reacquire OUTSIDE the `entries` mutex with an
+  `admission_seq` identity recheck under it (an invalid candidate can never
+  warm-hit, so it is pure overhead); (2) only if every candidate is still
+  valid, evict the **least-recently valid-hit** candidate (the front of the
+  slot's LRU order — a validated warm hit promotes its candidate to the back),
+  not the oldest-inserted (FIFO). FIFO evicts a freshly-inserted-but-hot
+  candidate; LRU-by-valid-hit retains the candidates that are actually serving
+  the workload. Same-discriminant re-publish (matching
+  `validated_at_generation` + `facts`) replaces in place and becomes freshest.
+  A new cacheable candidate is **always admitted** after local eviction —
+  cacheability never depends on memory pressure — and every displaced
+  candidate's per-`admission_seq` reverse-index registrations are drained,
+  whatever its slot position.
+- **Global memory ceiling (DEFERRED — full `U3.CACHE_FACT_MODEL`).** The
+  process-wide bound over the whole multi-candidate substrate — the sum of
+  admitted candidates across all families and slots, with cross-slot
+  invalid-first / LRU-by-valid-hit eviction at the ceiling and typed
+  `ReturnOnly`/`ComputeAdmission` non-admission for a candidate that cannot be
+  admitted — is **NOT live**. It remains named full-U3 work; admission
+  semantics at the bridge are unchanged and memory-pressure-independent.
+- **Benched fallback-count bound per family (DEFERRED — full
+  `U3.CACHE_FACT_MODEL`).** Each family carries a **benchmarked
+  fallback-count bound** — the maximum tolerated cold-recompute ("fallback")
+  rate for that family's representative workload — regression-gated through
+  the existing `BenchResultRow`, which already reports cache mode, hit count,
+  and fallback count. The bench asserts the per-family fallback count stays at
+  or below its declared bound for the representative batch; a cap regression
+  (e.g. silently reverting a hot family to a small cap) shows up as a
+  fallback-count regression and fails the bench gate. This makes the
+  per-family caps an empirically-tuned, regression-protected contract rather
+  than a hand-picked constant; it gates on the adaptive-cap half and lands
+  with it.
 
 The validity rail is unchanged: the per-family cap + eviction policy governs
 only *which* candidates a slot retains; *whether* a retained candidate may
 warm-hit is still decided exclusively by `ReadSetSignature.validate_with_self_roots`
-against the caller's live view. Pinned by
-**`cache_candidate_cap_is_per_family_not_uniform`**,
-**`family_eviction_prefers_invalid_then_lru_valid_hit`**, and the benched
-per-family fallback-count bound (owned at `U3.CACHE_FACT_MODEL`; the result-DB
-candidate storage at `U10.RESULT_DB` rides the same substrate).
+against the caller's live view. The family-local policy is pinned by
+**`cache_candidate_cap_is_per_family_not_uniform`** and
+**`family_eviction_prefers_invalid_then_lru_valid_hit`** (owned at
+`U3.ADAPTIVE_FAMILY_RETENTION`; the result-DB candidate storage at
+`U10.RESULT_DB` rides the same substrate). The deferred global ceiling + typed
+non-admission + benched fallback bound stay owned at `U3.CACHE_FACT_MODEL`.
 
 ## Fact registry shape
 

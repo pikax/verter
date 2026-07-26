@@ -141,6 +141,67 @@ impl SemanticGraphStore {
         validated_at_generation: u64,
         satisfied_projection: MaterializedSet,
     ) -> usize {
+        self.publish_for_tests_impl(
+            None,
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+            satisfied_projection,
+        )
+    }
+
+    /// Host-view-aware variant of
+    /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]:
+    /// the publish plans its per-family bounded-retention eviction
+    /// against the publishing caller's stable store view (invalid-first
+    /// victim selection). The `satisfied_projection` defaults to the
+    /// single requested point for `key`. Backs the per-family
+    /// bounded-retention guards.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_with_view_for_tests(
+        &self,
+        host: &crate::VerterHost,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+    ) -> usize {
+        let satisfied_projection = MaterializedSet::single(requested_point_for_key(&key));
+        self.publish_for_tests_impl(
+            Some(host),
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+            satisfied_projection,
+        )
+    }
+
+    /// Shared implementation of the test-only direct publishes. `view`
+    /// is the publishing caller's stable store view used for
+    /// invalid-first eviction planning; `None` (the legacy helpers)
+    /// falls back to the front-of-LRU-order victim.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    fn publish_for_tests_impl(
+        &self,
+        view: Option<&dyn crate::resolver_core::ResolverContext>,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+        satisfied_projection: MaterializedSet,
+    ) -> usize {
         if !matches!(result, QueryResult::Value(_)) {
             return 0;
         }
@@ -162,13 +223,22 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
         };
+        let cap = family.candidate_cap();
+        let eviction = match view {
+            Some(ctx) => {
+                family::plan_family_slot_eviction(&self.entries, &family, slot, &entry, cap, ctx)
+            }
+            None => family::EvictionVictim::LruFront,
+        };
         let mut entries = self.entries_lock_diagnosed();
         let family_was_new = !entries.contains_key(&family);
-        let outcome =
-            entries
-                .entry(family.clone())
-                .or_default()
-                .publish(slot, entry, &requested_path);
+        let outcome = entries.entry(family.clone()).or_default().publish(
+            slot,
+            entry,
+            &requested_path,
+            cap,
+            eviction,
+        );
         let populated_slots = outcome.populated;
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
@@ -202,5 +272,31 @@ impl SemanticGraphStore {
             .get(&family)
             .map(|slots| slots.slot_candidate_count_for_test(slot))
             .unwrap_or(0)
+    }
+
+    /// Test-only probe: the per-family bounded-retention candidate cap
+    /// (`FamilyKey::candidate_cap`) for `key`'s family. Backs the
+    /// per-family cap guard.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn family_candidate_cap_for_tests(&self, key: &SemanticQueryKey) -> usize {
+        let (family, _) = family_and_slot(key);
+        family.candidate_cap()
+    }
+
+    /// Test-only probe: `key`'s `(family, slot)` candidates'
+    /// `validated_at_generation` stamps in slot order (front =
+    /// least-recently admitted / validated-hit). Backs survivor/victim
+    /// identity and LRU-order assertions in the bounded-retention
+    /// guards.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn slot_candidate_generations_for_tests(&self, key: &SemanticQueryKey) -> Vec<u64> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .map(|slots| slots.slot_candidate_generations_for_test(slot))
+            .unwrap_or_default()
     }
 }

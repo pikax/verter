@@ -175,6 +175,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "cache_satisfaction_is_materialized_point_not_nominal_demand",
             "cache_satisfaction_requires_path_exact_not_prefix",
             "backfill_writes_only_recorded_materialized_points",
+            // U3.ADAPTIVE_FAMILY_RETENTION — per-family bounded
+            // retention on the family memo's multi-candidate slots:
+            // exhaustive per-family `candidate_cap()` (floor 4, higher
+            // for inference/substitution-heavy live families),
+            // invalid-first then LRU-by-valid-hit eviction, always-admit
+            // after local eviction.
+            "cache_candidate_cap_is_per_family_not_uniform",
+            "family_eviction_prefers_invalid_then_lru_valid_hit",
             // R6/R21 direct guards for the four migrated query-identity
             // cache keys (`crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs`):
             // each key is a content-free slot (R6 — no whole_hash /

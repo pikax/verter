@@ -3640,7 +3640,12 @@ U-block's scope bullet for the contract.
   apparent-type member-demand), each routing through `ReturnOnly`; the multi-candidate
   `FamilySlots` admission substrate with **per-family adaptive `candidate_cap()` +
   invalid-first/LRU-by-valid-hit eviction + a global memory ceiling** (replacing the
-  uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO); the five-dimension env-hash split
+  uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO — the FAMILY-LOCAL half of this piece:
+  the exhaustive per-family `candidate_cap()` + invalid-first/LRU-by-valid-hit
+  eviction + always-admit-after-local-eviction, is **LANDED** at the bridge block
+  `U3.ADAPTIVE_FAMILY_RETENTION` below; what remains at full U3 is the process-wide
+  candidate-memory ceiling + the typed `ReturnOnly` non-admission for it); the
+  five-dimension env-hash split
   (R21) with `lib_env_hash` entering only the layers whose value depends on lib data —
   AND, on the per-file artifact-identity side, the already-merged
   `FileArtifactKey.file_language_id` column (the `FileLanguage` row) is carried as an
@@ -3668,14 +3673,37 @@ U-block's scope bullet for the contract.
 - **Deps:** **`U8.WIRE_SURFACE_CLOSURE`** (the typed admission this block enforces
   produces values whose wire shape U8 closes — it lands AFTER the wire closure) +
   U2 (parent, the reducers it bounds/admits) + U6 (parent, the flow solver it
-  bounds/admits). NOT parallel-to-U8.
+  bounds/admits) + **`U3.ADAPTIVE_FAMILY_RETENTION`** (the landed retention bridge,
+  below). NOT parallel-to-U8.
+- **Landed bridge block — `U3.ADAPTIVE_FAMILY_RETENTION` (LANDED ✅).** The
+  family-local half of this block's retention work landed early as its own
+  zero-row bridge block on the ownership edge `U2.QUERY_VALUE_DOMAIN →
+  U3.ADAPTIVE_FAMILY_RETENTION → U3.CACHE_FACT_MODEL` (mechanism
+  `AdaptiveFamilyRetention`, organ `CacheFactModel`, U-block U3): each
+  `FamilyKey` declares an exhaustive, wildcard-free `candidate_cap()` (floor 4;
+  the inference/substitution-heavy live families `Instantiate` / `TypeOf` /
+  `Conditional` / `MappedType` hold 8); eviction at the family slot cap is
+  invalid-against-the-publishing-view FIRST (snapshot/validate/reacquire OUTSIDE
+  the `entries` mutex, `admission_seq` identity recheck under it), then
+  LRU-by-valid-hit (front of the slot order); a new cacheable candidate is
+  ALWAYS admitted after local eviction; same-discriminant re-publish replaces
+  in place and becomes freshest. Guards:
+  `cache_candidate_cap_is_per_family_not_uniform`,
+  `family_eviction_prefers_invalid_then_lru_valid_hit` (both moved here from
+  this block's named set; the remaining names stay full-U3). Explicitly NOT in
+  the bridge (still THIS block's scope): the process-wide candidate-memory
+  ceiling, its typed `ReturnOnly`/`ComputeAdmission` non-admission, and the
+  adaptive grow/shrink of caps under hit pressure — admission semantics are
+  unchanged and memory-pressure-independent at the bridge.
 - **Parallelism:** Semantic-graph lane, after U8 (the cache/fact rail the result DB
   + exporter + session ride on); runs beside the cache-runtime lane (U4/U5/U7/U9).
 - **Risk:** medium-large — correctness-sensitive (typed-admission + invalidation-
   authority change).
 - **Required deletions:** the uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` constant +
   FIFO candidate eviction (→ per-family `candidate_cap()` + invalid-first/LRU-by-
-  valid-hit eviction + global ceiling); any boolean/sentinel/side-channel cache
+  valid-hit eviction + global ceiling — the constant + FIFO are DELETED at the
+  `U3.ADAPTIVE_FAMILY_RETENTION` bridge; the global ceiling deletion-side stays
+  full-U3); any boolean/sentinel/side-channel cache
   admission (→ the typed `ComputeAdmission` enum); any bundled `project_config_hash`
   (→ the R21 five-dimension split); any content/version hash or `fact_dep_signature`
   on a query-identity KEY (→ version rooting on the value, R6); `component_meta_caches.rs`
@@ -3684,8 +3712,10 @@ U-block's scope bullet for the contract.
 - **Guards (per the child's named set):** `relation_budget_exceeded_admits_nothing`,
   `keyspace_budget_exceeded_admits_nothing`, `call_resolution_budget_exceeded_admits_nothing`,
   `apparent_type_budget_exceeded_admits_nothing`; `program_analysis_fact_domain_validates_flow_slice`
-  (the fourth closed `FactDomain::ProgramAnalysis` dispatch home); `cache_candidate_cap_is_per_family_not_uniform`;
-  `family_eviction_prefers_invalid_then_lru_valid_hit`; `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`;
+  (the fourth closed `FactDomain::ProgramAnalysis` dispatch home); `cache_candidate_cap_is_per_family_not_uniform`
+  + `family_eviction_prefers_invalid_then_lru_valid_hit` (**LANDED — moved to the
+  `U3.ADAPTIVE_FAMILY_RETENTION` bridge block's contract row**);
+  `cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions`;
   `instantiation_depth_policy_in_identity_and_facts`; `persistent_caches_never_admit_overlay_only_results`;
   `architecture_minimizes_fallback_entry_not_fallback_cost`. A guard that no
   `SemanticQueryKey` variant contains `DeclIdentity`; a guard that reverse-dependency
@@ -4756,16 +4786,17 @@ if skill routing changes; `docs/` for API/guide pages; inline rustdoc/JSDoc on
 changed signatures). Every new CRITICAL rule lands with a static guard or a
 discriminating regression test in the same change (R6 meta-guard).
 
-**Intentional current-state-authority divergence (NOT pre-edited).** `CLAUDE.md`
+**Intentional current-state-authority divergence (PARTIALLY CLOSED).** `CLAUDE.md`
 (the Cache Architecture (CRITICAL) rule) and the `/type-cache-architecture` skill
-currently describe the LIVE uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` + FIFO eviction
-model. That is the one live intentional divergence from this plan's end-state: it
-describes the code as it exists TODAY and is deliberately NOT pre-edited — making the
-current-state authority docs describe unbuilt state would make them lie about the live
-code. It is updated to the per-family-adaptive `candidate_cap()` +
-invalid-first/LRU-by-valid-hit eviction + global memory ceiling by U3's `Docs updated`
-step WHEN U3 lands. The divergence is therefore an intentional, tracked deliverable,
-not an oversight. (The query-mode / satisfaction model is NOT a divergence: `CLAUDE.md`
+described the LIVE uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` + FIFO eviction model
+until the `U3.ADAPTIVE_FAMILY_RETENTION` bridge landed: they now describe the
+landed family-local policy (per-family `candidate_cap()` + invalid-first/LRU-by-
+valid-hit eviction + always-admit). The ONE remaining live intentional divergence
+from this plan's end-state is the process-wide candidate-memory **global ceiling +
+its typed `ReturnOnly` non-admission** (plus adaptive grow/shrink of the per-family
+caps under hit pressure): unbuilt full-U3 state, deliberately NOT pre-described as
+live anywhere — it lands with U3's `Docs updated` step WHEN U3 lands. (The
+query-mode / satisfaction model is NOT a divergence: `CLAUDE.md`
 and the `/type-resolution` skill already document the landed materialized-point
 satisfaction — recorded `(path, point)` dominance via `cached_satisfies`, with the
 demand lattice as the algebra and the five modes as presets. The
@@ -4777,7 +4808,7 @@ demand lattice as the algebra and the five modes as presets. The
 | **U0** | `/type-resolution` (typeinfo contract surface); the reconciled A0a-landed `tests/typeinfo_ignored_test_manifest.rs` manifest (schema notes); `/audit-infrastructure` (`AuditedResult`). |
 | **U1** | `/scheduler` SKILL (TaskKind split, `execute_cache_node`); `/host-session` if dispatch surface changes. |
 | **U2** | `/type-resolution` + `/type-cache-architecture` (final `SemanticQueryKey` surface, slot identity, B4 node enumeration, R21 key composition); `CLAUDE.md` project-global-cache + macro-traversal summaries; `docs/arch/fact-based-cache.md` per-cache key tables. |
-| **U3** | `/type-cache-architecture` (invalidation authority, no reverse-dep eviction; **the per-family adaptive `candidate_cap()` + invalid-first/LRU-by-valid-hit eviction + global memory ceiling, replacing the uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO**); **`CLAUDE.md`** (the Cache Architecture (CRITICAL) `FAMILY_SLOT_CANDIDATE_CAP` / FIFO-eviction text → the per-family-adaptive cap model); `/component-meta` (cache contracts); `docs/arch/fact-based-cache.md` (multi-candidate `FamilySlots` section — already current). |
+| **U3** | `/type-cache-architecture` (invalidation authority, no reverse-dep eviction; **the per-family adaptive `candidate_cap()` + invalid-first/LRU-by-valid-hit eviction + global memory ceiling, replacing the uniform `FAMILY_SLOT_CANDIDATE_CAP = 4` FIFO** — the family-local half LANDED at `U3.ADAPTIVE_FAMILY_RETENTION` with its docs updated; full U3 adds the global ceiling + typed non-admission); **`CLAUDE.md`** (the Cache Architecture (CRITICAL) `FAMILY_SLOT_CANDIDATE_CAP` / FIFO-eviction text → the per-family cap model — LANDED at the bridge); `/component-meta` (cache contracts); `docs/arch/fact-based-cache.md` (multi-candidate `FamilySlots` section — already current). |
 | **U4** | `/type-cache-architecture` (persistent pure-artifact rules, sealed `PersistentArtifactNode`); `docs/arch/fact-based-cache.md`. |
 | **U5** | `/type-cache-architecture` (memory policy, metrics); `/audit-infrastructure` (`StructuredAuditEvent::CacheNode*`). |
 | **U6** | `docs/arch/native-flow-return.md` (moved here in U6); `/type-resolution` (`FlowReturn` query node); `/compiler-codegen` if flow lowering surfaces. |

@@ -328,13 +328,21 @@ the live host env); test fixtures use the env-agnostic
 empty global, `<synthetic>`) do NOT fabricate a `FileWholeHash` self-root —
 they root via `args` nodes only. A real-file base whose `ensure_indexed_ready_serve`
 returns `None` is a stale key and returns `cache_suppress = true`. Each
-`(family, slot)` in `FamilySlots` holds a candidate list capped at
-`FAMILY_SLOT_CANDIDATE_CAP = 4` (per-slot multi-candidate); two
+`(family, slot)` in `FamilySlots` holds a candidate list bounded at the family's
+exhaustive, wildcard-free `candidate_cap()` (`U3.ADAPTIVE_FAMILY_RETENTION` —
+floor 4; the inference/substitution-heavy live families `Instantiate` / `TypeOf` /
+`Conditional` / `MappedType` hold 8); two
 content-versions of the same content-free key coexist as distinct candidates
 inside one slot under R20 overlay isolation. Admission identity is the pair
 `(validated_at_generation, ReadSetSignature.facts)` — same exact discriminant
-replaces in place; a different view appends at the back; cap overflow
-FIFO-evicts the oldest. Warm lookup scans every candidate and returns the FIRST
+replaces in place and becomes freshest; a different view is ALWAYS admitted after
+local eviction: at the family cap the publish evicts a candidate INVALID against
+the publishing caller's stable store view FIRST (planned snapshot/validate/
+reacquire OUTSIDE the `entries` mutex, `admission_seq` identity recheck under it),
+then the front of the slot's LRU order (the least-recently validated-hit
+candidate). The process-wide candidate-memory ceiling + typed non-admission are
+deferred full-`U3.CACHE_FACT_MODEL` work — cacheability never depends on memory
+pressure. Warm lookup scans every candidate and returns the FIRST
 that passes BOTH §3.4 gates (below); `validated_at_generation` is LRU-recency
 metadata, NOT a semantic-validity oracle.
 

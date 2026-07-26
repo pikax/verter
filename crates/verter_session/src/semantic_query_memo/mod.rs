@@ -2143,11 +2143,11 @@ impl SemanticGraphStore {
             })
         });
         if let Some(entry) = &validated {
-            // Brief LRU bookkeeping — reacquire ONLY to update FIFO
-            // order so subsequent lookups treat this candidate as
-            // freshest. The match is by discriminant identity; if a
-            // concurrent invalidation drained it between snapshot and
-            // here, the update is a no-op.
+            // Brief LRU bookkeeping — reacquire ONLY to update the
+            // slot's LRU order so subsequent lookups treat this
+            // candidate as freshest. The match is by discriminant
+            // identity; if a concurrent invalidation drained it between
+            // snapshot and here, the update is a no-op.
             let mut entries = self.entries_lock_diagnosed();
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, entry);
@@ -2417,9 +2417,9 @@ impl SemanticGraphStore {
     /// dropped, so an unrelated warm read or cold publish does not
     /// serialise on the single global memo mutex for the duration of
     /// validation. LRU bookkeeping briefly reacquires the lock to move
-    /// the matching candidate to the back of the FIFO — a constant-time
-    /// `Vec` reorder, no fact-rail work. Mirrors the relation memo's
-    /// `get_relation`.
+    /// the matching candidate to the back of the slot's LRU order — a
+    /// constant-time `Vec` reorder, no fact-rail work. Mirrors the
+    /// relation memo's `get_relation`.
     #[inline]
     fn try_warm_value_hit_fast_path(
         &self,
@@ -2431,7 +2431,7 @@ impl SemanticGraphStore {
         let slot = prepared.slot();
 
         // Snapshot the candidate list under the lock; validate OUTSIDE
-        // the lock. With the cap-4 multi-candidate substrate the
+        // the lock. With the multi-candidate substrate the
         // validation walk over the path-precise fact rail is bounded
         // but still non-trivial, and holding the single global memo
         // mutex across it would serialise every unrelated warm read
@@ -2452,7 +2452,7 @@ impl SemanticGraphStore {
             .into_iter()
             .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
-        // candidate to the back of the FIFO order so subsequent
+        // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
         // identity; if a concurrent invalidation drained it between
         // snapshot and here, the update is a no-op (the caller still
@@ -3316,6 +3316,14 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
         };
+        // Per-family bounded retention: plan the cap eviction against the
+        // publishing caller's stable view BEFORE the publish lock (the
+        // plan releases `entries` before validating fact rails; the
+        // TOCTOU abort re-check below still runs under the publish lock,
+        // so an invalidation racing the plan is caught by the fence).
+        let cap = family.candidate_cap();
+        let eviction =
+            family::plan_family_slot_eviction(&self.entries, family, slot, &entry, cap, ctx);
         let mut entries = self.entries_lock_diagnosed();
         // Test forcing: simulate a concurrent sweep that aborted
         // this in-flight entry just before the TOCTOU re-check —
@@ -3345,11 +3353,13 @@ impl SemanticGraphStore {
         // Record whether this family is newly entering the memo so the
         // retention budget tracks one ledger record per family.
         let family_was_new = !entries.contains_key(family);
-        let outcome =
-            entries
-                .entry(family.clone())
-                .or_default()
-                .publish(slot, entry, requested_path);
+        let outcome = entries.entry(family.clone()).or_default().publish(
+            slot,
+            entry,
+            requested_path,
+            cap,
+            eviction,
+        );
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -3367,7 +3377,8 @@ impl SemanticGraphStore {
         }
         // Drain per-candidate reverse-index registrations for every
         // candidate this publish DISPLACED (same-discriminant
-        // replacements + per-slot FIFO cap-eviction victims). Each
+        // replacements + per-family bounded-retention cap-eviction
+        // victims, at whatever slot position the victim occupied). Each
         // displaced candidate's `admission_seq` keys its own
         // registrations, so siblings in the same slot keep theirs
         // (R20 overlay isolation). Runs UNDER the held `entries`
@@ -3523,6 +3534,16 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
         };
+        // Per-family bounded retention: plan the cap eviction against the
+        // publishing caller's stable view BEFORE the publish lock —
+        // symmetric with `warm_publish_one` (a concurrent cold winner may
+        // have filled the slot to its family cap between the presence
+        // probe above and this publish). The plan releases `entries`
+        // before validating fact rails; the parent abort fence below
+        // still runs under the publish lock.
+        let cap = family.candidate_cap();
+        let eviction =
+            family::plan_family_slot_eviction(&self.entries, family, slot, &entry, cap, ctx);
         let mut entries = self.entries_lock_diagnosed();
         // Abort fence — re-check the parent winner's in-flight `aborted`
         // flag UNDER the `entries` lock, symmetric with
@@ -3540,11 +3561,13 @@ impl SemanticGraphStore {
             return;
         }
         let family_was_new = !entries.contains_key(family);
-        let outcome =
-            entries
-                .entry(family.clone())
-                .or_default()
-                .publish(slot, entry, requested_path);
+        let outcome = entries.entry(family.clone()).or_default().publish(
+            slot,
+            entry,
+            requested_path,
+            cap,
+            eviction,
+        );
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill

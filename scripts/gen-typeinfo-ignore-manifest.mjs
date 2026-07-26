@@ -270,6 +270,7 @@ const BLOCK_TEXT_TO_VARIANT = new Map([
   ["U6.CROSS_FILE", "U6CrossFile"],
   ["U6.LOOP_CLOSURE", "U6LoopClosure"],
   ["U3.CACHE_FACT_MODEL", "U3CacheFactModel"],
+  ["U3.ADAPTIVE_FAMILY_RETENTION", "U3AdaptiveFamilyRetention"],
   ["U10.RESULT_DB", "U10ResultDb"],
   ["U11.PUBLIC_RELATION_SESSION", "U11PublicRelationSession"],
   ["U14.MACRO_ADAPTER", "U14MacroAdapter"],
@@ -317,6 +318,7 @@ const BLOCK_TO_MECHANISM = new Map([
   ["U6CrossFile", "CrossFileRouteFact"],
   ["U6LoopClosure", "LoopClosureFixedPoint"],
   ["U3CacheFactModel", "CacheFactModelAdmission"],
+  ["U3AdaptiveFamilyRetention", "AdaptiveFamilyRetention"],
   ["U10ResultDb", "ResultDbModeDemandExactness"],
   ["U11PublicRelationSession", "PublicSessionFootprintInvalidation"],
   ["U14MacroAdapter", "MacroSurfaceAdapter"],
@@ -338,7 +340,7 @@ const BLOCK_PREREQS = new Map([
   ["U0ManifestSubstrate", []],
   ["U2QueryValueDomain", ["U0ManifestSubstrate"]],
   ["U2BinderIdentityFacts", ["U2QueryValueDomain"]],
-  ["U2RelationInfer", ["U2QueryValueDomain", "U2BinderIdentityFacts"]],
+  ["U2RelationInfer", ["U2QueryValueDomain", "U2BinderIdentityFacts", "U3AdaptiveFamilyRetention"]],
   ["U2IndexedAccess", ["U2QueryValueDomain", "U2RelationInfer"]],
   ["U2MappedTemplate", ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess"]],
   ["U2Utilities", ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess", "U2MappedTemplate"]],
@@ -377,7 +379,20 @@ const BLOCK_PREREQS = new Map([
   ["U6LoopClosure", ["U6CallResolve", "U6PredicateAssertion"]],
   // Wire surface depends on U0 + the whole U2 + U6 parents.
   ["U8WireSurfaceClosure", ["U0ManifestSubstrate", "U2JsxFoundations", "U6LoopClosure"]],
-  ["U3CacheFactModel", ["U8WireSurfaceClosure", "U2JsxFoundations", "U6LoopClosure"]],
+  // Landed bridge block ahead of full U3: per-family bounded retention on
+  // the family memo's multi-candidate slots (per-family `candidate_cap()` +
+  // invalid-first/LRU-by-valid-hit eviction + always-admit). The global
+  // candidate-memory ceiling + typed non-admission stay full-U3 work.
+  ["U3AdaptiveFamilyRetention", ["U2QueryValueDomain"]],
+  [
+    "U3CacheFactModel",
+    [
+      "U8WireSurfaceClosure",
+      "U2JsxFoundations",
+      "U6LoopClosure",
+      "U3AdaptiveFamilyRetention",
+    ],
+  ],
   [
     "U10ResultDb",
     ["U3CacheFactModel", "U8WireSurfaceClosure", "U2JsxFoundations", "U6LoopClosure"],
@@ -463,6 +478,7 @@ const BLOCK_TO_UBLOCK = new Map([
   ["U6CrossFile", "U6"],
   ["U6LoopClosure", "U6"],
   ["U3CacheFactModel", "U3"],
+  ["U3AdaptiveFamilyRetention", "U3"],
   ["U10ResultDb", "U10"],
   ["U11PublicRelationSession", "U11"],
   ["U14MacroAdapter", "U14"],
@@ -501,6 +517,7 @@ const BLOCK_TO_ORGAN = new Map([
   ["U6CrossFile", "FlowCallSolver"],
   ["U6LoopClosure", "FlowCallSolver"],
   ["U3CacheFactModel", "CacheFactModel"],
+  ["U3AdaptiveFamilyRetention", "CacheFactModel"],
   ["U10ResultDb", "ResultDb"],
   ["U11PublicRelationSession", "PublicSession"],
   ["U14MacroAdapter", "FrameworkAdapter"],
@@ -778,12 +795,18 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "call_resolution_budget_exceeded_admits_nothing",
       "apparent_type_budget_exceeded_admits_nothing",
       "program_analysis_fact_domain_validates_flow_slice",
-      "cache_candidate_cap_is_per_family_not_uniform",
-      "family_eviction_prefers_invalid_then_lru_valid_hit",
       "cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions",
       "instantiation_depth_policy_in_identity_and_facts",
       "persistent_caches_never_admit_overlay_only_results",
       "architecture_minimizes_fallback_entry_not_fallback_cost",
+    ],
+  ],
+  [
+    "U3AdaptiveFamilyRetention",
+    [
+      _DAG,
+      "cache_candidate_cap_is_per_family_not_uniform",
+      "family_eviction_prefers_invalid_then_lru_valid_hit",
     ],
   ],
   [

@@ -275,9 +275,11 @@ enum UBlock {
 }
 
 /// The child `block_id` that OWNS lifting a row (per the partition).
-/// Closed set: the 30 row-owning blocks PLUS the 4 zero-row substrate
+/// Closed set: the 30 row-owning blocks PLUS the 5 zero-row substrate
 /// blocks (`U0.MANIFEST_SUBSTRATE`, `U8.WIRE_SURFACE_CLOSURE`,
-/// `U12.EXPORTER`, `U13.PROJECTION`). `U2.QUERY_VALUE_DOMAIN` was formerly
+/// `U12.EXPORTER`, `U13.PROJECTION`, `U3.ADAPTIVE_FAMILY_RETENTION` — the
+/// landed per-family bounded-retention bridge block, which owns contract
+/// guards but no `IgnoredTestRow`s). `U2.QUERY_VALUE_DOMAIN` was formerly
 /// a zero-row substrate block but now owns the 2 index-signature
 /// publication lifts, so it is row-owning.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
@@ -322,6 +324,11 @@ enum TypeInfoParityBlockId {
     U6LoopClosure,
     // Cache / result / session / projection / adapter blocks.
     U3CacheFactModel,
+    // The landed U3 bridge block: per-family bounded retention on the
+    // family memo's multi-candidate slots (`candidate_cap()` +
+    // invalid-first/LRU-by-valid-hit eviction + always-admit). Owns no
+    // `IgnoredTestRow`s; prerequisite of `U3CacheFactModel`.
+    U3AdaptiveFamilyRetention,
     U10ResultDb,
     U11PublicRelationSession,
     U14MacroAdapter,
@@ -506,6 +513,7 @@ enum MechanismId {
     LoopClosureFixedPoint,
     // Cache / result / session / adapter mechanisms.
     CacheFactModelAdmission,
+    AdaptiveFamilyRetention,
     ResultDbModeDemandExactness,
     PublicSessionFootprintInvalidation,
     MacroSurfaceAdapter,
@@ -728,6 +736,7 @@ fn mechanism_owning_block(mech: MechanismId) -> TypeInfoParityBlockId {
         CrossFileRouteFact => U6CrossFile,
         LoopClosureFixedPoint => U6LoopClosure,
         CacheFactModelAdmission => U3CacheFactModel,
+        AdaptiveFamilyRetention => U3AdaptiveFamilyRetention,
         ResultDbModeDemandExactness => U10ResultDb,
         PublicSessionFootprintInvalidation => U11PublicRelationSession,
         MacroSurfaceAdapter => U14MacroAdapter,
