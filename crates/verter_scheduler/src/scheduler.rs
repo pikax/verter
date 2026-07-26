@@ -15643,11 +15643,58 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     /// A worker running A.Analysis that submits a request for
-    /// A.Artifact{X} and waits must observe the same-path failure
-    /// rather than hanging on a dedup attachment.
+    /// A.Artifact{X} and waits must reach a TERMINAL state instead of
+    /// parking on its own pending completion.
+    ///
+    /// **This contract has TWO legitimate arms; both are correct.**
+    /// [`check_terminal_or_same_path`] checks `handle.try_get()` FIRST,
+    /// and re-checks it again immediately before synthesizing the
+    /// same-path failure, specifically so a genuinely-resolved handle is
+    /// never masked by the synthetic `Failed`. Which arm appears depends
+    /// only on what happens first:
+    ///
+    /// 1. the caller reaches the same-path probe while the handle is
+    ///    still pending → `Failed(StageFailed { stage: "wait_or_drive" })`
+    /// 2. the work resolves first → `Ready(Artifact { profile_hash: 7 })`
+    ///
+    /// Arm 2 is reachable HERE BY DESIGN and is not a defect. The
+    /// active-path frame is thread-local to this caller, so the
+    /// `SchedulerConfig::default()` pool — `num_cpus()` CPU workers plus
+    /// 4 I/O workers, every one of them with an EMPTY active path — is
+    /// free to run `/a.vue` Source → Analysis → Artifact to completion.
+    /// Nothing here is actually blocked on `/a.vue` Analysis; the caller
+    /// merely pushed a frame CLAIMING it is. Pinning arm 1 as the only
+    /// acceptable outcome therefore makes this test a race on pool
+    /// scheduling — it used to do exactly that, and it failed under
+    /// concurrent load having observed arm 2.
+    ///
+    /// **Do not "reconcile" this with
+    /// `wait_or_drive_inner_re_check_observes_handle_resolved_during_same_path_probe`
+    /// by making a resolved handle lose to the synthetic failure.** That
+    /// sibling test deterministically pins the opposite direction — a
+    /// handle that resolves during the same-path window MUST surface its
+    /// real terminal state — and it is the authority on arm 2. The two
+    /// tests are the two arms of ONE contract, not a contradiction.
+    ///
+    /// What this test guards is the anti-deadlock property described in
+    /// the section comment above: without the concrete
+    /// `CompletionTarget::Work` target stamping, the caller would dedup
+    /// onto the in-flight Artifact, which gates on its own Analysis, and
+    /// PARK forever. So the discriminating assertions are (a) a terminal
+    /// state ARRIVES at all, enforced by an off-thread liveness
+    /// watchdog, and (b) it is one of exactly the two legitimate shapes
+    /// — never `Superseded`, never `Shutdown`, never a differently
+    /// tagged `Failed`, never a `Ready` carrying some other target.
+    ///
+    /// The bound is a LIVENESS watchdog, NOT a latency budget: a parked
+    /// waiter never completes at all, so a generous bound separates
+    /// "parked" from "returned" perfectly while staying immune to
+    /// machine load. A tight wall-clock assertion here would only
+    /// re-introduce a load-sensitive flake — which is why the previous
+    /// `elapsed < 2s` check is gone.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn analysis_executor_submits_same_file_artifact_returns_failed() {
+    fn analysis_executor_submits_same_file_artifact_reaches_a_terminal_state() {
         use crate::caller_kind::{with_active_path, CallerKind};
         use crate::dag::{FileStageKey, WorkNodeIdentity};
         use crate::job::{CompletionState, SchedulerError};
@@ -15660,43 +15707,66 @@ mod tests {
             Arc::new(crate::executor::DefaultExecutor),
         ));
 
-        let analysis_id = WorkNodeIdentity::FileStage {
-            canonical: Arc::from("/a.vue"),
-            generation: 1,
-            stage: FileStageKey::Analysis,
-        };
-
-        // Simulate being inside the Analysis executor by pushing
-        // the Analysis frame onto the active path before submitting
-        // and waiting.
-        let start = std::time::Instant::now();
-        let state = with_active_path(analysis_id, || {
-            let handle = sched.submit_request(Request {
-                file_id: "/a.vue".to_string(),
-                target: TargetStage::Artifact { profile_hash: 7 },
-                priority: Priority::Interactive,
-                source: Some(Arc::from("a content")),
-                file_language: None,
-                request_context: None,
+        // Run the waiter on its own thread so a PARK is observable as a
+        // missing message rather than hanging the whole test binary.
+        // `with_active_path` is thread-local, so the simulated Analysis
+        // frame must be pushed on the same thread that waits.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sched_for_waiter = Arc::clone(&sched);
+        let waiter = std::thread::spawn(move || {
+            let analysis_id = WorkNodeIdentity::FileStage {
+                canonical: Arc::from("/a.vue"),
+                generation: 1,
+                stage: FileStageKey::Analysis,
+            };
+            let state = with_active_path(analysis_id, || {
+                let handle = sched_for_waiter.submit_request(Request {
+                    file_id: "/a.vue".to_string(),
+                    target: TargetStage::Artifact { profile_hash: 7 },
+                    priority: Priority::Interactive,
+                    source: Some(Arc::from("a content")),
+                    file_language: None,
+                    request_context: None,
+                });
+                sched_for_waiter.wait_or_drive_with_caller(&handle, CallerKind::CpuWorker)
             });
-            sched.wait_or_drive_with_caller(&handle, CallerKind::CpuWorker)
+            // A send failure only happens if the watchdog already failed
+            // the test and dropped the receiver.
+            let _ = tx.send(state);
         });
-        let elapsed = start.elapsed();
 
-        // Discriminating: must return Failed promptly, not hang.
-        assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "Analysis→Artifact same-path must return promptly; elapsed = {elapsed:?}",
-        );
-        match state {
-            CompletionState::Failed(SchedulerError::StageFailed { stage, .. }) => {
-                assert_eq!(stage, "wait_or_drive", "must be tagged as wait_or_drive");
-            }
-            other => {
-                panic!(
-                    "expected Failed(StageFailed {{ stage: \"wait_or_drive\" }}), got {other:?}",
-                );
-            }
+        // Liveness watchdog — the anti-deadlock discriminator. A parked
+        // waiter never sends, so this timeout is what converts the
+        // deadlock into a test failure.
+        let liveness_bound = std::time::Duration::from_secs(60);
+        let state = match rx.recv_timeout(liveness_bound) {
+            Ok(state) => state,
+            Err(_) => panic!(
+                "wait_or_drive reached NO terminal state within {liveness_bound:?}: the \
+                 Analysis→Artifact same-path waiter parked on its own pending completion \
+                 instead of returning. This is precisely the silent deadlock the concrete \
+                 `CompletionTarget::Work` target stamping exists to prevent.",
+            ),
+        };
+        waiter.join().expect("waiter thread panicked");
+
+        // Exactly TWO shapes are legitimate. Everything else — including
+        // `Superseded`, `Shutdown`, a `Failed` tagged with another stage,
+        // or a `Ready` for a different target — is a real failure.
+        match &state {
+            // Arm 1: same-path self-await detected while still pending.
+            CompletionState::Failed(SchedulerError::StageFailed { stage, .. })
+                if stage == "wait_or_drive" => {}
+            // Arm 2: the requested Artifact genuinely resolved first.
+            // `profile_hash` is checked so a `Ready` for the wrong target
+            // cannot satisfy this arm.
+            CompletionState::Ready(RequestResult::Artifact(snapshot))
+                if snapshot.profile_hash == 7 => {}
+            other => panic!(
+                "expected ONE of the two legitimate terminal arms — \
+                 Failed(StageFailed {{ stage: \"wait_or_drive\" }}) or \
+                 Ready(Artifact {{ profile_hash: 7 }}) — got {other:?}",
+            ),
         }
     }
 
