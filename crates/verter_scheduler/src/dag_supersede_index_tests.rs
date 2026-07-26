@@ -194,7 +194,7 @@ fn submit_node(
     identity: WorkNodeIdentity,
     kind: WorkKind,
 ) -> SubmissionToken {
-    dag.submit(identity, kind, Priority::Interactive, Vec::new(), None)
+    dag.submit_expect(identity, kind, Priority::Interactive, Vec::new(), None)
 }
 
 // ─────────────────────────────────────────────────────────────────

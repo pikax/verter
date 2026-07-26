@@ -37,7 +37,7 @@ fn artifact(s: &str, gen: u64, profile: u64) -> WorkNodeIdentity {
 
 /// Submit a CPU-class (Analysis) ready node at `prio`, return its token.
 fn submit_cpu(dag: &mut SchedulerDag, name: &str, prio: Priority) -> SubmissionToken {
-    dag.submit(
+    dag.submit_expect(
         file_stage(name, 1, FileStageKey::Analysis),
         WorkKind::Analysis,
         prio,
@@ -48,7 +48,7 @@ fn submit_cpu(dag: &mut SchedulerDag, name: &str, prio: Priority) -> SubmissionT
 
 /// Submit an I/O-class (Source/Load) ready node at `prio`, return its token.
 fn submit_io(dag: &mut SchedulerDag, name: &str, prio: Priority) -> SubmissionToken {
-    dag.submit(
+    dag.submit_expect(
         file_stage(name, 1, FileStageKey::Source),
         WorkKind::Load,
         prio,
@@ -85,7 +85,7 @@ fn submit_ready_node_enters_priority_class_lane() {
     // A gated node does not enter any lane.
     let dep = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let _dep_tok = submit_cpu(&mut dag, "/dep.ts", Priority::Interactive);
-    let gated = dag.submit(
+    let gated = dag.submit_expect(
         artifact("/c.vue", 1, 7),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -122,7 +122,7 @@ fn complete_dep_moves_waiter_into_lane() {
     let mut dag = SchedulerDag::new();
     let dep = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let _dep_tok = submit_cpu(&mut dag, "/dep.ts", Priority::Interactive);
-    let waiter = dag.submit(
+    let waiter = dag.submit_expect(
         artifact("/a.vue", 1, 7),
         WorkKind::Artifact,
         Priority::Background,
@@ -150,7 +150,7 @@ fn complete_dep_moves_waiter_into_lane() {
 fn pre_dispatch_dedup_adding_dep_removes_ready_token_from_lane() {
     let mut dag = SchedulerDag::new();
     let target = file_stage("/a.vue", 1, FileStageKey::Source);
-    let t1 = dag.submit(
+    let t1 = dag.submit_expect(
         target.clone(),
         WorkKind::Load,
         Priority::Interactive,
@@ -166,7 +166,7 @@ fn pre_dispatch_dedup_adding_dep_removes_ready_token_from_lane() {
     // merges the dep into deps_remaining — the node is no longer ready.
     let new_dep = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let _dep_tok = submit_cpu(&mut dag, "/dep.ts", Priority::Interactive);
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         target.clone(),
         WorkKind::Load,
         Priority::Interactive,
@@ -191,7 +191,7 @@ fn pre_dispatch_dedup_adding_dep_removes_ready_token_from_lane() {
 fn priority_upgrade_migrates_ready_token_to_higher_lane() {
     let mut dag = SchedulerDag::new();
     let id = file_stage("/a.ts", 1, FileStageKey::Analysis);
-    let t = dag.submit(
+    let t = dag.submit_expect(
         id.clone(),
         WorkKind::Analysis,
         Priority::Background,
@@ -203,7 +203,7 @@ fn priority_upgrade_migrates_ready_token_to_higher_lane() {
         Some((Priority::Background, ResourceClass::Cpu)),
     );
     // Re-submit at a higher priority (dedup upgrade).
-    let t2 = dag.submit(
+    let t2 = dag.submit_expect(
         id.clone(),
         WorkKind::Analysis,
         Priority::Critical,
@@ -228,7 +228,7 @@ fn priority_upgrade_migrates_ready_token_to_higher_lane() {
 fn explicit_upgrade_priority_migrates_ready_token_lane() {
     let mut dag = SchedulerDag::new();
     let id = file_stage("/a.ts", 1, FileStageKey::Analysis);
-    let t = dag.submit(
+    let t = dag.submit_expect(
         id.clone(),
         WorkKind::Analysis,
         Priority::Background,
@@ -257,7 +257,7 @@ fn terminal_failure_fanout_makes_stranded_waiter_dispatchable() {
     let mut dag = SchedulerDag::new();
     let dep = file_stage("/dep.ts", 1, FileStageKey::Analysis);
     let _dep_tok = submit_cpu(&mut dag, "/dep.ts", Priority::Interactive);
-    let waiter = dag.submit(
+    let waiter = dag.submit_expect(
         artifact("/a.vue", 1, 7),
         WorkKind::Artifact,
         Priority::Interactive,
@@ -539,7 +539,7 @@ fn parked_cpu_worker_loans_over_saturated_cpu_lane_no_deadlock() {
 
     // The parked worker's own in-flight job consumes the only CPU permit.
     let parked_id = file_stage("/parked.ts", 1, FileStageKey::Analysis);
-    let _parked = dag.submit(
+    let _parked = dag.submit_expect(
         parked_id.clone(),
         WorkKind::Analysis,
         Priority::Interactive,
@@ -552,7 +552,7 @@ fn parked_cpu_worker_loans_over_saturated_cpu_lane_no_deadlock() {
 
     // A transitive CPU dependency becomes ready.
     let dep_id = file_stage("/dep.ts", 1, FileStageKey::Analysis);
-    let _dep = dag.submit(
+    let _dep = dag.submit_expect(
         dep_id.clone(),
         WorkKind::Analysis,
         Priority::Critical,
@@ -626,7 +626,7 @@ fn loan_does_not_fire_for_cross_class_parked_worker() {
 fn active_path_skip_dispatches_next_eligible_token() {
     let mut dag = SchedulerDag::new();
     let active = file_stage("/active.ts", 1, FileStageKey::Analysis);
-    let _a = dag.submit(
+    let _a = dag.submit_expect(
         active.clone(),
         WorkKind::Analysis,
         Priority::Critical,
@@ -822,7 +822,7 @@ fn run_lifecycle_model(seed: u64, ops: usize, budget: DagCapacityBudget) {
                 } else {
                     Vec::new()
                 };
-                let _ = dag.submit(id.clone(), WorkKind::Analysis, prio, deps, None);
+                let _ = dag.submit_expect(id.clone(), WorkKind::Analysis, prio, deps, None);
                 if !live.contains(&id) {
                     live.push(id);
                 }

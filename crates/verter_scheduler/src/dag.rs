@@ -680,6 +680,18 @@ pub struct SchedulerDag {
     /// so [`Self::supersede_old_file_generations`] can drive off the
     /// bumped canonical's buckets alone. See [`CanonicalReverseIndex`].
     canonical_index: CanonicalReverseIndex,
+    /// Per-canonical RETIREMENT FLOOR: for canonical `C`, every identity
+    /// whose generation is `< retirement_floor[C]` is retired and can
+    /// never be admitted again.
+    ///
+    /// This is what makes "admission after retirement" structurally
+    /// impossible instead of a rule each admission site must remember.
+    /// The supersede sweep is backward-looking — it cancels what exists
+    /// NOW — so on its own it cannot stop a caller that admits a moment
+    /// later for the generation it just retired. The floor is the
+    /// forward half: [`Self::submit`], the single admission primitive,
+    /// consults it, so no caller can bypass the check.
+    retirement_floor: FxHashMap<Arc<str>, u64>,
     /// Dispatch-ready tokens, sharded by `(Priority, ResourceClass)`.
     /// Outer index is the [`Priority`] ordinal (`Critical`=0 ..
     /// `Maintenance`=3), inner index is the [`ResourceClass`] ordinal
@@ -964,6 +976,7 @@ impl SchedulerDag {
             artifact_blocker_deps: FxHashMap::default(),
             terminal_dep_failures: FxHashMap::default(),
             canonical_index: CanonicalReverseIndex::default(),
+            retirement_floor: FxHashMap::default(),
             ready_lanes: Default::default(),
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
@@ -1344,7 +1357,15 @@ impl SchedulerDag {
         priority: Priority,
         deps: Vec<DepKey>,
         request_context: Option<crate::request_context::OpaqueRequestContext>,
-    ) -> SubmissionToken {
+    ) -> Option<SubmissionToken> {
+        // STRUCTURAL GATE. A retired generation can never be admitted,
+        // whichever caller asks. This is the single admission primitive,
+        // so the check cannot be bypassed or forgotten by a new call
+        // site — which is exactly why it lives here rather than at each
+        // admission site.
+        if self.identity_is_retired(&identity) {
+            return None;
+        }
         // Dedup path: same identity. Three sub-cases — pre-dispatch
         // merge (priority + deps + winner-context), in-flight dedup
         // (priority + winner-context only; deps ignored because the
@@ -1361,7 +1382,7 @@ impl SchedulerDag {
                 // a cancelled tombstone is normally unreachable here.
                 // If observed, refuse to re-admit — the cancelled
                 // node has no completion path the joiner could see.
-                return existing_token;
+                return Some(existing_token);
             }
             if is_dispatched {
                 // In-flight dedup. The joiner shares the in-flight
@@ -1386,7 +1407,7 @@ impl SchedulerDag {
                 // upgrade on it cannot migrate a lane entry; the
                 // refresh is a no-op but keeps the invariant explicit.
                 self.refresh_ready_membership(existing_token);
-                return existing_token;
+                return Some(existing_token);
             }
             // Pre-dispatch merge.
             if let Some(existing) = self.nodes.get_mut(&existing_token) {
@@ -1409,7 +1430,7 @@ impl SchedulerDag {
                 // token to a higher lane, and a newly-added dep that
                 // makes the node non-ready removes it from its lane.
                 self.refresh_ready_membership(existing_token);
-                return existing_token;
+                return Some(existing_token);
             }
         }
 
@@ -1448,7 +1469,202 @@ impl SchedulerDag {
         // must enter its lane; a gated node stays out until its last
         // dep clears.
         self.refresh_ready_membership(token);
-        token
+        Some(token)
+    }
+
+    /// `true` when `identity` names a generation this canonical has
+    /// already retired. Cache nodes carry no generation and are never
+    /// retired by a file's lifecycle.
+    fn identity_is_retired(&self, identity: &WorkNodeIdentity) -> bool {
+        let (canonical, generation) = match identity {
+            WorkNodeIdentity::FileStage {
+                canonical,
+                generation,
+                ..
+            }
+            | WorkNodeIdentity::Artifact {
+                canonical,
+                generation,
+                ..
+            } => (canonical, *generation),
+            WorkNodeIdentity::CacheNode { .. } => return false,
+        };
+        self.retirement_floor
+            .get(canonical)
+            .is_some_and(|floor| generation < *floor)
+    }
+
+    /// Release every waiter gated on `dep_key`, returning those whose
+    /// LAST gate this was.
+    ///
+    /// Factored out of [`Self::cancel`] so retirement can fan out to
+    /// waiters keyed on an identity that was never admitted — a
+    /// consumer can gate on `Analysis-G` before any `Analysis-G` node
+    /// exists, so cancelling nodes alone can never reach it.
+    fn release_dep_waiters(&mut self, dep_key: &DepKey) -> Vec<SubmissionToken> {
+        let mut stranded = Vec::new();
+        if let Some(waiters) = self.waiters.remove(dep_key) {
+            for waiter_tok in waiters {
+                if let Some(waiter) = self.nodes.get_mut(&waiter_tok) {
+                    if waiter.cancelled {
+                        continue;
+                    }
+                    waiter.deps_remaining.remove(dep_key);
+                    if waiter.deps_remaining.is_empty() && !waiter.dispatched {
+                        stranded.push(waiter_tok);
+                    }
+                }
+                // Reconcile the waiter's lane: a cleared dep may make it
+                // dispatch-ready (it will dispatch then fail/retry).
+                self.refresh_ready_membership(waiter_tok);
+            }
+        }
+        stranded
+    }
+
+    /// THE retirement primitive: everything below `floor` for
+    /// `canonical` becomes unreachable, in one lock-held step.
+    ///
+    /// Three rounds of review found the same defect through three
+    /// different doors — a stage completion, a pending-Artifact
+    /// admission, and `remove()` — because each door had to remember to
+    /// gate itself. This collapses them: retirement records a FORWARD
+    /// floor (so [`Self::submit`] refuses later admissions by
+    /// construction) and performs ONE fan-out covering every consumer
+    /// kind, rather than one call per waiter kind.
+    ///
+    /// Returns stranded waiter tokens for the caller to requeue after
+    /// the lock drops.
+    pub(crate) fn retire_generations_below(
+        &mut self,
+        canonical: &Arc<str>,
+        floor: u64,
+    ) -> Vec<SubmissionToken> {
+        // The floor only ever advances: a later, lower retirement must
+        // not resurrect an already-retired generation.
+        let entry = self
+            .retirement_floor
+            .entry(Arc::clone(canonical))
+            .or_insert(0);
+        if floor > *entry {
+            *entry = floor;
+        }
+
+        let mut stranded = Vec::new();
+
+        // 1. Stale file waiter groups → `Superseded`.
+        for gen in self
+            .canonical_index
+            .file_waiter_gens_below(canonical, floor)
+        {
+            let key = FileGenKey {
+                canonical: Arc::clone(canonical),
+                generation: gen,
+            };
+            if let Some(mut state) = self.file_waiters.remove(&key) {
+                for mut group in state.groups.drain(..) {
+                    group.signal_all(CompletionState::Superseded);
+                }
+            }
+            self.canonical_index.remove_file_waiter(&key);
+        }
+
+        // 2. Stale admitted nodes → cancelled, so no stale-generation
+        // work dispatches. Collect identities BEFORE cancelling, since
+        // `cancel` prunes both `nodes` and the reverse index.
+        let stale_node_ids: Vec<WorkNodeIdentity> = self
+            .canonical_index
+            .node_tokens_for(canonical)
+            .into_iter()
+            .filter_map(|tok| {
+                let node = self.nodes.get(&tok)?;
+                if node.cancelled {
+                    return None;
+                }
+                let stale = match &node.identity {
+                    WorkNodeIdentity::FileStage { generation, .. }
+                    | WorkNodeIdentity::Artifact { generation, .. } => *generation < floor,
+                    WorkNodeIdentity::CacheNode { .. } => false,
+                };
+                stale.then(|| node.identity.clone())
+            })
+            .collect();
+        for identity in stale_node_ids {
+            stranded.extend(self.cancel(&identity));
+        }
+
+        // 3. THE GENERAL FAN-OUT. Cancelling nodes only reaches
+        // consumers whose dep was actually ADMITTED. A consumer can gate
+        // on a retired identity that never existed as a node — an owner
+        // Artifact gated on `dep:Analysis-G` while `dep:Source-G` was
+        // still running, where the invalidate cancels Source-G and no
+        // Analysis-G is ever admitted to fan out from. Those waiters
+        // would park forever. Sweeping the dep index by canonical +
+        // generation reaches every consumer regardless of which stage it
+        // named and regardless of whether that stage was ever admitted.
+        let retired_dep_keys: Vec<DepKey> = self
+            .waiters
+            .keys()
+            .filter(|dep| match dep {
+                DepKey::FileStage {
+                    canonical: c,
+                    generation,
+                    ..
+                }
+                | DepKey::Artifact {
+                    canonical: c,
+                    generation,
+                    ..
+                } => c == canonical && *generation < floor,
+                DepKey::CacheNode { .. } => false,
+            })
+            .cloned()
+            .collect();
+        for dep_key in retired_dep_keys {
+            stranded.extend(self.release_dep_waiters(&dep_key));
+        }
+
+        // 4. Stale per-(owner, generation) Artifact blocker entries; the
+        // new generation records its own via `record_artifact_blockers`.
+        for gen in self
+            .canonical_index
+            .blocker_owner_gens_below(canonical, floor)
+        {
+            let key = (Arc::clone(canonical), gen);
+            self.artifact_blocker_deps.remove(&key);
+            self.canonical_index.remove_blocker_owner(canonical, gen);
+        }
+
+        // 5. Stale terminal-dep-failure records, which would otherwise
+        // pin a future admission as `Failed` even though the fresh
+        // generation may yet succeed.
+        for dep_key in self
+            .canonical_index
+            .terminal_failure_keys_below(canonical, floor)
+        {
+            self.terminal_dep_failures.remove(&dep_key);
+            self.canonical_index.remove_terminal_failure(&dep_key);
+        }
+
+        stranded
+    }
+
+    /// Test-only `submit` that asserts the admission was accepted.
+    ///
+    /// Production callers MUST handle the `None` arm — it is the
+    /// retirement floor refusing a retired generation. Tests that are
+    /// not exercising retirement would otherwise all have to unwrap.
+    #[cfg(test)]
+    pub(crate) fn submit_expect(
+        &mut self,
+        identity: WorkNodeIdentity,
+        kind: WorkKind,
+        priority: Priority,
+        deps: Vec<DepKey>,
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
+    ) -> SubmissionToken {
+        self.submit(identity, kind, priority, deps, request_context)
+            .expect("test admission refused by the retirement floor")
     }
 
     /// Look up the token currently associated with `identity`, if any.
@@ -1788,24 +2004,7 @@ impl SchedulerDag {
         self.remove_from_lane(tok);
 
         let dep_key = DepKey::from_identity(identity);
-        let mut stranded = Vec::new();
-        if let Some(waiters) = self.waiters.remove(&dep_key) {
-            for waiter_tok in waiters {
-                if let Some(waiter) = self.nodes.get_mut(&waiter_tok) {
-                    if waiter.cancelled {
-                        continue;
-                    }
-                    waiter.deps_remaining.remove(&dep_key);
-                    if waiter.deps_remaining.is_empty() && !waiter.dispatched {
-                        stranded.push(waiter_tok);
-                    }
-                }
-                // Reconcile the waiter's lane: a cancelled dep clears
-                // the waiter's last gate, making it dispatch-ready (it
-                // will dispatch then fail/retry).
-                self.refresh_ready_membership(waiter_tok);
-            }
-        }
+        let stranded = self.release_dep_waiters(&dep_key);
         // Scrub this node's token from every `waiters` list its own
         // unresolved deps still point at, so the reverse-index never
         // carries a stale entry for a removed token after the node's
@@ -2147,6 +2346,7 @@ impl SchedulerDag {
             let _ = node.reservation.take();
         }
         self.by_identity.clear();
+        self.retirement_floor.clear();
         self.waiters.clear();
         // Signal Shutdown on any outstanding waiters so handles don't
         // hang across reset.
@@ -2311,82 +2511,11 @@ impl SchedulerDag {
     /// linger in `nodes` / `by_identity` and could still be dispatched
     /// by `next_ready`, racing the live-generation work.
     pub fn supersede_old_file_generations(&mut self, canonical: &Arc<str>, current_gen: u64) {
-        // Every surface below is driven off the per-canonical reverse
-        // index for the bumped `canonical` alone, so the sweep does work
-        // proportional to that file's stale entries rather than scanning
-        // the whole DAG. The cleanups are identical in observable effect
-        // to a crate-global scan over the same surfaces.
-
-        // 1. Stale file waiters → `Superseded`.
-        for gen in self
-            .canonical_index
-            .file_waiter_gens_below(canonical, current_gen)
-        {
-            let key = FileGenKey {
-                canonical: Arc::clone(canonical),
-                generation: gen,
-            };
-            if let Some(mut state) = self.file_waiters.remove(&key) {
-                for mut group in state.groups.drain(..) {
-                    group.signal_all(CompletionState::Superseded);
-                }
-            }
-            self.canonical_index.remove_file_waiter(&key);
-        }
-
-        // 2. Stale DAG nodes → cancelled so no stale-generation work
-        // dispatches after the bump. The candidate tokens come from the
-        // canonical's node bucket (every generation); filter to the
-        // older generations and collect identities BEFORE cancelling —
-        // `cancel` mutably prunes both `nodes` and the reverse index.
-        // The bucket covers both file-stage and artifact identities, so
-        // the cancel set matches the former global predicate exactly.
-        let stale_node_ids: Vec<WorkNodeIdentity> = self
-            .canonical_index
-            .node_tokens_for(canonical)
-            .into_iter()
-            .filter_map(|tok| {
-                let node = self.nodes.get(&tok)?;
-                if node.cancelled {
-                    return None;
-                }
-                let stale = match &node.identity {
-                    WorkNodeIdentity::FileStage { generation, .. }
-                    | WorkNodeIdentity::Artifact { generation, .. } => *generation < current_gen,
-                    WorkNodeIdentity::CacheNode { .. } => false,
-                };
-                stale.then(|| node.identity.clone())
-            })
-            .collect();
-        for identity in stale_node_ids {
-            self.cancel(&identity);
-        }
-
-        // 3. Drop any stale per-(owner, generation) Artifact blocker
-        // entries from the superseded generations; the new generation
-        // needs its own `record_artifact_blockers` call to record its
-        // own blockers.
-        for gen in self
-            .canonical_index
-            .blocker_owner_gens_below(canonical, current_gen)
-        {
-            let key = (Arc::clone(canonical), gen);
-            self.artifact_blocker_deps.remove(&key);
-            self.canonical_index.remove_blocker_owner(canonical, gen);
-        }
-
-        // 4. Drop any persistent terminal-dep-failure entries whose
-        // DepKey references this canonical at a superseded generation.
-        // Without this scrub a stale failure record would pin a future
-        // admission as `Failed` even though the invalidation produced a
-        // fresh generation that may yet succeed.
-        for dep_key in self
-            .canonical_index
-            .terminal_failure_keys_below(canonical, current_gen)
-        {
-            self.terminal_dep_failures.remove(&dep_key);
-            self.canonical_index.remove_terminal_failure(&dep_key);
-        }
+        // Delegates to the single retirement primitive. Superseding a
+        // generation IS retiring everything below the new one — the
+        // backward sweep and the forward admission floor are the same
+        // event and must not drift apart.
+        let _stranded = self.retire_generations_below(canonical, current_gen);
     }
 
     /// Signal `Failed(error)` to every waiter group at
@@ -2438,6 +2567,26 @@ impl SchedulerDag {
                 self.canonical_index.remove_file_waiter(&key);
             }
         }
+    }
+
+    /// Signal `Shutdown` to every waiter group at exactly
+    /// `(canonical, generation)`.
+    ///
+    /// Used when an admission is refused by the retirement floor AFTER
+    /// its waiter group was registered: nothing will produce that
+    /// identity, so the group must be terminalized rather than parked.
+    /// Scoped to the one generation so a live neighbour is untouched.
+    pub(crate) fn signal_file_shutdown_at(&mut self, canonical: &Arc<str>, generation: u64) {
+        let key = FileGenKey {
+            canonical: Arc::clone(canonical),
+            generation,
+        };
+        if let Some(mut state) = self.file_waiters.remove(&key) {
+            for mut group in state.groups.drain(..) {
+                group.signal_all(CompletionState::Shutdown);
+            }
+        }
+        self.canonical_index.remove_file_waiter(&key);
     }
 
     /// Signal `Shutdown` to every waiter group for `canonical` across
