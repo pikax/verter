@@ -17,6 +17,189 @@ use crate::type_provider::protocol::{
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
 
+// ── synthetic store-backed workspace roots ────────────────────────────────
+//
+// Several tests below drive the real `CarrierPublishCoordinator` over the on-disk
+// carrier store, whose dir is `temp/verter-carrier-store/<host>/blake3(<ws_root>)`.
+// That dir is PROCESS-EXTERNAL, so a synthetic root shared by two concurrent test
+// processes aliases them onto ONE `manifest.json`. These helpers are the single seam
+// those roots come from.
+
+/// The synthetic workspace root for a store-backed server test, from the
+/// disambiguators a concurrent test run varies over.
+///
+/// `pid` is the load-bearing one: these tests run one per PROCESS, so the per-process
+/// counter in [`unique_server_ws_root`] reads 0 in every process, and
+/// `SystemTime::now()` is only MICROSECOND-resolution on macOS. Without the process
+/// identity the root collides whenever two test processes reach it inside the same
+/// microsecond.
+fn server_ws_root_for(tag: &str, pid: u32, nanos: u128, n: u64) -> String {
+    format!("/verter_{tag}_{pid}_{nanos}_{n}/ws")
+}
+
+/// A synthetic workspace root unique across concurrent PROCESSES — see
+/// [`server_ws_root_for`].
+fn unique_server_ws_root(tag: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    server_ws_root_for(tag, std::process::id(), nanos, n)
+}
+
+/// Read the carrier-store manifest for `ws_root` STRICTLY: `None` ONLY when the manifest
+/// genuinely does not exist, and a PANIC naming the cause for every other failure.
+///
+/// These tests must not read through `CarrierPublishStore::current_manifest`, which by
+/// design reports a fresh EMPTY manifest for an unreadable or unparseable one. That
+/// fail-open is right for a read-only diagnostics view and wrong here in two distinct
+/// ways: a presence `.expect(...)` would blame the PUBLISH for a STORE failure, and an
+/// ABSENCE assertion ("owner loss must retract the carrier") would pass VACUOUSLY
+/// because an empty manifest trivially satisfies "not owned".
+fn carrier_manifest_strict(ws_root: &str) -> Option<crate::external_ts::Manifest> {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    let path = store.manifest_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<crate::external_ts::Manifest>(&bytes).unwrap_or_else(|e| {
+                panic!(
+                    "the carrier-store oracle must surface a store failure rather than \
+                     report nothing published: manifest at {} is present but unparseable: {e}",
+                    path.display()
+                )
+            }),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => panic!(
+            "the carrier-store oracle must surface a store failure rather than report \
+             nothing published: manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            path.display(),
+            e.kind(),
+            e.raw_os_error()
+        ),
+    }
+}
+
+/// A synthetic store-backed workspace root must be unique across concurrent PROCESSES,
+/// not merely within one process.
+///
+/// These tests run one per PROCESS, so a per-process counter disambiguates nothing
+/// across them, and `SystemTime::now()` is only MICROSECOND-resolution on macOS. A root
+/// built from the clock alone aliases two test processes that reach it inside the same
+/// microsecond onto ONE on-disk carrier store and one `manifest.json`, where a
+/// read-modify-write from either erases the other's.
+#[test]
+fn synthetic_server_ws_root_is_unique_across_processes_not_only_within_one() {
+    // Same microsecond, same per-process counter, same tag — only the process differs.
+    const SAME_MICROSECOND: u128 = 1_785_068_278_682_867_000;
+    let a = server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 0);
+    let b = server_ws_root_for("b1_prod", 4243, SAME_MICROSECOND, 0);
+    assert_ne!(
+        a, b,
+        "two test PROCESSES deriving a root in the same microsecond must not get the \
+         SAME workspace root"
+    );
+
+    // The consequence that actually bites: the derived store dirs must differ.
+    let host = crate::external_ts::default_carrier_store_host_version();
+    assert_ne!(
+        crate::external_ts::carrier_store_dir_for(host, &a),
+        crate::external_ts::carrier_store_dir_for(host, &b),
+        "distinct test processes must resolve DISTINCT carrier-store dirs; an aliased \
+         dir means two processes share one manifest"
+    );
+
+    // Distinct tags must stay distinct, and the within-process counter must still work.
+    assert_ne!(
+        server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 0),
+        server_ws_root_for("b1_other", 4242, SAME_MICROSECOND, 0),
+        "two tags must not collapse onto one root"
+    );
+
+    // Every tag this file actually mints must be process-varying. `membership_publish`
+    // and `foreign_mapping` regressed by building their root from a function-local
+    // `AtomicUsize` starting at 0 instead of this seam: under one-test-per-process every
+    // process minted `_0`, so the root was a FIXED STRING shared by every process AND
+    // every run. `foreign_mapping` was the worse of the two — a SHARED fixture helper
+    // with two callers, so two concurrent processes aliased onto one manifest.
+    for tag in [
+        "editor_live",
+        "b1_prod",
+        "b1_other",
+        "reqsurf_pub",
+        "membership_publish",
+        "foreign_mapping",
+    ] {
+        assert_ne!(
+            server_ws_root_for(tag, 4242, SAME_MICROSECOND, 0),
+            server_ws_root_for(tag, 4243, SAME_MICROSECOND, 0),
+            "tag {tag} must vary with the process identity"
+        );
+    }
+    assert_ne!(
+        server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 0),
+        server_ws_root_for("b1_prod", 4242, SAME_MICROSECOND, 1),
+        "two roots taken inside one microsecond by ONE process must still differ"
+    );
+
+    // And the live derivation must actually vary the process identity in.
+    let live = unique_server_ws_root("b1_prod");
+    assert!(
+        live.starts_with(&format!("/verter_b1_prod_{}_", std::process::id())),
+        "unique_server_ws_root must carry this process's identity; got {live}"
+    );
+}
+
+/// The carrier-store oracle must surface an unreadable / unparseable manifest as a
+/// FAILURE, never launder it into "nothing is published".
+///
+/// `CarrierPublishStore::current_manifest` deliberately reports a fresh EMPTY manifest
+/// for a corrupt one — correct for a read-only diagnostics view, wrong beneath these
+/// tests' assertions. Two shapes go wrong: a presence `.expect(...)` blames the publish
+/// instead of the store, and an ABSENCE assertion (`owner loss must retract`) passes
+/// VACUOUSLY because an empty manifest trivially satisfies "not owned".
+#[test]
+fn carrier_manifest_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+
+    let corrupt_root = unique_server_ws_root("oracle_corrupt");
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
+    std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
+    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+        .expect("write a corrupt manifest");
+
+    // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
+    assert!(
+        store.current_manifest().projects.is_empty(),
+        "the diagnostics reader is fail-open by design; this pins what the oracle must \
+         not inherit"
+    );
+
+    let detail = std::panic::catch_unwind(|| carrier_manifest_strict(&corrupt_root)).expect_err(
+        "a present-but-corrupt manifest must be a hard FAILURE from the oracle, never an \
+         empty manifest that reads as nothing being published",
+    );
+    let message = detail
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "<non-string panic>".to_string());
+    assert!(
+        message.contains("unparseable"),
+        "the failure must name the actual cause; got {message:?}"
+    );
+
+    // A genuinely absent manifest stays distinguishable from a corrupt one.
+    let absent_root = unique_server_ws_root("oracle_absent");
+    assert!(
+        carrier_manifest_strict(&absent_root).is_none(),
+        "a store that was never published must read as None, not as a failure"
+    );
+}
+
 #[derive(Default)]
 struct SlowConfigurePathsProvider {
     configure_paths_started: AtomicUsize,
@@ -3355,13 +3538,7 @@ async fn unique_carrier_still_renames_normally_not_fail_closed() {
 /// branch as managed tsserver, not the direct-open branch used by tsgo.
 #[tokio::test(flavor = "multi_thread")]
 async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
-    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let workspace_root = format!("/verter_editor_live_{nanos}/ws");
+    let workspace_root = unique_server_ws_root("editor_live");
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let canonical_id = format!("{workspace_root}/src/App.vue");
 
@@ -3390,8 +3567,8 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
     let uri = open_test_vue(server, &canonical_id, initial);
     assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
 
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &workspace_root);
-    let initial_manifest = store.current_manifest();
+    let initial_manifest = carrier_manifest_strict(&workspace_root)
+        .expect("the editor-owned publish must have written a manifest");
     let initial_ide = initial_manifest
         .projects
         .get(&tsconfig)
@@ -3410,7 +3587,8 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
     );
     assert!(server.publish_carrier_to_external_ts(&canonical_id).await);
 
-    let updated_manifest = store.current_manifest();
+    let updated_manifest = carrier_manifest_strict(&workspace_root)
+        .expect("the post-edit republish must have written a manifest");
     let updated_ide = updated_manifest
         .projects
         .get(&tsconfig)
@@ -12379,16 +12557,10 @@ async fn stale_repair_holding_pre_close_lease_cannot_retire_revived_lane() {
 /// BLOCKER-1's hermetic test missed by calling `publish_carrier` directly).
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
-    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
-
     // Unique workspace root so the per-(host_version, ws_root) carrier store dir is
     // isolated from other tests. A unix-style absolute root round-trips cleanly
     // through `open_test_vue`'s `file://{path}` URI (canonical_id == path).
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let ws_root = format!("/verter_b1_prod_{nanos}/ws");
+    let ws_root = unique_server_ws_root("b1_prod");
     let tsconfig = format!("{ws_root}/tsconfig.json");
     let source = format!("{ws_root}/src/App.vue");
 
@@ -12417,8 +12589,8 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
     // Capture the published provider paths so the post-retract check is path-exact
     // without hardcoding the companion suffix.
     let published_providers: Vec<String> = {
-        let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
-        let manifest = store.current_manifest();
+        let manifest =
+            carrier_manifest_strict(&ws_root).expect("the publish must have written a manifest");
         let project = manifest
             .projects
             .get(&tsconfig)
@@ -12456,7 +12628,7 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
 
     // 2. The owner DISAPPEARS: install a ready snapshot rooted ELSEWHERE that does
     //    NOT own this file (owner loss; ownership_ready = true).
-    let other_root = format!("/verter_b1_other_{nanos}/ws");
+    let other_root = unique_server_ws_root("b1_other");
     install_test_resolver_for_root(
         server,
         &other_root,
@@ -12466,11 +12638,10 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
     // 3. Drive the SAME production entry again. Owner loss MUST retract the carrier.
     server.ensure_current_file_synced(&uri).await;
 
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
-    let manifest = store.current_manifest();
+    let manifest = carrier_manifest_strict(&ws_root);
     let still_owned = manifest
-        .projects
-        .get(&tsconfig)
+        .as_ref()
+        .and_then(|manifest| manifest.projects.get(&tsconfig))
         .map(|p| p.owned_sources.iter().any(|o| o.source_uri == source))
         .unwrap_or(false);
     assert!(
@@ -12480,8 +12651,8 @@ async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
          production before the fix)"
     );
     let still_ready = manifest
-        .projects
-        .get(&tsconfig)
+        .as_ref()
+        .and_then(|manifest| manifest.projects.get(&tsconfig))
         .map(|p| {
             published_providers
                 .iter()
@@ -23473,14 +23644,12 @@ async fn resync_background_owner_loss_retracts_ledger_membership() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     use crate::external_ts::CanonicalSource;
-    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);
     let server = service.inner();
-    let fixture_id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-    let workspace_root = format!("/verter_membership_publish_{fixture_id}");
+    let workspace_root = unique_server_ws_root("membership_publish");
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let canonical_id = format!("{workspace_root}/src/App.vue");
     install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
@@ -25876,14 +26045,15 @@ async fn make_foreign_mapping_fixture() -> (
     String,
     String,
 ) {
-    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
-
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
-    let fixture_id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
-    let workspace_root = format!("/verter_foreign_mapping_{fixture_id}");
+    // A SHARED fixture helper: both callers run in their own PROCESS under nextest, so a
+    // function-local `AtomicUsize` starting at 0 minted `/verter_foreign_mapping_0` in
+    // BOTH — one store dir, one manifest.json, concurrently. Route through the
+    // process-varying seam.
+    let workspace_root = unique_server_ws_root("foreign_mapping");
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     install_test_resolver_for_root(server, &workspace_root, Some(&tsconfig));
 
@@ -26062,11 +26232,7 @@ async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances
 /// the publish) must still fail closed.
 #[tokio::test(flavor = "multi_thread")]
 async fn tsserver_published_carrier_surface_is_captured_and_serves_hover() {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let root = format!("/verter_reqsurf_pub_{nanos}/ws");
+    let root = unique_server_ws_root("reqsurf_pub");
     let tsconfig = format!("{root}/tsconfig.json");
 
     let provider = Arc::new(MockTypeProvider::new());

@@ -34,8 +34,8 @@ use verter_workspace::workspace_snapshot::{
 
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::{
-    default_carrier_store_host_version, CarrierCompanion, CarrierPublishCoordinator,
-    CarrierPublishStore, ReconcileOutcome, ReconcileReason,
+    carrier_store_dir_for, default_carrier_store_host_version, CarrierCompanion,
+    CarrierPublishCoordinator, CarrierPublishStore, Manifest, ReconcileOutcome, ReconcileReason,
 };
 use crate::project_resolver::{IdeProjectConfig, NativeProjectResolver};
 use crate::provider_surface_store::ProviderSurfaceStore;
@@ -912,6 +912,19 @@ fn carrier_close_target_returns_companion_paths_owner_independent() {
     );
 }
 
+/// The synthetic workspace root for a store-isolating test, built from the three
+/// disambiguators a concurrent test run varies over.
+///
+/// `pid` is the load-bearing one. This suite runs one test per PROCESS, so the
+/// per-process counter in [`unique_ws_root`] reads 0 in every process and disambiguates
+/// nothing across them, and `SystemTime::now()` is only MICROSECOND-resolution on
+/// macOS. Without the process identity the root collides whenever two test processes
+/// reach it inside the same microsecond, which aliases both onto ONE on-disk carrier
+/// store and one `manifest.json`.
+fn ws_root_for(pid: u32, nanos: u128, n: u64) -> String {
+    format!("d:/verter_carrier_sync_compilefail_{pid}_{nanos}_{n}/ws")
+}
+
 /// A unique, already-canonical (lowercase drive, forward slashes) workspace root, so
 /// the on-disk carrier store dir is isolated per run.
 fn unique_ws_root() -> String {
@@ -922,7 +935,139 @@ fn unique_ws_root() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("d:/verter_carrier_sync_compilefail_{nanos}_{n}/ws")
+    ws_root_for(std::process::id(), nanos, n)
+}
+
+/// Read the manifest of the carrier store this suite's backend writes for `ws_root`,
+/// STRICTLY: `Ok(None)` ONLY when the manifest genuinely does not exist, and `Err` for
+/// every other failure.
+///
+/// The oracle must NOT read through [`CarrierPublishStore::current_manifest`]. That
+/// reader deliberately reports a fresh EMPTY manifest for an unreadable or unparseable
+/// one — correct for a read-only diagnostics view, but underneath a readiness assertion
+/// it launders "the store could not be read" into "the carrier is not advertised". THREE
+/// tests in this file corrupt a manifest on purpose ([`break_carrier_store_writes`]), so
+/// that laundering is exactly what must not reach an assertion.
+fn read_store_manifest_strict(ws_root: &str) -> Result<Option<Manifest>, String> {
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    let path = store.manifest_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
+            .map(Some)
+            .map_err(|e| {
+                format!(
+                    "carrier manifest at {} is present but unparseable: {e}",
+                    path.display()
+                )
+            }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "carrier manifest at {} is unreadable: {e} (kind={:?}, errno={:?})",
+            path.display(),
+            e.kind(),
+            e.raw_os_error()
+        )),
+    }
+}
+
+/// The synthetic workspace root this suite derives must be unique across concurrent
+/// PROCESSES, not merely within one process.
+///
+/// This suite runs one test per PROCESS, so the per-process `COUNTER` in
+/// [`unique_ws_root`] reads 0 in every process and disambiguates nothing across them,
+/// and `SystemTime::now()` is only MICROSECOND-resolution on macOS. A root built from
+/// the clock and that counter alone ALIASES two test processes that reach it inside the
+/// same microsecond onto ONE on-disk carrier store.
+///
+/// This suite is the MOST exposed of the two that shared this shape: EIGHT tests derive
+/// a root from this helper (28 pairwise collision opportunities per run), and THREE of
+/// them deliberately write a CORRUPT manifest into their store via
+/// [`break_carrier_store_writes`]. A corrupt shared manifest makes the strict
+/// `read_manifest` propagate, so `publish_batch` fails, so the membership commit fails,
+/// so a sibling's reconcile decision is NOT `Published` — which is exactly how
+/// `multi_claimant_carrier_sync_serves_under_single_default_owner` and
+/// `owned_carrier_compile_to_empty_propagates_a_failed_retract_instead_of_pending`
+/// failed under full-workspace load.
+#[test]
+fn synthetic_ws_root_is_unique_across_processes_not_only_within_one() {
+    // Same microsecond AND same per-process counter — exactly what two concurrent
+    // one-test-per-process runs observe. Only the process identity differs.
+    const SAME_MICROSECOND: u128 = 1_785_068_278_682_867_000;
+    let a = ws_root_for(4242, SAME_MICROSECOND, 0);
+    let b = ws_root_for(4243, SAME_MICROSECOND, 0);
+    assert_ne!(
+        a, b,
+        "two test PROCESSES deriving a root in the same microsecond must not get the \
+         SAME workspace root (the per-process counter reads 0 in both)"
+    );
+
+    // The consequence that actually bites: the derived on-disk store dirs must differ,
+    // or both processes read-modify-write ONE manifest.json.
+    let host = default_carrier_store_host_version();
+    assert_ne!(
+        carrier_store_dir_for(host, &a),
+        carrier_store_dir_for(host, &b),
+        "distinct test processes must resolve DISTINCT carrier-store dirs; an aliased \
+         dir means two processes share one manifest"
+    );
+
+    // The within-process disambiguator must still work.
+    assert_ne!(
+        ws_root_for(4242, SAME_MICROSECOND, 0),
+        ws_root_for(4242, SAME_MICROSECOND, 1),
+        "two roots taken inside one microsecond by ONE process must still differ"
+    );
+
+    // And the live derivation must actually vary the process identity in.
+    let live = unique_ws_root();
+    assert!(
+        live.starts_with(&format!(
+            "d:/verter_carrier_sync_compilefail_{}_",
+            std::process::id()
+        )),
+        "unique_ws_root must carry this process's identity; got {live}"
+    );
+}
+
+/// The store oracle must surface an unreadable / unparseable manifest as a FAILURE,
+/// never launder it into "the carrier is not advertised".
+///
+/// [`CarrierPublishStore::current_manifest`] deliberately reports a fresh EMPTY manifest
+/// for a corrupt one — correct for a read-only diagnostics view (it never writes, so
+/// there is nothing to clobber), but WRONG underneath [`carrier_ready_in_store`]:
+/// THREE tests in this very file corrupt a manifest on purpose, so a laundered read
+/// turns "the store could not be read" into "the carrier is not ready" and the
+/// assertion blames the wrong thing.
+#[test]
+fn store_oracle_reports_a_corrupt_manifest_as_a_failure_not_as_absence() {
+    let corrupt_root = unique_ws_root();
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &corrupt_root);
+    std::fs::create_dir_all(store.workspace_dir()).expect("create the store dir");
+    std::fs::write(store.manifest_path(), b"{ this manifest is truncated")
+        .expect("write a corrupt manifest");
+
+    // Pin the fail-open behaviour of the diagnostics reader the oracle must NOT inherit.
+    assert!(
+        store.current_manifest().projects.is_empty(),
+        "the diagnostics reader is fail-open by design; this pins what the oracle must \
+         not inherit"
+    );
+
+    let detail = read_store_manifest_strict(&corrupt_root).expect_err(
+        "a present-but-corrupt manifest must be an ERROR from the oracle's reader, never \
+         an empty manifest that reads as the carrier not being ready",
+    );
+    assert!(
+        detail.contains("unparseable"),
+        "the error must name the actual cause; got {detail:?}"
+    );
+
+    // A genuinely absent manifest stays distinguishable from a corrupt one.
+    let absent_root = unique_ws_root();
+    assert!(
+        matches!(read_store_manifest_strict(&absent_root), Ok(None)),
+        "a store that was never published must read as Ok(None), not as an error"
+    );
 }
 
 /// A `WorkspaceSnapshot` with ONE configured project owning `src/**/*` (so a `.vue`
@@ -1016,8 +1161,19 @@ fn no_owner_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot {
 /// Whether `provider` is still in the project's `ready_files` set (the cross-process
 /// advertised surface the plugin's `getExternalFiles` serves).
 fn carrier_ready_in_store(ws_root: &str, tsconfig: &str, provider: &str) -> bool {
-    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
-    let manifest = store.current_manifest();
+    let manifest = match read_store_manifest_strict(ws_root) {
+        Ok(Some(manifest)) => manifest,
+        // No manifest at all ⇒ genuinely nothing published for this workspace.
+        Ok(None) => return false,
+        // A store FAILURE is not a carrier absence — surface the real cause instead of
+        // letting a readiness assertion report a misleading "not advertised". No test
+        // reads this oracle AFTER its own `break_carrier_store_writes`, so a failure
+        // here means the store was damaged by something OTHER than this test.
+        Err(detail) => panic!(
+            "the carrier-store oracle must surface a store failure rather than report \
+             the carrier unadvertised: {detail}"
+        ),
+    };
     manifest
         .projects
         .get(tsconfig)

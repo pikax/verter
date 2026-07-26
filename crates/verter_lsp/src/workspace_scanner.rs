@@ -1205,6 +1205,90 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    // ── synthetic store-backed workspace roots ────────────────────────────
+    //
+    // The scan tests below drive a real `CarrierPublishCoordinator` over a real
+    // `TsserverEngineBackend`, so publishing writes the PROCESS-EXTERNAL carrier store
+    // at `temp/verter-carrier-store/<host>/blake3(<ws_root>)` even where the assertion
+    // only reads the in-process ledger. A synthetic root shared by two concurrent test
+    // processes therefore aliases them onto ONE `manifest.json`. These helpers are the
+    // single seam those roots come from.
+
+    /// The synthetic workspace root for a store-backed scan test, from the
+    /// disambiguators a concurrent test run varies over.
+    ///
+    /// `pid` is the load-bearing one: these tests run one per PROCESS, so the
+    /// per-process counter in [`unique_scan_ws_root`] reads 0 in every process, and
+    /// `SystemTime::now()` is only MICROSECOND-resolution on macOS. Without the process
+    /// identity the root collides whenever two test processes reach it inside the same
+    /// microsecond.
+    fn scan_ws_root_for(tag: &str, pid: u32, nanos: u128, n: u64) -> String {
+        format!("/verter_scan_{tag}_{pid}_{nanos}_{n}/ws")
+    }
+
+    /// A synthetic workspace root unique across concurrent PROCESSES — see
+    /// [`scan_ws_root_for`].
+    fn unique_scan_ws_root(tag: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        scan_ws_root_for(tag, std::process::id(), nanos, n)
+    }
+
+    /// A synthetic store-backed workspace root must be unique across concurrent
+    /// PROCESSES, not merely within one process.
+    ///
+    /// These tests run one per PROCESS, so a per-process counter disambiguates nothing
+    /// across them, and `SystemTime::now()` is only MICROSECOND-resolution on macOS. A
+    /// root built from the clock alone aliases two test processes onto ONE on-disk
+    /// carrier store; the owner-loss arm below then calls `retract_source_everywhere`,
+    /// which walks EVERY project in that shared manifest and would retract a colliding
+    /// sibling's source too.
+    #[test]
+    fn synthetic_scan_ws_root_is_unique_across_processes_not_only_within_one() {
+        // Same microsecond, same per-process counter, same tag — only the process differs.
+        const SAME_MICROSECOND: u128 = 1_785_068_278_682_867_000;
+        let a = scan_ws_root_for("e", 4242, SAME_MICROSECOND, 0);
+        let b = scan_ws_root_for("e", 4243, SAME_MICROSECOND, 0);
+        assert_ne!(
+            a, b,
+            "two test PROCESSES deriving a root in the same microsecond must not get \
+             the SAME workspace root"
+        );
+
+        // The consequence that actually bites: the derived store dirs must differ.
+        let host = crate::external_ts::default_carrier_store_host_version();
+        assert_ne!(
+            crate::external_ts::carrier_store_dir_for(host, &a),
+            crate::external_ts::carrier_store_dir_for(host, &b),
+            "distinct test processes must resolve DISTINCT carrier-store dirs; an \
+             aliased dir means two processes share one manifest"
+        );
+
+        // Distinct tags stay distinct, and the within-process counter still works.
+        assert_ne!(
+            scan_ws_root_for("e", 4242, SAME_MICROSECOND, 0),
+            scan_ws_root_for("e_other", 4242, SAME_MICROSECOND, 0),
+            "two tags must not collapse onto one root"
+        );
+        assert_ne!(
+            scan_ws_root_for("e", 4242, SAME_MICROSECOND, 0),
+            scan_ws_root_for("e", 4242, SAME_MICROSECOND, 1),
+            "two roots taken inside one microsecond by ONE process must still differ"
+        );
+
+        // And the live derivation must actually vary the process identity in.
+        let live = unique_scan_ws_root("e");
+        assert!(
+            live.starts_with(&format!("/verter_scan_e_{}_", std::process::id())),
+            "unique_scan_ws_root must carry this process's identity; got {live}"
+        );
+    }
+
     #[test]
     fn tsserver_leaves_real_sources_and_node_modules_disk_resolved() {
         assert!(!eager_sync_real_sources(false));
@@ -2383,11 +2467,7 @@ defineProps<{ msg: string }>()
     async fn workspace_scan_publishes_then_retracts_carrier_membership_for_tsserver() {
         use crate::type_provider::traits::TypeProvider;
 
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let ws_root = format!("/verter_scan_e_{nanos}/ws");
+        let ws_root = unique_scan_ws_root("e");
         let tsconfig = format!("{ws_root}/tsconfig.json");
         let source = format!("{ws_root}/src/App.vue");
 
@@ -2463,7 +2543,7 @@ defineProps<{ msg: string }>()
 
         // 2. Owner LOSS: a later scan over a snapshot rooted ELSEWHERE that does not
         //    own the file MUST retract the carrier.
-        let other_root = format!("/verter_scan_e_other_{nanos}/ws");
+        let other_root = unique_scan_ws_root("e_other");
         let other_vfs =
             make_configured_carrier_vfs(&other_root, &format!("{other_root}/tsconfig.json"));
         sync_file_to_provider(
@@ -2497,11 +2577,7 @@ defineProps<{ msg: string }>()
 
     #[tokio::test(flavor = "multi_thread")]
     async fn workspace_scan_publishes_for_editor_tsserver_without_project_sync() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        let ws_root = format!("/verter_scan_editor_{nanos}/ws");
+        let ws_root = unique_scan_ws_root("editor");
         let tsconfig = format!("{ws_root}/tsconfig.json");
         let source = format!("{ws_root}/src/App.vue");
         let host = VerterHost::new_standalone(verter_session::HostConfig::default());
@@ -2563,11 +2639,7 @@ defineProps<{ msg: string }>()
     /// contribution for scan-synced files.
     #[tokio::test(flavor = "multi_thread")]
     async fn workspace_scan_direct_ide_sync_records_carrier_ide_surface() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let ws_root = format!("/verter_scan_ide_rec_{nanos}/ws");
+        let ws_root = unique_scan_ws_root("ide_rec");
         let tsconfig = format!("{ws_root}/tsconfig.json");
         let source = format!("{ws_root}/src/App.vue");
 
