@@ -211,10 +211,22 @@ enum NotOwnedReason {
     /// user-visible `verter(project)` diagnostic is published separately from the same
     /// resolution (see [`project_ownership_diagnostic`]).
     Unresolved,
-    /// Nothing was advertised this pass (compile-to-nothing, a not-advertised reconcile, a
-    /// fail-closed reconcile error, or a FAILED terminal retract): keep the file queued and
-    /// commit nothing. The coordinator requeues it.
+    /// Nothing was COMMITTED this pass (compile-to-nothing with a SUCCESSFUL retract, a
+    /// not-advertised reconcile, an unactivatable publish, or a fail-closed publish error):
+    /// keep the file queued and commit nothing. The coordinator requeues it. This arm
+    /// asserts the store is in the state the reconciler intended; a FAILED retract, which
+    /// leaves a stale advertisement the reconciler tried and failed to remove, is
+    /// [`NotOwnedReason::RetractFailed`].
     Pending,
+    /// A store RETRACT for this pass ERRORED, so the carrier MAY STILL BE ADVERTISED in the
+    /// cross-process store the `@verter/typescript-plugin` reads. Requeued exactly like
+    /// [`NotOwnedReason::Pending`] (local state preserved, no buffer conversion, never
+    /// terminal), but reported as a DISTINCT class so a failed retract is never
+    /// indistinguishable from a clean "nothing advertised" pass — the fail-closed
+    /// durability contract documented on
+    /// [`CarrierPublishError::Retract`](super::publish_coordinator::CarrierPublishError::Retract)
+    /// ("PROPAGATED rather than swallowed").
+    RetractFailed,
 }
 
 /// A NON-OWNED carrier-sync outcome whose disposition is owned by the coordinator.
@@ -251,6 +263,14 @@ impl CarrierNotOwned {
             reason: NotOwnedReason::Pending,
         }
     }
+    /// The FAILED-RETRACT non-owned outcome: the store retract this pass required ERRORED,
+    /// so the carrier may still be advertised cross-process. Produced ONLY by the gateway's
+    /// retract sites (never by a server-side wrapper, which has no retract to fail).
+    fn retract_failed() -> Self {
+        Self {
+            reason: NotOwnedReason::RetractFailed,
+        }
+    }
 }
 
 /// The classified disposition [`CarrierTransactionCoordinator::settle`] hands back after it
@@ -265,17 +285,23 @@ pub(crate) enum SettleClass {
     /// Terminal (`NoProject` / `Ambiguous`): the owner-loss barrier was advanced. The site
     /// preserves an open document's TSX / clears a closed one, then DEQUEUES (never retried).
     Unresolved,
-    /// Nothing advertised (`Pending` / failed retract): requeued by the coordinator, no
-    /// buffer conversion (local state preserved).
+    /// Nothing committed and no failed retract: requeued by the coordinator, no buffer
+    /// conversion (local state preserved).
     Pending,
+    /// A store retract ERRORED, so the carrier may STILL be advertised cross-process:
+    /// requeued and local state preserved exactly like [`SettleClass::Pending`], but a
+    /// DISTINCT class so the fail-closed durability breach is never reported as a clean
+    /// "nothing advertised" pass.
+    RetractFailed,
 }
 
 impl SettleClass {
     /// Whether a settled no-owner class runs the editor-liveness buffer conversion
     /// (preserve an open document's TSX / clear a closed one). ONLY the settled no-owner
-    /// classes (`NotReady` bootstrap / terminal `Unresolved`) run it; a `Pending` (a failed
-    /// retract — the stale cross-process membership is still advertised) PRESERVES local
-    /// state so the source is retried, never cleared/reclassified as-if-retracted.
+    /// classes (`NotReady` bootstrap / terminal `Unresolved`) run it; `Pending` and
+    /// `RetractFailed` (the latter meaning the stale cross-process membership is still
+    /// advertised) PRESERVE local state so the source is retried, never
+    /// cleared/reclassified as-if-retracted.
     #[must_use]
     pub(crate) fn runs_buffer_cleanup(self) -> bool {
         matches!(self, SettleClass::NotReady | SettleClass::Unresolved)
@@ -432,26 +458,28 @@ fn capture_carrier_ownership(req: &CarrierSyncRequest<'_>) -> CarrierOwnershipRe
     }
 }
 
-/// The decision for a TERMINAL owner-loss reconcile (`NoProject` / `Ambiguous`),
-/// classified from the store-retract result.
+/// The decision for a TERMINAL-absent reconcile — the owner-loss retract
+/// (`NoProject` / `Ambiguous`) and the owned compile-to-empty retract
+/// (`ReconcileReason::CompileFailed`) alike — classified from the store-retract result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalRetractDecision {
-    /// The store tombstone SUCCEEDED — report the terminal `Unresolved` (the call site
-    /// clears local state as-if-retracted).
+    /// The store tombstone SUCCEEDED — nothing is advertised for the source.
     Tombstoned,
-    /// The store tombstone ERRORED — keep the carrier queued (`Pending`) so local state
-    /// is preserved and the source retries.
+    /// The store tombstone ERRORED — the carrier may STILL be advertised cross-process:
+    /// report `RetractFailed` so local state is preserved and the source retries.
     RetryPending,
 }
 
-/// Classify a terminal owner-loss retract result into its sync decision.
+/// Classify a terminal-absent retract result into its sync decision.
 ///
-/// A SUCCESSFUL tombstone authorizes the terminal `Unresolved`; an ERRORED retract must
-/// fall back to `Pending` (preserve local state + retry) so a failed cross-process
+/// A SUCCESSFUL tombstone authorizes the caller's clean outcome (the terminal
+/// `Unresolved` on owner loss, `Pending` on compile-to-empty); an ERRORED retract must
+/// fall back to `RetractFailed` (preserve local state + retry) so a failed cross-process
 /// retract never masquerades as a completed one — reporting `Unresolved` on a failed
-/// retract would strand the stale membership (still served under the former project)
-/// AND stop the source retrying. Pure over the `Ok`/`Err` shape so it is unit-testable
-/// without a live backend.
+/// retract would strand the stale membership (still served under the former project) AND
+/// stop the source retrying, and reporting the clean `Pending` would assert an absence
+/// that does not hold. Pure over the `Ok`/`Err` shape so it is unit-testable without a
+/// live backend.
 fn classify_terminal_retract<T, E>(retract: &Result<T, E>) -> TerminalRetractDecision {
     match retract {
         Ok(_) => TerminalRetractDecision::Tombstoned,
@@ -487,10 +515,17 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         CarrierOwnershipResolution::Bound(binding) => binding,
         CarrierOwnershipResolution::NotReady => {
             // Transient bootstrap: keep the carrier QUEUED for a later retry. tsserver
-            // defers the membership WITHOUT thrash (no retract) so a cold sync never
-            // drops an existing advertisement.
+            // defers the membership WITHOUT thrash (no retract on a cold ownership
+            // resolution) so a cold sync never drops an existing advertisement.
+            //
+            // The caller's `reason` still reaches the reconciler, and a CALLER-AUTHORITATIVE
+            // terminal reason (`Deleted` / `CompileFailed` / `ConflictRemoved`) short-circuits
+            // to a RETRACT without consulting ownership. So this branch CAN drive a store
+            // retract, and an ERRORED one must be PROPAGATED: reporting `NotReady` would run
+            // the editor-liveness buffer conversion and clear local state as-if-retracted
+            // while the cross-process store still advertises the carrier.
             if let Some(membership) = req.membership.as_ref() {
-                if let Err(error) = membership
+                let deferred = membership
                     .coordinator
                     .reconcile_membership_with_resolution(
                         req.canonical_id,
@@ -498,12 +533,17 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                         Vec::new(),
                         req.reason,
                     )
-                    .await
-                {
-                    tracing::warn!(
-                        "carrier-sync gateway: bootstrap defer reconcile failed for {}: {error}",
-                        req.canonical_id
-                    );
+                    .await;
+                if classify_terminal_retract(&deferred) == TerminalRetractDecision::RetryPending {
+                    if let Err(error) = &deferred {
+                        tracing::warn!(
+                            "carrier-sync gateway: bootstrap defer reconcile failed for {}: \
+                             {error} (external-TS degraded; keeping the carrier queued and \
+                             preserving local state)",
+                            req.canonical_id
+                        );
+                    }
+                    return CarrierSyncDecision::NotOwned(CarrierNotOwned::retract_failed());
                 }
             }
             return CarrierSyncDecision::NotOwned(CarrierNotOwned::not_ready());
@@ -530,9 +570,9 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                     // serves the carrier under its former project. Reporting the terminal
                     // `Unresolved` here would make the call site clear local state
                     // as-if-retracted AND stop retrying, stranding that stale advertisement.
-                    // Return `Pending` instead — preserve local state and keep the carrier
-                    // queued for a later retry (the same keep-queued contract `CompileFailed`
-                    // uses on its own retract).
+                    // PROPAGATE the failure as `RetractFailed` instead — preserve local state
+                    // and keep the carrier queued for a later retry, while never claiming the
+                    // clean `Pending` ("nothing is advertised for this source").
                     if let Err(error) = &retract {
                         tracing::warn!(
                             "carrier-sync gateway: owner-loss retract reconcile failed for {}: \
@@ -540,7 +580,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                             req.canonical_id
                         );
                     }
-                    return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
+                    return CarrierSyncDecision::NotOwned(CarrierNotOwned::retract_failed());
                 }
             }
             // A SUCCESSFUL tombstone (or tsgo — no membership store to retract) authorizes
@@ -661,7 +701,12 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
         // reason — an empty companion set tombstones the source across every project.
         // IDE error-recovery normally still emits a DEGRADED-but-current (non-empty)
         // companion that PUBLISHES, so only the genuinely-empty owned case reaches here.
-        if let Err(error) = membership
+        // The retract failure is PROPAGATED, never swallowed (the fail-closed durability
+        // contract on `CarrierPublishError::Retract`): an ERRORED tombstone leaves the
+        // carrier ADVERTISED in the cross-process store, so reporting the clean `Pending`
+        // ("nothing was advertised this pass") would be false. The disposition stays
+        // keep-queued + preserve-local-state; only the class distinguishes the breach.
+        let retract = membership
             .coordinator
             .reconcile_membership_with_resolution(
                 req.canonical_id,
@@ -669,13 +714,17 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                 Vec::new(),
                 ReconcileReason::CompileFailed,
             )
-            .await
-        {
-            tracing::warn!(
-                "carrier-sync gateway: compile-failed retract reconcile failed for {}: \
-                 {error} (external-TS degraded for this source)",
-                req.canonical_id
-            );
+            .await;
+        if classify_terminal_retract(&retract) == TerminalRetractDecision::RetryPending {
+            if let Err(error) = &retract {
+                tracing::warn!(
+                    "carrier-sync gateway: compile-failed retract reconcile failed for {}: \
+                     {error} (external-TS degraded for this source; the stale advertisement \
+                     is still served cross-process and the carrier stays queued for retry)",
+                    req.canonical_id
+                );
+            }
+            return CarrierSyncDecision::NotOwned(CarrierNotOwned::retract_failed());
         }
         return CarrierSyncDecision::NotOwned(CarrierNotOwned::pending());
     }
@@ -1190,6 +1239,15 @@ impl CarrierTransactionCoordinator {
                     set.insert(source.to_string());
                 }
                 SettleClass::Pending
+            }
+            NotOwnedReason::RetractFailed => {
+                // A failed retract is REQUEUED (the retract must be re-attempted) and the
+                // owner-loss barrier is NOT advanced: the source is not terminally settled
+                // while the cross-process store may still advertise it.
+                if let Some(set) = requeue {
+                    set.insert(source.to_string());
+                }
+                SettleClass::RetractFailed
             }
         }
     }

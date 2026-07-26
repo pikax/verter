@@ -1146,7 +1146,11 @@ async fn apply_owner_resolved_carrier_sync(
                     }
                     CarrierApplyOutcome::Unresolved
                 }
-                crate::external_ts::SettleClass::Pending => CarrierApplyOutcome::Pending,
+                // Both non-advertising classes keep the carrier queued and commit nothing;
+                // `RetractFailed` additionally means the cross-process store may still
+                // advertise it, so it is never treated as a settled disposition.
+                crate::external_ts::SettleClass::Pending
+                | crate::external_ts::SettleClass::RetractFailed => CarrierApplyOutcome::Pending,
             }
         }
     }

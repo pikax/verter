@@ -837,8 +837,8 @@ fn terminal_retract_classification_gates_unresolved_on_success() {
     // A TERMINAL owner-loss (NoProject/Ambiguous) may report the terminal `Unresolved`
     // — which the call site treats as "retracted, clear local state and stop retrying" —
     // ONLY after the store tombstone SUCCEEDED. An ERRORED retract must classify as
-    // `RetryPending` (the gateway returns `Pending`: preserve local state + retry), so a
-    // failed cross-process retract never masquerades as a completed one.
+    // `RetryPending` (the gateway returns `RetractFailed`: preserve local state + retry),
+    // so a failed cross-process retract never masquerades as a completed one.
     //
     // DISCRIMINATING: the pre-fix behaviour ("always Unresolved on a terminal, even when
     // the retract errored") corresponds to classifying `Err` as `Tombstoned`, which
@@ -969,6 +969,50 @@ fn project_binding_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot 
     build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1))
 }
 
+/// The SAME workspace with the SAME configured project, except its `include` no longer
+/// covers `src/**` — so the carrier's authoritative ownership resolution is the terminal
+/// `NoProject` (the owner-loss transition).
+fn no_owner_snapshot(ws_root: &str, tsconfig: &str) -> WorkspaceSnapshot {
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![ws_root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(
+        tsconfig.to_string(),
+        Arc::<str>::from(r#"{ "include": ["elsewhere/**/*"] }"#),
+    );
+    ws.inject_file(
+        format!("{ws_root}/src/Comp.vue"),
+        Arc::<str>::from("<template></template>"),
+    );
+
+    let root = CanonicalPath::new(ws_root);
+    let raw_membership = load_project_membership(&ws, tsconfig);
+    let compiler_options = load_compiler_options(&ws, tsconfig);
+    let supported = supported_extensions_for(&compiler_options);
+    let spec = membership_to_spec(&root, &raw_membership, &supported);
+    let references = load_project_references(&ws, tsconfig)
+        .into_iter()
+        .map(|r| CanonicalPath::new(&r))
+        .collect();
+    let project = OwnershipProject {
+        id: ProjectId(0),
+        root: root.clone(),
+        workspace_root: CanonicalPath::new(ws_root),
+        payload: ProjectPayload::Configured {
+            tsconfig_path: CanonicalPath::new(tsconfig),
+            membership: ConfiguredMembership {
+                spec,
+                materialized_files: Default::default(),
+            },
+            compiler_options,
+            references,
+            workspace_aliases: Vec::new(),
+        },
+    };
+    build_workspace_snapshot_simple(vec![project], SnapshotGeneration(2))
+}
+
 /// Whether `provider` is still in the project's `ready_files` set (the cross-process
 /// advertised surface the plugin's `getExternalFiles` serves).
 fn carrier_ready_in_store(ws_root: &str, tsconfig: &str, provider: &str) -> bool {
@@ -1090,6 +1134,356 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
         !carrier_ready_in_store(&ws_root, &tsconfig, &provider),
         "an owned carrier that compiled to EMPTY companions MUST be retracted from the \
          store's ready_files (so the plugin stops advertising it); the stale row lingered"
+    );
+}
+
+/// Corrupt the on-disk manifest for `ws_root`'s store so EVERY subsequent store
+/// read-modify-write FAILS (`read_manifest` propagates a parse error on a
+/// present-but-unparseable manifest rather than clobbering it). This is the portable
+/// stand-in for the IO-failure class a real retract hits (a full disk being the cheapest
+/// reproducer) — it needs no permission games and behaves identically on macOS, Windows
+/// and Linux.
+fn break_carrier_store_writes(ws_root: &str) {
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), ws_root);
+    std::fs::write(store.manifest_path(), b"{ this manifest is not valid json")
+        .expect("the store dir exists after the initial publish");
+}
+
+/// A FAILED store retract must be PROPAGATED, not swallowed: when an owned carrier
+/// compiles to an EMPTY companion set and its `ReconcileReason::CompileFailed` retract
+/// ERRORS, the carrier is STILL advertised in the cross-process store the
+/// `@verter/typescript-plugin` reads, so the pass must NOT settle as the clean
+/// `SettleClass::Pending` ("nothing was advertised this pass"). It settles as the distinct
+/// fail-closed `SettleClass::RetractFailed`.
+///
+/// RED before the fix: the empty-companions branch logged the `Err` through
+/// `tracing::warn!`, DISCARDED it, and returned `CarrierNotOwned::pending()` — making a
+/// live stale advertisement indistinguishable from a clean retract.
+#[tokio::test]
+async fn owned_carrier_compile_to_empty_propagates_a_failed_retract_instead_of_pending() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+
+    // 1. Publish the carrier under its configured owner so a stale `ready_files` row
+    //    EXISTS to be retracted.
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the initial publish under a configured owner succeeds");
+    assert!(
+        matches!(published, ReconcileOutcome::Advertised { .. }),
+        "the initial publish resolves to a configured owner ⇒ advertised, got {published:?}"
+    );
+    assert!(
+        carrier_ready_in_store(&ws_root, &tsconfig, &provider),
+        "the carrier must be advertised in the store's ready_files after the initial publish"
+    );
+
+    // 2. Break the store so the compile-to-empty retract CANNOT reach its tombstone.
+    break_carrier_store_writes(&ws_root);
+
+    // 3. The owned source now compiles to NOTHING: the gateway drives the
+    //    `CompileFailed` retract, which FAILS against the broken store.
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("an owned compile-to-empty pass advertises nothing this pass (NotOwned)");
+    };
+
+    // The FAILED retract is propagated as its own class — never the clean `Pending`,
+    // whose contract is that nothing is advertised for the source.
+    let requeue = dashmap::DashSet::new();
+    let class = admission.settle(not_owned, &source, Some(&requeue));
+    assert_eq!(
+        class,
+        SettleClass::RetractFailed,
+        "a FAILED compile-failed retract must propagate as RetractFailed, not be swallowed \
+         into the clean Pending class (the carrier is still advertised cross-process)"
+    );
+    assert_ne!(
+        class,
+        SettleClass::Pending,
+        "Pending asserts nothing is advertised — a failed retract must not claim that"
+    );
+    // Fail-closed disposition is unchanged: the source is REQUEUED (the retract is
+    // re-attempted) and local state is preserved (no as-if-retracted buffer conversion).
+    assert!(
+        requeue.contains(&source),
+        "a failed retract must keep the carrier queued so the retract is re-attempted"
+    );
+    assert!(
+        !class.runs_buffer_cleanup(),
+        "a failed retract must NOT clear local state as-if-retracted"
+    );
+}
+
+/// The bootstrap-DEFER branch is the third site of the same class. It threads the
+/// caller's `reason` into the reconciler, and a CALLER-AUTHORITATIVE terminal reason
+/// (`Deleted` / `CompileFailed` / `ConflictRemoved`) short-circuits to a RETRACT even
+/// under a cold `NotReady` resolution. When that retract ERRORS the pass must NOT settle
+/// as `NotReady`: `NotReady` runs the editor-liveness buffer conversion
+/// (`runs_buffer_cleanup()`), so a closed document's local state would be cleared
+/// as-if-retracted while the cross-process store still advertises the carrier.
+///
+/// RED before the fix: the branch logged the `Err` and returned
+/// `CarrierNotOwned::not_ready()`.
+#[tokio::test]
+async fn cold_bootstrap_defer_propagates_a_failed_retract_instead_of_not_ready() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the initial publish under a configured owner succeeds");
+    assert!(
+        matches!(published, ReconcileOutcome::Advertised { .. }),
+        "the initial publish resolves to a configured owner ⇒ advertised, got {published:?}"
+    );
+    break_carrier_store_writes(&ws_root);
+
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        // Cold ownership ⇒ the bootstrap-defer branch.
+        ownership_ready: false,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
+        }),
+        admission: &admission,
+        // A caller-authoritative terminal reason: the reconciler retracts even under a
+        // cold resolution, so the deferring branch really does drive a store retract.
+        reason: ReconcileReason::CompileFailed,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("a cold bootstrap pass advertises nothing (NotOwned)");
+    };
+    let class = admission.settle(not_owned, &source, None);
+    assert_eq!(
+        class,
+        SettleClass::RetractFailed,
+        "a FAILED retract driven from the bootstrap-defer branch must propagate as \
+         RetractFailed"
+    );
+    assert!(
+        !class.runs_buffer_cleanup(),
+        "a failed retract must NOT clear local state as-if-retracted (the NotReady class \
+         would have)"
+    );
+}
+
+/// The TERMINAL owner-loss branch is the same class of site: when its store retract
+/// ERRORS the carrier is still advertised, so the pass must settle as `RetractFailed`
+/// (never the terminal `Unresolved`, and no longer the clean `Pending`).
+#[tokio::test]
+async fn terminal_owner_loss_propagates_a_failed_retract_instead_of_pending() {
+    let ws_root = unique_ws_root();
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/Comp.vue");
+    let provider = format!("{ws_root}/src/Comp.vue.tsx");
+
+    let mock = MockTypeProvider::new();
+    let backend = Arc::new(TsserverEngineBackend::with_default_host_version());
+    let coord =
+        CarrierPublishCoordinator::new(Arc::clone(&backend), Arc::new(mock.clone()), "5.9.0");
+
+    let vfs: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = VerterHost::new(HostConfig::default(), vfs);
+    let fs =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        project_binding_snapshot(&ws_root, &tsconfig),
+    )));
+
+    let companion = CarrierCompanion::carrier_ide_from_generated(
+        Arc::from(provider.as_str()),
+        source.as_str(),
+        "export default {} as any;\n",
+        None,
+        verter_session::external_ts::ScriptKind::Tsx,
+        1,
+    );
+    let published = coord
+        .reconcile_membership(
+            &host,
+            &fs,
+            &source,
+            vec![companion],
+            true,
+            ReconcileReason::SourceSynced,
+        )
+        .await
+        .expect("the initial publish under a configured owner succeeds");
+    assert!(
+        matches!(published, ReconcileOutcome::Advertised { .. }),
+        "the initial publish resolves to a configured owner ⇒ advertised, got {published:?}"
+    );
+    assert!(
+        carrier_ready_in_store(&ws_root, &tsconfig, &provider),
+        "the carrier must be advertised before the owner loss"
+    );
+
+    // The owner is LOST: republish a snapshot whose only configured project no longer
+    // includes the carrier ⇒ the authoritative resolution is the terminal `NoProject`.
+    fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(no_owner_snapshot(
+        &ws_root, &tsconfig,
+    ))));
+    break_carrier_store_writes(&ws_root);
+
+    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+        ws_root.clone(),
+        ws_root.clone(),
+        Some(tsconfig.clone()),
+    )]);
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+    let surfaces = ProviderSurfaceStore::new();
+    let admission = CarrierTransactionCoordinator::new();
+    let decision = reconcile_carrier_source(CarrierSyncRequest {
+        host: &host,
+        vfs: Some(&fs),
+        ownership_ready: true,
+        resolver: &resolver,
+        provider_sync_states: &states,
+        provider_surfaces: &surfaces,
+        documents: None,
+        project_sync: None,
+        canonical_id: &source,
+        is_jsx: false,
+        ide: None,
+        membership: Some(CarrierMembershipCtx {
+            coordinator: &coord,
+            provider_delivery: CarrierProviderDelivery::StoreBacked,
+            activate_provider_member: false,
+        }),
+        admission: &admission,
+        reason: ReconcileReason::SourceSynced,
+    })
+    .await;
+    let CarrierSyncDecision::NotOwned(not_owned) = decision else {
+        panic!("a terminal owner loss advertises nothing (NotOwned)");
+    };
+    let class = admission.settle(not_owned, &source, None);
+    assert_eq!(
+        class,
+        SettleClass::RetractFailed,
+        "a FAILED owner-loss retract must propagate as RetractFailed"
+    );
+    assert_ne!(
+        class,
+        SettleClass::Unresolved,
+        "a failed retract must never masquerade as a completed terminal retract"
     );
 }
 
