@@ -1015,6 +1015,9 @@ pub(super) async fn handle_rename(
 
         Some(edit)
     })();
+    // Captured from the SAME snapshot as `verter_result`, before any await, so a
+    // mid-flight edit cannot make the two disagree.
+    let expected_same_file_ranges = same_file_rename_expectation(server, uri, position);
     let native_rename_is_css = server
         .documents
         .get(uri)
@@ -1310,19 +1313,16 @@ pub(super) async fn handle_rename(
         return Ok(None);
     }
 
-    // MERGED-EDIT COMPLETENESS GATE (fail-closed) — applied ONCE over the final
-    // result, so it covers the provider-success, provider-Err, and verter-only
-    // fallthrough paths uniformly. For a CONFIRMED cross-file child-prop rename the
-    // EMITTED `WorkspaceEdit` must edit BOTH the prop declaration AND the parent
-    // `.vue` usage at their EXACT full ranges, or the whole rename fails closed
-    // (returns no edit) — never a usage-only / decl-only partial. A `NotChildProp`
-    // result is returned untouched. See `gate_cross_file_child_prop_rename`.
-    Ok(
-        gate_cross_file_child_prop_rename(result, &rename_class, new_name).map(|mut edit| {
-            merge::dedupe_rename_workspace_edit_with_preferred(&mut edit, Some(uri));
-            edit
-        }),
-    )
+    // The two fail-closed completeness gates, applied ONCE over the final result
+    // so they cover the provider-success, provider-Err, and verter-only
+    // fallthrough paths uniformly. See `finalize_rename_transaction`.
+    Ok(finalize_rename_transaction(
+        result,
+        &rename_class,
+        new_name,
+        uri,
+        expected_same_file_ranges.as_deref(),
+    ))
 }
 
 /// Upsert the EXACT authored parent-usage rename edit for a confirmed
@@ -1478,8 +1478,14 @@ fn workspace_edit_satisfies_child_prop_rename(
 
 #[path = "nav_features_navigation_rename_gate.rs"]
 mod nav_features_navigation_rename_gate;
-use nav_features_navigation_rename_gate::gate_cross_file_child_prop_rename;
+use nav_features_navigation_rename_gate::{
+    finalize_rename_transaction, same_file_rename_expectation,
+};
 
 #[cfg(test)]
 #[path = "nav_features_navigation_tests.rs"]
 mod nav_features_navigation_tests;
+
+#[cfg(test)]
+#[path = "nav_features_rename_completeness_tests.rs"]
+mod nav_features_rename_completeness_tests;

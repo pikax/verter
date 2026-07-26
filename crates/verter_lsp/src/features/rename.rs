@@ -10,7 +10,7 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::references::{
     collect_css_ref_spans, find_css_target_in_style_refs, find_css_target_in_template_refs,
-    CssRefTarget,
+    offset_is_instance_member_access, CssRefTarget,
 };
 
 pub use super::sentinel_uris::SAME_FILE_URI;
@@ -19,6 +19,12 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 /// Check if the symbol at the given position can be renamed.
 ///
 /// Returns a `Range` of the symbol if renaming is allowed, or `None` if not.
+///
+/// An instance-member template access ([`offset_is_instance_member_access`]) is
+/// NOT natively renameable: the name-based match below would hand the editor the
+/// word range of a same-named script declaration, which is a different symbol.
+/// Only the TypeScript provider can resolve that position, so this surface
+/// declines it.
 pub fn prepare_rename(
     position: &Position,
     source: &str,
@@ -29,6 +35,10 @@ pub fn prepare_rename(
     let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
     let word = word_at_offset(source, offset)?;
+
+    if offset_is_instance_member_access(offset as u32, analysis) {
+        return prepare_rename_css(offset, source, analysis, line_index);
+    }
 
     // Only allow renaming known bindings and non-type imports
     let is_binding = analysis.bindings.iter().any(|b| b.name == word);
@@ -124,104 +134,14 @@ pub fn rename_at_position(
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Option<WorkspaceEdit> {
-    let analysis = analysis?;
-    let offset = line_index.position_to_offset(position)? as usize;
-    let word = word_at_offset(source, offset)?;
-
-    // Verify renaming is allowed
-    let is_binding = analysis.bindings.iter().any(|b| b.name == word);
-    let is_import = analysis
-        .imports
-        .iter()
-        .any(|i| !i.is_type_only && i.bindings.iter().any(|b| b.name == word && !b.is_type_only));
-    let is_macro = analysis
-        .macros
-        .iter()
-        .any(|m| m.binding_name.as_ref().is_some_and(|n| n == &word));
-
-    if !is_binding && !is_import && !is_macro {
-        // Try CSS class/ID rename
-        return rename_css(offset, new_name, source, analysis, line_index);
-    }
-
-    let mut edits: Vec<TextEdit> = Vec::new();
-
-    // Host analysis spans are already SFC-absolute.
-    // Collect declaration spans from the host snapshot.
-    if let Some(binding) = analysis.bindings.iter().find(|b| b.name == word) {
-        if binding.span.start > 0 || binding.span.end > 0 {
-            if let Some(edit) =
-                span_to_edit(binding.span.start, binding.span.end, new_name, line_index)
-            {
-                edits.push(edit);
-            }
-        }
-    }
-    for import in &analysis.imports {
-        for binding in &import.bindings {
-            if binding.name == word && (binding.span.start > 0 || binding.span.end > 0) {
-                if let Some(edit) =
-                    span_to_edit(binding.span.start, binding.span.end, new_name, line_index)
-                {
-                    edits.push(edit);
-                }
-            }
-        }
-    }
-
-    // Use span-based template binding occurrences (precise, no false positives)
-    if let Some(template) = &analysis.template {
-        for occ in &template.binding_occurrences {
-            if occ.name == word {
-                // Skip if this overlaps a declaration span edit
-                let already_covered = edits.iter().any(|e| {
-                    let e_start = line_index.position_to_offset(&e.range.start);
-                    e_start == Some(occ.span.start)
-                });
-                if !already_covered {
-                    if let Some(edit) =
-                        span_to_edit(occ.span.start, occ.span.end, new_name, line_index)
-                    {
-                        edits.push(edit);
-                    }
-                }
-            }
-        }
-    }
-
-    // For script blocks, use text search for usages (beyond declaration spans)
-    for block in blocks {
-        if block.tag_name != "script" {
-            continue;
-        }
-        let (content_start, content_end) = block.content_range();
-        let content = &source[content_start as usize..content_end as usize];
-
-        for occ_offset in find_all_word_occurrences(content, &word) {
-            let abs_offset = content_start as usize + occ_offset;
-            let abs_end = abs_offset + word.len();
-
-            // Skip if already covered by a declaration or template span
-            let already_covered = edits.iter().any(|e| {
-                let e_start = line_index.position_to_offset(&e.range.start);
-                e_start == Some(abs_offset as u32)
-            });
-            if already_covered {
-                continue;
-            }
-
-            if let (Some(start), Some(end)) = (
-                line_index.offset_to_position(abs_offset as u32),
-                line_index.offset_to_position(abs_end as u32),
-            ) {
-                edits.push(TextEdit {
-                    range: Range { start, end },
-                    new_text: new_name.to_string(),
-                });
-            }
-        }
-    }
-
+    let ranges = same_file_rename_ranges(position, source, blocks, analysis, line_index)?;
+    let edits: Vec<TextEdit> = ranges
+        .into_iter()
+        .map(|range| TextEdit {
+            range,
+            new_text: new_name.to_string(),
+        })
+        .collect();
     if edits.is_empty() {
         return None;
     }
@@ -236,14 +156,118 @@ pub fn rename_at_position(
     })
 }
 
-/// Perform a CSS class/ID rename across template and style blocks.
-fn rename_css(
+/// Every range in THIS file that a rename at `position` must overwrite.
+///
+/// The single authority for the same-file rename surface: [`rename_at_position`]
+/// builds its `TextEdit`s from exactly this set, and the server proves the
+/// emitted (possibly provider-merged) transaction still covers it. `None` means
+/// nothing under the cursor is renameable BY THIS SURFACE — either nothing
+/// resolves, or the position belongs to a symbol only the TypeScript provider
+/// can resolve (an instance-member template access), in which case the provider
+/// is the sole authority and an empty provider answer must ship no edit at all.
+pub fn same_file_rename_ranges(
+    position: &Position,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    line_index: &LineIndex,
+) -> Option<Vec<Range>> {
+    let analysis = analysis?;
+    let offset = line_index.position_to_offset(position)? as usize;
+    let word = word_at_offset(source, offset)?;
+
+    // The cursor sits inside an instance-member template access
+    // (`___VERTER___instance.<name>`). A same-named script declaration is a
+    // DIFFERENT symbol, so the name-based surface below must not answer: yield
+    // to the positional CSS owner (which answers `None` here) and let the
+    // provider own the position.
+    if offset_is_instance_member_access(offset as u32, analysis) {
+        return css_rename_spans(offset, source, analysis)
+            .map(|spans| to_ranges(spans, line_index));
+    }
+
+    // Verify renaming is allowed
+    let is_binding = analysis.bindings.iter().any(|b| b.name == word);
+    let is_import = analysis
+        .imports
+        .iter()
+        .any(|i| !i.is_type_only && i.bindings.iter().any(|b| b.name == word && !b.is_type_only));
+    let is_macro = analysis
+        .macros
+        .iter()
+        .any(|m| m.binding_name.as_ref().is_some_and(|n| n == &word));
+
+    if !is_binding && !is_import && !is_macro {
+        // Try CSS class/ID rename
+        return css_rename_spans(offset, source, analysis)
+            .map(|spans| to_ranges(spans, line_index));
+    }
+
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    let push_span = |spans: &mut Vec<(u32, u32)>, start: u32, end: u32| {
+        if !spans.iter().any(|(existing, _)| *existing == start) {
+            spans.push((start, end));
+        }
+    };
+
+    // Host analysis spans are already SFC-absolute.
+    // Collect declaration spans from the host snapshot.
+    if let Some(binding) = analysis.bindings.iter().find(|b| b.name == word) {
+        if binding.span.start > 0 || binding.span.end > 0 {
+            push_span(&mut spans, binding.span.start, binding.span.end);
+        }
+    }
+    for import in &analysis.imports {
+        for binding in &import.bindings {
+            if binding.name == word && (binding.span.start > 0 || binding.span.end > 0) {
+                push_span(&mut spans, binding.span.start, binding.span.end);
+            }
+        }
+    }
+
+    // Span-based template occurrences (precise, no false positives).
+    // `binding_occurrences` is the ONLY template inventory that names this
+    // symbol: it holds the expression spans whose name the compiler's template
+    // bindings map DID contain, which is exactly the set that lowers to a bare
+    // identifier over the script binding. The complement,
+    // `unresolved_bindings`, lowers to `___VERTER___instance.<name>` — an
+    // instance property, a different symbol — and is never rewritten from here.
+    if let Some(template) = &analysis.template {
+        for occ in &template.binding_occurrences {
+            if occ.name != word {
+                continue;
+            }
+            // `push_span` skips an occurrence already recorded (a declaration
+            // span).
+            push_span(&mut spans, occ.span.start, occ.span.end);
+        }
+    }
+
+    // For script blocks, use text search for usages (beyond declaration spans)
+    for block in blocks {
+        if block.tag_name != "script" {
+            continue;
+        }
+        let (content_start, content_end) = block.content_range();
+        let content = &source[content_start as usize..content_end as usize];
+
+        for occ_offset in find_all_word_occurrences(content, &word) {
+            let abs_offset = content_start as usize + occ_offset;
+            let abs_end = abs_offset + word.len();
+            push_span(&mut spans, abs_offset as u32, abs_end as u32);
+        }
+    }
+
+    Some(to_ranges(spans, line_index))
+}
+
+/// The CSS class/ID spans a rename at `offset` must overwrite, across template
+/// and style blocks.
+fn css_rename_spans(
     offset: usize,
-    new_name: &str,
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    line_index: &LineIndex,
-) -> Option<WorkspaceEdit> {
+) -> Option<Vec<(u32, u32)>> {
     let target = if let Some(template) = &analysis.template {
         find_css_target_in_template_refs(offset, source, template)
     } else {
@@ -255,38 +279,21 @@ fn rename_css(
     if spans.is_empty() {
         return None;
     }
-
-    let edits: Vec<TextEdit> = spans
-        .into_iter()
-        .filter_map(|(start, end)| span_to_edit(start, end, new_name, line_index))
-        .collect();
-
-    if edits.is_empty() {
-        return None;
-    }
-
-    #[allow(clippy::mutable_key_type)]
-    let mut changes = HashMap::new();
-    changes.insert(SAME_FILE_URI.clone(), edits);
-
-    Some(WorkspaceEdit {
-        changes: Some(changes),
-        ..Default::default()
-    })
+    Some(spans)
 }
 
-fn span_to_edit(
-    span_start: u32,
-    span_end: u32,
-    new_name: &str,
-    line_index: &LineIndex,
-) -> Option<TextEdit> {
-    let start = line_index.offset_to_position(span_start)?;
-    let end = line_index.offset_to_position(span_end)?;
-    Some(TextEdit {
-        range: Range { start, end },
-        new_text: new_name.to_string(),
-    })
+/// Convert SFC-absolute spans to `Range`s, dropping any that do not convert
+/// (fail closed — never a fabricated line-0 range).
+fn to_ranges(spans: Vec<(u32, u32)>, line_index: &LineIndex) -> Vec<Range> {
+    spans
+        .into_iter()
+        .filter_map(|(start, end)| {
+            Some(Range {
+                start: line_index.offset_to_position(start)?,
+                end: line_index.offset_to_position(end)?,
+            })
+        })
+        .collect()
 }
 
 use crate::utils::{find_all_word_occurrences, find_word_start, word_at_offset};

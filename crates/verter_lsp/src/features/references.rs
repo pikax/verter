@@ -10,6 +10,36 @@ use crate::documents::sfc_scanner::SfcBlock;
 pub use super::sentinel_uris::SAME_FILE_URI;
 pub use super::sentinel_uris::SAME_FILE_URI_STR;
 
+/// Whether `offset` lands inside a template `unresolved_bindings` span — an
+/// INSTANCE MEMBER access, not a use of a same-named script declaration.
+///
+/// One map decides both facts. `TemplateAnalysisSnapshot::unresolved_bindings`
+/// receives exactly the template occurrences the compiler's template bindings
+/// map did NOT contain, and that same map picks the generated IDE accessor: a
+/// name in the map lowers to a bare identifier, a name outside it lowers to
+/// `___VERTER___instance.<name>`. For a plain `<script>` SFC that map holds only
+/// the Options-API surface (data/props/computed/methods/inject on the default
+/// export), so a top-level `const` is never in it and `{{ count }}` is an
+/// instance property — a different symbol from `const count`.
+///
+/// Nothing local can tell a VALID instance property (supplied by a
+/// `ComponentCustomProperties` augmentation in another file, which cannot change
+/// this file's compiler inputs, generated carrier, or analysis snapshot) from a
+/// missing one. So the name-based native surface must not answer for such a
+/// position, and must not claim such a span as an occurrence of a script symbol:
+/// the TypeScript provider is the sole semantic authority there.
+pub(crate) fn offset_is_instance_member_access(
+    offset: u32,
+    analysis: &FileAnalysisSnapshot,
+) -> bool {
+    analysis.template.as_ref().is_some_and(|template| {
+        template
+            .unresolved_bindings
+            .iter()
+            .any(|binding| offset >= binding.span.start && offset < binding.span.end)
+    })
+}
+
 /// Find all references to the symbol at the given position.
 ///
 /// Strategy:
@@ -19,6 +49,11 @@ pub use super::sentinel_uris::SAME_FILE_URI_STR;
 ///    - Template binding occurrences from `TemplateAnalysisSnapshot` (precise spans)
 ///    - Text occurrences in script blocks (word boundary match)
 ///    - Falls back to text search in template blocks if template analysis is unavailable
+///
+/// Instance-member template accesses ([`offset_is_instance_member_access`]) are a
+/// different symbol: the cursor never resolves to the script declaration there,
+/// and a text hit inside such a span is never reported as one of its
+/// occurrences.
 pub fn references_at_position(
     position: &Position,
     source: &str,
@@ -34,6 +69,14 @@ pub fn references_at_position(
         // positional CSS path still owns the position.
         return css_references_at_position(offset, source, blocks, analysis, line_index);
     };
+
+    // The cursor sits on an instance-member access: a same-named script
+    // declaration is a DIFFERENT symbol, and the provider owns this one. Fall
+    // through to the positional CSS owner (which answers `None` here), never to
+    // the name-based branch below.
+    if offset_is_instance_member_access(offset as u32, analysis) {
+        return css_references_at_position(offset, source, blocks, analysis, line_index);
+    }
 
     // Check if this word is a known binding, import, or macro
     let is_binding = analysis.bindings.iter().any(|b| b.name == word);
@@ -122,6 +165,12 @@ pub fn references_at_position(
 
         for occ_offset in find_all_word_occurrences(content, &word) {
             let abs_offset = content_start as usize + occ_offset;
+
+            // A text hit inside an instance-member template access belongs to
+            // that instance property, not to the script symbol under the cursor.
+            if offset_is_instance_member_access(abs_offset as u32, analysis) {
+                continue;
+            }
 
             // Skip if this overlaps a declaration we already added
             let already_present = locations.iter().any(|loc| {

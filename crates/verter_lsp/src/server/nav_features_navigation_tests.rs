@@ -148,9 +148,8 @@ mod synthesized_rename_injection_tests {
 
 #[cfg(test)]
 mod cross_file_rename_gate_tests {
-    use super::super::{
-        gate_cross_file_child_prop_rename, workspace_edit_satisfies_child_prop_rename,
-    };
+    use super::super::nav_features_navigation_rename_gate::gate_cross_file_child_prop_rename;
+    use super::super::workspace_edit_satisfies_child_prop_rename;
     use crate::server::child_prop_rename::{
         ChildPropDeclarationProof, ChildPropRenameClass, ChildPropUsage, ConfirmedChildPropRename,
     };
@@ -600,6 +599,171 @@ mod cross_file_rename_gate_tests {
             &parent_uri(),
             Some(parent_usage_range()),
             "x"
+        ));
+    }
+}
+
+/// The SAME-FILE completeness gate: the emitted transaction must overwrite every
+/// authored occurrence Verter's own typed analysis proved, or the rename fails
+/// closed. A non-emptiness check cannot see a partial — this can.
+#[cfg(test)]
+mod same_file_completeness_gate_tests {
+    use super::super::nav_features_navigation_rename_gate::workspace_edit_covers_same_file_ranges;
+    use std::collections::HashMap;
+    use tower_lsp_server::ls_types::{Position, Range, TextEdit, Uri, WorkspaceEdit};
+
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
+    }
+
+    fn app() -> Uri {
+        uri("file:///src/App.vue")
+    }
+
+    fn rng(line: u32, start_ch: u32, end_ch: u32) -> Range {
+        Range {
+            start: Position {
+                line,
+                character: start_ch,
+            },
+            end: Position {
+                line,
+                character: end_ch,
+            },
+        }
+    }
+
+    fn te(range: Range, new_text: &str) -> TextEdit {
+        TextEdit {
+            range,
+            new_text: new_text.to_string(),
+        }
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    fn edit_with(entries: Vec<(Uri, Vec<TextEdit>)>) -> WorkspaceEdit {
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        for (uri, edits) in entries {
+            changes.entry(uri).or_default().extend(edits);
+        }
+        WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }
+    }
+
+    /// The declaration + script usage + the two template occurrences.
+    fn expected() -> Vec<Range> {
+        vec![
+            rng(1, 6, 11),
+            rng(2, 12, 17),
+            rng(6, 13, 18),
+            rng(6, 23, 28),
+        ]
+    }
+
+    #[test]
+    fn complete_edit_set_passes() {
+        let complete = edit_with(vec![(
+            app(),
+            expected().into_iter().map(|r| te(r, "renamed")).collect(),
+        )]);
+        assert!(workspace_edit_covers_same_file_ranges(
+            Some(&complete),
+            &app(),
+            &expected(),
+            "renamed"
+        ));
+    }
+
+    #[test]
+    fn script_only_subset_fails_closed() {
+        // The exact shipped defect: the declaration + the script usage, with both
+        // template occurrences missing. Non-empty, so a non-emptiness check passes
+        // it; this gate must not.
+        let partial = edit_with(vec![(
+            app(),
+            vec![te(rng(1, 6, 11), "renamed"), te(rng(2, 12, 17), "renamed")],
+        )]);
+        assert!(
+            !workspace_edit_covers_same_file_ranges(Some(&partial), &app(), &expected(), "renamed"),
+            "a 2-of-4 edit set is a partial that corrupts the template — it must not pass"
+        );
+    }
+
+    #[test]
+    fn the_same_ranges_in_a_different_file_do_not_cover_this_one() {
+        // Ranges are proved PER FILE: an identical edit set recorded against
+        // another document leaves this file's occurrences untouched.
+        let elsewhere = edit_with(vec![(
+            uri("file:///src/Other.vue"),
+            expected().into_iter().map(|r| te(r, "renamed")).collect(),
+        )]);
+        assert!(
+            !workspace_edit_covers_same_file_ranges(
+                Some(&elsewhere),
+                &app(),
+                &expected(),
+                "renamed"
+            ),
+            "edits in another file cannot satisfy this file's occurrence proof"
+        );
+    }
+
+    #[test]
+    fn wrong_new_text_at_an_expected_range_fails_closed() {
+        let mut edits: Vec<TextEdit> = expected().into_iter().map(|r| te(r, "renamed")).collect();
+        edits[3] = te(rng(6, 23, 28), "SOMETHING_ELSE");
+        let wrong = edit_with(vec![(app(), edits)]);
+        assert!(
+            !workspace_edit_covers_same_file_ranges(Some(&wrong), &app(), &expected(), "renamed"),
+            "an edit at the right range writing the wrong text does not cover the occurrence"
+        );
+    }
+
+    #[test]
+    fn cross_file_additions_do_not_affect_the_same_file_proof() {
+        // The provider legitimately adds edits in OTHER files; the gate constrains
+        // only this file's coverage.
+        let with_other_file = edit_with(vec![
+            (
+                app(),
+                expected().into_iter().map(|r| te(r, "renamed")).collect(),
+            ),
+            (
+                uri("file:///src/Other.vue"),
+                vec![te(rng(9, 0, 5), "renamed")],
+            ),
+        ]);
+        assert!(workspace_edit_covers_same_file_ranges(
+            Some(&with_other_file),
+            &app(),
+            &expected(),
+            "renamed"
+        ));
+    }
+
+    #[test]
+    fn no_edit_at_all_fails_closed_when_occurrences_were_proved() {
+        assert!(
+            !workspace_edit_covers_same_file_ranges(None, &app(), &expected(), "renamed"),
+            "proved occurrences with no emitted edit is the emptiest partial of all"
+        );
+    }
+
+    #[test]
+    fn nothing_proved_imposes_no_constraint() {
+        // A cursor with no Verter-owned occurrence set (a provider-only cross-file
+        // rename anchor) must not be gated at all.
+        let provider_only = edit_with(vec![(
+            uri("file:///src/Other.vue"),
+            vec![te(rng(9, 0, 5), "renamed")],
+        )]);
+        assert!(workspace_edit_covers_same_file_ranges(
+            Some(&provider_only),
+            &app(),
+            &[],
+            "renamed"
         ));
     }
 }
