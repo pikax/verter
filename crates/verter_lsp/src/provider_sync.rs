@@ -1,4 +1,5 @@
 use crate::project_resolver::NativeProjectResolver;
+use crate::provider_surface_store::ContentHash;
 use dashmap::DashMap;
 use verter_semantic::analysis::types::Hash16;
 use verter_workspace::workspace_snapshot::SnapshotGeneration;
@@ -74,6 +75,27 @@ pub fn non_decl_close_targets(
             NonDeclProviderPathKind::from_provider_path_kind(*kind).map(|k| (k, path.clone()))
         })
         .collect()
+}
+
+/// The identity of an API companion's DECLARATIONS — the surface an importer's
+/// rewritten specifier actually resolves against.
+///
+/// ONE definition, consumed by both the delivery stamp and the re-observation,
+/// so the two can never disagree about what "the same API" means.
+///
+/// The projection ends with a `//# sourceMappingURL=` comment whose data URI
+/// embeds the carrier's own `sourcesContent`, so the raw bytes change on EVERY
+/// keystroke. Hashing those would make each edit look like a public-surface
+/// change and fail completeness-requiring requests closed on edits that cannot
+/// affect resolution at all — the blanket latency cost this witness exists to
+/// avoid. The declaration text above it is what TypeScript resolves.
+#[must_use]
+fn api_declaration_identity(api_code: &str) -> ContentHash {
+    let declarations = match api_code.rfind("//# sourceMappingURL=") {
+        Some(index) => &api_code[..index],
+        None => api_code,
+    };
+    ContentHash::of(declarations)
 }
 
 /// Typed ownership binding for provider sync state.
@@ -200,6 +222,32 @@ pub struct ProviderSyncState {
     /// committed state — see [`CarrierCommitStamp`]. `None` for a non-carrier / unresolved
     /// commit (which carries no receipt).
     pub commit_stamp: Option<CarrierCommitStamp>,
+    /// The API companion's own CURRENCY witness — the identity of the exact
+    /// public-API bytes this provider was last GIVEN for `api_path`. Written
+    /// ONLY by an API delivery ([`Self::mark_api_delivered`]); an IDE-only sync
+    /// and its receipt can never refresh it, which is the whole point: the
+    /// state-wide [`Self::commit_stamp`] advances with an IDE receipt that
+    /// attested no API bytes, so it says nothing about API currency.
+    ///
+    /// `api_background_loaded` remains the LIVENESS statement (that buffer is
+    /// open). This is the orthogonal currency one, and a consumer that needs a
+    /// resolvable import graph needs both.
+    pub api_delivered_hash: Option<ContentHash>,
+    /// The identity of the public-API projection as of the last time this
+    /// carrier was observed — stamped at delivery, and re-stamped by the
+    /// interactive IDE repair from the API companion it already computes.
+    ///
+    /// Currency is `api_delivered_hash == api_observed_hash` (both `Some`): an
+    /// API-NEUTRAL edit re-observes the SAME identity and stays current with no
+    /// reopen, while an edit that moves the public surface leaves the two
+    /// apart until a publication actually delivers the new bytes.
+    pub api_observed_hash: Option<ContentHash>,
+    /// The shadow (rewritten non-carrier) buffer's currency witness: the
+    /// identity of the SOURCE the delivered projection was built from. The
+    /// projection cannot be recomputed cheaply per request, so the source
+    /// identity is the conservative key — an edited barrel is not current until
+    /// its rewritten buffer is re-delivered.
+    pub shadow_delivered_source_hash: Option<ContentHash>,
 }
 
 impl ProviderSyncState {
@@ -262,6 +310,48 @@ impl ProviderSyncState {
         }
     }
 
+    /// Record that `api_code` was successfully delivered to the provider under
+    /// `api_path`: the API companion is LIVE and its delivered identity is now
+    /// the current one. THE single writer of
+    /// [`api_delivered_hash`](Self::api_delivered_hash) — an API delivery is the
+    /// only event that may claim API currency.
+    pub fn mark_api_delivered(&mut self, api_code: &str) {
+        let identity = api_declaration_identity(api_code);
+        self.api_background_loaded = true;
+        self.api_delivered_hash = Some(identity);
+        self.api_observed_hash = Some(identity);
+    }
+
+    /// Re-observe the CURRENT public-API projection without delivering it: the
+    /// interactive IDE repair computes these bytes anyway, so an API-neutral
+    /// edit re-observes the delivered identity and stays current with no reopen,
+    /// while a public-surface edit records the divergence the frontier fails
+    /// closed on.
+    pub fn observe_api_projection(&mut self, api_code: Option<&str>) {
+        self.api_observed_hash = api_code.map(api_declaration_identity);
+    }
+
+    /// Record that the rewritten shadow buffer built from `source` was
+    /// delivered to the provider under `shadow_path`.
+    pub fn mark_shadow_delivered(&mut self, source: &str) {
+        self.shadow_background_loaded = true;
+        self.shadow_delivered_source_hash = Some(ContentHash::of(source));
+    }
+
+    /// Whether the API companion is BOTH live and current — the two independent
+    /// statements an importer's resolvable module identity depends on.
+    pub fn api_companion_is_live_and_current(&self) -> bool {
+        self.api_background_loaded
+            && self.api_delivered_hash.is_some()
+            && self.api_delivered_hash == self.api_observed_hash
+    }
+
+    /// Whether the shadow buffer is live and was built from `source`.
+    pub fn shadow_is_live_and_current(&self, source: &str) -> bool {
+        self.shadow_background_loaded
+            && self.shadow_delivered_source_hash == Some(ContentHash::of(source))
+    }
+
     /// Returns `true` if this state has no committed owner (unresolved binding).
     pub fn is_unresolved(&self) -> bool {
         self.owner_binding.is_unresolved()
@@ -308,6 +398,9 @@ impl ProviderSyncState {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         }
     }
 
@@ -327,7 +420,40 @@ impl ProviderSyncState {
         for kind in ALL_PATH_KINDS {
             if self.path_for_kind(kind) == previous.path_for_kind(kind) {
                 self.set_background_loaded(kind, previous.background_loaded_for_kind(kind));
+                self.carry_delivery_witness_for(kind, previous);
             }
+        }
+    }
+
+    /// Move a kind's delivery/currency witnesses along with its loaded flag.
+    /// The witnesses describe the SAME buffer the flag does, so they travel with
+    /// it and never outlive a path change (a different path is a different
+    /// buffer, and its witness stays `None` until that buffer is delivered).
+    fn carry_delivery_witness_for(&mut self, kind: ProviderPathKind, previous: &ProviderSyncState) {
+        match kind {
+            ProviderPathKind::Api => {
+                self.api_delivered_hash = previous.api_delivered_hash;
+                self.api_observed_hash = previous.api_observed_hash;
+            }
+            ProviderPathKind::Shadow => {
+                self.shadow_delivered_source_hash = previous.shadow_delivered_source_hash;
+            }
+            ProviderPathKind::Ide | ProviderPathKind::Decl => {}
+        }
+    }
+
+    /// Drop a kind's delivery/currency witnesses (the kind carries no live
+    /// buffer for this state).
+    fn clear_delivery_witness_for(&mut self, kind: ProviderPathKind) {
+        match kind {
+            ProviderPathKind::Api => {
+                self.api_delivered_hash = None;
+                self.api_observed_hash = None;
+            }
+            ProviderPathKind::Shadow => {
+                self.shadow_delivered_source_hash = None;
+            }
+            ProviderPathKind::Ide | ProviderPathKind::Decl => {}
         }
     }
 
@@ -425,6 +551,9 @@ pub fn non_carrier_sync_state_for_source(
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     })
 }
 
@@ -568,6 +697,9 @@ pub fn open_unresolved_carrier_state(
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     }
 }
 
@@ -639,8 +771,14 @@ pub fn revert_unsynced_kinds(
             ProviderPathKind::Decl => committed.decl_path = prev_path,
             ProviderPathKind::Shadow => committed.shadow_path = prev_path,
         }
-        committed
-            .set_background_loaded(kind, prev_loaded && committed.path_for_kind(kind).is_some());
+        let retained = prev_loaded && committed.path_for_kind(kind).is_some();
+        committed.set_background_loaded(kind, retained);
+        // The reverted kind is the PREVIOUS buffer, so its currency witnesses
+        // are the previous state's; a kind with no retained buffer has none.
+        match (retained, previous) {
+            (true, Some(previous)) => committed.carry_delivery_witness_for(kind, previous),
+            _ => committed.clear_delivery_witness_for(kind),
+        }
     }
 }
 
@@ -773,6 +911,9 @@ pub fn open_unresolved_carrier_commit(
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         }
     });
 

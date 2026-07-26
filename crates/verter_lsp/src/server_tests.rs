@@ -11275,6 +11275,9 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -11378,6 +11381,9 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -11494,6 +11500,9 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -11607,6 +11616,9 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12552,6 +12564,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12648,6 +12663,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12763,6 +12781,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12852,6 +12873,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -12952,6 +12976,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -13184,6 +13211,9 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert("/workspace/src/App.vue".to_string(), prior_state.clone());
 
@@ -13326,6 +13356,9 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -13453,6 +13486,9 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -13883,6 +13919,9 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -13930,6 +13969,9 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -14028,6 +14070,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
@@ -14168,6 +14213,9 @@ defineProps<{ msg: string }>()
             ),
             source_revision: u64::MAX,
         }),
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state);
 
@@ -14281,6 +14329,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
@@ -14915,6 +14966,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -14997,6 +15051,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     server.commit_provider_sync_state("/workspace/src/App.vue", prior_state.clone());
 
@@ -15270,6 +15327,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -15688,6 +15748,9 @@ const msg = 'hello'
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -19231,6 +19294,9 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -22419,6 +22485,9 @@ import Child from '@/components/Child.vue'
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(child_id.clone(), prior_state.clone());
 
@@ -22834,6 +22903,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(child_id.clone(), prior_state);
 
@@ -23024,6 +23096,9 @@ defineProps<{ show: boolean }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -23145,6 +23220,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -23253,6 +23331,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -24219,6 +24300,9 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     // Record the surface a successful IDE sync would have recorded — the
@@ -24369,6 +24453,9 @@ fn active_non_decl_paths_excludes_the_declaration_overlay() {
         shadow_background_loaded: true,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
 
     // The full active set still includes the declaration overlay.
@@ -24429,6 +24516,9 @@ async fn generic_stale_closer_never_closes_declaration_overlay() {
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
 
     // Exactly the call shape the removal paths use: the generic closer over the
@@ -25611,6 +25701,9 @@ async fn make_virtual_file_fixture(
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
     server.record_carrier_ide_snapshot("/workspace/src/App.vue", &tsx_path, recorded_content, None);

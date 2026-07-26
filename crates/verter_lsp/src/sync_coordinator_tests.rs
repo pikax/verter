@@ -652,6 +652,9 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         },
     );
 
@@ -1207,6 +1210,9 @@ defineProps<{ msg: string }>()
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     };
     provider_sync_states.insert(canonical_id.to_string(), prior_state.clone());
 

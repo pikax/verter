@@ -11,6 +11,8 @@
 //! `server/mod.rs` so it sees the parent's private struct fields without
 //! visibility widening.
 
+use std::collections::HashSet;
+
 use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
@@ -21,6 +23,10 @@ use crate::type_provider::merge;
 
 use super::server_utils::source_id_from_provider_carrier_path;
 use super::{TypeProviderContext, VerterLanguageServer};
+
+#[cfg(test)]
+#[path = "workspace_symbol_frontier_tests.rs"]
+mod workspace_symbol_frontier_tests;
 
 impl VerterLanguageServer {
     /// Capture the immutable FOREIGN-carrier IDE surface set a provider-backed
@@ -175,6 +181,33 @@ impl VerterLanguageServer {
         );
     }
 
+    /// The bytes of the carrier's CURRENT public-API projection — the identity
+    /// an API companion delivery would carry right now.
+    ///
+    /// `None` when the carrier projects no public API or the projection fails:
+    /// an unknown identity never matches a delivered one, so the companion reads
+    /// as not-current and a completeness-requiring request fails closed until a
+    /// publication delivers a known one.
+    pub(super) fn current_public_api_identity(
+        &self,
+        canonical_id: &str,
+    ) -> Option<std::sync::Arc<str>> {
+        let projected = super::handler_guard::block_in_place_if_available(|| {
+            self.documents.host().get_public_api(canonical_id)
+        });
+        match projected {
+            Ok(api) => api.map(|api| api.code),
+            Err(error) => {
+                crate::report_public_api_projection_error(
+                    "current_public_api_identity",
+                    canonical_id,
+                    &error,
+                );
+                None
+            }
+        }
+    }
+
     /// Pre-extracted data for type provider calls.
     /// All DashMap guards are dropped before this is returned, so it is safe
     /// to hold this across `.await` points without risking deadlock.
@@ -321,20 +354,30 @@ impl VerterLanguageServer {
         };
 
         match activation {
-            Ok(activated) if activated == expected_sources.len() => true,
+            Ok(activated) if activated == expected_sources.len() => {
+                // Roots are live. On tsgo the graph must also RESOLVE: its
+                // buffers are explicit opens, so a carrier-import edge whose
+                // target companion is unopened leaves the IMPORTER's use of
+                // that symbol unresolved while both IDE roots look complete.
+                if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo)
+                    || self.carrier_import_closure_is_live(&expected_sources, &owner_key)
+                {
+                    return true;
+                }
+                tracing::debug!(
+                    "workspace-symbol frontier not ready: carrier-import closure incomplete"
+                );
+                self.signal_frontier_scanner_priority(expected_sources)
+                    .await;
+                false
+            }
             Ok(activated) => {
                 tracing::debug!(
                     "workspace-symbol frontier not ready: activated {activated}/{} carriers",
                     expected_sources.len()
                 );
-                // The scanner is already running; priority signals make the
-                // missing owning-project carriers its next work without making
-                // this interactive request join background compilation.
-                if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
-                    for source in expected_sources {
-                        scanner.signal_priority(source);
-                    }
-                }
+                self.signal_frontier_scanner_priority(expected_sources)
+                    .await;
                 false
             }
             Err(error) => {
@@ -342,6 +385,180 @@ impl VerterLanguageServer {
                 false
             }
         }
+    }
+
+    /// Make the incomplete owning-project carriers the scanner's next work
+    /// without making this interactive request join background compilation.
+    async fn signal_frontier_scanner_priority(&self, expected_sources: Vec<String>) {
+        if let Some(scanner) = self.workspace_scanner.lock().await.as_ref() {
+            for source in expected_sources {
+                scanner.signal_priority(source);
+            }
+        }
+    }
+
+    /// Whether every EFFECTIVE carrier-import edge reachable from the owning
+    /// project's carriers already has its provider surface live for this owner.
+    ///
+    /// This is a SEPARATE demand from the IDE-root predicate above, and it gates
+    /// a different failure: the roots being open proves each carrier's own
+    /// symbols are in the Program, not that a cross-carrier reference RESOLVES.
+    /// A parent's IDE buffer imports the rewritten `{child}.verter.ts` specifier,
+    /// so while that API companion is unopened the parent's use of a child symbol
+    /// is unresolved — and a project-wide references/rename answer comes back
+    /// plausible but missing that file, which is worse than no answer.
+    ///
+    /// The demand is exactly what the background import-dependency publication
+    /// delivers, so it can never gate on a surface nothing produces:
+    /// - a carrier reached by a direct import (or a dynamic module reference)
+    ///   needs its API companion open under a receipt-gated commit;
+    /// - a barrel that RE-EXPORTS a carrier needs its rewritten shadow buffer
+    ///   loaded — its `export … from './X.vue'` specifier is projected, so the
+    ///   on-disk bytes do not resolve for the provider.
+    ///
+    /// A carrier that is NOT an import target is not gated (a standalone
+    /// initiating carrier, and the file under the cursor, need only their IDE
+    /// root); neither is any target outside this configured project, which the
+    /// provider resolves from disk.
+    fn carrier_import_closure_is_live(&self, expected_sources: &[String], owner_key: &str) -> bool {
+        let published = self
+            .vfs_workspace
+            .read()
+            .as_ref()
+            .and_then(|workspace| workspace.load_published())
+            .or_else(|| self.documents.host().workspace_read().published_root());
+        let Some(published) = published else {
+            return false;
+        };
+        let owned_by_frontier_project =
+            |path: &str| configured_owner_key(&published.snapshot, path) == Some(owner_key);
+
+        let host = self.documents.host();
+        let resolver_snapshot = self.published_resolver();
+        let reader = super::server_utils::LspProjectResolverReader::new(&self.documents);
+
+        let mut carrier_targets: Vec<String> = Vec::new();
+        let mut seen_carriers: HashSet<String> = HashSet::new();
+        let mut barrel_frontier: Vec<String> = Vec::new();
+        let mut seen_barrels: HashSet<String> = HashSet::new();
+        let mut push_carrier = |target: String, carrier_targets: &mut Vec<String>| {
+            if seen_carriers.insert(target.clone()) {
+                carrier_targets.push(target);
+            }
+        };
+
+        for source in expected_sources {
+            let Some(ingress) = host.get_script_ingress(source) else {
+                // The importer's edges cannot be enumerated from an unindexed
+                // script: fail closed rather than assume it imports nothing.
+                return false;
+            };
+            for target in super::server_utils::collect_imported_carrier_priority_ids_from_imports_with_fallback(
+                &ingress.imports,
+                Some(source.as_str()),
+                |parent, specifier| self.resolve_import_specifier(parent, specifier),
+            ) {
+                push_carrier(target, &mut carrier_targets);
+            }
+            for target in super::server_utils::collect_priority_carrier_public_api_targets_from_module_references(
+                resolver_snapshot.as_ref(),
+                &reader,
+                source,
+                &ingress.module_references,
+            ) {
+                push_carrier(target, &mut carrier_targets);
+            }
+            for import in ingress.imports.iter() {
+                let Some(resolved) = import
+                    .resolved_canonical_id
+                    .clone()
+                    .or_else(|| self.resolve_import_specifier(source, &import.source))
+                else {
+                    continue;
+                };
+                if verter_workspace::resolver::path_is_carrier(&resolved) {
+                    continue;
+                }
+                if seen_barrels.insert(resolved.clone()) {
+                    barrel_frontier.push(resolved);
+                }
+            }
+        }
+
+        // Follow the `export … from` graph the publication's barrel leg follows,
+        // classifying each hop by its RESOLVED target (never the specifier text),
+        // so an aliased or multi-hop re-export reaches the terminal carrier.
+        // `seen_barrels` terminates cycles.
+        let mut rewritten_barrels: Vec<String> = Vec::new();
+        while let Some(barrel) = barrel_frontier.pop() {
+            if !owned_by_frontier_project(&barrel) {
+                // A package-backed or foreign-project module: the provider
+                // resolves it from disk and publication never rewrites it.
+                continue;
+            }
+            let Some(ingress) = host.get_script_ingress(&barrel) else {
+                return false;
+            };
+            let mut re_exports_carrier = false;
+            for module_reference in ingress.module_references.iter() {
+                if module_reference.syntax
+                    != verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
+                {
+                    continue;
+                }
+                let Some(specifier) = module_reference.literal_specifier.as_deref() else {
+                    continue;
+                };
+                let Some(target) = self.resolve_import_specifier(&barrel, specifier) else {
+                    continue;
+                };
+                if verter_workspace::resolver::path_is_carrier(&target) {
+                    re_exports_carrier = true;
+                    push_carrier(target, &mut carrier_targets);
+                } else if seen_barrels.insert(target.clone()) {
+                    barrel_frontier.push(target);
+                }
+            }
+            if re_exports_carrier {
+                rewritten_barrels.push(barrel);
+            }
+        }
+
+        carrier_targets
+            .iter()
+            .filter(|target| owned_by_frontier_project(target))
+            .all(|target| {
+                self.provider_sync_states
+                    .get(target.as_str())
+                    .is_some_and(|state| {
+                        state.owner_binding.owner_key() == Some(owner_key)
+                            && state.commit_stamp.is_some()
+                            // LIVENESS *and* CURRENCY. An open API buffer whose
+                            // bytes predate the importer's edit resolves the
+                            // importer's use of a renamed symbol to nothing, and
+                            // the answer comes back missing that file — the same
+                            // partial-but-plausible result an unopened companion
+                            // produces, one stage later. The state-wide
+                            // `commit_stamp` cannot stand in for this: an
+                            // IDE-only receipt advances it while attesting no
+                            // API bytes at all.
+                            && state.api_companion_is_live_and_current()
+                    })
+            })
+            && rewritten_barrels.iter().all(|barrel| {
+                self.provider_sync_states
+                    .get(barrel.as_str())
+                    .is_some_and(|state| {
+                        state.owner_binding.owner_key() == Some(owner_key)
+                            // Same principle, cheaper key: the rewritten
+                            // projection cannot be recomputed per request, so an
+                            // edited barrel is not current until its buffer is
+                            // re-delivered from these exact source bytes.
+                            && host.get_source(barrel).is_some_and(|source| {
+                                state.shadow_is_live_and_current(&source)
+                            })
+                    })
+            })
     }
 
     /// Whether `uri` projects through a SELF-FILE rune-module own buffer.
@@ -895,6 +1112,25 @@ impl VerterLanguageServer {
                 .documents
                 .get(uri)
                 .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
+    }
+}
+
+/// The tsconfig key of the ONE configured project that owns `path`, or `None`
+/// when no single configured project does (unowned, ambiguous, or fallback-only).
+fn configured_owner_key<'a>(
+    snapshot: &'a verter_workspace::WorkspaceSnapshot,
+    path: &str,
+) -> Option<&'a str> {
+    let verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(owner) =
+        snapshot.configured_owner_resolution_for_file(path)
+    else {
+        return None;
+    };
+    match &snapshot.projects.get(owner.0 as usize)?.payload {
+        verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+            tsconfig_path, ..
+        } => Some(tsconfig_path.as_str()),
+        _ => None,
     }
 }
 

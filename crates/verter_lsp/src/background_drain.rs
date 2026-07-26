@@ -1021,7 +1021,7 @@ async fn apply_owner_resolved_carrier_sync(
                 };
                 match result {
                     Ok(()) => {
-                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        committed_state.mark_api_delivered(&api.code);
                         synced.push(ProviderPathKind::Api);
                         crate::provider_surface_store::record_carrier_api_surface(
                             documents.provider_surfaces(),
@@ -1260,7 +1260,7 @@ pub(super) async fn sync_api_to_provider_background_task(
     };
     match result {
         Ok(()) => {
-            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+            committed_state.mark_api_delivered(&api.code);
             synced_kinds.push(ProviderPathKind::Api);
             // Record a fresh generation pinning the synced content + its
             // same-content source map. This spawned task has no
@@ -1378,7 +1378,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
         .await
     {
         Ok(()) => {
-            committed_state.set_background_loaded(ProviderPathKind::Shadow, true);
+            committed_state.mark_shadow_delivered(&source);
             commit_sync_transition(provider_sync_states, canonical_id, committed_state);
             documents.host.set_import_dependencies(
                 canonical_id,

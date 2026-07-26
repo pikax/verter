@@ -432,7 +432,7 @@ impl VerterLanguageServer {
                         if let Err(e) = result {
                             tracing::warn!("sync_api: failed for {dts_path}: {e}");
                         } else {
-                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            committed_state.mark_api_delivered(&api.code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the synced content +
                             // its same-content source map under this virtual path.
@@ -1277,7 +1277,30 @@ impl VerterLanguageServer {
                             api_path: None,
                             ..Default::default()
                         });
+                    // This pass syncs the IDE companion ONLY, and closes no other
+                    // kind's buffer. Carry every OTHER kind's loaded flag from the
+                    // state that is live right now (per-kind, same-path only), or
+                    // the committed state would claim an unloaded API companion
+                    // whose buffer this provider still holds open — a lie the
+                    // workspace-symbol import closure would then read as an
+                    // undelivered import target and refuse a complete answer for.
+                    if let Some(previous) = self.provider_sync_state_for_source(&canonical_id) {
+                        state.carry_background_loaded_from(&previous);
+                    }
                     state.set_background_loaded(ProviderPathKind::Ide, true);
+                    // Liveness is not CURRENCY. The carried flag says the API
+                    // buffer is open; it cannot say the bytes in it still
+                    // describe this source, and the receipt minted below attests
+                    // the IDE companion ONLY. So re-observe the public-API
+                    // projection here: an API-NEUTRAL edit (the common template
+                    // or body change) re-observes the delivered identity and the
+                    // companion stays current with no reopen, while an edit that
+                    // moves the public surface records the divergence a
+                    // completeness-requiring request must fail closed on until a
+                    // publication delivers the new bytes.
+                    state.observe_api_projection(
+                        self.current_public_api_identity(&canonical_id).as_deref(),
+                    );
                     // Commit through the admission gate directly so the close below can be
                     // gated on ADMISSION: a `Superseded` commit (a newer transaction reclaimed
                     // the source, or an owner-loss advanced the barrier) requeues and closes
@@ -2221,7 +2244,7 @@ impl VerterLanguageServer {
                             };
                             outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
                             if result.is_ok() {
-                                committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                                committed_state.mark_api_delivered(&api.code);
                                 synced_kinds.push(ProviderPathKind::Api);
                                 // Record a fresh generation pinning the EXACT content +
                                 // its same-content source map under this virtual path.
@@ -2524,7 +2547,7 @@ impl VerterLanguageServer {
                             sync.open_dts(&dts_path, &api.code).await
                         };
                         if result.is_ok() {
-                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            committed_state.mark_api_delivered(&api.code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the synced content +
                             // its same-content source map under this virtual path.

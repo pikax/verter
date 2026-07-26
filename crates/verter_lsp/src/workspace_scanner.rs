@@ -781,7 +781,7 @@ async fn sync_non_carrier_file_to_provider(
                 prepared.provider_path
             );
         } else {
-            committed.set_background_loaded(ProviderPathKind::Shadow, true);
+            committed.mark_shadow_delivered(&source);
         }
 
         commit_sync_transition(sync_states, canonical_id, committed);
@@ -1041,7 +1041,7 @@ pub(crate) async fn sync_file_to_provider(
                         sync.load_dts_background(&dts_path, &api.code).await
                     };
                     if result.is_ok() {
-                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                        committed_state.mark_api_delivered(&api.code);
                         synced_kinds.push(ProviderPathKind::Api);
                         // Record a fresh generation pinning the synced content + its
                         // same-content source map. The background scan has no
@@ -2214,6 +2214,9 @@ defineProps<{ msg: string }>()
             shadow_background_loaded: false,
             committed_ide_surface: None,
             commit_stamp: None,
+            api_delivered_hash: None,
+            api_observed_hash: None,
+            shadow_delivered_source_hash: None,
         };
         sync_states.insert(canonical_id.to_string(), prior_state.clone());
 

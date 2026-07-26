@@ -731,7 +731,12 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
                         }
                     }
                     // The semantic provider consumes both store-resident
-                    // companions, so no direct provider I/O is pending.
+                    // companions, so no direct provider I/O is pending. This arm
+                    // stamps LIVENESS only and deliberately mints no API
+                    // currency witness: the store publication — not a direct
+                    // buffer this state would have to track — owns what tsserver
+                    // holds, and the witness exists for the direct-open route
+                    // that opens the API companion itself.
                     if committed_state.api_path.is_some() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
                     }
@@ -1265,6 +1270,9 @@ fn carrier_owned_sync_state(
         // Stamped by `commit_carrier_provider_state` from the receipt at commit time.
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     }
 }
 
@@ -1298,6 +1306,9 @@ pub(crate) fn carrier_close_target(
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     })
 }
 

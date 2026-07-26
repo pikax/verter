@@ -545,7 +545,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                     };
                     match result {
                         Ok(()) => {
-                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            committed_state.mark_api_delivered(&api.code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the EXACT content
                             // just synced under this virtual path.

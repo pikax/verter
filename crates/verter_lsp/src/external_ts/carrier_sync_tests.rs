@@ -55,6 +55,9 @@ fn owned_carrier_state() -> ProviderSyncState {
         shadow_background_loaded: false,
         committed_ide_surface: None,
         commit_stamp: None,
+        api_delivered_hash: None,
+        api_observed_hash: None,
+        shadow_delivered_source_hash: None,
     }
 }
 

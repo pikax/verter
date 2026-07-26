@@ -345,9 +345,9 @@ impl VerterLanguageServer {
     /// provider-surface generation (failing a concurrent request's post-await
     /// surface validation into an empty answer) and, on tsserver, re-publish
     /// the store + fire a store-changed notification for content the engine
-    /// already holds. Skip iff the committed state says the companion kinds
-    /// are live AND the recorded surface still byte-matches the child's live
-    /// source — an edited child (hash mismatch) always takes the full sync.
+    /// already holds. Skip iff the committed state says both companion kinds are
+    /// live AND current for the child's live bytes — an edited child always
+    /// takes the full sync.
     fn imported_carrier_already_delivered(&self, canonical_id: &str) -> bool {
         let Some(state) = self.provider_sync_state_for_source(canonical_id) else {
             return false;
@@ -357,20 +357,26 @@ impl VerterLanguageServer {
         // API-only state with no `ide_path` at all, and a skip keyed on that
         // state would silently complete — and mint DependencyReady — over an
         // undelivered IDE companion.
-        if !state.api_background_loaded || !state.ide_background_loaded {
+        if !state.ide_background_loaded {
+            return false;
+        }
+        // The API companion's own delivery witness decides whether it is still
+        // current — NEVER a recorded provider surface. The store publication
+        // re-records BOTH companion surfaces whenever the carrier gateway
+        // advertises, including on the tsgo route where the direct API buffer
+        // was NOT reopened; a skip keyed on that recording would leave the
+        // provider holding the pre-edit declarations with nothing left to
+        // re-deliver them, and a fail-closed consumer would then wait forever.
+        if !state.api_companion_is_live_and_current() {
             return false;
         }
         let store = self.documents.provider_surfaces();
+        // The IDE half stays surface-keyed: it carries no separate witness, and
+        // its surface is recorded only after a successful direct sync.
         let recorded = state
-            .api_path
+            .ide_path
             .as_deref()
-            .and_then(|path| store.current_snapshot(path))
-            .or_else(|| {
-                state
-                    .ide_path
-                    .as_deref()
-                    .and_then(|path| store.current_snapshot(path))
-            });
+            .and_then(|path| store.current_snapshot(path));
         let Some(snapshot) = recorded else {
             return false;
         };
@@ -586,7 +592,13 @@ impl VerterLanguageServer {
                         prepared.provider_path
                     );
                 } else {
-                    self.commit_provider_sync_state(barrel_id, transition.next);
+                    // The rewritten buffer IS delivered here, so this state must
+                    // say so: a barrel published only by this leg would otherwise
+                    // read as undelivered to every consumer of the committed
+                    // state (the workspace-symbol import closure included).
+                    let mut committed = transition.next;
+                    committed.mark_shadow_delivered(&source);
+                    self.commit_provider_sync_state(barrel_id, committed);
                 }
             } else {
                 let result = sync
