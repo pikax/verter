@@ -253,7 +253,22 @@ export class ExtensionTsService {
       // wins as a WHOLE package (a name the install does not export stays
       // unresolved rather than being backfilled from Verter's declarations, which
       // would silently merge two versions of the same package).
-      resolveModuleNameLiterals: (moduleLiterals, containingFile, redirectedReference, options) =>
+      //
+      // The resolution MODE is per IMPORT SITE, not per project: under
+      // `node16`/`nodenext` an `import` in an ES module resolves a package's
+      // `import` condition while the same specifier in a CommonJS file resolves
+      // `require`, and a `resolution-mode` attribute overrides both. Dropping the
+      // mode makes `resolveModuleName` default to the CommonJS conditions, so a
+      // correctly-written ESM import silently picks up a dual-published package's
+      // CJS types. `getModeForUsageLocation` is the compiler's own answer for
+      // this literal in this file — never re-derived here.
+      resolveModuleNameLiterals: (
+        moduleLiterals,
+        containingFile,
+        redirectedReference,
+        options,
+        containingSourceFile,
+      ) =>
         moduleLiterals.map((literal) => {
           const resolved = this.ts.resolveModuleName(
             literal.text,
@@ -262,6 +277,7 @@ export class ExtensionTsService {
             diskResolutionHost,
             undefined,
             redirectedReference,
+            this.ts.getModeForUsageLocation(containingSourceFile, literal, options),
           );
           if (literal.text !== VERTER_TYPES_MODULE || resolved.resolvedModule) {
             return resolved;

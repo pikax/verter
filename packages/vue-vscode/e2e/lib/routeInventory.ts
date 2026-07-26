@@ -83,7 +83,7 @@ export const NON_REQUIRED_E2E_ROUTES: readonly DeselectedE2eRoute[] = [
   {
     route: { fixture: "out-of-tree-monorepo", typeProvider: "extension" },
     reason:
-      "carrier publication is suppressed for TypeProviderKind::Tsserver, the kind the extension-hosted service registers under, so no .vue.tsx companion reaches it and its acceptance is skipped",
+      "carrier publication is suppressed for TypeProviderKind::Tsserver, the kind the extension-hosted service registers under, so no .vue.tsx companion reaches it and its acceptance is skipped; the setting is contained rather than silent — opening a carrier under `extension` warns and names auto/tsserver/tsgo, and the status bar holds a persistent warning while one is open",
   },
 ] as const;
 

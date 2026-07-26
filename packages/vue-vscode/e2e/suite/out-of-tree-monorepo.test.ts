@@ -25,8 +25,13 @@ const CARRIER_PUBLICATION_SUPPRESSED =
   "carrier publication is suppressed for TypeProviderKind::Tsserver, and the extension-hosted " +
   "service registers under that kind, so no .vue.tsx companion is ever opened to the extension " +
   "host and every carrier query arrives for a file the registry has no binding for. The " +
-  "extension-hosted provider serves plain .ts files only. Remove this skip once carrier " +
-  "publication is connected for the extension-hosted topology; this route then proves that fix.";
+  "extension-hosted provider serves plain .ts files only. THE SETTING IS CONTAINED, NOT SILENT: " +
+  "the `extension` option's description states that .vue/.svelte are not served, opening a " +
+  "carrier under it raises a warning naming auto/tsserver/tsgo as the providers that do serve " +
+  "them, and the status bar holds a persistent warning while a carrier is open " +
+  "(src/carrierProviderSupport.ts). What is missing is the CAPABILITY, and this suite is its " +
+  "resolution gate. Remove this skip once carrier publication is connected for the " +
+  "extension-hosted topology; this route then proves that fix.";
 
 /**
  * The extension-hosted TypeScript provider, end to end, across the ONE seam no

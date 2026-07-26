@@ -50,6 +50,7 @@ import {
   RequestType,
 } from "@verter/language-shared";
 import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
+import { computeCarrierUnsupportedNotice } from "./carrierProviderSupport";
 import { computeProviderRecommendationNotice, computeStatusBarState } from "./statusBar";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 import { VirtualFileContentProvider } from "./VirtualFileManager";
@@ -415,7 +416,34 @@ async function activateExtension(context: ExtensionContext) {
     void ensureTypeScriptPluginConfigured(document);
   };
 
+  // A provider that cannot serve carriers must say so when one opens, rather
+  // than leave the file silently unchecked. Raised once per selection: the
+  // status bar carries the state persistently (see `computeStatusBarState`), so
+  // this is the loud half, not a recurring nag. Changing the setting re-arms it,
+  // because that is a new decision by the user.
+  let carrierUnsupportedNoticeShown = false;
+  const warnWhenProviderCannotServeCarrier = (document?: TextDocument) => {
+    if (carrierUnsupportedNoticeShown) return;
+    const notice = computeCarrierUnsupportedNotice({
+      typeProvider: workspace.getConfiguration("verter").get<string>("typeProvider", "auto"),
+      languageId: document?.uri.scheme === "file" ? document.languageId : undefined,
+    });
+    if (!notice) return;
+    carrierUnsupportedNoticeShown = true;
+    void window.showWarningMessage(notice.message, "Change provider").then((choice) => {
+      if (choice === "Change provider") {
+        void commands.executeCommand("verter.selectTypeProvider");
+      }
+    });
+  };
+
   context.subscriptions.push(
+    workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("verter.typeProvider")) {
+        carrierUnsupportedNoticeShown = false;
+        warnWhenProviderCannotServeCarrier(window.activeTextEditor?.document);
+      }
+    }),
     workspace.onDidOpenTextDocument((document) => {
       if (document.uri.scheme === "file" && isFrameworkCarrierLanguageId(document.languageId)) {
         activeCarrierSources.add(document.uri.fsPath);
@@ -423,6 +451,7 @@ async function activateExtension(context: ExtensionContext) {
       } else {
         ensureTypeScriptPluginConfiguredForDocument(document);
       }
+      warnWhenProviderCannotServeCarrier(document);
       ensureStartedForFrameworkDocument(document);
     }),
     workspace.onDidCloseTextDocument((document) => {
@@ -538,6 +567,11 @@ async function activateExtension(context: ExtensionContext) {
     void ensureLanguageServerStarted();
   }
   ensureTypeScriptPluginConfiguredForDocument(window.activeTextEditor?.document);
+  // A carrier already open at activation never fires `onDidOpenTextDocument`, so
+  // it would otherwise be the one case that stays silent.
+  for (const document of workspace.textDocuments) {
+    warnWhenProviderCannotServeCarrier(document);
+  }
 
   return {
     getClient: getStartedClient,
@@ -1189,16 +1223,46 @@ async function startVueLanguageServer(
       });
   }
 
+  // The status bar's own inputs are the server's last status PLUS two client
+  // facts it does not carry: which provider the user selected, and whether a
+  // carrier is open. A provider that cannot serve the open carrier must not
+  // report a check mark, and the warning must persist for as long as the carrier
+  // stays open — so the bar re-renders on carrier open/close too, not only on a
+  // server notification.
+  let lastTypeProviderStatus:
+    | NotificationParams[typeof NotificationType.TypeProviderStatus]
+    | undefined;
+
+  function renderTypeProviderStatusBar() {
+    if (!lastTypeProviderStatus) return;
+    const state = computeStatusBarState(lastTypeProviderStatus, {
+      typeProvider: workspace.getConfiguration("verter").get<string>("typeProvider", "auto"),
+      carrierOpen: workspace.textDocuments.some(
+        (document) =>
+          document.uri.scheme === "file" && isFrameworkCarrierLanguageId(document.languageId),
+      ),
+    });
+    typeProviderStatusBar.text = state.text;
+    typeProviderStatusBar.tooltip = state.tooltip;
+    typeProviderStatusBar.backgroundColor = state.warning
+      ? new ThemeColor("statusBarItem.warningBackground")
+      : undefined;
+  }
+
+  attempt.add(
+    workspace.onDidOpenTextDocument(renderTypeProviderStatusBar),
+    workspace.onDidCloseTextDocument(renderTypeProviderStatusBar),
+    workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("verter.typeProvider")) renderTypeProviderStatusBar();
+    }),
+  );
+
   function registerTypeProviderStatusHandler(lc: LanguageClient) {
     lc.onNotification(
       NotificationType.TypeProviderStatus,
       (params: NotificationParams[typeof NotificationType.TypeProviderStatus]) => {
-        const state = computeStatusBarState(params);
-        typeProviderStatusBar.text = state.text;
-        typeProviderStatusBar.tooltip = state.tooltip;
-        typeProviderStatusBar.backgroundColor = state.warning
-          ? new ThemeColor("statusBarItem.warningBackground")
-          : undefined;
+        lastTypeProviderStatus = params;
+        renderTypeProviderStatusBar();
         log.info(
           `Type provider status: ${params.kind}${params.reason ? ` (${params.reason})` : ""}`,
         );

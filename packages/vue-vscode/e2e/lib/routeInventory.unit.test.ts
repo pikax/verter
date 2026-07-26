@@ -55,6 +55,11 @@ describe("VS Code E2E route inventory", () => {
       typeProvider: "extension",
     });
     expect(deselected.reason).toMatch(/TypeProviderKind::Tsserver/);
+    // A deselected route must not read as merely broken: the reason states the
+    // interim containment the product ships, so the next reader knows the
+    // setting warns instead of silently answering nothing.
+    expect(deselected.reason).toMatch(/contained/i);
+    expect(deselected.reason).toMatch(/warn/i);
 
     // Every deselected route is a declared route: the required set is the
     // inventory minus exactly those, never a set that drops a route silently.
