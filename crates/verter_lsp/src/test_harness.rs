@@ -26,6 +26,74 @@ mod fixture_dependencies;
 mod locate;
 use crate::LspConfig;
 pub(crate) use fixture_dependencies::fixture_workspace_root;
+
+/// A fixture workspace root WITH its type-only dependency surface materialized.
+///
+/// Any test that puts a real type provider (or a host that resolves imports)
+/// over a fixture must use this rather than [`fixture_workspace_root`]. A staged
+/// root starts with NO `node_modules`, so a fixture whose sources import `vue`
+/// resolves nothing until dependencies are materialized into the copy — and a
+/// provider answering from an unresolved import returns a DEGRADED surface, not
+/// an error. Tests that then guard on the degraded answer report green without
+/// running their assertions, which is worse than the stale state staging
+/// removed: that failed loudly, this passes quietly.
+///
+/// This PAIRS the two rather than making the unpaired form unreachable:
+/// [`fixture_workspace_root`] remains available, and
+/// [`crate::test_harness::TestSessionBuilder`] pairs them by hand for its own
+/// fixtures. The silent green is closed at the ASSERTION — the discriminators
+/// that masked it now fail — not by API inaccessibility. A manually-spawned
+/// provider test that calls the unpaired form still compiles; it fails loudly
+/// instead of passing quietly.
+pub(crate) fn provider_fixture_workspace_root(name: &str) -> String {
+    let root = fixture_workspace_root(name);
+    materialize_real_provider_framework_types(name);
+    root
+}
+
+/// Resolve the tsserver every harness-spawned session runs, from the CONFIGURED
+/// tsdk alone.
+///
+/// `resolve_tsserver` ranks every `node_modules/typescript` on the owning
+/// project's ANCESTOR WALK above the configured tsdk. Fixtures are staged under
+/// the system temp directory, whose ancestry this harness does not own, so a
+/// `node_modules/typescript` anywhere above it — or a `TMPDIR` pointed inside a
+/// tree that has one — would silently swap the TypeScript under every tsserver
+/// test while the authored fixture kept resolving the repo's own.
+///
+/// This function takes NO workspace root, so no caller can reintroduce that
+/// ancestry: the resolved TypeScript is the one named here, on any host and
+/// under any `TMPDIR`. Hermetic per the Testing-Hermeticity rule, and equal to
+/// what a clean checkout resolves by CONSTRUCTION rather than by coincidence.
+/// Resolution is also pinned to the tsdk TIER, not merely to a tsdk-first
+/// search: with no workspace root the ancestor walk is gone, but the ambient
+/// `npm root -g` tier remains, so a missing or rejected tsdk would otherwise let
+/// the harness run the GLOBAL compiler while reporting nothing unusual. A
+/// substitution is refused loudly; a machine with no TypeScript at all still
+/// yields `None`, which callers surface as an absent-provider skip.
+pub(crate) fn harness_tsserver_path(tsdk: &str) -> Option<std::path::PathBuf> {
+    let resolved = verter_type_runtime::discovery::resolve_tsserver(Some(tsdk), None).ok()?;
+    Some(accept_only_configured_tsdk(resolved))
+}
+
+/// Reject any tsserver the harness did not name.
+///
+/// Split out from [`harness_tsserver_path`] so the refusal is testable without
+/// a global npm install: the tier is what decides, and every tier other than
+/// the configured tsdk means a compiler substituted for the one under test.
+pub(crate) fn accept_only_configured_tsdk(
+    resolved: verter_type_runtime::discovery::ResolvedTsserver,
+) -> std::path::PathBuf {
+    assert_eq!(
+        resolved.source,
+        verter_type_runtime::discovery::TsserverSource::ConfiguredTsdk,
+        "the harness must run the TypeScript it names, but resolution supplied a \
+         {:?} install at {} — refusing to substitute a compiler",
+        resolved.source,
+        resolved.path.display()
+    );
+    resolved.path
+}
 use fixture_dependencies::materialize_real_provider_framework_types;
 
 /// Keep real external-provider sessions below the host-saturation point. A tsgo
@@ -179,11 +247,10 @@ impl TestSessionBuilder {
                     Some(p) => p,
                     None => return handle_absent_provider(self.kind, "node not found"),
                 };
-                let tsserver_path =
-                    match crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id)) {
-                        Some(p) => p,
-                        None => return handle_absent_provider(self.kind, "tsserver.js not found"),
-                    };
+                let tsserver_path = match harness_tsserver_path(&tsdk) {
+                    Some(p) => p,
+                    None => return handle_absent_provider(self.kind, "tsserver.js not found"),
+                };
                 let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../packages/vue-vscode/node_modules")
                     .to_string_lossy()

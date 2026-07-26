@@ -1994,14 +1994,7 @@ async fn make_definition_test_server_with_kind_and_deadlines(
     (temp, service, drain_handle, provider, workspace_id)
 }
 
-fn fixture_workspace_root(name: &str) -> String {
-    let path = std::fs::canonicalize(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("../../packages/vue-vscode/e2e/fixtures/{name}")),
-    )
-    .expect("fixture workspace path should canonicalize");
-    crate::test_utils::canonical_test_path(&path)
-}
+use crate::test_harness::fixture_workspace_root;
 
 #[test]
 fn fixture_workspace_root_returns_canonical_path() {
@@ -16077,7 +16070,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_properties() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16086,8 +16079,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -16193,9 +16185,11 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
         .await
     else {
-        eprintln!("skipping: direct tsserver completion timed out (cold start)");
         provider.shutdown().await;
-        return;
+        panic!(
+            "direct tsserver completion must answer; a timeout here means the \
+             staged fixture never reached a typed state"
+        );
     };
     let direct_labels: Vec<String> = direct_result
         .items
@@ -16210,11 +16204,15 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
             labels.contains(&"label".to_string()),
@@ -16229,7 +16227,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immediately_after_open()
 {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16238,8 +16236,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -16335,11 +16332,15 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
         labels.contains(&"label".to_string()),
@@ -16354,7 +16355,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_dot_trigger_immediately_after_open(
 ) {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -16363,8 +16364,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -16460,11 +16460,15 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
             labels.contains(&"label".to_string()),
@@ -16478,17 +16482,15 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
 
 #[test]
 fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let app_path = format!("{workspace_id}/src/App.vue");
     let app_source = std::fs::read_to_string(&app_path).expect("fixture App.vue should exist");
     let uri = crate::uri::path_to_file_uri(&app_path).expect("fixture uri should be valid");
 
-    let fixture_path = std::fs::canonicalize(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/vue-vscode/e2e/fixtures/single-project"),
-    )
-    .unwrap();
-    let host = crate::test_utils::make_filesystem_test_host(&fixture_path);
+    // Root the host at the SAME staged copy `workspace_id`, `app_path` and the
+    // document URI come from. Rooting it at the authored tree instead would make
+    // the host resolve a different fixture than the one under test.
+    let host = crate::test_utils::make_filesystem_test_host(std::path::Path::new(&workspace_id));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
     let _ = documents.did_open(&TextDocumentItem {
         uri: uri.clone(),
@@ -17291,7 +17293,7 @@ fn style_vbind_bare_prop_name_keeps_prop_live_and_dead_prop_flagged() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_missed() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -17300,8 +17302,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -17389,11 +17390,15 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     );
 
     if !labels.contains(&"disabled".to_string()) {
-        eprintln!(
-            "skipping: tsserver not warmed up (got global completions instead of member access)"
-        );
+        // FAIL, never skip. `disabled` is absent exactly when the fixture's
+        // dependency surface did not resolve, and returning green here reports a
+        // pass for a test that ran none of its assertions.
         provider.shutdown().await;
-        return;
+        panic!(
+            "member-access completion must resolve the fixture's typed surface; \
+             `disabled` is missing, which means the staged fixture's dependencies \
+             did not materialize, got: {labels:?}"
+        );
     }
     assert!(
         labels.contains(&"label".to_string()),
@@ -17407,7 +17412,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
 
 #[tokio::test(flavor = "multi_thread")]
 async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_parent() {
-    let workspace_id = fixture_workspace_root("single-project");
+    let workspace_id = crate::test_harness::provider_fixture_workspace_root("single-project");
     let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/vue-vscode/node_modules/typescript/lib")
         .to_string_lossy()
@@ -17416,8 +17421,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         eprintln!("skipping: node not found");
         return;
     };
-    let Some(tsserver_path) = crate::tsserver::find_tsserver(Some(&tsdk), Some(&workspace_id))
-    else {
+    let Some(tsserver_path) = crate::test_harness::harness_tsserver_path(&tsdk) else {
         eprintln!("skipping: tsserver.js not found");
         return;
     };
@@ -17618,9 +17622,13 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     };
 
     if !labels.contains(&"name".to_string()) {
-        eprintln!("skipping: tsserver not warmed up (slot member completions missing 'name')");
+        // FAIL, never skip — see the member-access discriminators above.
         provider.shutdown().await;
-        return;
+        panic!(
+            "slot member completion must resolve the scoped-slot type; `name` is \
+             missing, which means the staged fixture's dependencies did not \
+             materialize, got: {labels:?}"
+        );
     }
     assert!(
         labels.contains(&"id".to_string()),
