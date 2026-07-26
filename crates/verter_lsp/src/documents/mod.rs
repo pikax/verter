@@ -59,6 +59,10 @@ pub struct DocumentRegistry {
 }
 
 /// Tracked state for an open document.
+///
+/// `Clone` exists so a caller can take an owned snapshot and release the
+/// registry's shard read guard — see [`DocumentRegistry::get`].
+#[derive(Clone)]
 pub struct DocumentState {
     /// The canonical ID used with verter_session.
     pub canonical_id: String,
@@ -460,6 +464,17 @@ impl DocumentRegistry {
     }
 
     /// Get the document state for a URI.
+    ///
+    /// The returned value is a LIVE `DashMap` shard READ guard, not a snapshot.
+    /// `did_open`, `did_change`, `did_change_incremental`, `did_close`,
+    /// [`Self::get_ide`], [`Self::recompile_and_refresh_mapper`] and
+    /// [`Self::refresh_self_file_rewrites`] take the WRITE side of that same
+    /// shard, so calling any of them while this guard is alive parks the caller
+    /// on a lock it is itself holding — a self-deadlock with no other live
+    /// holder, and no timeout.
+    ///
+    /// Take what you need and drop the guard first (`DocumentState` is `Clone`)
+    /// before calling back into the registry.
     pub fn get(&self, uri: &Uri) -> Option<dashmap::mapref::one::Ref<'_, String, DocumentState>> {
         self.documents.get(uri.as_str())
     }

@@ -18,13 +18,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   const statusBarItems: { disposed: boolean }[] = [];
   const diagnosticCollections: { disposed: boolean }[] = [];
-  const state = { startShouldFail: true };
+  const errorMessages: string[] = [];
+  const state = {
+    startShouldFail: true,
+    startCalls: 0,
+    stopCalls: 0,
+    /** Park `start()` so a test can dispose the extension mid-start. */
+    holdStart: false,
+    releaseStart: undefined as (() => void) | undefined,
+  };
   const configuration = {
     get: (_key: string, fallback?: unknown) => fallback,
     inspect: () => undefined,
     update: async () => {},
   };
-  return { statusBarItems, diagnosticCollections, state, configuration };
+  return { statusBarItems, diagnosticCollections, errorMessages, state, configuration };
 });
 
 vi.mock("vscode", () => {
@@ -63,7 +71,10 @@ vi.mock("vscode", () => {
       activeTextEditor: undefined,
       showInformationMessage: async () => undefined,
       showWarningMessage: async () => undefined,
-      showErrorMessage: async () => undefined,
+      showErrorMessage: async (message: string) => {
+        mocks.errorMessages.push(message);
+        return undefined;
+      },
       showTextDocument: async () => undefined,
       showQuickPick: async () => undefined,
       withProgress: async (_options: unknown, task: (...args: unknown[]) => unknown) =>
@@ -225,11 +236,19 @@ vi.mock("vscode-languageclient/node", () => ({
       return Promise.resolve();
     }
     async start() {
+      mocks.state.startCalls += 1;
       if (mocks.state.startShouldFail) {
         throw new Error("verter-lsp exited before the initialize handshake");
       }
+      if (mocks.state.holdStart) {
+        await new Promise<void>((resolve) => {
+          mocks.state.releaseStart = resolve;
+        });
+      }
     }
-    async stop() {}
+    async stop() {
+      mocks.state.stopCalls += 1;
+    }
   },
   State: { Stopped: 1, Running: 2, Starting: 3 },
   TransportKind: { stdio: 0, ipc: 1, pipe: 2, socket: 3 },
@@ -237,6 +256,7 @@ vi.mock("vscode-languageclient/node", () => ({
 }));
 
 import { activateVueLanguageServer } from "./extension";
+import { DEFAULT_RESTART_POLICY } from "./restart";
 
 type ActivateParams = Parameters<typeof activateVueLanguageServer>;
 
@@ -270,7 +290,9 @@ describe("language server start attempt lifetime", () => {
     vi.useFakeTimers();
     mocks.statusBarItems.length = 0;
     mocks.diagnosticCollections.length = 0;
+    mocks.errorMessages.length = 0;
     mocks.state.startShouldFail = true;
+    mocks.state.startCalls = 0;
   });
 
   afterEach(() => {
@@ -319,5 +341,136 @@ describe("language server start attempt lifetime", () => {
 
     expect(vi.getTimerCount()).toBe(0);
     expect(liveStatusBarItems()).toBe(0);
+  });
+});
+
+/**
+ * The heartbeat watchdog restarts a frozen server. Against a server that CANNOT
+ * come back, that recovery used to have no counter, no delay and no ceiling: the
+ * monitor re-armed a fresh 60s timer before `client.start()` was even awaited, so
+ * a start that threw still scheduled the next restart — a permanent background
+ * process storm at a fixed cadence with no path to quiescence.
+ *
+ * The assertions are on OBSERVED PROCESS STARTS, so a change that merely silences
+ * the log cannot pass them.
+ */
+describe("automatic restart bounding", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mocks.statusBarItems.length = 0;
+    mocks.diagnosticCollections.length = 0;
+    mocks.errorMessages.length = 0;
+    mocks.state.startShouldFail = false;
+    mocks.state.startCalls = 0;
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("stops restarting a server that can never start, and says how to retry", async () => {
+    await activateVueLanguageServer(makeContext(), log);
+    expect(mocks.state.startCalls).toBe(1);
+
+    // From here every start throws. Let far more virtual time pass than the
+    // whole retry budget needs (60s watchdog + 2+4+8+16+32s of backoff), with
+    // enough headroom that a WIDER budget would visibly spend it here.
+    mocks.state.startShouldFail = true;
+    await vi.advanceTimersByTimeAsync(900_000);
+
+    expect(mocks.state.startCalls).toBe(1 + DEFAULT_RESTART_POLICY.maxAutomaticRestarts);
+    expect(mocks.errorMessages.some((m) => /Restart Language Server/.test(m))).toBe(true);
+
+    // Quiescence: nothing re-arms after the give-up.
+    const settled = mocks.state.startCalls;
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(mocks.state.startCalls).toBe(settled);
+  });
+
+  it("still restarts a frozen server that can come back", async () => {
+    await activateVueLanguageServer(makeContext(), log);
+    expect(mocks.state.startCalls).toBe(1);
+
+    // One watchdog trip (60s) plus the first backoff (2s).
+    await vi.advanceTimersByTimeAsync(63_000);
+
+    expect(mocks.state.startCalls).toBe(2);
+    expect(mocks.errorMessages).toEqual([]);
+  });
+});
+
+/**
+ * Deactivation while a recovery is mid-flight.
+ *
+ * The user disables the extension or reloads the window between the watchdog
+ * trip and the restart it scheduled. Recovery outliving the extension instance
+ * that owns it means a language server process nobody owns and nothing will
+ * ever shut down, so the assertions are on OBSERVED PROCESS STARTS and STOPS.
+ */
+describe("disposal during an in-flight recovery", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mocks.statusBarItems.length = 0;
+    mocks.diagnosticCollections.length = 0;
+    mocks.errorMessages.length = 0;
+    mocks.state.startShouldFail = false;
+    mocks.state.startCalls = 0;
+    mocks.state.stopCalls = 0;
+    mocks.state.holdStart = false;
+    mocks.state.releaseStart = undefined;
+  });
+
+  afterEach(() => {
+    mocks.state.releaseStart?.();
+    mocks.state.holdStart = false;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("starts no server when disposal lands inside the restart backoff", async () => {
+    const context = makeContext();
+    await activateVueLanguageServer(context, log);
+    expect(mocks.state.startCalls).toBe(1);
+
+    // The watchdog trips at 60s and recovery enters its 2s backoff.
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(mocks.state.startCalls).toBe(1);
+
+    // The user disables the extension / reloads the window mid-backoff.
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+
+    // The backoff delay expires afterwards, and every later window passes.
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    expect(mocks.state.startCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shuts down a server whose start completed after disposal", async () => {
+    const context = makeContext();
+    await activateVueLanguageServer(context, log);
+    expect(mocks.state.startCalls).toBe(1);
+
+    // The next start parks, so disposal lands while the restart is executing.
+    mocks.state.holdStart = true;
+    await vi.advanceTimersByTimeAsync(63_000);
+    expect(mocks.state.startCalls).toBe(2);
+    expect(mocks.state.releaseStart).toBeDefined();
+    const stopsBeforeDisposal = mocks.state.stopCalls;
+
+    for (const subscription of context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    // The process finishes coming up — for an owner that no longer exists.
+    mocks.state.releaseStart?.();
+    await vi.advanceTimersByTimeAsync(600_000);
+
+    // The orphan is shut down, and no watchdog is armed over it.
+    expect(mocks.state.stopCalls).toBe(stopsBeforeDisposal + 1);
+    expect(mocks.state.startCalls).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

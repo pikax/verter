@@ -22,6 +22,24 @@ use crate::features::hover::hover_at_position;
 use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
 
+/// Helper: take an OWNED snapshot of an open document.
+///
+/// `DocumentRegistry::get` returns a live `DashMap` shard READ guard, and
+/// `get_ide` (plus `did_open` / `did_change` / `did_close` /
+/// `recompile_and_refresh_mapper` / `refresh_self_file_rewrites`) takes the
+/// WRITE side of the SAME shard. Keeping the guard alive across one of those
+/// calls parks the thread on a lock it is itself holding: a self-deadlock with
+/// no other live holder and no timeout, which shows up as an intermittent
+/// suite HANG rather than a failure. Snapshotting releases the guard at the end
+/// of this call, so the assertions that follow cannot deadlock the test.
+fn document_snapshot(registry: &DocumentRegistry, uri: &Uri) -> crate::documents::DocumentState {
+    registry
+        .get(uri)
+        .expect("document should be open")
+        .value()
+        .clone()
+}
+
 /// Helper: create a DocumentRegistry and open a Vue SFC.
 fn open_vue_file(source: &str) -> (DocumentRegistry, Uri) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -77,7 +95,7 @@ const count = ref(0)
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -114,7 +132,7 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -159,7 +177,7 @@ const message = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -207,7 +225,7 @@ const count = ref(0)
 </script>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -242,7 +260,7 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -272,7 +290,7 @@ fn integration_definition_span_is_sfc_absolute() {
 const msg = 'hello'
 </script>"#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -328,7 +346,7 @@ fn integration_definition_not_offset_by_template_size() {
 const title = 'hello'
 </script>"#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -400,7 +418,7 @@ console.log(count)
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -434,7 +452,7 @@ const msg = 'hello'
 </script>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -461,7 +479,7 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -534,7 +552,7 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
 
     let verter_diags = match registry.get_diagnostics(&uri) {
         Some(snapshot) => map_diagnostics(&snapshot, &doc.line_index),
@@ -565,7 +583,7 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
 
     let verter_diags = match registry.get_diagnostics(&uri) {
         Some(snapshot) => map_diagnostics(&snapshot, &doc.line_index),
@@ -602,7 +620,7 @@ button { color: red; }
 </style>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -639,7 +657,7 @@ div { color: red; }
 </style>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
     let analysis = registry.get_analysis(&uri);
@@ -665,7 +683,7 @@ console.log(msg)
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -1530,7 +1548,7 @@ const count = 0
 <template><p>{{ count }}</p></template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1605,7 +1623,7 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1651,7 +1669,7 @@ function handleClick() {}
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1696,7 +1714,7 @@ const nested = reactive({ deep: { value: 'hello', count: 1 } })
 <template><div>{{ nested.deep.va }}</div></template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1756,7 +1774,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1837,7 +1855,7 @@ const users: User[] = [{ name: 'Alice', email: 'a@b.com', age: 30 }]
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1892,7 +1910,7 @@ fn validated_tsx_offset_keeps_fixture_vfor_member_access_on_template_occurrence(
     let source =
         include_str!("../../../packages/vue-vscode/e2e/fixtures/single-project/src/App.vue");
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -1952,7 +1970,7 @@ const outerLabel = 'outer'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -2004,7 +2022,7 @@ const outerLabel = 'outer'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -2065,7 +2083,7 @@ const outerLabel = 'outer'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -2128,7 +2146,7 @@ const show = true
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -2174,7 +2192,7 @@ const items = [1, 2, 3]
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let tsx = registry.get_ide(&uri).expect("TSX should be available");
     let mapper = registry
         .get_position_mapper(&uri)
@@ -2573,7 +2591,7 @@ const msg = 'hello'
     );
 
     // Verify document state was updated
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     assert_eq!(doc.version, 2, "version should be updated");
     assert!(
         doc.source.contains("world"),
@@ -2636,7 +2654,7 @@ const count = {}
     }
 
     // Verify final state
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     assert_eq!(doc.version, 11, "version should be 11 after 10 edits");
     assert!(
         doc.source.contains("count = 11"),
@@ -2828,16 +2846,55 @@ const value{i} = {i}
     }
 }
 
+/// The operation `multithread_interleaved_writes_and_reads` last entered.
+///
+/// A deadlock in this test parks the thread that runs the body, so the only
+/// evidence left is where it got to. The index is published before each blocking
+/// registry call and read by the watchdog on timeout, which turns "the suite
+/// hung" into "`DocumentRegistry::get_ide` never returned".
+const INTERLEAVED_PHASES: [&str; 10] = [
+    "setup",
+    "DocumentRegistry::did_open",
+    "spawning reader threads",
+    "DocumentRegistry::did_change_incremental (writer loop)",
+    "signalling readers to stop",
+    "joining reader 1 (DocumentRegistry::get_ide loop)",
+    "joining reader 2 (DocumentRegistry::get_analysis loop)",
+    "final DocumentRegistry::get",
+    "final DocumentRegistry::get_ide (DashMap `documents` write-shard mapper rebuild)",
+    "done",
+];
+
 /// @ai-generated — Multi-threaded E2E: interleaved writes and reads on same file.
 ///
 /// Simulates rapid typing (sequential did_change) while concurrent threads
 /// continuously read TSX and analysis. No operation should deadlock or panic.
+///
+/// The body runs on its own thread behind a hard watchdog. A deadlock here parks
+/// the thread doing the reads and writes, so without the watchdog the test does
+/// not fail — it hangs, burning the whole gate window and yielding no signal at
+/// all. The watchdog converts that into a failure naming the stuck operation.
 #[test]
 fn multithread_interleaved_writes_and_reads() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    let source = r#"<script setup lang="ts">
+    /// Generous next to a normal run (well under a second) and still far below
+    /// any plausible gate budget.
+    const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let phase = Arc::new(AtomicUsize::new(0));
+    let writer_version = Arc::new(AtomicUsize::new(0));
+    let reads1_seen = Arc::new(AtomicUsize::new(0));
+    let reads2_seen = Arc::new(AtomicUsize::new(0));
+
+    let body_phase = Arc::clone(&phase);
+    let body_writer_version = Arc::clone(&writer_version);
+    let body_reads1 = Arc::clone(&reads1_seen);
+    let body_reads2 = Arc::clone(&reads2_seen);
+
+    let body = std::thread::spawn(move || {
+        let source = r#"<script setup lang="ts">
 const count = 0
 </script>
 
@@ -2846,72 +2903,79 @@ const count = 0
 </template>
 "#;
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let registry = Arc::new(DocumentRegistry::new(host));
-    let uri: Uri = "file:///test/Interleaved.vue".parse().unwrap();
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let registry = Arc::new(DocumentRegistry::new(host));
+        let uri: Uri = "file:///test/Interleaved.vue".parse().unwrap();
 
-    registry.did_open(&TextDocumentItem {
-        uri: uri.clone(),
-        language_id: "vue".to_string(),
-        version: 1,
-        text: source.to_string(),
-    });
+        body_phase.store(1, Ordering::Release);
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: source.to_string(),
+        });
 
-    let done = Arc::new(AtomicBool::new(false));
-    let start_reads = Arc::new(AtomicBool::new(false));
-    let readers_started = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let start_reads = Arc::new(AtomicBool::new(false));
+        let readers_started = Arc::new(AtomicUsize::new(0));
 
-    // Reader thread 1: continuously read TSX until writes are done
-    let reg_r1 = Arc::clone(&registry);
-    let uri_r1 = uri.clone();
-    let done_r1 = Arc::clone(&done);
-    let start_reads_r1 = Arc::clone(&start_reads);
-    let readers_started_r1 = Arc::clone(&readers_started);
-    let reader1 = std::thread::spawn(move || {
-        let mut read_count = 0u32;
-        while !start_reads_r1.load(Ordering::Acquire) {
+        body_phase.store(2, Ordering::Release);
+
+        // Reader thread 1: continuously read TSX until writes are done
+        let reg_r1 = Arc::clone(&registry);
+        let uri_r1 = uri.clone();
+        let done_r1 = Arc::clone(&done);
+        let start_reads_r1 = Arc::clone(&start_reads);
+        let readers_started_r1 = Arc::clone(&readers_started);
+        let reader1 = std::thread::spawn(move || {
+            let mut read_count = 0u32;
+            while !start_reads_r1.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            while !done_r1.load(Ordering::Acquire) {
+                let _ = reg_r1.get_ide(&uri_r1);
+                read_count += 1;
+                body_reads1.store(read_count as usize, Ordering::Relaxed);
+                if read_count == 1 {
+                    readers_started_r1.fetch_add(1, Ordering::Release);
+                }
+            }
+            read_count
+        });
+
+        // Reader thread 2: continuously read analysis until writes are done
+        let reg_r2 = Arc::clone(&registry);
+        let uri_r2 = uri.clone();
+        let done_r2 = Arc::clone(&done);
+        let start_reads_r2 = Arc::clone(&start_reads);
+        let readers_started_r2 = Arc::clone(&readers_started);
+        let reader2 = std::thread::spawn(move || {
+            let mut read_count = 0u32;
+            while !start_reads_r2.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            while !done_r2.load(Ordering::Acquire) {
+                let _ = reg_r2.get_analysis(&uri_r2);
+                read_count += 1;
+                body_reads2.store(read_count as usize, Ordering::Relaxed);
+                if read_count == 1 {
+                    readers_started_r2.fetch_add(1, Ordering::Release);
+                }
+            }
+            read_count
+        });
+
+        start_reads.store(true, Ordering::Release);
+        while readers_started.load(Ordering::Acquire) < 2 {
             std::thread::yield_now();
         }
-        while !done_r1.load(Ordering::Acquire) {
-            let _ = reg_r1.get_ide(&uri_r1);
-            read_count += 1;
-            if read_count == 1 {
-                readers_started_r1.fetch_add(1, Ordering::Release);
-            }
-        }
-        read_count
-    });
 
-    // Reader thread 2: continuously read analysis until writes are done
-    let reg_r2 = Arc::clone(&registry);
-    let uri_r2 = uri.clone();
-    let done_r2 = Arc::clone(&done);
-    let start_reads_r2 = Arc::clone(&start_reads);
-    let readers_started_r2 = Arc::clone(&readers_started);
-    let reader2 = std::thread::spawn(move || {
-        let mut read_count = 0u32;
-        while !start_reads_r2.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-        while !done_r2.load(Ordering::Acquire) {
-            let _ = reg_r2.get_analysis(&uri_r2);
-            read_count += 1;
-            if read_count == 1 {
-                readers_started_r2.fetch_add(1, Ordering::Release);
-            }
-        }
-        read_count
-    });
-
-    start_reads.store(true, Ordering::Release);
-    while readers_started.load(Ordering::Acquire) < 2 {
-        std::thread::yield_now();
-    }
-
-    // Writer: 20 sequential edits while readers are running
-    for i in 2..=21 {
-        let new_source = format!(
-            r#"<script setup lang="ts">
+        // Writer: 20 sequential edits while readers are running
+        body_phase.store(3, Ordering::Release);
+        for i in 2..=21 {
+            body_writer_version.store(i as usize, Ordering::Relaxed);
+            let new_source = format!(
+                r#"<script setup lang="ts">
 const count = {i}
 </script>
 
@@ -2919,38 +2983,77 @@ const count = {i}
   <div>{{{{ count }}}}</div>
 </template>
 "#
+            );
+            registry.did_change_incremental(
+                &uri,
+                i,
+                vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: new_source,
+                }],
+            );
+        }
+
+        // Signal readers to stop
+        body_phase.store(4, Ordering::Release);
+        done.store(true, Ordering::Release);
+
+        body_phase.store(5, Ordering::Release);
+        let reads1 = reader1.join().expect("reader1 panicked");
+        body_phase.store(6, Ordering::Release);
+        let reads2 = reader2.join().expect("reader2 panicked");
+
+        // Both readers should have completed multiple reads
+        assert!(reads1 > 0, "TSX reader should have completed reads");
+        assert!(reads2 > 0, "analysis reader should have completed reads");
+
+        // Verify final state is correct
+        body_phase.store(7, Ordering::Release);
+        let doc = document_snapshot(&registry, &uri);
+        assert_eq!(doc.version, 21, "version should reflect last edit");
+        assert!(
+            doc.source.contains("count = 21"),
+            "source should have final value"
         );
-        registry.did_change_incremental(
-            &uri,
-            i,
-            vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: new_source,
-            }],
-        );
+
+        body_phase.store(8, Ordering::Release);
+        let tsx = registry.get_ide(&uri);
+        assert!(tsx.is_some(), "TSX should be available after all edits");
+        body_phase.store(9, Ordering::Release);
+    });
+
+    // Join through a rendezvous channel so a parked body thread expires the
+    // watchdog instead of blocking the test thread forever.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<std::thread::Result<()>>(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(body.join());
+    });
+    match rx.recv_timeout(WATCHDOG) {
+        Ok(Ok(())) => {}
+        // Surface the body's own panic verbatim rather than a wrapper message.
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => {
+            let reached = phase.load(Ordering::Acquire);
+            panic!(
+                "multithread_interleaved_writes_and_reads deadlocked: no progress for {:?}.\n\
+                 Stuck in: {}\n\
+                 Last writer version: {} (of 21)\n\
+                 reader 1 (get_ide) reads: {}\n\
+                 reader 2 (get_analysis) reads: {}\n\
+                 The registry calls named above take the DashMap `documents` shard \
+                 lock (read for `get`/`get_canonical_id`, exclusive for the \
+                 `get_mut` mapper rebuild); a body parked there with no other \
+                 live holder means that shard's lock was acquired and never \
+                 released on this path.",
+                WATCHDOG,
+                INTERLEAVED_PHASES[reached.min(INTERLEAVED_PHASES.len() - 1)],
+                writer_version.load(Ordering::Relaxed),
+                reads1_seen.load(Ordering::Relaxed),
+                reads2_seen.load(Ordering::Relaxed),
+            )
+        }
     }
-
-    // Signal readers to stop
-    done.store(true, Ordering::Release);
-
-    let reads1 = reader1.join().expect("reader1 panicked");
-    let reads2 = reader2.join().expect("reader2 panicked");
-
-    // Both readers should have completed multiple reads
-    assert!(reads1 > 0, "TSX reader should have completed reads");
-    assert!(reads2 > 0, "analysis reader should have completed reads");
-
-    // Verify final state is correct
-    let doc = registry.get(&uri).unwrap();
-    assert_eq!(doc.version, 21, "version should reflect last edit");
-    assert!(
-        doc.source.contains("count = 21"),
-        "source should have final value"
-    );
-
-    let tsx = registry.get_ide(&uri);
-    assert!(tsx.is_some(), "TSX should be available after all edits");
 }
 
 /// @ai-generated — Multi-threaded E2E: concurrent `did_change` on different files.
@@ -3413,7 +3516,7 @@ const count = 42
         character: position.character + 3,
     };
 
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -3520,7 +3623,7 @@ const count = 42
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -4872,7 +4975,7 @@ const pageTitle: string = 'Hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -4936,7 +5039,7 @@ const x = 1
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -4985,7 +5088,7 @@ fn integration_hover_on_slot_tag_name() {
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -5022,7 +5125,7 @@ fn integration_hover_on_slot_name_attr_value() {
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -5055,7 +5158,7 @@ fn integration_hover_on_default_slot_outlet() {
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -5089,7 +5192,7 @@ import MyComp from './MyComp.vue'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -5127,7 +5230,7 @@ import MyComp from './MyComp.vue'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -5161,7 +5264,7 @@ import MyComp from './MyComp.vue'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 
@@ -5247,7 +5350,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
+    let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
     let blocks = scan_sfc_blocks(&doc.source);
 

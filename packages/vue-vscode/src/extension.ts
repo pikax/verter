@@ -66,7 +66,7 @@ import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
 import type { ComponentNode, ParentFileNode } from "./ComponentTreeProvider";
 import { CssService } from "./css/cssService";
 import { findStyleBlockAt, scanStyleBlocks } from "./css/styleBlockScanner";
-import { restartLanguageServer } from "./restart";
+import { createRestartSupervisor, restartLanguageServer } from "./restart";
 import {
   checkClaudeCodeAndNotify,
   setupMcpForClaudeCode,
@@ -678,6 +678,17 @@ interface LanguageServerActivationOptions {
 class StartAttemptScope implements Disposable {
   private items: Disposable[] = [];
   private disposed = false;
+
+  /**
+   * True once the attempt has been torn down.
+   *
+   * Work that was already in flight when disposal landed reads this to decide
+   * whether it still has an owner — a restart that finishes afterwards must not
+   * hand the workspace a server this attempt will never shut down.
+   */
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
 
   add(...items: Disposable[]): void {
     for (const item of items) {
@@ -1293,29 +1304,38 @@ async function startVueLanguageServer(
   const HEARTBEAT_INITIAL_TIMEOUT_MS = 60_000;
   let heartbeatInitialized = false;
 
-  function resetHeartbeatTimer() {
+  function armHeartbeatTimer(timeout: number) {
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
-    const timeout = heartbeatInitialized ? HEARTBEAT_TIMEOUT_MS : HEARTBEAT_INITIAL_TIMEOUT_MS;
-    heartbeatInitialized = true; // After first reset from heartbeat, use normal timeout
-    heartbeatTimer = setTimeout(async () => {
-      log.error(
-        `No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen, restarting...`,
-      );
-      await restartLS(false);
+    heartbeatTimer = setTimeout(() => {
+      const reason = `no heartbeat from Verter LSP for ${timeout / 1000}s`;
+      log.error(`No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen.`);
+      void restartSupervisor.requestAutomaticRestart(reason);
     }, timeout);
   }
 
-  function registerHeartbeatMonitor(lc: LanguageClient) {
+  function resetHeartbeatTimer() {
+    const timeout = heartbeatInitialized ? HEARTBEAT_TIMEOUT_MS : HEARTBEAT_INITIAL_TIMEOUT_MS;
+    heartbeatInitialized = true; // After first reset from heartbeat, use normal timeout
+    armHeartbeatTimer(timeout);
+  }
+
+  /**
+   * Arm the freeze watchdog for a server that is ACTUALLY RUNNING.
+   *
+   * This is deliberately separate from handler registration and is called only
+   * after `client.start()` resolves. Arming it alongside the handlers — before
+   * the start was awaited — meant a start that THREW still scheduled a restart
+   * against a server that had never come up, which is how a permanently
+   * unstartable server produced restarts forever at a fixed cadence.
+   */
+  function armHeartbeatWatchdog() {
     // Start with initial grace period (60s) — background init may take time.
     // The first heartbeat received switches to the normal 30s timeout.
     heartbeatInitialized = false;
-    if (heartbeatTimer) clearTimeout(heartbeatTimer);
-    heartbeatTimer = setTimeout(async () => {
-      log.error(
-        `No heartbeat from Verter LSP for ${HEARTBEAT_INITIAL_TIMEOUT_MS / 1000}s — server appears frozen, restarting...`,
-      );
-      await restartLS(false);
-    }, HEARTBEAT_INITIAL_TIMEOUT_MS);
+    armHeartbeatTimer(HEARTBEAT_INITIAL_TIMEOUT_MS);
+  }
+
+  function registerServerNotifications(lc: LanguageClient) {
     lc.onNotification(NotificationType.Heartbeat, () => {
       resetHeartbeatTimer();
       // Log heartbeat in E2E test mode so tests can verify heartbeat receipt
@@ -1347,11 +1367,11 @@ async function startVueLanguageServer(
     }
   }
 
-  // The watchdog timer is armed by `registerHeartbeatMonitor`, so it is
-  // cancellable from exactly one place: a failed attempt, a superseding retry
-  // (which re-arms through the same monitor) and deactivation all disarm it.
+  // The watchdog timer is armed by `armHeartbeatWatchdog`, so it is cancellable
+  // from exactly one place: a failed attempt, a superseding retry (which re-arms
+  // through the same function) and deactivation all disarm it.
   attempt.add({ dispose: stopHeartbeatTimer });
-  registerHeartbeatMonitor(client);
+  registerServerNotifications(client);
 
   // ── Extension-hosted TypeScript language service (Experiment E) ──
   // When --type-provider=extension is used, the Rust LSP sends $/verter/tsQuery
@@ -1485,19 +1505,20 @@ async function startVueLanguageServer(
     );
   }
 
-  let restarting = false;
-  async function restartLS(showMsg: boolean) {
-    if (restarting) {
-      return;
-    }
-    restarting = true;
-    try {
-      const success = await restartLanguageServer({
+  const restartSupervisor = createRestartSupervisor({
+    restart: () =>
+      restartLanguageServer({
         stop: () => {
           plainScriptSync.disconnect();
           return client.stop();
         },
         createAndStart: async () => {
+          if (attempt.isDisposed) {
+            // Deactivation landed while this recovery was stopping the old
+            // server. Starting one now would hand the workspace a process no
+            // extension instance owns, and nothing would ever shut it down.
+            throw new Error("Verter extension was disposed before the restart could start");
+          }
           client = createLanguageServer(
             buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
               ...sharedTsgo.lspArgs,
@@ -1507,13 +1528,22 @@ async function startVueLanguageServer(
           );
           bindPlainScriptSync(client);
           registerTypeProviderPidListener(client);
-          registerHeartbeatMonitor(client);
+          registerServerNotifications(client);
           registerMcpListener(client);
           registerViteConfigTrustHandler(client);
           registerTypeProviderStatusHandler(client);
           tsQueryHandler = undefined; // Drop every project's TS service on restart
           registerTsQueryHandler(client);
           await client.start();
+          if (attempt.isDisposed) {
+            // Deactivation landed during the start itself. The process is up but
+            // its owner is gone, so shut it down here — arming a watchdog over
+            // it would only keep an ownerless server company.
+            await client.stop();
+            return;
+          }
+          // Only a server that is actually up gets a freeze watchdog.
+          armHeartbeatWatchdog();
         },
         killTrackedTypeProvider,
         resetServices: () => {
@@ -1522,12 +1552,23 @@ async function startVueLanguageServer(
           cssDiagnostics.clear();
         },
         log,
+      }),
+    onGiveUp: (message) => {
+      const RETRY = "Restart Language Server";
+      void Promise.resolve(window.showErrorMessage(message, RETRY)).then((picked) => {
+        if (picked === RETRY) {
+          void commands.executeCommand("verter.restartLanguageServer");
+        }
       });
-      if (success && showMsg) {
-        window.showInformationMessage("Verter Language server restarted");
-      }
-    } finally {
-      restarting = false;
+    },
+    log,
+  });
+  attempt.add({ dispose: () => restartSupervisor.dispose() });
+
+  async function restartLS(showMsg: boolean) {
+    const outcome = await restartSupervisor.requestManualRestart();
+    if (outcome === "restarted" && showMsg) {
+      window.showInformationMessage("Verter Language server restarted");
     }
   }
 
@@ -1536,6 +1577,8 @@ async function startVueLanguageServer(
   writeTimingMarker("client_start_begin", Date.now());
   await client.start();
   writeTimingMarker("client_start_end", Date.now());
+  // Only a server that is actually up gets a freeze watchdog.
+  armHeartbeatWatchdog();
 
   return {
     getClient,
