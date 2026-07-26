@@ -198,7 +198,8 @@ pub fn trim_span(source: &str, start: u32, end: u32) -> (u32, u32) {
 // re-derivations):
 //   - resolved binding → synthetic prefix, MAPPED identifier, synthetic suffix
 //   - ignored / local binding → MAPPED bare identifier, NO prefix/suffix
-//   - verbatim punctuation / operators / literals → unmapped
+//   - verbatim punctuation / operators / literals → MAPPED to their own authored
+//     bytes (they are a verbatim copy of them)
 //   - shorthand → controlled by the EXPLICIT [`ShorthandMode`], NOT inferred
 //     blindly from `binding.is_shorthand`
 //
@@ -206,8 +207,10 @@ pub fn trim_span(source: &str, start: u32, end: u32) -> (u32, u32) {
 // NO-OPS (the original bytes stay an `Original`, 1:1-mapped chunk); only the
 // prefix / suffix / shorthand-expansion inserts are emitted (the exact analogue
 // of `collect_binding_patches`). The RELOCATED sink emits each surviving
-// identifier as an `InsertMapped` at the target anchor and every verbatim /
-// synthetic slice as an `InsertUnmapped`.
+// identifier AND each verbatim slice as an `InsertMapped` at the target anchor —
+// so an authored expression stays one unbroken mapped run chain and a diagnostic
+// spanning the WHOLE expression still composes back to the carrier — and only
+// truly synthetic scaffolding as an `InsertUnmapped`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Where an [`ExprPlan`] is emitted.
@@ -285,8 +288,11 @@ enum ExprPiece<'a> {
     Synthetic { text: EmitText<'a> },
     /// Verbatim source slice between identifiers (punctuation, operators,
     /// literals, whitespace). `range` is the source span. In-place: stays an
-    /// `Original` chunk (no-op). Relocated: emitted as an unmapped insert (a
-    /// relocated verbatim slice has no navigation meaning).
+    /// `Original` chunk (no-op). Relocated: emitted as a MAPPED insert anchored at
+    /// `range.start` — the slice is a byte-for-byte copy of the authored bytes, so
+    /// it owns that authored span and keeps the authored expression one unbroken
+    /// mapped run chain (which is what lets a diagnostic RANGE over the whole
+    /// expression compose back to the carrier).
     Verbatim { range: SourceByteRange },
     /// A navigable identifier that survives in the output. In-place: the
     /// identifier stays an `Original` chunk; the `prefix` / `suffix` /
@@ -532,9 +538,10 @@ fn emit_plan_in_place<'alloc>(out: &mut CodeGenOutput<'alloc>, plan: &ExprPlan<'
 }
 
 /// RELOCATED sink: the prop span is deleted and the expression re-emitted at `at`.
-/// Each surviving identifier is an `InsertMapped` pointing at its source start;
-/// verbatim slices, accessor prefixes/suffixes, and shorthand keys are unmapped
-/// inserts. Ignored locals are MAPPED bare identifiers.
+/// Each surviving identifier AND each verbatim slice is an `InsertMapped` pointing
+/// at its source start, so the authored expression stays one unbroken mapped run
+/// chain; accessor prefixes/suffixes, shorthand keys, and object-literal
+/// scaffolding are unmapped inserts. Ignored locals are MAPPED bare identifiers.
 fn emit_plan_relocated<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     plan: &ExprPlan<'_>,
@@ -567,7 +574,16 @@ fn emit_plan_relocated<'alloc>(
             ExprPiece::Verbatim { range } => {
                 let slice = &source[range.start.0 as usize..range.end.0 as usize];
                 if !slice.is_empty() {
-                    unmapped(out, EmitText::Borrowed(slice));
+                    // A relocated verbatim slice is a byte-for-byte copy of the
+                    // authored bytes at `range.start`, so it OWNS that authored
+                    // span. Emitting it unmapped punched a hole through the middle
+                    // of an authored expression: a strict range mapper composes a
+                    // carrier range only from runs contiguous in BOTH spaces, so a
+                    // diagnostic over `1 + count` (whose range starts in the
+                    // unmapped `1 + `) was dropped whole and the user saw no
+                    // squiggle on a real type error. Mapping it is not a widening —
+                    // the bytes and their offsets are identical to the source.
+                    mapped(out, EmitText::Borrowed(slice), range.start);
                 }
             }
             ExprPiece::IgnoredIdent { source_start, name } => {

@@ -456,33 +456,44 @@ pub fn process_element_props<'alloc>(
                     //
                     // The key is emitted BARE whenever the modifier is a valid JS
                     // identifier, because TypeScript anchors the excess-property
-                    // diagnostic at the property-name node: a quoted key starts at
-                    // the quote, which is synthetic and unmapped, so the whole
-                    // diagnostic would fail closed and the user would see no
-                    // squiggle at all. A bare key puts the diagnostic anchor on the
-                    // mapped name itself. A modifier that is not a valid identifier
-                    // (`v-foo.some-mod`) must stay quoted to be legal JS; its name
-                    // is still mapped for hover/definition.
+                    // diagnostic at the property-name node, and a bare key puts
+                    // that anchor on the mapped name itself.
+                    //
+                    // A modifier that is not a valid identifier (`v-foo.some-mod`)
+                    // must stay quoted to be legal JS, and TypeScript then spans
+                    // the WHOLE string literal — both quotes included. Synthetic,
+                    // unmapped quotes therefore drop the invalid-modifier
+                    // diagnostic entirely (its range starts AND ends outside any
+                    // mapped run). So each quote owns the authored delimiter it
+                    // stands for: the opening quote maps to the `.` that
+                    // introduces the modifier, the closing quote to the token that
+                    // terminates it. The quoted key is then one run chain
+                    // contiguous in BOTH the generated and the authored space, and
+                    // the diagnostic composes onto the authored modifier.
                     pieces.push(DirectivePiece::Syn(",{".to_string()));
                     for (i, modifier) in prop.modifiers.iter().enumerate() {
                         let mod_name = &source[modifier.start as usize..modifier.end as usize];
-                        let bare = is_js_identifier(mod_name);
-                        pieces.push(DirectivePiece::Syn(
-                            match (i > 0, bare) {
-                                (true, true) => ",",
-                                (true, false) => ",\"",
-                                (false, true) => "",
-                                (false, false) => "\"",
-                            }
-                            .to_string(),
-                        ));
+                        if i > 0 {
+                            pieces.push(DirectivePiece::Syn(",".to_string()));
+                        }
+                        let quoted = !is_js_identifier(mod_name);
+                        if quoted {
+                            pieces.push(DirectivePiece::Mapped {
+                                text: "\"".to_string(),
+                                source_start: SourceByteOffset(modifier.start.saturating_sub(1)),
+                            });
+                        }
                         pieces.push(DirectivePiece::Mapped {
                             text: mod_name.to_string(),
                             source_start: SourceByteOffset(modifier.start),
                         });
-                        pieces.push(DirectivePiece::Syn(
-                            if bare { ":true" } else { "\":true" }.to_string(),
-                        ));
+                        if quoted {
+                            pieces.push(DirectivePiece::Mapped {
+                                text: "\"".to_string(),
+                                source_start: SourceByteOffset(modifier.end),
+                            });
+                        }
+                        pieces.push(DirectivePiece::Syn(":true".to_string()));
                     }
                     pieces.push(DirectivePiece::Syn("});".to_string()));
 
