@@ -6,11 +6,15 @@
  * instead of over TCP. The Rust LSP sends `$/verter/tsQuery` requests which
  * are dispatched to `handleQuery()`.
  *
- * TypeScript is resolved ONLY from the workspace (via `createRequire`), so the
- * language service uses the project's own TS version and its lib files. There is
- * no bundled fallback: a compiler packed into the extension resolves its default
- * libs next to the bundle, where no `lib.*.d.ts` ships, so it would answer from
- * a lib-less service — silently wrong diagnostics.
+ * TypeScript is resolved ONLY from the workspace — from the project's own
+ * `node_modules` chain and nothing else — so the language service uses the
+ * project's own TS version and its lib files. There is no bundled fallback: a
+ * compiler packed into the extension resolves its default libs next to the
+ * bundle, where no `lib.*.d.ts` ships, so it would answer from a lib-less
+ * service — silently wrong diagnostics. There is no AMBIENT fallback either: the
+ * global folders Node ends a bare specifier at (`NODE_PATH`,
+ * `$HOME/.node_modules`, …) are a compiler the project did not install, with its
+ * own version and its own libs, and are never consulted.
  *
  * One instance serves ONE configured project — its root (where its TypeScript is
  * installed) and its config file (which gives it its compiler options), both
@@ -28,9 +32,9 @@
  *    `crates/verter_type_runtime/src/discovery.rs` `validate_tsserver_candidate`).
  */
 
-import { readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { createRequire } from "module";
-import { dirname, join } from "path";
+import { basename, dirname, join, resolve } from "path";
 import type * as ts from "typescript";
 
 import { VERTER_TYPES_STUB } from "@verter/typescript-plugin/verter-types-stub";
@@ -91,6 +95,94 @@ function countDefaultLibs(libDir: string): number {
   }).length;
 }
 
+/**
+ * The `node_modules` directories that belong to `root` — its own, then each
+ * ancestor's, in Node's lookup order and stopping at the filesystem root.
+ *
+ * This is Node's own list — `Module._nodeModulePaths`, the directories a bare
+ * specifier is searched in — WITHOUT Node's final step. Node ends a bare
+ * specifier at GLOBAL_FOLDERS — the `NODE_PATH` entries, `$HOME/.node_modules`,
+ * `$HOME/.node_libraries` and `$PREFIX/lib/node` — so `require.resolve` can
+ * answer from a TypeScript that has nothing to do with the project: a different
+ * major version, a different set of `lib.*.d.ts`, installed by something else
+ * entirely. Serving from it is exactly the silently-wrong-diagnostics outcome
+ * this provider refuses a bundled compiler for, so the chain is walked
+ * explicitly and the global folders are never consulted.
+ *
+ * A directory already named `node_modules` contributes NOTHING from its own
+ * iteration, which is Node's rule for a project that lives inside a dependency
+ * tree: no `node_modules/node_modules` is ever probed, and the directory itself
+ * still gets searched because the PARENT's iteration already contributes that
+ * identical path. Skipping it — rather than letting it contribute itself — is
+ * what keeps the list Node's: contributing itself names the same directory
+ * twice, which resolves the same but is no longer the list Node walks.
+ */
+export function workspaceNodeModulesChain(root: string): string[] {
+  const chain: string[] = [];
+  let dir = resolve(root);
+  for (;;) {
+    if (basename(dir) !== "node_modules") chain.push(join(dir, "node_modules"));
+    const parent = dirname(dir);
+    if (parent === dir) return chain;
+    dir = parent;
+  }
+}
+
+/**
+ * The directory whose `node_modules` holds the workspace's own TypeScript, or
+ * `undefined` when nothing in `searched` installs one.
+ *
+ * Takes the already-computed chain rather than deriving its own, so the
+ * directories REPORTED when this returns `undefined` are by construction the
+ * directories that were actually consulted — the two can never drift into a
+ * diagnostic that names a search which did not happen.
+ *
+ * Presence is decided by the package MANIFEST, the same signal every package
+ * manager writes and every resolver reads. `existsSync` follows symlinks, so a
+ * pnpm/yarn store link (and the junction the fixtures materialize) counts as the
+ * install it points at.
+ *
+ * The answer is the OWNING DIRECTORY rather than the entry path so that the
+ * module itself is still loaded by Node from there — `main`, `exports` and every
+ * other package-resolution rule stay Node's, and the first lookup path already
+ * holds the package, so no later candidate (and no global folder) is reachable.
+ */
+function workspaceTypeScriptOwner(searched: readonly string[]): string | undefined {
+  for (const nodeModules of searched) {
+    if (existsSync(join(nodeModules, "typescript", "package.json"))) return dirname(nodeModules);
+  }
+  return undefined;
+}
+
+/**
+ * The `MODULE_NOT_FOUND` that resolving through Node would have raised, for the
+ * case Node is never asked about: nothing in the workspace's chain installs
+ * TypeScript at all.
+ *
+ * This is the commonest failure there is, and it needs the same underlying
+ * detail every other failure here carries as a `cause` — the actionable message
+ * alone cannot separate "no TypeScript is installed" from "TypeScript is
+ * installed somewhere this provider deliberately does not look", and those need
+ * different fixes.
+ *
+ * It reproduces what Node attached: the `MODULE_NOT_FOUND` code, and the same
+ * `Cannot find module 'typescript'` first line. What it does NOT reproduce is
+ * Node's `Require stack:` tail — nothing was required, so there is no stack, and
+ * that tail named only the anchor file anyway. The directories actually
+ * consulted go there instead: strictly the more useful fact, and the one a user
+ * with a hoisted or misplaced install needs to see.
+ */
+function typeScriptNotInstalled(searched: readonly string[]): Error {
+  return Object.assign(
+    new Error(
+      `Cannot find module 'typescript'\n` +
+        `Searched (the project's own node_modules chain — Node's lookup list ` +
+        `without its global-folder step):\n- ${searched.join("\n- ")}`,
+    ),
+    { code: "MODULE_NOT_FOUND" },
+  );
+}
+
 export class ExtensionTsService {
   private ts!: typeof ts;
   private service!: ts.LanguageService;
@@ -120,17 +212,17 @@ export class ExtensionTsService {
     if (this.initializationError) throw this.initializationError;
     if (this.initialized) return;
 
-    // The workspace TypeScript is the ONLY source.
-    let tsModule: typeof ts;
-    let entryPath: string;
-    try {
-      const wsRequire = createRequire(join(this.workspaceRoot, "package.json"));
-      // Resolve the entry FIRST: its directory is the install's lib directory,
-      // which must be validated before the compiler is allowed to answer.
-      entryPath = wsRequire.resolve("typescript");
-      tsModule = wsRequire("typescript") as typeof ts;
-    } catch (cause) {
-      throw this.failClosed(
+    // The workspace TypeScript is the ONLY source. `require.resolve` on its own
+    // is NOT that guarantee: its last step is the global folders, so an ambient
+    // `NODE_PATH` (every pnpm bin shim exports one) or a legacy
+    // `$HOME/.node_modules` answers for a project that installed no TypeScript
+    // at all. The owning directory is therefore found in the workspace's own
+    // `node_modules` chain first, and Node resolves the module from THERE.
+    // Nothing installed in the chain and a chain entry that fails to load are one
+    // outcome to the user — no usable TypeScript of this project's own — so both
+    // fail closed through one message.
+    const unresolvable = (cause?: unknown): Error =>
+      this.failClosed(
         `Verter: the extension TypeScript provider could not resolve a workspace ` +
           `TypeScript installation from ${this.workspaceRoot}. Install TypeScript in ` +
           `the workspace (npm install -D typescript) or choose a different ` +
@@ -138,6 +230,20 @@ export class ExtensionTsService {
           `than serve wrong diagnostics from a TypeScript the project does not use.`,
         cause,
       );
+
+    let tsModule: typeof ts;
+    let entryPath: string;
+    const searched = workspaceNodeModulesChain(this.workspaceRoot);
+    const owner = workspaceTypeScriptOwner(searched);
+    if (owner === undefined) throw unresolvable(typeScriptNotInstalled(searched));
+    try {
+      const wsRequire = createRequire(join(owner, "package.json"));
+      // Resolve the entry FIRST: its directory is the install's lib directory,
+      // which must be validated before the compiler is allowed to answer.
+      entryPath = wsRequire.resolve("typescript");
+      tsModule = wsRequire("typescript") as typeof ts;
+    } catch (cause) {
+      throw unresolvable(cause);
     }
 
     // The native-preview TypeScript layout (the `typescript` 7.x package) is a

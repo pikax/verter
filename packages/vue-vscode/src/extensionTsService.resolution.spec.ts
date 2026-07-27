@@ -16,24 +16,51 @@
 // answers instead of the thrown error, and the bundle-composition guard finds the
 // TypeScript compiler among the bundled inputs.
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import Module, { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ExtensionTsService } from "./extensionTsService.js";
+import { ExtensionTsService, workspaceNodeModulesChain } from "./extensionTsService.js";
 import {
   materializeLibLessWorkspaceTypeScript,
   materializeLibShapedNonFileWorkspaceTypeScript,
   materializeNativePreviewWorkspaceTypeScript,
   materializeWorkspaceTypeScript,
+  realTypeScriptPackageDir,
 } from "./extensionTsService.testUtils.js";
 
 const tmps: string[] = [];
 afterEach(() => {
   for (const d of tmps.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+
+/**
+ * Recompute Node's GLOBAL_FOLDERS from the CURRENT `NODE_PATH`.
+ *
+ * Node reads `NODE_PATH` once, at process start, so setting the variable from
+ * inside a test changes nothing on its own. `_initPaths` is the internal that
+ * performs that read; calling it is the only way to make an ambient install
+ * reachable — and unreachable again — while the process is running.
+ */
+function reinitializeNodeGlobalFolders(): void {
+  (Module as unknown as { _initPaths(): void })._initPaths();
+}
+
+/**
+ * Node's OWN `node_modules` lookup list for `from` — the directories a bare
+ * `require.resolve` consults before it falls through to the global folders.
+ *
+ * The chain under test claims to be exactly this list, so it is pinned against
+ * the real implementation rather than a hand-written expectation: a
+ * hand-written list only ever proves the author and the code agree, while this
+ * fails the moment the two walks disagree — in either direction.
+ */
+function nodeModulePathsOf(from: string): string[] {
+  return (Module as unknown as { _nodeModulePaths(from: string): string[] })._nodeModulePaths(from);
+}
 
 function makeWorkspace(name: string): { root: string } {
   const root = mkdtempSync(join(tmpdir(), name));
@@ -114,6 +141,116 @@ describe("ExtensionTsService — workspace TypeScript resolution", () => {
     }
     expect(second).toBe(first);
     expect(unavailable).toEqual([message]);
+  });
+
+  // The message above is a SUMMARY. Behind it there must still be the underlying
+  // detail — which module was not found, and where it was looked for — because
+  // "TypeScript is not installed here" and "TypeScript is installed somewhere
+  // this provider does not look" produce the SAME summary and need different
+  // fixes; the searched list is what separates them.
+  //
+  // Resolving through Node used to supply that detail for free: the raised
+  // `MODULE_NOT_FOUND` was attached as the thrown error's `cause`. Walking the
+  // chain ourselves means Node never raises it, so it has to be carried
+  // deliberately — otherwise the failure users hit MOST often is the one that
+  // reports least, while the rarer load failure right below keeps its cause.
+  it("carries the module-not-found detail, and the directories it searched, as the cause", () => {
+    const { root } = makeWorkspace("ext-ts-cause-");
+    // NO materializeWorkspaceTypeScript: nothing is installed anywhere in the
+    // fixture's chain, which is the commonest real failure.
+
+    const svc = new ExtensionTsService(root, () => {});
+
+    let thrown: unknown;
+    try {
+      svc.handleQuery("open", {
+        file: join(root, "entry.ts"),
+        fileContent: "",
+        scriptKindName: "TS",
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+
+    const cause = (thrown as { cause?: unknown }).cause;
+    expect(
+      cause,
+      "the commonest failure must not be the one that discards its diagnostic",
+    ).toBeInstanceOf(Error);
+    // The machine-readable half the Node error carried.
+    expect((cause as { code?: unknown }).code).toBe("MODULE_NOT_FOUND");
+    // The human-readable half: WHICH module.
+    expect((cause as Error).message).toContain("typescript");
+
+    // …and WHERE it was looked for. Every directory the resolver actually
+    // consulted is named — not just the first, or the user cannot tell an
+    // uninstalled project from one whose install sits above the search.
+    const causeMessage = (cause as Error).message;
+    for (const searched of workspaceNodeModulesChain(root)) {
+      expect(causeMessage, `the cause must name ${searched}`).toContain(searched);
+    }
+    // Discriminates a first-entry-only report from a whole-chain one: an
+    // ancestor entry is present, and it is not the workspace's own.
+    expect(causeMessage).toContain(join(dirname(root), "node_modules"));
+  });
+
+  // Node does not end a bare `require.resolve` at the project: its last step is
+  // the GLOBAL FOLDERS — every `NODE_PATH` entry, `$HOME/.node_modules`,
+  // `$HOME/.node_libraries`, `$PREFIX/lib/node`. A TypeScript found there is not
+  // the project's — another version, another set of `lib.*.d.ts`, installed by
+  // something else entirely — so serving from it is the same silently-wrong
+  // diagnostics the bundled compiler was refused for, delivered to a user whose
+  // project installs no TypeScript at all. The provider therefore walks the
+  // workspace's OWN `node_modules` chain and stops there.
+  //
+  // The ambient reachability is MADE here, not assumed: the fixture points
+  // `NODE_PATH` at a real TypeScript and asks Node to re-read its global
+  // folders, then restores both. And the premise is ASSERTED before the refusal
+  // is checked — an ambient setup that silently failed to apply would otherwise
+  // leave this test passing while proving nothing.
+  it("refuses a TypeScript reachable only through Node's global folders", () => {
+    const { root } = makeWorkspace("ext-ts-ambient-");
+    // NO materializeWorkspaceTypeScript: nothing is installed in the workspace.
+    const ambient = mkdtempSync(join(tmpdir(), "ext-ts-ambient-global-"));
+    tmps.push(ambient);
+    symlinkSync(realTypeScriptPackageDir(), join(ambient, "typescript"), "junction");
+
+    const previousNodePath = process.env.NODE_PATH;
+    process.env.NODE_PATH = ambient;
+    reinitializeNodeGlobalFolders();
+    try {
+      // The premise: a bare resolve from the fixture DOES find the ambient
+      // TypeScript. Whatever the service does below, it is deciding against a
+      // reachable compiler, not against an empty machine.
+      expect(() => createRequire(join(root, "package.json")).resolve("typescript")).not.toThrow();
+
+      const source = "export const answer: number = 42;\n";
+      const filePath = join(root, "entry.ts");
+      writeFileSync(filePath, source);
+
+      const unavailable: string[] = [];
+      const svc = new ExtensionTsService(root, (message) => unavailable.push(message));
+
+      let thrown: unknown;
+      try {
+        svc.handleQuery("open", { file: filePath, fileContent: source, scriptKindName: "TS" });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(
+        thrown,
+        "an ambient TypeScript the project never installed must not be served",
+      ).toBeInstanceOf(Error);
+      const message = (thrown as Error).message;
+      expect(message).toMatch(/could not resolve a workspace TypeScript/);
+      expect(message).toContain(root);
+      expect(unavailable).toEqual([message]);
+    } finally {
+      if (previousNodePath === undefined) delete process.env.NODE_PATH;
+      else process.env.NODE_PATH = previousNodePath;
+      reinitializeNodeGlobalFolders();
+    }
   });
 
   // A workspace TypeScript that RESOLVES but carries no default libraries is the
@@ -225,11 +362,45 @@ describe("ExtensionTsService — workspace TypeScript resolution", () => {
   });
 });
 
+// The chain the provider searches is Node's own `node_modules` lookup list with
+// its FINAL step — the global folders — removed, and nothing else changed. That
+// is the whole claim: the provider narrows Node's search, it does not invent a
+// different one. Pinning it against `Module._nodeModulePaths` is what keeps the
+// claim honest; a hand-written expected list would only prove the author and the
+// code agree with each other.
+describe("workspaceNodeModulesChain — Node's lookup list minus the global folders", () => {
+  it("matches Node's own list exactly for an ordinary project root", () => {
+    const { root } = makeWorkspace("ext-ts-chain-");
+    expect(workspaceNodeModulesChain(root)).toEqual(nodeModulePathsOf(root));
+  });
+
+  // A project that lives INSIDE a dependency tree. Node does not probe a
+  // `node_modules/node_modules`: it skips that directory's own iteration
+  // entirely, because the PARENT's iteration already contributes the identical
+  // path. A walk that instead makes the directory contribute itself emits that
+  // path twice — same resolution, but no longer Node's list.
+  it("matches Node's own list for a root that is itself a node_modules directory", () => {
+    const { root } = makeWorkspace("ext-ts-chain-nested-");
+    const inside = join(root, "node_modules");
+    const chain = workspaceNodeModulesChain(inside);
+    expect(chain).toEqual(nodeModulePathsOf(inside));
+    // The discriminating half, stated directly: no entry repeats.
+    expect(chain).toEqual([...new Set(chain)]);
+  });
+
+  it("matches Node's own list for a package nested under a dependency tree", () => {
+    const { root } = makeWorkspace("ext-ts-chain-pkg-");
+    const inside = join(root, "node_modules", "some-pkg");
+    expect(workspaceNodeModulesChain(inside)).toEqual(nodeModulePathsOf(inside));
+  });
+});
+
 // The setting's own copy is the only description most users ever read. It must
 // not promise less than the service enforces: a refusal class the UI does not
 // mention reads to the user as a bug in Verter.
 describe("verter.typeProvider — the `extension` option's user-facing copy", () => {
-  it("names every refusal class the service implements", () => {
+  /** The `extension` option's description, as VS Code will show it. */
+  function extensionOptionDescription(): string {
     const manifest = JSON.parse(
       readFileSync(join(dirname(import.meta.dirname), "package.json"), "utf8"),
     ) as {
@@ -240,7 +411,11 @@ describe("verter.typeProvider — the `extension` option's user-facing copy", ()
       };
     };
     const setting = manifest.contributes.configuration.properties["verter.typeProvider"]!;
-    const description = setting.enumDescriptions[setting.enum.indexOf("extension")]!;
+    return setting.enumDescriptions[setting.enum.indexOf("extension")]!;
+  }
+
+  it("names every refusal class the service implements", () => {
+    const description = extensionOptionDescription();
 
     expect(description).toMatch(/no bundled fallback/i);
     // (1) nothing resolves, (2) resolves but library-less, (3) an engine this
@@ -250,5 +425,20 @@ describe("verter.typeProvider — the `extension` option's user-facing copy", ()
     expect(description).toMatch(/native \(7\.x\/tsgo\)/i);
     // And that the refusal is PER PROJECT, not per window.
     expect(description).toMatch(/sibling projects keep working/i);
+  });
+
+  // The fourth refusal, and the one a reader is most likely to guess wrong:
+  // this mode has no global tier, so a TypeScript reachable only through
+  // `NODE_PATH` or a legacy global folder is refused even though `tsserver` —
+  // sitting right beside it in the same picker — would use it. The docs table
+  // says so; the setting the user actually reads must not be the surface that
+  // stays silent, or the two disagree and the refusal reads as a Verter bug.
+  it("says it has no global tier, matching the docs row", () => {
+    const description = extensionOptionDescription();
+
+    expect(description).toMatch(/no global tier/i);
+    expect(description).toContain("NODE_PATH");
+    // The claim is scoped to THIS provider, so it names the one it differs from.
+    expect(description).toMatch(/tsserver/);
   });
 });

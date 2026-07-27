@@ -1,10 +1,12 @@
 // Test-only helpers for the ExtensionTsService spec suites.
 //
-// `ExtensionTsService` resolves TypeScript ONLY from the workspace under test
-// (`createRequire` anchored at `<root>/package.json`). The specs build fixture
-// workspaces in the OS temp directory, which has no resolvable TypeScript of its
-// own — so each fixture must materialize one explicitly, exactly like a real
-// workspace's `npm install -D typescript`.
+// `ExtensionTsService` resolves TypeScript ONLY from the workspace under test:
+// it walks that workspace's OWN `node_modules` chain and anchors `createRequire`
+// at the first entry that installs one — the OWNING directory's `package.json`,
+// not the root's — so Node's global folders are never a source. The specs build
+// fixture workspaces in the OS temp directory, whose chain installs no
+// TypeScript at any level — so each fixture must materialize one explicitly,
+// exactly like a real workspace's `npm install -D typescript`.
 
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
