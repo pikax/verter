@@ -434,13 +434,37 @@ jobs:
       - name: Run tests
         run: |
           pnpm --filter @verter/types exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
-      - name: Carrier-routing no-Vue-gate guards (ts-plugin + vue-vscode)
-        # Surgical, by-path run of the two TS carrier-routing static guards so a
-        # re-introduced Vue-only carrier gate is caught in main CI. Explicit file
-        # paths deliberately AVOID the vue-vscode package's pre-existing broken
-        # specs (packageManifest*/ssrReadiness) that block a blanket package run.
-        run: |
-          pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts packages/vue-vscode/src/carrier-routing-no-vue-gate.spec.ts
+      - name: vue-vscode unit specs (discovered, NOT enumerated)
+        # DISCOVERY BY PATTERN, with quarantine by explicit EXCLUSION.
+        #
+        # This job used to name vue-vscode specs individually, on the premise
+        # that `packageManifest*`/`ssrReadiness` were broken and blocked a
+        # blanket package run. They are not: with the `Build TS packages` step
+        # above, all 40 spec files under packages/vue-vscode/src pass. What the
+        # filename list actually did was leave the other 37 in no CI job at
+        # all. Four paths were named across this job's two old steps, but only
+        # THREE of them were vue-vscode specs — `carrier-routing-no-vue-gate`,
+        # `extensionTsService.autoimport` and `extensionTsService.diagnostics`;
+        # the fourth was typescript-plugin's own carrier-routing guard, which
+        # still runs in the step below. So 37 of the 40 never ran:
+        # `extensionTsService.resolution.spec.ts` and
+        # `extensionTsServiceRegistry.spec.ts` were both added on 2026-07-26 and
+        # were never once executed by CI, so three fail-closed provider guards
+        # regressed with nothing watching them.
+        #
+        # A spec added under packages/vue-vscode/src now runs here by default.
+        # A spec that must NOT run is quarantined by adding an `--exclude` on
+        # this step, where it is visible and named alongside its reason.
+        #
+        # Quarantined: none.
+        run: pnpm vitest run packages/vue-vscode/src
+      - name: Carrier-routing no-Vue-gate guard (typescript-plugin)
+        # Deliberately still a single path, and not for lack of coverage: the
+        # WHOLE typescript-plugin package is run by `native-test`, which has the
+        # built `@verter/native` that `src/tsc/*.spec.ts` require and this job
+        # does not produce. This step is only the fast, native-free carrier
+        # guard, kept here so a re-introduced Vue-only carrier gate fails early.
+        run: pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts
       - name: Rust build-tooling helper self-tests (sccache-env, publish set)
         # Explicit-path root vitest run: scripts/ is not a workspace package,
         # so `pnpm -r run test` never reaches these specs — same convention as
@@ -452,19 +476,6 @@ jobs:
         # by explicit path for the same reason as the steps above — this job
         # does not run `pnpm -r run test`, so an unreferenced spec never runs.
         run: pnpm vitest run packages/binary-launcher packages/verter-lsp packages/verter-mcp
-      - name: Extension-provider headless guards (auto-import + diagnostics)
-        # Regression-guards the in-process EXTENSION type provider headlessly (no
-        # VS Code, no LSP) via `ExtensionTsService`:
-        #   - autoimport: surfaces an unimported export with a `source` resolve
-        #     key and resolves the import edit.
-        #   - diagnostics (GAP-2): unions the SEMANTIC + SYNTACTIC + SUGGESTION
-        #     passes, reaching parity with the native TS / TSGO pull model
-        #     (reverting the syntactic/suggestion handlers makes it throw).
-        # The shared Rust resolve path is covered by the tsserver parity gate;
-        # these prove the extension-specific TS-side shaping. Run by explicit path
-        # for the same reason as the carrier-routing guards above.
-        run: |
-          pnpm vitest run packages/vue-vscode/src/extensionTsService.autoimport.spec.ts packages/vue-vscode/src/extensionTsService.diagnostics.spec.ts
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v3
@@ -628,12 +639,42 @@ jobs:
   # These two jobs used to run `pnpm run build:wasm` independently, so any
   # change matching both filters paid for the wasm toolchain, wasm-bindgen and
   # a full wasm32 compile twice. No Rust toolchain is needed here now.
+  #
+  # This job also BUILDS the playground, which nothing in CI did before.
+  # `packages/playground/vite.config.ts` runs `verter()` with `vue()` commented
+  # out, so the playground's own 25 SFCs compile through Verter's VDOM codegen
+  # at build time — it is the dogfooding surface, and it had no build coverage
+  # at all. A compiler defect sat in it undetected until a bundler change turned
+  # a silent runtime bug into a build error.
+  #
+  # The build lives HERE, not in a job of its own, because both expensive
+  # prerequisites already exist as artifacts: wasm32 from `wasm-build` and the
+  # release `.node` from `build-native-node` (which `@verter/unplugin`, and so
+  # `verter()`, loads). Running `pnpm --filter @verter/playground build` instead
+  # would recompile both from source — the ~4 minutes of wasm toolchain this
+  # job was explicitly restructured to stop paying twice.
+  #
+  # THE TOTAL DELIBERATE COST, not just this job's share of it. Inside these
+  # steps it is `build:ts` plus `vite build`, with no Rust toolchain. But the
+  # larger half is paid upstream: `build-native-node` now also fires on the
+  # `playground` filter, and that is a release `napi build --release` under a
+  # 40-minute timeout, newly triggered by any of the 111 tracked files under
+  # packages/playground/** — a README or `.gitignore` edit included — with this
+  # job serialized behind it. That widening is load-bearing, not incidental:
+  # under the previous `rust || js` condition those same 111 files satisfy this
+  # job's own `if:` while its producer skips, and a skipped job skips its
+  # dependents, so the job would be silently disabled. See its `if:` below.
+  #
+  # The consequence to know before reading a red run: a playground-only PR can
+  # now fail on a Rust COMPILE error out of `build-native-node` while
+  # `rust-test`, `rust-clippy` and `rust-fmt` are all skipped, none of the three
+  # being on the `playground` filter.
   playground-test:
-    name: Playground Unit Tests
-    needs: [detect-changes, wasm-build]
+    name: Playground Unit Tests & Build
+    needs: [detect-changes, wasm-build, build-native-node]
     if: needs.detect-changes.outputs.playground == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v6
@@ -649,6 +690,29 @@ jobs:
           path: packages/wasm
       - name: Playground tests
         run: pnpm --filter @verter/playground test
+      # MANDATORY wasm gate. `src/core/compiler.spec.ts` is the ONE playground
+      # spec that drives the built WASM host, so it is excluded from the
+      # package's artifact-independent default `test` script (root `pnpm test`
+      # and a plain dev checkout have no `packages/wasm/wasm/`, where 19 of its
+      # 41 running tests fail — 43 in the file, two of them `it.skip`). This
+      # job downloaded the artifact, so this step is that spec's ONLY
+      # enforcement point — same arrangement as `native-test`'s
+      # `@verter/component-meta test:native`.
+      - name: Playground WASM compiler spec
+        run: pnpm --filter @verter/playground test:wasm
+      # Everything below builds the app. The .node is what `verter()` runs the
+      # SFCs through; `build:ts` supplies the workspace deps the playground
+      # imports (type-ir, proto, types, language-shared, component-meta,
+      # unplugin) — the same set `build:workspace-deps` would build from source.
+      - name: Download native binding
+        uses: actions/download-artifact@v7
+        with:
+          name: native-node
+          path: packages/native/dist
+      - name: Build TS packages
+        run: pnpm run build:ts
+      - name: Build the playground
+        run: pnpm --filter @verter/playground exec vite build
 
   wasm-build:
     name: WASM Build
@@ -926,7 +990,14 @@ jobs:
   build-native-node:
     name: Build native binding
     needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.js == 'true'
+    # Also runs for `playground`, which consumes this job's artifact to build
+    # the app — a playground-only change sets neither `rust` nor `js` (the `js`
+    # filter excludes packages/playground/**), and a skipped job skips its
+    # dependents, which would silently disable playground-test.
+    if: >-
+      needs.detect-changes.outputs.rust == 'true' ||
+      needs.detect-changes.outputs.js == 'true' ||
+      needs.detect-changes.outputs.playground == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
