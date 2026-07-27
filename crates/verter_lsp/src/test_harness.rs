@@ -1407,7 +1407,8 @@ export namespace JSX {
 /// `svelte/transition` and `svelte/animate`, and the managed-tsgo Svelte JSX
 /// asset preparation ([`crate::svelte_assets`]) REQUIRES the owner package to
 /// declare an `./elements` type export — a package without it is rejected as
-/// malformed, and the carrier IDE surface then never reaches the engine at all.
+/// unusable, so the carrier reaches the engine UNSPECIALIZED (its `svelte`
+/// imports unresolved) alongside a `svelte-package-unusable` diagnostic.
 /// Modelling the real export map is what makes the Svelte assertions in this
 /// fixture exercise the production path instead of a degraded one.
 const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[

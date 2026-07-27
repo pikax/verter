@@ -453,6 +453,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let init_generation = Arc::clone(&init_generation);
         let vfs_workspace = Arc::clone(&vfs_workspace);
         let provider_sync_states = Arc::clone(&provider_sync_states);
+        let project_sync = project_sync.clone();
         tokio::spawn(async move {
             // Level 2 of the readiness ladder is emitted only after level 1: a fast
             // scan on a small workspace finishes before this init reaches its ready
@@ -486,18 +487,24 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                     continue;
                 };
 
+                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+                // The SAME complete Verter-owned set the debounced coordinator
+                // publishes. This sweep REPLACES the client's whole list for the
+                // document, so a narrower set here would erase categories the
+                // coordinator had already surfaced.
                 let verter_diags = {
                     let vfs_ws = vfs_workspace.read();
-                    compute_verter_diagnostics_for_with_views(
+                    crate::server::verter_owned_diagnostics(
                         &documents,
                         &uri,
+                        &canonical_id,
                         &cached_verter_diags,
                         vfs_ws.as_deref(),
+                        project_sync.as_ref(),
                     )
                 };
 
                 let diagnostics = if let Some(tp) = &type_provider {
-                    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
                     let encoding = position_encoding.read().clone();
                     crate::sync_coordinator::carrier_provider_diagnostics(
                         &documents,
@@ -548,18 +555,24 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                 continue;
             };
 
+            let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+            // The SAME complete Verter-owned set the debounced coordinator
+            // publishes. This sweep REPLACES the client's whole list for the
+            // document, so a narrower set here would erase categories the
+            // coordinator had already surfaced.
             let verter_diags = {
                 let vfs_ws = vfs_workspace.read();
-                compute_verter_diagnostics_for_with_views(
+                crate::server::verter_owned_diagnostics(
                     &documents,
                     &uri,
+                    &canonical_id,
                     &cached_verter_diags,
                     vfs_ws.as_deref(),
+                    project_sync.as_ref(),
                 )
             };
 
             let diagnostics = if let Some(tp) = &type_provider {
-                let canonical_id = crate::documents::uri_to_canonical_id(&uri);
                 let encoding = position_encoding.read().clone();
                 crate::sync_coordinator::carrier_provider_diagnostics(
                     &documents,

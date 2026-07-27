@@ -95,12 +95,11 @@ impl VerterLanguageServer {
     /// directly (the test harness drains the client socket, so a pushed set is not
     /// otherwise readable).
     pub(super) async fn compute_full_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        let mut verter_diags = self.compute_verter_diagnostics(uri);
-        // Surface a user-visible `verter(project)` diagnostic for an UNRESOLVED open
-        // carrier (no configured project / ambiguous owner), from the ONE shared
-        // carrier-ownership resolution — so an orphaned carrier is never silently
-        // typeless.
-        verter_diags.extend(self.project_ownership_diagnostics(uri));
+        // The complete Verter-owned set — including the `verter(project)`
+        // ownership warning for an UNRESOLVED open carrier — comes from the one
+        // shared composer, so this path cannot drift from what the debounced
+        // and background publishers surface.
+        let verter_diags = self.compute_verter_diagnostics(uri);
 
         if let Some(tp) = &self.type_provider {
             match self.provider_projection_context(uri) {
@@ -167,24 +166,6 @@ impl VerterLanguageServer {
         } else {
             verter_diags
         }
-    }
-
-    /// The `verter(project)` diagnostics for `uri` when it is an UNRESOLVED open
-    /// carrier (`NoProject` / `Ambiguous`). Empty for a `Bound` / `NotReady` carrier and
-    /// for a non-carrier document. Driven from the shared carrier-ownership
-    /// resolution — the same typed resolution the carrier-sync gateway consumes —
-    /// never a path-shape heuristic.
-    ///
-    /// Unlike the always-present OWNED admission gate, the diagnostics path OBSERVES
-    /// the published root's `ownership_ready`: a cold-bootstrap snapshot resolves
-    /// `NotReady` (⇒ empty), so a carrier queried before the real project graph
-    /// publishes never surfaces a FALSE `verter(project)` no-owner warning where the
-    /// carrier-sync gateway correctly defers. A genuine terminal `NoProject` /
-    /// `Ambiguous` under an authoritative snapshot still surfaces.
-    fn project_ownership_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        let host = self.documents.host();
-        let canonical = crate::audit_harness::canonical_id_for_uri(host, uri);
-        crate::external_ts::project_ownership_diagnostics_for(host, &canonical)
     }
 
     /// Audit-aware wrapper for [`Self::publish_full_diagnostics`].

@@ -13746,7 +13746,7 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
     // resolves immediately via the "types" export condition in package.json.
     // No stale HOST_MISSING_MACRO_TYPE_DEP diagnostic should appear.
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     assert!(
         !diags.iter().any(|d| matches!(
             &d.code,
@@ -16502,7 +16502,7 @@ fn compute_verter_diagnostics_flags_fixture_fragment_component_data_attr() {
     let cached_verter_diags = Arc::new(DashMap::new());
 
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     let fragment_path = format!("{workspace_id}/src/FragmentComp.vue");
     let fragment_analysis = resolve_component_for(host.as_ref(), &app_path, "./FragmentComp.vue");
 
@@ -16586,7 +16586,7 @@ fn unused_declared_props_emits_slots_surface_by_default_with_unnecessary_tag() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     let by_code = |code: &str| {
         diags
@@ -16686,7 +16686,7 @@ fn unused_declaration_diagnostics_fail_open_on_escapes_destructure_and_use_slots
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16733,7 +16733,7 @@ fn with_defaults_bound_props_script_and_template_reads_are_not_flagged() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16774,7 +16774,7 @@ fn with_defaults_bound_props_genuinely_unused_prop_is_still_flagged() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     let unused_props = diags
         .iter()
@@ -16831,7 +16831,7 @@ fn with_defaults_bound_props_whole_object_spread_suppresses() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16875,7 +16875,7 @@ fn with_defaults_bound_props_template_whole_object_bind_suppresses() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -16907,7 +16907,7 @@ fn with_defaults_bound_props_template_whole_object_bind_suppresses() {
         version: 1,
         text: control_source.to_string(),
     });
-    let control_diags = compute_verter_diagnostics_for_with_views(
+    let control_diags = crate::server::document_diagnostics_for_test(
         &documents,
         &control_uri,
         &cached_verter_diags,
@@ -16972,7 +16972,7 @@ fn with_defaults_bound_props_style_root_vbind_suppresses() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -17003,7 +17003,7 @@ fn with_defaults_bound_props_style_root_vbind_suppresses() {
         version: 1,
         text: control_source.to_string(),
     });
-    let control_diags = compute_verter_diagnostics_for_with_views(
+    let control_diags = crate::server::document_diagnostics_for_test(
         &documents,
         &control_uri,
         &cached_verter_diags,
@@ -17061,7 +17061,7 @@ fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -17103,7 +17103,7 @@ fn template_emit_binding_call_never_flags_the_emitted_event() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -17144,7 +17144,7 @@ fn template_dollar_emit_call_suppresses_emit_diagnostics() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         !diags.iter().any(|diag| matches!(
@@ -17215,8 +17215,12 @@ fn broken_script_mid_edit_emits_no_unused_declaration_hints() {
         });
 
         let cached_verter_diags = Arc::new(DashMap::new());
-        let diags =
-            compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        let diags = crate::server::document_diagnostics_for_test(
+            &documents,
+            &uri,
+            &cached_verter_diags,
+            None,
+        );
 
         assert!(
             !diags.iter().any(|diag| matches!(
@@ -17264,7 +17268,7 @@ fn style_vbind_bare_prop_name_keeps_prop_live_and_dead_prop_flagged() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     let unused_props: Vec<_> = diags
         .iter()
@@ -20158,7 +20162,7 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     let cached_verter_diags = Arc::new(DashMap::new());
 
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
 
     assert!(
         documents.get(&uri).is_some(),
@@ -20207,7 +20211,7 @@ const props = defineProps<Props<string>>()
     });
 
     let diagnostics =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &DashMap::new(), None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &DashMap::new(), None);
     let limited: Vec<_> = diagnostics
         .iter()
         .filter(|diagnostic| {
@@ -20261,7 +20265,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
 
     // First call — should contain HOST_MISSING_MACRO_TYPE_DEP
     let diags1 =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     assert!(
         diags1.iter().any(|d| matches!(
             &d.code,
@@ -20284,7 +20288,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
 
     // Second call — same doc version, but diagnostics_generation changed
     let diags2 =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     assert!(
             !diags2.iter().any(|d| matches!(
                 &d.code,
@@ -26920,7 +26924,7 @@ fn e2e_fixture_unused_declarations_matches_boundary_semantics() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
     let diags =
-        compute_verter_diagnostics_for_with_views(&documents, &uri, &cached_verter_diags, None);
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
     let count = |code: &str| {
         diags
             .iter()

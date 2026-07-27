@@ -1467,7 +1467,12 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
 ///
 /// Uses the published `LspViews` from the VFS workspace for per-project lint.
 /// If no published snapshot exists or the file has no owner, uses a default linter.
-pub(crate) fn compute_verter_diagnostics_for_with_views(
+/// The DOCUMENT half only (host errors + lint + component usage), version-cached.
+/// Private on purpose: production publishers must go through
+/// [`verter_owned_diagnostics`], which adds the state-derived categories a
+/// replacing publisher would otherwise erase. Tests may target this half
+/// directly through the `#[cfg(test)]` alias below.
+fn compute_verter_diagnostics_for_with_views(
     documents: &DocumentRegistry,
     uri: &Uri,
     cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
@@ -1593,6 +1598,120 @@ pub(crate) fn compute_verter_diagnostics_for_with_views(
     }
 
     diags
+}
+
+/// THE complete set of Verter-owned diagnostics for one document — the only
+/// crate-visible way to produce it.
+///
+/// Every publisher (the debounced coordinator on `did_open`/`did_change`, both
+/// background-initialization sweeps, and the pull `textDocument/diagnostic`
+/// path) computes its Verter half here. That is not tidiness: each publisher
+/// REPLACES the client's whole diagnostic list for the document, so a publisher
+/// that assembled a shorter set would silently erase whatever the others had
+/// surfaced — the last writer wins, and the user's explanation disappears with
+/// no error anywhere. [`compute_verter_diagnostics_for_with_views`] is private
+/// to this module for exactly that reason: a future publisher cannot reach the
+/// version-cached document half without also getting the state-derived
+/// categories below.
+///
+/// The split matters. The document half is cached per `(version,
+/// diagnostics generation)`; the categories added here derive from workspace,
+/// ownership and provider state that moves independently of the document
+/// version, so they are recomputed fresh on every publish and never enter that
+/// cache.
+pub(crate) fn verter_owned_diagnostics(
+    documents: &DocumentRegistry,
+    uri: &Uri,
+    canonical_id: &str,
+    cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
+    vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
+    project_sync: Option<&crate::type_provider::project_sync::ProjectSync>,
+) -> Vec<Diagnostic> {
+    let mut diags = compute_verter_diagnostics_for_with_views(
+        documents,
+        uri,
+        cached_verter_diags,
+        vfs_workspace,
+    );
+
+    // The `verter(project)` ownership diagnostic for a terminally unresolved
+    // carrier (`NoProject` / disk-layout carrier-path conflict). A resolved
+    // carrier (`Bound`, including a resolved multi-claimant) and a bootstrap
+    // `NotReady` stay silent — the shared owner authority decides, never a
+    // path-shape heuristic.
+    diags.extend(crate::external_ts::project_ownership_diagnostics_for(
+        documents.host(),
+        canonical_id,
+    ));
+
+    // A `.svelte` document whose governing `svelte` install is missing or
+    // unusable fails CLOSED (module-not-found on the shim's `svelte` import).
+    // The typed diagnostic explains it instead of leaving a raw TS
+    // module-not-found — or, for an install that exists but fails validation,
+    // nothing at all.
+    if let Some(source) = documents.host().get_source(canonical_id) {
+        diags.extend(crate::svelte_assets::svelte_package_diagnostic(
+            canonical_id,
+            &source,
+        ));
+    }
+
+    // A carrier whose provider surface could not be PREPARED at all. The read
+    // side fails closed with `None` — the honest "no engine holds bytes for
+    // this buffer" answer — but that must not also be silent: every
+    // provider-backed feature on the file goes dark, and the only other trace
+    // is a log line the user never sees.
+    if let Some(reason) =
+        project_sync.and_then(|sync| sync.carrier_preparation_failure(canonical_id))
+    {
+        let source = documents
+            .host()
+            .get_source(canonical_id)
+            .unwrap_or_default();
+        diags.push(carrier_provider_unavailable_diagnostic(&reason, &source));
+    }
+
+    diags
+}
+
+/// Test-only access to the document half. Production code cannot reach it —
+/// the base function is private and the one production entry point is
+/// [`verter_owned_diagnostics`], so a publisher physically cannot assemble the
+/// incomplete set.
+#[cfg(test)]
+pub(crate) fn document_diagnostics_for_test(
+    documents: &DocumentRegistry,
+    uri: &Uri,
+    cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
+    vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
+) -> Vec<Diagnostic> {
+    compute_verter_diagnostics_for_with_views(documents, uri, cached_verter_diags, vfs_workspace)
+}
+
+/// The typed Verter diagnostic code for a carrier whose provider surface could
+/// not be prepared at all.
+pub(crate) const CARRIER_PROVIDER_UNAVAILABLE_CODE: &str = "carrier-provider-unavailable";
+
+/// Build the typed diagnostic for a recorded carrier-preparation failure,
+/// anchored at the file head so it lands even before any projection exists.
+fn carrier_provider_unavailable_diagnostic(reason: &str, source: &str) -> Diagnostic {
+    let first_line_len = source.lines().next().map(str::len).unwrap_or(0) as u32;
+    Diagnostic {
+        range: Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, first_line_len),
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(NumberOrString::String(
+            CARRIER_PROVIDER_UNAVAILABLE_CODE.to_string(),
+        )),
+        source: Some("verter".to_string()),
+        message: format!(
+            "Verter could not build the TypeScript surface for this file, so \
+             type-aware features are unavailable here: {reason}"
+        ),
+        ..Default::default()
+    }
 }
 
 pub(super) fn resolve_import_path(importer_dir: &str, import_source: &str) -> String {

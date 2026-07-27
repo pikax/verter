@@ -2158,3 +2158,213 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
         Some(canonical_id.as_str())
     );
 }
+
+/// Deps for a verter-only (no in-process provider) coordinator publish.
+fn verter_only_deps(documents: Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
+    SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::None,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    }
+}
+
+/// Install a `svelte` package at `<root>/node_modules/svelte`.
+fn install_svelte_at(root: &std::path::Path, manifest: &str) {
+    let dir = root.join("node_modules/svelte");
+    std::fs::create_dir_all(&dir).expect("svelte package dir");
+    std::fs::write(dir.join("package.json"), manifest).expect("manifest");
+    std::fs::write(dir.join("index.d.ts"), "export type S = 1;\n").expect("index");
+    std::fs::write(dir.join("elements.d.ts"), "export interface E {}\n").expect("elements");
+}
+
+const USABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
+const UNUSABLE_SVELTE: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
+
+/// `did_open` and `did_change` both route through this coordinator, and this is
+/// the set it hands the client. An unusable `svelte` install must be explained
+/// on BOTH — a user who never edits the file still needs to know why every
+/// type-aware feature is dark.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_publishes_the_svelte_install_diagnostic_on_open_and_on_change() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    install_svelte_at(tmp.path(), UNUSABLE_SVELTE);
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let canonical_id = src_dir
+        .join("App.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(&canonical_id, "<div>hi</div>").expect("component");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<div>hi</div>".to_string(),
+    });
+    let deps = verter_only_deps(Arc::clone(&documents));
+
+    let on_open = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    let has_unusable = |diags: &[Diagnostic]| {
+        diags.iter().any(|d| {
+            matches!(&d.code, Some(NumberOrString::String(code))
+                if code == crate::svelte_assets::SVELTE_PACKAGE_UNUSABLE_CODE)
+        })
+    };
+    assert!(
+        has_unusable(&on_open),
+        "an unusable svelte install must be explained on did_open, got {on_open:?}"
+    );
+
+    // The same document after an edit — the debounced change publish must not
+    // drop the category.
+    let _ = documents.did_change(&uri, 2, "<div>edited</div>");
+    let on_change = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        has_unusable(&on_change),
+        "the diagnostic must survive did_change, got {on_change:?}"
+    );
+}
+
+/// The negative control: a healthy install publishes NO install diagnostic on
+/// the same path. Without it the test above would pass for a coordinator that
+/// warns unconditionally.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_stays_silent_for_a_usable_svelte_install() {
+    let tmp = tempfile::tempdir().expect("workspace");
+    install_svelte_at(tmp.path(), USABLE_SVELTE);
+    let src_dir = tmp.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let canonical_id = src_dir
+        .join("App.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(&canonical_id, "<div>hi</div>").expect("component");
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<div>hi</div>".to_string(),
+    });
+    let deps = verter_only_deps(documents);
+
+    let diags = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        !diags
+            .iter()
+            .any(|d| matches!(&d.code, Some(NumberOrString::String(code))
+            if code == crate::svelte_assets::SVELTE_PACKAGE_UNUSABLE_CODE
+                || code == crate::svelte_assets::SVELTE_PACKAGE_MISSING_CODE)),
+        "a usable install must publish no svelte install diagnostic, got {diags:?}"
+    );
+}
+
+/// The user-visible half of the fail-closed contract: when a carrier's provider
+/// surface cannot be prepared at all, the coordinator PUBLISHES the reason.
+///
+/// This is the reachability the internal ledger alone cannot prove. A first-open
+/// preparation failure never commits a provider path for the document, so any
+/// lookup keyed on committed provider state finds nothing and the user is left
+/// with a silently dark file and a log line.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_publishes_carrier_provider_unavailable_for_an_unpreparable_carrier() {
+    let owner = tempfile::tempdir().expect("workspace");
+    install_svelte_at(owner.path(), USABLE_SVELTE);
+    let src_dir = owner.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("src dir");
+    let canonical_id = src_dir
+        .join("Component.svelte")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let provider_path = format!("{canonical_id}.tsx");
+    std::fs::write(&canonical_id, "<div>hi</div>").expect("component");
+    let generated = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
+
+    let sync = ProjectSync::new_with_kind(
+        Arc::new(MockTypeProvider::new()),
+        ProjectSyncMode::FullProject,
+        crate::TypeProviderKind::Tsgo,
+    );
+
+    // Block the owner-bound asset directory with a FILE so materialization hits
+    // a real, unmodellable I/O failure.
+    let asset_dir = crate::svelte_assets::owner_asset_dir_for_test(&provider_path, generated)
+        .expect("a usable owner has an owner-bound asset directory");
+    let _ = std::fs::remove_dir_all(&asset_dir);
+    std::fs::create_dir_all(asset_dir.parent().expect("owners dir")).expect("owners dir");
+    std::fs::write(&asset_dir, b"not a directory").expect("block the asset directory");
+    struct Unblock(std::path::PathBuf);
+    impl Drop for Unblock {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let unblock = Unblock(asset_dir);
+
+    // Production ordering: the coordinator syncs the carrier, then publishes.
+    // NOTHING is committed to `provider_sync_states` — exactly the first-open
+    // shape in which the failure must still be findable.
+    assert!(
+        sync.carrier_provider_surface(&provider_path, generated)
+            .is_none(),
+        "an unmodellable buffer must fail closed"
+    );
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: "<div>hi</div>".to_string(),
+    });
+    let mut deps = verter_only_deps(Arc::clone(&documents));
+    deps.project_sync = Some(sync.clone());
+
+    let diags = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    let unavailable = |diags: &[Diagnostic]| {
+        diags.iter().any(|d| {
+            matches!(&d.code, Some(NumberOrString::String(code))
+                if code == crate::server::CARRIER_PROVIDER_UNAVAILABLE_CODE)
+        })
+    };
+    assert!(
+        unavailable(&diags),
+        "a carrier whose provider surface cannot be prepared must be EXPLAINED to \
+         the user, not only logged; got {diags:?}"
+    );
+
+    // Recovery: once preparation succeeds the explanation must disappear, or it
+    // becomes a permanent false alarm.
+    drop(unblock);
+    assert!(
+        sync.carrier_provider_surface(&provider_path, generated)
+            .is_some(),
+        "a repaired environment prepares again"
+    );
+    let recovered = compute_merged_diagnostics(&deps, &canonical_id, &uri).await;
+    assert!(
+        !unavailable(&recovered),
+        "the explanation must clear once the surface can be prepared, got {recovered:?}"
+    );
+}

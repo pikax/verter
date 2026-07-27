@@ -156,10 +156,13 @@ pub use self::protocol_types::*;
 pub(crate) mod server_utils;
 use self::server_utils::*;
 pub(crate) use self::server_utils::{
-    attr_name_match_rank, carrier_language_for, compute_verter_diagnostics_for_with_views,
-    is_default_export_component_carrier, prepare_non_carrier_provider_sync,
-    select_best_ranked_candidate, self_file_language_for, sync_self_file_shadow_state,
-    to_pascal_case,
+    attr_name_match_rank, carrier_language_for, is_default_export_component_carrier,
+    prepare_non_carrier_provider_sync, select_best_ranked_candidate, self_file_language_for,
+    sync_self_file_shadow_state, to_pascal_case, verter_owned_diagnostics,
+};
+#[cfg(test)]
+pub(crate) use self::server_utils::{
+    document_diagnostics_for_test, CARRIER_PROVIDER_UNAVAILABLE_CODE,
 };
 
 #[path = "../background_drain.rs"]
@@ -1118,11 +1121,14 @@ impl VerterLanguageServer {
     /// push (didChange) and pull (textDocument/diagnostic) paths request diagnostics.
     fn compute_verter_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
         let vfs_ws = self.vfs_workspace.read();
-        compute_verter_diagnostics_for_with_views(
+        let canonical_id = crate::documents::uri_to_canonical_id(uri);
+        verter_owned_diagnostics(
             &self.documents,
             uri,
+            &canonical_id,
             &self.cached_verter_diags,
             vfs_ws.as_deref(),
+            self.project_sync.as_ref(),
         )
     }
 }

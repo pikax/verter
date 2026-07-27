@@ -12,7 +12,36 @@ impl ProjectSync {
     /// are therefore adapted to owner-bound classic JSX namespaces in the
     /// provider buffer. Callers that record a provider surface use this method
     /// first so the recorded bytes are the exact bytes delivered to the engine.
+    ///
+    /// This is also the ONE funnel every carrier preparation passes through, so
+    /// a failure is recorded exactly once wherever it originates — the
+    /// publication path (which propagates the error) and the read path (which
+    /// fails closed to `None`) alike. The recorded reason is what
+    /// [`ProjectSync::carrier_preparation_failure`] hands the diagnostic pass;
+    /// without it a read-side failure would be observable only in a log.
     pub(super) fn prepare_tsx_surface(
+        &self,
+        tsx_path: &str,
+        tsx_content: &str,
+    ) -> Result<PreparedTsxContent, TypeProviderError> {
+        let result = self.prepare_tsx_surface_inner(tsx_path, tsx_content);
+        let key = super::carrier_failure_key(tsx_path);
+        match &result {
+            Ok(_) => {
+                self.carrier_preparation_failures.remove(&key);
+            }
+            Err(error) => {
+                tracing::error!(
+                    "project_sync: carrier provider surface unavailable for {tsx_path}: {error}"
+                );
+                self.carrier_preparation_failures
+                    .insert(key, Arc::from(error.message.as_str()));
+            }
+        }
+        result
+    }
+
+    fn prepare_tsx_surface_inner(
         &self,
         tsx_path: &str,
         tsx_content: &str,
@@ -177,6 +206,12 @@ impl ProjectSync {
     ) -> Result<(), TypeProviderError> {
         let lock = self.virtual_verter_types_lock(tsx_path);
         let _guard = lock.lock().await;
+        // Our own record of why this carrier could not be prepared describes a
+        // buffer we are giving up on, so it is dropped whatever the provider
+        // says. Otherwise a first-open failure — which never commits provider
+        // state and so may never reach the success branch below — would outlive
+        // every buffer it ever described.
+        self.clear_carrier_preparation_failure(tsx_path);
         let result = match lane {
             ProviderLane::Foreground => self.provider.close_file(tsx_path).await,
             ProviderLane::Background => self.provider.close_file_background(tsx_path).await,

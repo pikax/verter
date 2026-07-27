@@ -61,6 +61,19 @@ struct DeliveredCarrierSurface {
     prepared: PreparedCarrierProviderContent,
 }
 
+/// The key a carrier-preparation failure is recorded under: the carrier SOURCE
+/// for a companion path, else the path itself.
+///
+/// Recording under the source is what makes the failure findable from the one
+/// identity the user-facing diagnostic pass has — the open document — without
+/// depending on any committed provider state, which a first-open failure never
+/// produces.
+fn carrier_failure_key(provider_path: &str) -> String {
+    verter_session::framework::descriptor::classify_carrier_companion(provider_path)
+        .map(|companion| companion.source)
+        .unwrap_or_else(|| provider_path.to_owned())
+}
+
 #[derive(Clone, Copy)]
 enum ProviderLane {
     Foreground,
@@ -110,6 +123,16 @@ pub struct ProjectSync {
     /// Shared across clones because server/background producers must record the
     /// same immutable provider surface that the engine actually received.
     delivered_carrier_surfaces: Arc<DashMap<String, DeliveredCarrierSurface>>,
+    /// Why the LAST carrier preparation for a provider path FAILED, retained
+    /// until that path prepares successfully or closes.
+    ///
+    /// [`Self::carrier_provider_surface`] answers a failed preparation with the
+    /// fail-closed `None` — it cannot say what the engine holds, so it says
+    /// nothing. That answer is honest but INVISIBLE: every provider-backed
+    /// feature on the file goes dark with no user-facing signal. Keeping the
+    /// reason here is what lets the debounced diagnostic pass report it, so a
+    /// fail-closed read is never a SILENT one.
+    carrier_preparation_failures: Arc<DashMap<String, Arc<str>>>,
     /// Adjacent provider-only `@verter/types` declaration overlays currently
     /// published for tsgo carriers.
     virtual_verter_types_paths: Arc<DashSet<String>>,
@@ -139,6 +162,7 @@ impl ProjectSync {
             // store-publish suppression is opt-in via `new_with_kind`.
             kind: TypeProviderKind::Tsgo,
             delivered_carrier_surfaces: Arc::new(DashMap::new()),
+            carrier_preparation_failures: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
@@ -158,6 +182,7 @@ impl ProjectSync {
             mode,
             kind,
             delivered_carrier_surfaces: Arc::new(DashMap::new()),
+            carrier_preparation_failures: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,
@@ -177,6 +202,7 @@ impl ProjectSync {
             mode,
             kind,
             delivered_carrier_surfaces: Arc::new(DashMap::new()),
+            carrier_preparation_failures: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: Some(workspace),
@@ -196,10 +222,32 @@ impl ProjectSync {
                 prepared: delivered,
             },
         );
+        // A completed delivery is the strongest possible evidence that this
+        // buffer is not dark; any earlier failure no longer describes it.
+        self.clear_carrier_preparation_failure(path);
     }
 
     fn retract_delivered_carrier_surface(&self, path: &str) {
         self.delivered_carrier_surfaces.remove(path);
+    }
+
+    fn clear_carrier_preparation_failure(&self, provider_path: &str) {
+        self.carrier_preparation_failures
+            .remove(&carrier_failure_key(provider_path));
+    }
+
+    /// Why the last carrier preparation for `document_path` failed, if it did.
+    ///
+    /// Keyed by the CARRIER SOURCE, never the provider companion path. The
+    /// user-facing lookup happens per open document, and a preparation that
+    /// fails on first open never commits a provider path for that document —
+    /// so a companion-keyed record would be unreachable at exactly the moment
+    /// it matters. The source is known from the companion at record time and
+    /// is what the diagnostic pass already holds.
+    pub(crate) fn carrier_preparation_failure(&self, document_path: &str) -> Option<Arc<str>> {
+        self.carrier_preparation_failures
+            .get(document_path)
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// The exact bytes AND rewrite mapper from the most recent successful carrier
@@ -262,17 +310,30 @@ impl ProjectSync {
     /// `None` when the buffer cannot be modelled at all — fail closed: a caller
     /// that cannot say what the provider holds must record nothing rather than
     /// record bytes no engine has.
+    ///
+    /// Fail-closed is not the same as silent. A preparation failure keeps
+    /// returning `None` here — substituting unprepared bytes would be a silent
+    /// success asserting a surface no engine holds — but the reason is retained
+    /// by [`Self::prepare_tsx_surface`] and read back through
+    /// [`Self::carrier_preparation_failure`], which the debounced diagnostic
+    /// pass publishes as `verter(carrier-provider-unavailable)`.
     pub(crate) fn carrier_provider_surface(
         &self,
         path: &str,
         generated: &str,
     ) -> Option<PreparedCarrierProviderContent> {
         match self.delivered_carrier_surface_for(path, generated) {
-            Some(delivered) => Some(delivered),
-            None => self
-                .prepare_tsx_surface(path, generated)
-                .ok()
-                .map(|prepared| prepared.prepared),
+            Some(delivered) => {
+                // The engine holds a surface prepared from exactly these bytes,
+                // so nothing about this buffer is dark — an older recorded
+                // failure must not outlive that and keep a diagnostic alive.
+                self.clear_carrier_preparation_failure(path);
+                Some(delivered)
+            }
+            None => match self.prepare_tsx_surface(path, generated) {
+                Ok(prepared) => Some(prepared.prepared),
+                Err(_) => None,
+            },
         }
     }
 
@@ -797,6 +858,106 @@ mod tests {
         ProjectSync::new(Arc::new(mock.clone()), mode)
     }
 
+    /// A carrier preparation that genuinely CANNOT be modelled still fails
+    /// closed — and the reason survives the read, under the key the user-facing
+    /// lookup uses (the carrier SOURCE, not the companion path), so a first-open
+    /// failure that never commits any provider state is still findable.
+    ///
+    /// The user-visible half of this contract — that the retained reason becomes
+    /// a published diagnostic — is asserted through the production publish path
+    /// in `sync_coordinator_tests`; this covers the fail-closed and lifecycle
+    /// halves that live on `ProjectSync` itself.
+    #[tokio::test]
+    async fn a_failed_carrier_preparation_fails_closed_and_stays_findable_by_source() {
+        let owner = tempfile::tempdir().expect("temporary Svelte owner");
+        let svelte_dir = owner.path().join("node_modules/svelte");
+        std::fs::create_dir_all(&svelte_dir).expect("Svelte package directory");
+        std::fs::write(
+            svelte_dir.join("package.json"),
+            r#"{"name":"svelte","version":"5.0.0","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#,
+        )
+        .expect("Svelte package marker");
+        std::fs::write(svelte_dir.join("index.d.ts"), "export type S = 1;\n")
+            .expect("declarations");
+        std::fs::write(svelte_dir.join("elements.d.ts"), "export interface E {}\n")
+            .expect("elements declarations");
+        let provider_path = owner.path().join("src/Component.svelte.tsx");
+        std::fs::create_dir_all(provider_path.parent().expect("provider parent"))
+            .expect("provider parent directory");
+        let provider_path = provider_path.to_string_lossy().into_owned();
+        // The identity the user-facing diagnostic pass holds: the open document,
+        // never the generated companion.
+        let document_path = owner
+            .path()
+            .join("src/Component.svelte")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
+
+        let sync = ProjectSync::new_with_kind(
+            Arc::new(MockTypeProvider::new()),
+            ProjectSyncMode::FullProject,
+            TypeProviderKind::Tsgo,
+        );
+
+        // Control: this owner IS usable, so preparation succeeds and records no
+        // failure. Without this the assertions below could pass for the wrong
+        // reason (a fixture that never prepares at all).
+        assert!(
+            sync.carrier_provider_surface(&provider_path, source)
+                .is_some(),
+            "a usable owner must produce a provider surface"
+        );
+        assert!(
+            sync.carrier_preparation_failure(&document_path).is_none(),
+            "a successful preparation records no failure"
+        );
+
+        // Block the owner-bound asset directory with a FILE, so materializing
+        // the owner-bound runtime hits a real, unmodellable I/O failure.
+        let asset_dir = crate::svelte_assets::owner_asset_dir_for_test(&provider_path, source)
+            .expect("a usable owner has an owner-bound asset directory");
+        std::fs::remove_dir_all(&asset_dir).expect("clear the materialized owner assets");
+        std::fs::write(&asset_dir, b"not a directory").expect("block the asset directory");
+        struct Unblock(std::path::PathBuf);
+        impl Drop for Unblock {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _unblock = Unblock(asset_dir);
+
+        // Force a fresh preparation: the ledger answers only for the exact
+        // generated bytes it delivered, so different bytes re-prepare.
+        let edited = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <span />;\n";
+        assert!(
+            sync.carrier_provider_surface(&provider_path, edited)
+                .is_none(),
+            "an unmodellable buffer must still FAIL CLOSED, never hand back \
+             unprepared bytes as if an engine held them"
+        );
+        let reason = sync
+            .carrier_preparation_failure(&document_path)
+            .expect("the fail-closed read must RETAIN why it failed, not swallow it");
+        assert!(
+            reason.contains(&provider_path),
+            "the retained reason names the carrier: {reason}"
+        );
+
+        // Clearing the blockage lets preparation succeed again, and the stale
+        // failure must not linger as a permanent false diagnostic.
+        drop(_unblock);
+        assert!(
+            sync.carrier_provider_surface(&provider_path, edited)
+                .is_some(),
+            "a repaired environment prepares again"
+        );
+        assert!(
+            sync.carrier_preparation_failure(&document_path).is_none(),
+            "a later success clears the recorded failure"
+        );
+    }
+
     fn make_sync_failing(provider: &FailingTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
         // FailingTypeProvider is not Clone, so wrap directly. These tests assert
         // the carrier verbs reach the provider (error propagation), so the kind
@@ -806,6 +967,7 @@ mod tests {
             mode,
             kind: TypeProviderKind::Tsgo,
             delivered_carrier_surfaces: Arc::new(DashMap::new()),
+            carrier_preparation_failures: Arc::new(DashMap::new()),
             virtual_verter_types_paths: Arc::new(DashSet::new()),
             virtual_verter_types_locks: Arc::new(DashMap::new()),
             workspace: None,

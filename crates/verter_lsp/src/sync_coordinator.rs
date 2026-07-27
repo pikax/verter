@@ -25,7 +25,6 @@ use crate::provider_sync::{
     open_unresolved_carrier_commit, open_unresolved_carrier_state, revert_unsynced_kinds,
     NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
-use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
@@ -990,61 +989,22 @@ fn compute_verter_diagnostics(
     canonical_id: &str,
     uri: &Uri,
 ) -> Vec<Diagnostic> {
-    // Recompute verter diagnostics fresh (lint + host errors) instead of reading stale cache.
+    // The complete Verter-owned set from the ONE shared composer. `did_open` /
+    // `did_change` route through this coordinator, and every other publisher
+    // (both background-init sweeps, the pull `textDocument/diagnostic` path)
+    // replaces the client's whole list for the document — so all of them must
+    // assemble the same categories or the last writer silently erases the rest.
     let mut verter_diags = {
         let vfs_ws = deps.vfs_workspace.read();
-        compute_verter_diagnostics_for_with_views(
+        crate::server::verter_owned_diagnostics(
             &deps.documents,
             uri,
+            canonical_id,
             &deps.cached_verter_diags,
             vfs_ws.as_deref(),
+            deps.project_sync.as_ref(),
         )
     };
-
-    // Surface the `verter(project)` ownership diagnostic on the DEBOUNCED publish
-    // path — `did_open` / `did_change` route through this coordinator, NOT through
-    // the request-only `compute_full_diagnostics`, so an unresolved carrier
-    // (terminal `NoProject` / disk-layout carrier-path conflict) is now explained
-    // on open AND edit. A resolved carrier (`Bound`, including a resolved
-    // multi-claimant) and a bootstrap `NotReady` stay silent — the shared owner
-    // authority decides, never a path-shape heuristic.
-    verter_diags.extend(crate::external_ts::project_ownership_diagnostics_for(
-        deps.documents.host(),
-        canonical_id,
-    ));
-
-    // A `.svelte` file whose owner workspace has NO `svelte`
-    // install fails CLOSED (module-not-found on the shim's `svelte` import) —
-    // surface the typed `svelte-package-missing` diagnostic on the source file
-    // so the failure is explained, not just a raw TS module-not-found. The
-    // owner root resolves through the published resolver snapshot.
-    if crate::server::carrier_language_for(canonical_id).is_some_and(|l| l.is_svelte()) {
-        let owner_root = {
-            let ws = deps.vfs_workspace.read();
-            ws.as_ref()
-                .and_then(|ws| ws.load_published())
-                .and_then(|p| {
-                    p.snapshot
-                        .resolver
-                        .nearest_config_for_path(canonical_id)
-                        .map(|o| o.root.clone())
-                })
-        };
-        if let Some(owner_root) = owner_root {
-            let source = deps
-                .documents
-                .host
-                .get_source(canonical_id)
-                .unwrap_or_default();
-            if let Some(diag) = crate::svelte_assets::svelte_package_missing_diagnostic(
-                canonical_id,
-                &owner_root,
-                &source,
-            ) {
-                verter_diags.push(diag);
-            }
-        }
-    }
 
     // When a type provider serves this session, suppress component usage
     // diagnostics (unknown-prop, unknown-model) since the provider validates

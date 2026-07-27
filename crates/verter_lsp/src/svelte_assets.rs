@@ -14,9 +14,32 @@
 //! never reaches the user workspace's `svelte`; `baseUrl` does not rescue
 //! node-style specifiers under `moduleResolution: "bundler"`), so the SAME
 //! injection adds per-owner-project `paths` rows mapping `svelte` + `svelte/*`
-//! to the OWNER WORKSPACE's installed `svelte` package. A workspace with NO
-//! `svelte` install gets NO `svelte` rows and fails CLOSED (module-not-found +
-//! the typed `svelte-package-missing` diagnostic).
+//! to the OWNER WORKSPACE's installed `svelte` package.
+//!
+//! `resolve_svelte_owner` is the single authority WITHIN RUST on "does this
+//! owner have a `svelte` package Verter can use", and `SvelteOwnerAnchor` is
+//! the only way to say WHERE to look. It has exactly two constructors, so the
+//! question cannot fork again inside this crate:
+//!
+//! * `SvelteOwnerAnchor::document` — the document's own directory. Node's
+//!   nearest-first rule, and therefore the install that actually governs the
+//!   file. BOTH the carrier specialization and the user-facing diagnostic
+//!   anchor here, which is what makes them describe the same install.
+//! * `SvelteOwnerAnchor::project` — the owner project root, used ONLY for the
+//!   project-global `paths` rows, which TypeScript cannot express per-directory.
+//!   It is not a per-document claim and never reaches the user.
+//!
+//! A document with no usable `svelte` gets NO owner-bound carrier — it fails
+//! CLOSED (module-not-found) and the typed `svelte-package-missing` /
+//! `svelte-package-unusable` diagnostic explains WHY.
+//!
+//! KNOWN GAP: on the editor-tsserver route `@verter/typescript-plugin` resolves
+//! the shim's own `svelte` / `svelte/*` imports itself, from an anchor built at
+//! the CONFIGURED-PROJECT ROOT (`packages/typescript-plugin/src/index.ts:896`),
+//! which Rust does not drive. A document with a healthy NESTED install under a
+//! broken ROOT install therefore gets no diagnostic here while tsserver binds
+//! the broken root; the reverse layout disagrees the other way. Tracked as
+//! follow-on work — see `/host-session` → "One Verter-Owned Diagnostic Set".
 
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -99,6 +122,13 @@ struct ResolvedSveltePackage {
 /// has no `svelte` install — the shim's `import … from "svelte"` then fails
 /// CLOSED (module-not-found), and this typed diagnostic explains WHY.
 pub(crate) const SVELTE_PACKAGE_MISSING_CODE: &str = "svelte-package-missing";
+
+/// The typed Verter diagnostic code for a `svelte` package that IS installed
+/// but that Verter cannot use (wrong name, unsupported major, or missing/broken
+/// `.` / `./elements` type exports). Same fail-closed outcome as a missing
+/// install, but a different cause — so it carries its own code and names the
+/// rejected install plus the validator's reason.
+pub(crate) const SVELTE_PACKAGE_UNUSABLE_CODE: &str = "svelte-package-unusable";
 
 /// The host data directory the shim materializes into — a per-host-version
 /// subdirectory under the system temp dir (NOT the user workspace). The
@@ -208,18 +238,88 @@ fn resolve_svelte_package(candidate: &Path) -> std::io::Result<ResolvedSveltePac
     })
 }
 
-fn nearest_svelte_for_carrier(
-    provider_path: &str,
-) -> std::io::Result<Option<ResolvedSveltePackage>> {
-    let mut directory = Path::new(provider_path).parent();
+/// What the owner resolution found. Every RUST consumer — the `paths` rows, the
+/// carrier specialization, the user-facing diagnostic — branches on this same
+/// value. The tsserver plugin resolves separately (see the module KNOWN GAP).
+#[derive(Debug)]
+enum SvelteOwnerResolution {
+    /// The Node ancestor walk found no `svelte` package at all.
+    Absent,
+    /// A `svelte` package directory EXISTS at `candidate` but fails validation.
+    /// `reason` is the validator's own message, reported verbatim to the user.
+    Unusable { candidate: PathBuf, reason: String },
+    /// A validated Svelte 5 package Verter can bind the projection to.
+    Usable {
+        /// The un-canonicalized install directory, as the ancestor walk found
+        /// it — the form the `paths` rows map at.
+        candidate: PathBuf,
+        package: Box<ResolvedSveltePackage>,
+    },
+}
+
+/// The directory a Svelte owner walk starts from.
+///
+/// Private, with exactly TWO constructors, each deriving its directory from a
+/// path the caller already holds. A caller cannot invent a third anchor: there
+/// is no public field, no `From<&Path>`, and no resolution entry point that
+/// accepts a directory. That is what keeps "which install governs this file"
+/// from silently forking again — the defect this type exists to prevent was two
+/// consumers answering the same question from two different starting points.
+struct SvelteOwnerAnchor(Option<PathBuf>);
+
+impl SvelteOwnerAnchor {
+    /// The anchor for everything said about ONE DOCUMENT: its own directory.
+    ///
+    /// Node resolves `svelte` nearest-to-the-file, so this is the install that
+    /// actually governs the document — and therefore the only defensible basis
+    /// for a per-document claim. Both the carrier specialization and the
+    /// user-facing diagnostic anchor here, which is what makes them agree.
+    ///
+    /// Accepts either the source (`App.svelte`) or its companion
+    /// (`App.svelte.tsx`): they are siblings, so both yield the same directory.
+    fn document(document_path: &str) -> Self {
+        Self(Path::new(document_path).parent().map(Path::to_path_buf))
+    }
+
+    /// The anchor for the PROJECT-GLOBAL `paths` rows.
+    ///
+    /// TypeScript `paths` is a project-wide mapping — it cannot express "svelte
+    /// resolves differently per directory" — so this row is unavoidably a
+    /// project-scoped statement, resolved once per owner project root. It is
+    /// deliberately NOT a per-document usability claim and never feeds a
+    /// user-facing diagnostic; the document anchor above is the sole authority
+    /// for what Verter tells the user about a given file.
+    fn project(project_root: &str) -> Self {
+        Self(Some(PathBuf::from(project_root)))
+    }
+}
+
+/// Walk `node_modules/svelte` up the ancestor chain from `anchor` and FULLY
+/// validate the first package found.
+///
+/// The walk stops at the first `svelte` package directory exactly as Node
+/// resolution does: continuing past a broken install would bind the projection
+/// to a package the user's bundler will never load. A rejected first hit is
+/// therefore reported, not skipped.
+fn resolve_svelte_owner(anchor: SvelteOwnerAnchor) -> SvelteOwnerResolution {
+    let mut directory = anchor.0;
     while let Some(current) = directory {
         let candidate = current.join("node_modules/svelte");
         if candidate.join("package.json").is_file() {
-            return resolve_svelte_package(&candidate).map(Some);
+            return match resolve_svelte_package(&candidate) {
+                Ok(package) => SvelteOwnerResolution::Usable {
+                    candidate,
+                    package: Box::new(package),
+                },
+                Err(error) => SvelteOwnerResolution::Unusable {
+                    candidate,
+                    reason: error.to_string(),
+                },
+            };
         }
-        directory = current.parent();
+        directory = current.parent().map(Path::to_path_buf);
     }
-    Ok(None)
+    SvelteOwnerResolution::Absent
 }
 
 fn normalized_module_path(path: &Path) -> String {
@@ -271,6 +371,35 @@ fn owner_bound_runtime(source: &str, package: &ResolvedSveltePackage) -> std::io
     Ok(rewritten)
 }
 
+/// The host-owned directory holding one owner's bound JSX assets.
+fn owner_asset_directory(namespace: SvelteJsxAssetNamespace, key: &str) -> PathBuf {
+    let mut directory = host_shim_dir().join("owners").join(key);
+    let namespace_directory = namespace.directory();
+    if !namespace_directory.is_empty() {
+        directory.push(namespace_directory);
+    }
+    directory
+}
+
+/// The exact directory [`prepare_managed_tsgo_svelte_carrier`] would materialize
+/// this carrier's owner-bound assets into, for a test that needs to make that
+/// materialization genuinely fail. `None` when the carrier has no usable owner
+/// (nothing would be materialized).
+#[cfg(test)]
+pub(crate) fn owner_asset_dir_for_test(provider_path: &str, content: &str) -> Option<PathBuf> {
+    let (namespace, _) = SvelteJsxAssetNamespace::from_carrier(content)?;
+    let SvelteOwnerResolution::Usable { package, .. } =
+        resolve_svelte_owner(SvelteOwnerAnchor::document(provider_path))
+    else {
+        return None;
+    };
+    let runtime = owner_bound_runtime(namespace.runtime(), &package).ok()?;
+    Some(owner_asset_directory(
+        namespace,
+        &owner_asset_key(namespace, &package, &runtime),
+    ))
+}
+
 fn classic_jsx_adapter() -> &'static str {
     r#"import type { JSX as __VerterAutomaticJSX } from "./jsx-runtime";
 export function h(...args: unknown[]): __VerterAutomaticJSX.Element;
@@ -314,9 +443,18 @@ fn collision_free_binding(asset_key: &str, content: &str) -> String {
 /// its absolute, quoted imports resolve paths containing spaces on every host.
 ///
 /// `Ok(None)` means the content is not a Svelte JSX carrier, or its normal Node
-/// ancestor walk finds no Svelte install. In the latter case the original bare
-/// import source remains unresolved and the public `svelte-package-missing`
-/// diagnostic explains the fail-closed outcome.
+/// ancestor walk finds no USABLE Svelte install. In the latter case the original
+/// bare import source remains unresolved and the public
+/// `svelte-package-missing` / `svelte-package-unusable` diagnostic explains the
+/// fail-closed outcome.
+///
+/// An install that exists but fails validation takes the SAME fail-closed
+/// branch as a missing one — never an `Err`. Erroring here would abort the
+/// whole carrier preparation, which the provider-surface read must treat as
+/// "this buffer cannot be modelled", silently removing every provider-backed
+/// feature from every `.svelte` file in the workspace. The install is a
+/// property of the OWNER, reported once as a typed diagnostic, not an
+/// unmodellable buffer.
 pub(crate) fn prepare_managed_tsgo_svelte_carrier(
     provider_path: &str,
     content: &str,
@@ -324,18 +462,16 @@ pub(crate) fn prepare_managed_tsgo_svelte_carrier(
     let Some((asset_namespace, pragma)) = SvelteJsxAssetNamespace::from_carrier(content) else {
         return Ok(None);
     };
-    let Some(package) = nearest_svelte_for_carrier(provider_path)? else {
+    let SvelteOwnerResolution::Usable { package, .. } =
+        resolve_svelte_owner(SvelteOwnerAnchor::document(provider_path))
+    else {
         return Ok(None);
     };
 
     let runtime = owner_bound_runtime(asset_namespace.runtime(), &package)?;
     let key = owner_asset_key(asset_namespace, &package, &runtime);
     let factory_namespace = collision_free_binding(&key, content);
-    let mut directory = host_shim_dir().join("owners").join(&key);
-    let namespace_directory = asset_namespace.directory();
-    if !namespace_directory.is_empty() {
-        directory.push(namespace_directory);
-    }
+    let directory = owner_asset_directory(asset_namespace, &key);
     std::fs::create_dir_all(&directory)?;
 
     write_if_changed(&directory.join("jsx-runtime.d.ts"), &runtime)?;
@@ -485,25 +621,6 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
     }
 }
 
-/// Resolve the owner workspace's installed `svelte` package directory, if any.
-///
-/// `workspace_root` is the owner project root (a filesystem path). Returns the
-/// `<root>/node_modules/svelte` directory when it exists. A monorepo with
-/// multiple `svelte` installs resolves each project against its own copy (the
-/// caller passes the owner project root). When NO `svelte` is installed,
-/// returns `None` — no rows are injected and the shim's imports fail closed.
-pub(crate) fn resolve_owner_svelte(workspace_root: &str) -> Option<PathBuf> {
-    let mut directory = Some(Path::new(workspace_root));
-    while let Some(current) = directory {
-        let candidate = current.join("node_modules/svelte");
-        if candidate.join("package.json").is_file() {
-            return Some(candidate);
-        }
-        directory = current.parent();
-    }
-    None
-}
-
 /// Inject the svelte-jsx shim + transitive `svelte` rows into a `paths` JSON
 /// object for `configure_paths`.
 ///
@@ -556,8 +673,19 @@ pub(crate) fn inject_svelte_paths(
         serde_json::json!([format!("{shim}/mathml/jsx-dev-runtime.d.ts")]),
     );
 
-    // Transitive `svelte` rows — only when the owner workspace installs it.
-    if let Some(svelte_dir) = resolve_owner_svelte(workspace_root) {
+    // Transitive `svelte` rows — only when the owner project root has a USABLE
+    // install, resolved through the SAME validator every other consumer uses.
+    // An unusable one is mapped nowhere (fail closed).
+    //
+    // This row is PROJECT-scoped by construction (see
+    // [`SvelteOwnerAnchor::project`]) and makes no claim about any individual
+    // document: a file with a nearer install is governed by that one, and the
+    // document anchor — not this row — is what the user is told about.
+    if let SvelteOwnerResolution::Usable {
+        candidate: svelte_dir,
+        ..
+    } = resolve_svelte_owner(SvelteOwnerAnchor::project(workspace_root))
+    {
         let svelte = svelte_dir.to_string_lossy().replace('\\', "/");
         obj.insert("svelte".to_string(), serde_json::json!([svelte.clone()]));
         obj.insert(
@@ -583,19 +711,26 @@ pub(crate) fn owner_provider_path_config(
     Some((base_url, inject_svelte_paths(paths, owner_root)))
 }
 
-/// Produce the typed `svelte-package-missing` diagnostic for a `.svelte` source
-/// file when its owner workspace has NO `svelte` install.
+/// Report a `.svelte` document whose governing `svelte` install is missing or
+/// unusable, as the typed `svelte-package-missing` / `svelte-package-unusable`
+/// diagnostic.
 ///
-/// Returns `Some(Diagnostic)` exactly when `resolve_owner_svelte(owner_root)`
-/// is `None` — the same fail-closed condition that suppresses the `svelte`
-/// `paths` rows. The diagnostic anchors at the file head (line 0) so it is
-/// always placed even before the projection materialises. `None` is returned
-/// for a non-`.svelte` file or when `svelte` IS installed (no false positive).
-pub(crate) fn svelte_package_missing_diagnostic(
-    canonical_id: &str,
-    owner_root: &str,
-    source: &str,
-) -> Option<Diagnostic> {
+/// The install is resolved from [`SvelteOwnerAnchor::document`] — the SAME
+/// anchor and the SAME validator [`prepare_managed_tsgo_svelte_carrier`] uses,
+/// which is what makes the diagnostic describe exactly the install the carrier
+/// acted on. There is deliberately no owner-root parameter: an anchor the
+/// caller could choose is how the carrier and the diagnostic came to disagree
+/// about the same file.
+///
+/// Returns `Some(Diagnostic)` exactly when that resolution is not
+/// [`SvelteOwnerResolution::Usable`] — the same condition that suppresses the
+/// owner-bound carrier, so the user is told whenever it fails closed. An
+/// install that EXISTS but fails validation is reported with the validator's
+/// own reason rather than passing silently. The diagnostic anchors at the file
+/// head (line 0) so it is always placed even before the projection
+/// materialises. `None` for a non-`.svelte` file or a usable install (no false
+/// positive).
+pub(crate) fn svelte_package_diagnostic(canonical_id: &str, source: &str) -> Option<Diagnostic> {
     // Carrier classification routes through the language registry (the single
     // static classification authority) — never a hand-matched extension literal.
     let is_svelte = verter_session::LanguageRegistry::global()
@@ -605,9 +740,27 @@ pub(crate) fn svelte_package_missing_diagnostic(
     if !is_svelte {
         return None;
     }
-    if resolve_owner_svelte(owner_root).is_some() {
-        return None;
-    }
+    let (code, message) = match resolve_svelte_owner(SvelteOwnerAnchor::document(canonical_id)) {
+        SvelteOwnerResolution::Usable { .. } => return None,
+        SvelteOwnerResolution::Absent => (
+            SVELTE_PACKAGE_MISSING_CODE,
+            format!(
+                "`svelte` is not installed for this file ({canonical_id}). The \
+                 Svelte IDE type-check imports `svelte` types; install `svelte` to \
+                 enable type checking for `.svelte` components."
+            ),
+        ),
+        SvelteOwnerResolution::Unusable { candidate, reason } => (
+            SVELTE_PACKAGE_UNUSABLE_CODE,
+            format!(
+                "the `svelte` package installed at {} cannot be used by Verter: \
+                 {reason}. The Svelte IDE type-check needs a Svelte 5 package \
+                 publishing `.` and `./elements` type exports; type checking for \
+                 `.svelte` components is disabled until this install is repaired.",
+                candidate.display()
+            ),
+        ),
+    };
     // Anchor at the file head — cover the first line so the squiggle is visible.
     let first_line_len = source.lines().next().map(str::len).unwrap_or(0) as u32;
     Some(Diagnostic {
@@ -616,15 +769,9 @@ pub(crate) fn svelte_package_missing_diagnostic(
             end: Position::new(0, first_line_len),
         },
         severity: Some(DiagnosticSeverity::ERROR),
-        code: Some(NumberOrString::String(
-            SVELTE_PACKAGE_MISSING_CODE.to_string(),
-        )),
+        code: Some(NumberOrString::String(code.to_string())),
         source: Some("verter".to_string()),
-        message: format!(
-            "`svelte` is not installed in this workspace ({owner_root}). The \
-             Svelte IDE type-check imports `svelte` types; install `svelte` to \
-             enable type checking for `.svelte` components."
-        ),
+        message,
         ..Default::default()
     })
 }
@@ -633,6 +780,245 @@ pub(crate) fn svelte_package_missing_diagnostic(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A Svelte 5 install Verter can use: correct name, major 5, and both the
+    /// `.` and `./elements` type exports pointing at declarations that exist.
+    const USABLE_SVELTE_MANIFEST: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
+
+    /// The exact defect shape: a `svelte` package that EXISTS (so a stat-only
+    /// owner probe calls it installed) but publishes NO `./elements` type
+    /// export, which the carrier's validator rejects. A patched, aliased, or
+    /// future-layout install lands here.
+    const NO_ELEMENTS_SVELTE_MANIFEST: &str = r#"{"name":"svelte","version":"5.56.3","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#;
+
+    /// A `svelte` package of an unsupported major — the second validation
+    /// failure class, proving the report names the reason rather than a single
+    /// canned string.
+    const SVELTE_4_MANIFEST: &str = r#"{"name":"svelte","version":"4.2.19","types":"./index.d.ts","exports":{".":{"types":"./index.d.ts"},"./elements":{"types":"./elements.d.ts"}}}"#;
+
+    /// Install a `svelte` package at `<root>/node_modules/svelte` with
+    /// `manifest` as its `package.json` and both declaration files present, so
+    /// the ONLY thing under test is what the manifest declares.
+    fn install_svelte(root: &Path, manifest: &str) -> PathBuf {
+        let svelte_dir = root.join("node_modules/svelte");
+        std::fs::create_dir_all(&svelte_dir).unwrap();
+        std::fs::write(svelte_dir.join("package.json"), manifest).unwrap();
+        std::fs::write(
+            svelte_dir.join("index.d.ts"),
+            "export type Snippet = () => unknown;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            svelte_dir.join("elements.d.ts"),
+            "export interface SvelteHTMLElements { div: {}; }\n",
+        )
+        .unwrap();
+        svelte_dir
+    }
+
+    /// A projected Svelte carrier path under `root`, with its parent created so
+    /// the owner ancestor walk starts from a real directory.
+    fn carrier_path_in(root: &Path) -> String {
+        let path = root.join("src/App.svelte.tsx");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    const SVELTE_CARRIER_SOURCE: &str =
+        "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\nexport {};\n";
+
+    /// THE invariant: for one document, the install the carrier acted on and the
+    /// install the diagnostic describes are the SAME install.
+    ///
+    /// The layout that breaks a two-anchor design: a VALID install at the
+    /// workspace root and an UNUSABLE one nested beside the document. A
+    /// diagnostic anchored at the workspace root sees the valid install and
+    /// says nothing, while the carrier — which resolves nearest-to-file, as
+    /// Node does — declines the nested one. That is the original silent-loss
+    /// defect arriving through a second door.
+    #[test]
+    fn the_carrier_and_the_diagnostic_describe_the_same_install() {
+        let tmp = tempdir().unwrap();
+        install_svelte(tmp.path(), USABLE_SVELTE_MANIFEST);
+        let nested = tmp.path().join("packages/app");
+        std::fs::create_dir_all(&nested).unwrap();
+        let nested_install = install_svelte(&nested, NO_ELEMENTS_SVELTE_MANIFEST);
+        let doc = nested.join("src/App.svelte");
+        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        let carrier = nested.join("src/App.svelte.tsx");
+
+        // The carrier binds nearest-to-file, so it declines the nested install.
+        let prepared =
+            prepare_managed_tsgo_svelte_carrier(&carrier.to_string_lossy(), SVELTE_CARRIER_SOURCE)
+                .expect("an unusable owner is a fail-closed outcome, not a preparation error");
+        assert!(
+            prepared.is_none(),
+            "the carrier must not bind the document to the unusable nested install"
+        );
+
+        // …and the diagnostic must name THAT install, not the healthy root one.
+        let diag = svelte_package_diagnostic(&doc.to_string_lossy(), "<div/>")
+            .expect("the carrier declined, so the user must be told");
+        assert_eq!(
+            diag.code,
+            Some(NumberOrString::String(
+                SVELTE_PACKAGE_UNUSABLE_CODE.to_string()
+            ))
+        );
+        assert!(
+            diag.message.contains(&nested_install.display().to_string()),
+            "the diagnostic must describe the NESTED install the carrier saw, \
+             not the healthy root one: {}",
+            diag.message
+        );
+    }
+
+    /// The mirror: a document under a healthy nested install is silent even
+    /// when the ROOT install is broken. Without this, "always report" would
+    /// pass the test above while being useless.
+    #[test]
+    fn a_document_under_a_healthy_nested_install_is_silent_despite_a_broken_root() {
+        let tmp = tempdir().unwrap();
+        install_svelte(tmp.path(), NO_ELEMENTS_SVELTE_MANIFEST);
+        let nested = tmp.path().join("packages/app");
+        std::fs::create_dir_all(&nested).unwrap();
+        install_svelte(&nested, USABLE_SVELTE_MANIFEST);
+        let doc = nested.join("src/App.svelte");
+        std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        let carrier = nested.join("src/App.svelte.tsx");
+
+        assert!(
+            prepare_managed_tsgo_svelte_carrier(&carrier.to_string_lossy(), SVELTE_CARRIER_SOURCE)
+                .expect("preparation succeeds")
+                .is_some(),
+            "the carrier binds the healthy nested install"
+        );
+        assert!(
+            svelte_package_diagnostic(&doc.to_string_lossy(), "<div/>").is_none(),
+            "the carrier bound an install, so the user must NOT be warned"
+        );
+    }
+
+    #[test]
+    fn an_existing_but_unusable_svelte_install_is_reported_not_silent() {
+        // THE DEFECT: `svelte` is present, so the stat-only owner probe said
+        // "installed" and the diagnostic stayed silent, while the carrier's full
+        // validator rejected the same package and hard-errored — killing every
+        // provider-backed feature on every `.svelte` file with no user signal.
+        let tmp = tempdir().unwrap();
+        let svelte_dir = install_svelte(tmp.path(), NO_ELEMENTS_SVELTE_MANIFEST);
+        let root = tmp.path().to_string_lossy().into_owned();
+
+        let diag = svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div>hi</div>")
+            .expect("an unusable svelte install must be reported to the user");
+        assert_eq!(
+            diag.code,
+            Some(NumberOrString::String(
+                SVELTE_PACKAGE_UNUSABLE_CODE.to_string()
+            )),
+            "the unusable install has its OWN code, distinct from a missing one"
+        );
+        assert_eq!(diag.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(diag.source.as_deref(), Some("verter"));
+        assert!(
+            diag.message.contains("elements"),
+            "the diagnostic must NAME why the install is unusable: {}",
+            diag.message
+        );
+        assert!(
+            diag.message.contains(&svelte_dir.display().to_string()),
+            "the diagnostic must name WHICH install is unusable: {}",
+            diag.message
+        );
+    }
+
+    #[test]
+    fn an_unsupported_major_svelte_install_is_reported_with_its_version() {
+        let tmp = tempdir().unwrap();
+        install_svelte(tmp.path(), SVELTE_4_MANIFEST);
+        let root = tmp.path().to_string_lossy().into_owned();
+
+        let diag = svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div/>")
+            .expect("an unsupported svelte major must be reported");
+        assert_eq!(
+            diag.code,
+            Some(NumberOrString::String(
+                SVELTE_PACKAGE_UNUSABLE_CODE.to_string()
+            ))
+        );
+        assert!(
+            diag.message.contains("4.2.19"),
+            "the reason must carry the rejected version: {}",
+            diag.message
+        );
+    }
+
+    #[test]
+    fn an_unusable_svelte_install_injects_no_svelte_paths_rows() {
+        // One Rust owner decides "usable": the rows and the diagnostic cannot
+        // disagree. An unusable install fails CLOSED exactly like a missing one.
+        let tmp = tempdir().unwrap();
+        install_svelte(tmp.path(), NO_ELEMENTS_SVELTE_MANIFEST);
+        let root = tmp.path().to_string_lossy().into_owned();
+
+        let injected = inject_svelte_paths(serde_json::Value::Null, &root);
+        let obj = injected.as_object().unwrap();
+        assert!(
+            !obj.contains_key("svelte"),
+            "an unusable install must not be path-mapped as if it were usable"
+        );
+        assert!(!obj.contains_key("svelte/*"));
+        assert!(
+            obj.contains_key("@verter/svelte-jsx/jsx-runtime"),
+            "the host-owned shim rows are unaffected by the owner's install"
+        );
+    }
+
+    #[test]
+    fn an_unusable_svelte_install_does_not_hard_error_the_carrier() {
+        // The carrier falls back to the unspecialized projection (its bare
+        // `svelte` import stays unresolved — fail closed) instead of returning
+        // an Err that the provider-surface read discards, taking every
+        // provider-backed feature down silently.
+        let tmp = tempdir().unwrap();
+        install_svelte(tmp.path(), NO_ELEMENTS_SVELTE_MANIFEST);
+        let carrier = carrier_path_in(tmp.path());
+
+        let prepared = prepare_managed_tsgo_svelte_carrier(&carrier, SVELTE_CARRIER_SOURCE)
+            .expect("an unusable owner install is a fail-closed outcome, not a preparation error");
+        assert!(
+            prepared.is_none(),
+            "an unusable install must not produce a specialized carrier bound to it"
+        );
+    }
+
+    #[test]
+    fn a_usable_svelte_install_still_specializes_and_reports_nothing() {
+        // NEGATIVE CONTROL for all three above: the strict owner must not
+        // regress a healthy install.
+        let tmp = tempdir().unwrap();
+        install_svelte(tmp.path(), USABLE_SVELTE_MANIFEST);
+        let root = tmp.path().to_string_lossy().into_owned();
+        let carrier = carrier_path_in(tmp.path());
+
+        assert!(
+            svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div/>").is_none(),
+            "a usable install emits NO diagnostic"
+        );
+        let injected = inject_svelte_paths(serde_json::Value::Null, &root);
+        let obj = injected.as_object().unwrap();
+        assert!(obj.contains_key("svelte"), "usable install is path-mapped");
+        assert!(obj.contains_key("svelte/*"));
+
+        let prepared = prepare_managed_tsgo_svelte_carrier(&carrier, SVELTE_CARRIER_SOURCE)
+            .expect("preparation succeeds for a usable install")
+            .expect("a usable install specializes the carrier");
+        assert!(prepared.content.starts_with("/** @jsxRuntime classic */"));
+        assert_eq!(
+            prepared.content.lines().count(),
+            SVELTE_CARRIER_SOURCE.lines().count()
+        );
+    }
 
     #[test]
     fn materialize_writes_the_shim_into_the_host_data_dir_not_the_workspace() {
@@ -689,9 +1075,7 @@ mod tests {
     #[test]
     fn inject_adds_svelte_rows_when_the_workspace_installs_svelte() {
         let tmp = tempdir().unwrap();
-        let svelte_dir = tmp.path().join("node_modules/svelte");
-        std::fs::create_dir_all(&svelte_dir).unwrap();
-        std::fs::write(svelte_dir.join("package.json"), r#"{"name":"svelte"}"#).unwrap();
+        install_svelte(tmp.path(), USABLE_SVELTE_MANIFEST);
 
         let root = tmp.path().to_string_lossy().to_string();
         let injected = inject_svelte_paths(serde_json::Value::Null, &root);
@@ -708,9 +1092,7 @@ mod tests {
             r#"{"compilerOptions":{"strict":true,"jsx":"preserve"},"include":["src"]}"#,
         )
         .unwrap();
-        let svelte_dir = tmp.path().join("node_modules/svelte");
-        std::fs::create_dir_all(&svelte_dir).unwrap();
-        std::fs::write(svelte_dir.join("package.json"), r#"{"name":"svelte"}"#).unwrap();
+        install_svelte(tmp.path(), USABLE_SVELTE_MANIFEST);
         let workspace = verter_workspace::FilesystemWorkspace::new(
             verter_workspace::FilesystemOptions::default(),
         );
@@ -738,15 +1120,12 @@ mod tests {
     fn svelte_package_missing_diagnostic_emitted_when_owner_has_no_svelte() {
         // A `.svelte` file in a workspace WITHOUT `svelte` gets the
         // typed `svelte-package-missing` diagnostic on the source file.
-        let diag = svelte_package_missing_diagnostic(
-            "/ws/src/App.svelte",
-            "/nonexistent-workspace",
-            "<div>hi</div>",
-        )
-        .expect("diagnostic present");
+        let diag = svelte_package_diagnostic("/nonexistent-workspace/App.svelte", "<div>hi</div>")
+            .expect("diagnostic present");
         assert_eq!(
             diag.code,
-            Some(NumberOrString::String("svelte-package-missing".to_string()))
+            Some(NumberOrString::String("svelte-package-missing".to_string())),
+            "an ABSENT install keeps its own code, distinct from an unusable one"
         );
         assert_eq!(diag.severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(diag.source.as_deref(), Some("verter"));
@@ -755,15 +1134,13 @@ mod tests {
 
     #[test]
     fn svelte_package_missing_diagnostic_absent_when_svelte_installed() {
-        // DISCRIMINATING: with `svelte` installed, NO diagnostic (no false
-        // positive).
+        // DISCRIMINATING: with a USABLE `svelte` installed, NO diagnostic (no
+        // false positive).
         let tmp = tempdir().unwrap();
-        let svelte_dir = tmp.path().join("node_modules/svelte");
-        std::fs::create_dir_all(&svelte_dir).unwrap();
-        std::fs::write(svelte_dir.join("package.json"), r#"{"name":"svelte"}"#).unwrap();
+        install_svelte(tmp.path(), USABLE_SVELTE_MANIFEST);
         let root = tmp.path().to_string_lossy().to_string();
         assert!(
-            svelte_package_missing_diagnostic("/ws/src/App.svelte", &root, "<div/>").is_none(),
+            svelte_package_diagnostic(&format!("{root}/App.svelte"), "<div/>").is_none(),
             "no diagnostic when svelte is installed"
         );
     }
@@ -772,7 +1149,7 @@ mod tests {
     fn svelte_package_missing_diagnostic_absent_for_non_svelte_file() {
         // A non-`.svelte` file never gets the diagnostic, even with no svelte.
         assert!(
-            svelte_package_missing_diagnostic("/ws/src/App.vue", "/nonexistent", "x").is_none(),
+            svelte_package_diagnostic("/nonexistent/App.vue", "x").is_none(),
             "no diagnostic for a non-.svelte file"
         );
     }
