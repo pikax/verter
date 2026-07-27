@@ -221,6 +221,17 @@ jobs:
               - '.github/workflows/ci.yml'
 
 
+  # ---------------------------------------------------------------------------
+  # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
+  # every other workflow. The version MUST equal `rust-toolchain.toml`'s
+  # `channel` — see that file for why the compiler is pinned at all.
+  #
+  # The action does not read `rust-toolchain.toml`; it installs the toolchain
+  # named by its `@ref` and `rustup default`s it, and rustup's toolchain-file
+  # override then outranks that default. So with a drifted `@stable` the action
+  # would install `targets:`/`components:` onto a toolchain the build never
+  # uses, and `cargo build --target <t>` would fail on missing `std`.
+  # ---------------------------------------------------------------------------
   rust-fmt:
     name: Rust Format
     needs: detect-changes
@@ -229,7 +240,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -242,13 +253,55 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-clippy
       - run: cargo clippy --workspace -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # The two build configurations no other job compiles.
+  #
+  # Every other Rust job here builds the HOST target in DEBUG. Both of the
+  # configurations below have already shipped defects that were structurally
+  # invisible to that:
+  #
+  # - RELEASE. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body
+  #   still name-resolves in release. A `#[cfg(debug_assertions)]` helper called
+  #   inside one is an E0425 in every release build — the napi and wasm
+  #   artifacts included — while compiling clean in debug. `release.yml` builds
+  #   release, but that runs on a tag, which is far too late.
+  #
+  # - wasm32-unknown-unknown. `rust-clippy` above is host-only and cannot see
+  #   target-gated code at all. The existing `editor-lapce` / `editor-zed` jobs
+  #   do run wasm clippy, but against `wasm32-wasip1`/`wasip2` and the SEPARATE
+  #   `extensions/*` manifests; nothing linted the wasm32 build that the
+  #   playground and `@verter/wasm` consumers actually run.
+  #
+  # `cargo check` (not `build`) for release: this is a compile-configuration
+  # gate, not an artifact producer, and skipping codegen keeps it cheap.
+  # ---------------------------------------------------------------------------
+  rust-build-configs:
+    name: Rust Build Configurations
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-build-configs
+      - name: Check the release configuration
+        run: cargo check --workspace --release
+      - name: Clippy (wasm32-unknown-unknown)
+        run: cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
 
   rust-test:
     name: Rust Test
@@ -258,7 +311,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           # Job-scoped by default. The previous shared
@@ -431,7 +484,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: svelte-oracle
@@ -468,7 +521,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: svelte-conformance
@@ -522,7 +575,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: svelte-compiler-benchmark
@@ -606,7 +659,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -667,7 +720,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-lsp-debug
@@ -878,7 +931,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-native-node
@@ -1034,7 +1087,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-editor-lsp
@@ -1055,7 +1108,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: editor-helix
@@ -1144,7 +1197,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-wasip1
           components: clippy, rustfmt
@@ -1212,7 +1265,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-wasip2
           components: clippy, rustfmt
@@ -1407,6 +1460,7 @@ jobs:
       - detect-changes
       - rust-fmt
       - rust-clippy
+      - rust-build-configs
       - rust-test
       - js-build-test
       - svelte-oracle

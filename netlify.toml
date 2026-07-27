@@ -2,10 +2,16 @@
 
 
 # Deploy previews are built by GitHub Actions, but this config supports manual deployments
+#
+# No RUST_VERSION here, deliberately. Netlify's RUST_VERSION only chooses what
+# rustup installs as the DEFAULT toolchain, and rustup's `rust-toolchain.toml`
+# override outranks the default — so any value set here is overridden the moment
+# cargo runs in this repo. Pinning it would create a version string that must be
+# kept in sync yet can never take effect. `rust-toolchain.toml` is the single
+# source of truth for the toolchain; leave it that way.
 [build.environment]
 PNPM_VERSION = "10.22.0"
 NODE_VERSION = "20"
-RUST_VERSION = "stable"
 
 # HTTP headers for SharedArrayBuffer and WASM support
 [[headers]]

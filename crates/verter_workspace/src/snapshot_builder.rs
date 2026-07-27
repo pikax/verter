@@ -297,6 +297,7 @@ pub fn configured_membership_from_raw(
 /// filesystem-less environment — the in-memory Engine path or WASM), only
 /// `files` entries are materialized; `ConfiguredMembership::contains` then
 /// decides the rest through the compiled spec globs.
+#[cfg(not(target_arch = "wasm32"))]
 fn materialize_from_spec(
     spec: &StaticMembershipSpec,
     project_root: &CanonicalPath,

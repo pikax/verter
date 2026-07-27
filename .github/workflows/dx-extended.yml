@@ -74,7 +74,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: corpus-sweep-dx
@@ -127,7 +127,7 @@ jobs:
           repository: ${{ inputs.external_corpus_repo }}
           ref: ${{ inputs.external_corpus_ref }}
           path: .dx-external-corpus
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: external-corpus-dx

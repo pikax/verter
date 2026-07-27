@@ -67,7 +67,7 @@ jobs:
             echo "dist-tag=latest" >> $GITHUB_OUTPUT
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -112,7 +112,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
       - uses: pnpm/action-setup@v6
@@ -182,7 +182,12 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - uses: dtolnay/rust-toolchain@stable
+      # `@1.97.1`, not `@stable`, and it MUST equal `rust-toolchain.toml`'s
+      # `channel`. The action installs `targets:` onto the toolchain named by its
+      # `@ref`, while rustup's toolchain-file override decides which toolchain
+      # actually compiles. Drift the two and every cross leg here dies on a
+      # missing `std` for `${{ matrix.target }}`.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
       # build-native was the ONLY build matrix with no cargo cache at all —
@@ -283,7 +288,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -376,7 +381,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -465,7 +470,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -512,7 +517,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -582,7 +587,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-editor-lsp-${{ matrix.slug }}
@@ -618,7 +623,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -752,7 +757,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-wasip1
           components: clippy, rustfmt
@@ -843,7 +848,7 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: wasm32-wasip2
           components: clippy, rustfmt
@@ -1058,7 +1063,7 @@ jobs:
       url: https://crates.io/crates/verter_compiler
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Publish verter_span
         run: |
@@ -1685,7 +1690,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       # Prebuilt binary rather than a from-source `cargo install`, which added
       # several minutes of compile to every release for a changelog generator.

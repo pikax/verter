@@ -1,6 +1,10 @@
+// Named only by the native-only `impl ProjectGraph` builder below.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::canonical_path::CanonicalPath;
 use crate::membership::ConfiguredMembership;
 use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+// Likewise native-only.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::snapshot_builder::configured_membership_from_raw;
 use crate::types::ProjectOwnership;
 

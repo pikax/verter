@@ -9,13 +9,13 @@ importers:
   .:
     dependencies:
       '@vue/compiler-core':
-        specifier: ^3.5.34
+        specifier: 3.5.34
         version: 3.5.34
       '@vue/compiler-sfc':
         specifier: 3.5.34
         version: 3.5.34
       oxfmt:
-        specifier: ^0.52.0
+        specifier: 0.52.0
         version: 0.52.0(svelte@5.56.3)
     devDependencies:
       '@bufbuild/buf':

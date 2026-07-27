@@ -150,7 +150,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache pnpm store
         uses: actions/cache@v5
@@ -305,7 +305,7 @@ jobs:
         uses: pnpm/action-setup@v6
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache pnpm store
         uses: actions/cache@v5

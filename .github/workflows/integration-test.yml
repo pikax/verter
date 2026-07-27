@@ -177,7 +177,7 @@ jobs:
 
       - name: Install Rust
         if: steps.source.outputs.source == 'artifact'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache Rust dependencies
         if: steps.source.outputs.source == 'artifact'

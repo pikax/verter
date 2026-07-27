@@ -73,9 +73,9 @@
     "test:vue-macro-oracle": "node --test scripts/vue-macro-runtime-oracle/oracle.test.mjs"
   },
   "dependencies": {
-    "@vue/compiler-core": "^3.5.34",
+    "@vue/compiler-core": "3.5.34",
     "@vue/compiler-sfc": "3.5.34",
-    "oxfmt": "^0.52.0"
+    "oxfmt": "0.52.0"
   },
   "devDependencies": {
     "@bufbuild/buf": "1.70.0",

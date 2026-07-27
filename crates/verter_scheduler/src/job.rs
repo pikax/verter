@@ -5,6 +5,8 @@
 
 use std::fmt;
 use std::sync::Arc;
+// Named only by `wait_timeout`, which is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
@@ -333,7 +335,8 @@ impl<T: Clone> CompletionHandle<T> {
     ///
     /// Used by the cooperative pump to bound how long a single
     /// iteration sleeps on the condvar before re-checking the inbox
-    /// and ready queue.
+    /// and ready queue. The pump is native-only, so this is too.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn wait_timeout(&self, timeout: Duration) -> Option<CompletionState<T>> {
         let mut guard = self.inner.state.lock();
         if guard.is_some() {

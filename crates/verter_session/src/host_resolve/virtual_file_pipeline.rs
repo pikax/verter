@@ -37,6 +37,9 @@ pub(crate) fn vue_macro_output_matches_revision(
 /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane: the
 /// assembled `_sfc_main` module bytes, its optional source map, and the
 /// soft (warning-severity) diagnostics of a SUCCESSFUL render.
+///
+/// `host_compile` — the only consumer — is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct RenderOnlyMain {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
@@ -893,6 +896,7 @@ impl VerterHost {
     /// through the SAME shared substrate and host-side `Main` assembly,
     /// without the per-file session-wrapper overhead. `diagnostics` carries
     /// only the soft (warning-severity) diagnostics of a SUCCESSFUL render.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn render_only_main(
         &self,
         canonical_id: &str,
@@ -3053,6 +3057,7 @@ impl VerterHost {
     ///   HostBacked/type-resolution request needs it.
     /// - (f) one request-local runtime macro bundle is produced from TypeInfo;
     ///   the render lane does not retain it or mutate dependency state.
+    #[cfg(not(target_arch = "wasm32"))]
     fn compile_entry_runtime_render(
         &self,
         snapshot: &CompileInput,

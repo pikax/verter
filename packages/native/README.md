@@ -258,7 +258,9 @@ interface CompileBatchEntry {
 
 ### Building from Source
 
-Building requires a Rust toolchain (stable) and the NAPI-RS CLI:
+Building requires a Rust toolchain (installed via [rustup](https://rustup.rs/); the version is
+pinned in `rust-toolchain.toml` and installed on the first `cargo` invocation in the repo) and
+the NAPI-RS CLI:
 
 ```bash
 # Install the NAPI-RS CLI

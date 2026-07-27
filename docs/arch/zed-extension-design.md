@@ -540,7 +540,7 @@ checklist in the README, not an automated gate (mirrors the Lapce/neovim posture
 
 ## 7. CI
 
-The `editor-zed` job in `.github/workflows/ci.yml` (`dtolnay/rust-toolchain@stable` with
+The `editor-zed` job in `.github/workflows/ci.yml` (`dtolnay/rust-toolchain@1.97.1` with
 `targets: wasm32-wasip2` + clippy/rustfmt) runs the `wasm32-wasip2` release build, the
 host-target unit tests, `cargo clippy --target wasm32-wasip2 -- -D warnings`, `cargo fmt
 --check`, and the production-plan semantic smoke against the shared `verter-lsp` binary

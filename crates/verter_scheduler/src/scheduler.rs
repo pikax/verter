@@ -454,6 +454,9 @@ impl DispatchPauseHook {
     /// test observes the resulting queue depth before releasing. Bounded
     /// at ~10 s — a release that never arrives PANICS rather than hanging
     /// the driver forever.
+    ///
+    /// The single call site is in the native dispatch loop.
+    #[cfg(not(target_arch = "wasm32"))]
     fn on_dispatch_and_maybe_pause(&self, redrain: &dyn Fn()) {
         use std::time::{Duration, Instant};
         let mut state = self.state.lock();
@@ -937,6 +940,9 @@ pub(crate) enum PumpReason {
 /// Counters returned by a single [`Scheduler::pump_ready`] call.
 /// Used by tests and the cooperative pump to decide whether
 /// progress was made before parking on the condvar.
+///
+/// `pump_ready` and every producer of these counters are native-only.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PumpStats {
     /// Submissions drained from the inbox into the DAG.
@@ -947,6 +953,7 @@ pub(crate) struct PumpStats {
     pub executed_inline: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PumpStats {
     /// `true` when any counter is non-zero. A pump that drained
     /// nothing, dispatched nothing, and ran nothing inline made no
@@ -6666,6 +6673,9 @@ fn identity_canonical(identity: &crate::dag::WorkNodeIdentity) -> String {
 /// session crate and isn't visible to the scheduler), while the
 /// clear path is a concrete `OpaqueContextGuard` that owns the
 /// prior value directly.
+///
+/// Constructed only on the native inline-execution path.
+#[cfg(not(target_arch = "wasm32"))]
 enum InlineTlsGuard {
     /// Winner has its own request context; install it for the
     /// inner stage. Drop restores the prior TLS via the trait
