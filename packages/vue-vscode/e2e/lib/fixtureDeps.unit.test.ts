@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   assertLocalDepsAreLinked,
@@ -34,6 +34,15 @@ import { fixtureLockPath } from "./fixtureLock";
 
 const created: string[] = [];
 const children: ChildProcess[] = [];
+const environment: Array<[string, string | undefined]> = [];
+
+beforeEach(() => {
+  // The adopt list defaults to this variable for every caller that does not
+  // pass `adoptFixtures`, which is most of the cases here. Exported in a shell,
+  // it puts every one of them through a mode they did not ask for — so it is
+  // pinned rather than inherited, and the two cases that are ABOUT it set it.
+  setEnv("VERTER_E2E_ADOPT_FIXTURE_DEPS", undefined);
+});
 
 afterEach(() => {
   // Killed by collected handle (pid), never by name.
@@ -41,7 +50,37 @@ afterEach(() => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
   for (const dir of created.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  // Restored in reverse, and from `afterEach` rather than at the end of a test
+  // body, so a FAILING test restores too: these tests share one process, and a
+  // leaked `CI` decides the outcome of every adopt-mode case after it.
+  for (const [name, value] of environment.splice(0).reverse()) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
 });
+
+/** Pin one environment variable for the length of a test. */
+function setEnv(name: string, value: string | undefined): void {
+  environment.push([name, process.env[name]]);
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+/**
+ * The environment of the machine the adopt-mode override exists for.
+ *
+ * `adoptDecision` reads CI from `CI`/`GITHUB_ACTIONS` whenever the caller does
+ * not pass `continuousIntegration`, and REFUSES there — deliberately, because a
+ * result produced from a tree nobody verified means nothing. A test about what
+ * adopt mode DOES therefore has to say where it is standing: inheriting the
+ * variable makes the assertion a statement about the machine, passing on a
+ * developer's laptop and refusing on every runner. That exact gap is what took
+ * four of these red on CI while they were green everywhere they were written.
+ */
+function developerMachine(): void {
+  setEnv("CI", undefined);
+  setEnv("GITHUB_ACTIONS", undefined);
+}
 
 /**
  * Short lock waits so a bug surfaces as a failure rather than a hung suite, and
@@ -1168,6 +1207,7 @@ describe("installFixtureDeps", () => {
 
   describe("the NON-HERMETIC override", () => {
     it("uses an existing tree without mutating or stamping it", () => {
+      developerMachine();
       const dir = tempFixture({ name: "adopt-me", dependencies: { vue: "3.5.0" } });
       const obsolete = plantObsoletePackage(dir);
       const installer = recordingInstaller();
@@ -1203,6 +1243,7 @@ describe("installFixtureDeps", () => {
       // The recovery is the ordinary one and runs under the ordinary lock:
       // "found here" only means "left by a dead transaction" while this process
       // owns the fixture. Everything else about adopt mode is unchanged.
+      developerMachine();
       const dir = tempFixture({ name: "adopt-me", dependencies: { vue: "3.5.0" } });
       const root = tempDir();
       const abandoned = path.join(dir, "node_modules.verter-rollback-deadbeef");
@@ -1243,6 +1284,7 @@ describe("installFixtureDeps", () => {
       // left by a dead transaction" is true. A holding appearing between the two
       // belongs to a LIVE transaction, and not touching that is the right answer
       // rather than a missed one.
+      developerMachine();
       const dir = tempFixture({ name: "adopt-me", dependencies: { vue: "3.5.0" } });
       plantObsoletePackage(dir);
       const child = await childHoldingLock(dir, 60_000);
@@ -1266,6 +1308,9 @@ describe("installFixtureDeps", () => {
     });
 
     it("is fixture-scoped: a different fixture's name authorises nothing", () => {
+      // Pinned like the cases above: the CI refusal is reached before the name
+      // is compared, so this one is decided by the environment too.
+      developerMachine();
       const dir = tempFixture({ name: "f", dependencies: { vue: "3.5.0" } });
       const root = tempDir();
       const obsolete = plantObsoletePackage(dir);
@@ -1280,6 +1325,8 @@ describe("installFixtureDeps", () => {
     });
 
     it("is REJECTED under CI", () => {
+      // The INJECTED flag. The environment default it stands in for is the case
+      // below, and only that one is what a runner actually takes.
       const dir = tempFixture({ name: "f", dependencies: { vue: "3.5.0" } });
       const installer = recordingInstaller();
       expect(() =>
@@ -1290,6 +1337,80 @@ describe("installFixtureDeps", () => {
           continuousIntegration: true,
         }),
       ).toThrow(/NON-HERMETIC/);
+      expect(installer.calls).toEqual([]);
+    });
+
+    for (const variable of ["CI", "GITHUB_ACTIONS"] as const) {
+      it(`is REJECTED when ${variable} says so and nothing was passed`, () => {
+        // The clause a runner reaches, and the one nothing guarded: no caller in
+        // this repository passes `continuousIntegration`, so the refusal that
+        // makes a CI result mean something is the ENVIRONMENT default alone.
+        // Its absence is why four adopt-mode cases could inherit the variable
+        // and go red the first time they ran anywhere that sets it.
+        developerMachine();
+        setEnv(variable, "true");
+        const dir = tempFixture({ name: "f", dependencies: { vue: "3.5.0" } });
+        const installer = recordingInstaller();
+
+        expect(() =>
+          installFixtureDeps(dir, {
+            ...fast(),
+            install: installer.run,
+            adoptFixtures: [path.basename(dir)],
+          }),
+        ).toThrow(/NON-HERMETIC/);
+        expect(installer.calls).toEqual([]);
+      });
+    }
+
+    for (const value of ["", "false", "0"]) {
+      it(`still adopts when CI is set to ${JSON.stringify(value)}`, () => {
+        // The other half, and the reason the refusal reads the VALUE rather than
+        // the variable's presence: `CI=false` is how a developer says this is
+        // not a runner, and reading it as one would take the override away from
+        // the machines it exists for.
+        developerMachine();
+        setEnv("CI", value);
+        const dir = tempFixture({ name: "adopt-me", dependencies: { vue: "3.5.0" } });
+        const obsolete = plantObsoletePackage(dir);
+        const installer = recordingInstaller();
+
+        expect(
+          installFixtureDeps(dir, {
+            ...fast(),
+            install: installer.run,
+            adoptFixtures: [path.basename(dir)],
+          }),
+        ).toEqual({ install: false, reason: "adopted" });
+        expect(installer.calls).toEqual([]);
+        expect(fs.existsSync(obsolete)).toBe(true);
+      });
+    }
+
+    it("takes the fixture list from VERTER_E2E_ADOPT_FIXTURE_DEPS when none is passed", () => {
+      // Every case above hands the list in directly, so none of them reaches the
+      // way a developer actually turns this on.
+      developerMachine();
+      const dir = tempFixture({ name: "adopt-me", dependencies: { vue: "3.5.0" } });
+      setEnv("VERTER_E2E_ADOPT_FIXTURE_DEPS", ` other-fixture, ${path.basename(dir)} `);
+      const installer = recordingInstaller();
+
+      expect(installFixtureDeps(dir, { ...fast(), install: installer.run })).toEqual({
+        install: false,
+        reason: "adopted",
+      });
+      expect(installer.calls).toEqual([]);
+    });
+
+    it("REFUSES a wildcard: there is no broad authorisation", () => {
+      developerMachine();
+      const dir = tempFixture({ name: "adopt-me", dependencies: { vue: "3.5.0" } });
+      setEnv("VERTER_E2E_ADOPT_FIXTURE_DEPS", "adopt-*");
+      const installer = recordingInstaller();
+
+      expect(() => installFixtureDeps(dir, { ...fast(), install: installer.run })).toThrow(
+        /must name each fixture/,
+      );
       expect(installer.calls).toEqual([]);
     });
   });

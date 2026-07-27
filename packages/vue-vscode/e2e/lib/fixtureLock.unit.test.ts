@@ -40,6 +40,30 @@ function tempDir(): string {
 }
 
 /**
+ * A liveness predicate that answers "gone" for the owners this test planted, and
+ * the TRUTH about every other one.
+ *
+ * The injection point is not scoped to the lock a test is acquiring. Every
+ * acquire first sweeps the whole lock directory, and that directory is
+ * process-global — `<tmp>/verter-e2e-fixture-locks`, shared by every fixture,
+ * every concurrent run, and every other test file vitest is running beside this
+ * one. So a predicate of the form `() => false` does not say "the owner I
+ * planted is gone"; it says "every process on this machine is gone", and the
+ * sweep believes it: another worker's IN-FLIGHT `.pending-` payload is
+ * classified as debris and unlinked, and that worker's next claim then links
+ * FROM a file that no longer exists. It fails with an ENOENT on the SOURCE that
+ * has nothing to do with locking, on a schedule decided by whichever test files
+ * happened to overlap.
+ *
+ * Naming the pids keeps each of these cases the statement it means to make. The
+ * only pid a test may declare dead is one it wrote itself: a fabricated one, or
+ * its own — no other worker can be running under either.
+ */
+function deadPids(...dead: readonly number[]): (pid: number) => boolean {
+  return (pid) => !dead.includes(pid);
+}
+
+/**
  * The claim suffix the module derives for a dead owner's token.
  *
  * Recomputed here rather than exported: this is the production derivation
@@ -317,9 +341,10 @@ describe("acquireFixtureLock", () => {
   it("reclaims a lock whose owner is gone", () => {
     const dir = tempDir();
     // A pid that cannot be running: the child exits before we look.
+    const deadPid = 999_999_998;
     plantLock(dir, {
       token: "dead",
-      pid: 999_999_998,
+      pid: deadPid,
       host: os.hostname(),
       startedAt: new Date().toISOString(),
       subject: dir,
@@ -327,7 +352,7 @@ describe("acquireFixtureLock", () => {
     const lock = acquireFixtureLock(dir, {
       timeoutMs: 2_000,
       pollMs: 10,
-      isProcessAlive: () => false,
+      isProcessAlive: deadPids(deadPid),
     });
     expect(lock.token).not.toBe("dead");
     releaseFixtureLock(lock);
@@ -556,9 +581,10 @@ describe("acquireFixtureLock", () => {
     // must not shape a path at all.
     const dir = tempDir();
     const lockDir = path.dirname(fixtureLockPath(dir));
+    const deadPid = 999_999_994;
     plantLock(dir, {
       token: "../../verter-gb11-escaped-claim",
-      pid: 999_999_994,
+      pid: deadPid,
       host: os.hostname(),
       startedAt: new Date().toISOString(),
       subject: dir,
@@ -576,7 +602,7 @@ describe("acquireFixtureLock", () => {
     const lock = acquireFixtureLock(dir, {
       timeoutMs: 2_000,
       pollMs: 10,
-      isProcessAlive: () => false,
+      isProcessAlive: deadPids(deadPid),
       link: recordingLink,
     });
     releaseFixtureLock(lock);
@@ -606,9 +632,10 @@ describe("acquireFixtureLock", () => {
     const lockPath = fixtureLockPath(dir);
     const claimPath = `${lockPath}.reclaim-${reclaimGeneration("dead-owner-unremovable-claim")}`;
     dirs.push(claimPath);
+    const deadPid = 999_999_991;
     plantLock(dir, {
       token: "dead-owner-unremovable-claim",
-      pid: 999_999_991,
+      pid: deadPid,
       host: os.hostname(),
       startedAt: new Date().toISOString(),
       subject: dir,
@@ -628,7 +655,7 @@ describe("acquireFixtureLock", () => {
       const lock = acquireFixtureLock(dir, {
         timeoutMs: 2_000,
         pollMs: 10,
-        isProcessAlive: () => false,
+        isProcessAlive: deadPids(deadPid),
         link: plantingLink,
       });
       releaseFixtureLock(lock);
@@ -670,10 +697,14 @@ describe("acquireFixtureLock", () => {
     expect(probes).toBeGreaterThan(0);
     // And it refused rather than taking the lock through the weaker primitive.
     expect(fs.existsSync(lockPath)).toBe(false);
-    // The probe cleans up after itself; the directory is as it was.
-    expect(fs.readdirSync(path.dirname(lockPath)).filter((n) => n.includes(".pending-"))).toEqual(
-      [],
-    );
+    // The probe cleans up after itself; the directory is as it was. Scoped to
+    // THIS subject's own lock name, because every debris file the attempts
+    // above could leave is named after it — and the directory itself belongs to
+    // every concurrent run, so a bare `.pending-` filter asserts that nothing
+    // else on the machine is midway through an acquire.
+    expect(
+      fs.readdirSync(path.dirname(lockPath)).filter((n) => n.startsWith(path.basename(lockPath))),
+    ).toEqual([]);
   });
 
   it("never sweeps away its own in-flight payload", () => {
@@ -700,8 +731,11 @@ describe("acquireFixtureLock", () => {
     const lock = acquireFixtureLock(dir, {
       timeoutMs: 2_000,
       pollMs: 10,
-      // Every owner reads as gone — including this process's own.
-      isProcessAlive: () => false,
+      // This process's OWN owner reads as gone, which is the whole hazard: the
+      // payload at risk is the one written under this pid. Every other owner
+      // still reads truthfully, because the sweep walks a directory shared with
+      // whatever else is running — see {@link deadPids}.
+      isProcessAlive: deadPids(process.pid),
       link: watchingLink,
     });
     releaseFixtureLock(lock);
@@ -711,6 +745,62 @@ describe("acquireFixtureLock", () => {
     expect(sources.every((source) => source.includes(".pending-"))).toBe(true);
     // And the file it linked from was still there each time.
     expect(present).not.toContain(false);
+  });
+
+  it("leaves the in-flight payload of ANOTHER live process where it is", async () => {
+    // The exclusion above covers one file: the one this process is about to
+    // link from. Every other `.pending-` payload in that directory belongs to
+    // somebody else — the directory is process-global, so it holds the in-flight
+    // payload of every concurrent run and every other test file executing beside
+    // this one — and the only thing standing between those and the unlink is the
+    // liveness predicate. Nothing tested that, and it is the more consequential
+    // half: removing another process's payload does not fail THIS acquire, it
+    // fails THAT one, later, with an ENOENT on the link SOURCE that names no
+    // cause and points at no owner.
+    const mine = tempDir();
+    const theirs = tempDir();
+    const theirLock = fixtureLockPath(theirs);
+    const token = "0f0f0f0f-0000-4000-8000-000000000000";
+
+    // A REAL second process, holding a REAL payload, because the predicate under
+    // test asks the operating system whether a pid exists. A planted file with a
+    // fabricated pid would prove the opposite of what this needs.
+    const script = `
+      const fs = require("node:fs");
+      const os = require("node:os");
+      fs.writeFileSync(${JSON.stringify(theirLock)} + ".pending-" + process.pid + "-${token}",
+        JSON.stringify({
+          token: "${token}", pid: process.pid, host: os.hostname(),
+          startedAt: new Date().toISOString(), subject: ${JSON.stringify(theirs)},
+        }));
+      setTimeout(() => {}, 60000);
+    `;
+    const child = spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+    children.push(child);
+    const theirPending = `${theirLock}.pending-${child.pid}-${token}`;
+    dirs.push(theirPending);
+    await new Promise<void>((resolve, reject) => {
+      const started = Date.now();
+      const poll = (): void => {
+        if (fs.existsSync(theirPending)) return resolve();
+        if (Date.now() - started > 10_000) return reject(new Error("child never wrote a payload"));
+        setTimeout(poll, 10);
+      };
+      poll();
+    });
+
+    // Positive controls: the payload really is on disk, in the very directory
+    // this acquire is about to sweep, and its owner really is running.
+    expect(fs.existsSync(theirPending)).toBe(true);
+    expect(path.dirname(theirPending)).toBe(path.dirname(fixtureLockPath(mine)));
+    expect(child.exitCode).toBeNull();
+
+    // An ordinary acquire of an unrelated fixture. The sweep at the top of it
+    // walks the whole directory.
+    const lock = acquireFixtureLock(mine, { timeoutMs: 2_000, pollMs: 10 });
+    releaseFixtureLock(lock);
+
+    expect(fs.existsSync(theirPending)).toBe(true);
   });
 
   it("REFUSES when the probe cannot say whether hard links are available either", () => {
@@ -751,8 +841,12 @@ describe("acquireFixtureLock", () => {
     // And nothing was created: no lock through the weaker primitive, and no
     // probe debris left behind by the attempts that failed.
     expect(fs.existsSync(lockPath)).toBe(false);
+    // Named after this subject's own lock, for the reason given on the same
+    // assertion in the test above.
     expect(
-      fs.readdirSync(path.dirname(lockPath)).filter((n) => n.includes("-hardlink-probe-")),
+      fs
+        .readdirSync(path.dirname(lockPath))
+        .filter((n) => n.startsWith(path.basename(lockPath)) && n.includes("-hardlink-probe-")),
     ).toEqual([]);
   });
 
@@ -804,9 +898,14 @@ describe("acquireFixtureLock", () => {
       startedAt: new Date().toISOString(),
       subject: dir,
     });
-    // A pid is meaningless across hosts, so liveness must not be consulted at all.
+    // A pid is meaningless across hosts, so liveness must not be consulted at
+    // all: the planted owner's pid is THIS process's, and it reads as gone.
     expect(() =>
-      acquireFixtureLock(dir, { timeoutMs: 200, pollMs: 20, isProcessAlive: () => false }),
+      acquireFixtureLock(dir, {
+        timeoutMs: 200,
+        pollMs: 20,
+        isProcessAlive: deadPids(process.pid),
+      }),
     ).toThrow(/timed out/);
   });
 });
