@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import {
   ensureFixtureWarm,
@@ -38,7 +39,7 @@ suite(`Activation & LSP Health [${FIXTURE_NAME}]`, function () {
     this.timeout(15_000);
     // Heartbeat is sent every 5s — wait long enough for at least one
     const start = Date.now();
-    while (Date.now() - start < 12_000) {
+    while (Date.now() - start < pollBudget("activationHeartbeat")) {
       const log = readTestLog();
       // Look for the actual heartbeat notification, not error messages about missing heartbeats
       if (log.includes("$/verter/heartbeat")) {

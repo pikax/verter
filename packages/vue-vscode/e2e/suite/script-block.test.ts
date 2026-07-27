@@ -6,9 +6,11 @@ import {
   measureHover,
   getCompletions,
   getDefinitions,
-  getReferences,
+  waitForReferences,
   findPosition,
   hoverText,
+  logMark,
+  withFrontierDiagnosis,
   FIXTURE_NAME,
   TYPE_PROVIDER,
 } from "../helpers";
@@ -311,12 +313,18 @@ suite(`Script Block [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const refs = await getReferences(doc.uri, pos);
+    const mark = logMark();
+    const refs = await waitForReferences(doc.uri, pos, {
+      predicate: (locations) => locations.length >= 4,
+    });
     console.log(`    References for count: ${refs.length} location(s)`);
 
     // count appears in: declaration, {{ count }}, count.value * 2, :bar="count",
     // count.value++, formatCount(count.value), watch(count, ...)
-    expect(refs.length, "should have at least 4 references").to.be.greaterThanOrEqual(4);
+    expect(
+      refs.length,
+      withFrontierDiagnosis(mark, "should have at least 4 references"),
+    ).to.be.greaterThanOrEqual(4);
 
     // All in same file
     for (const ref of refs) {
@@ -337,11 +345,17 @@ suite(`Script Block [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const refs = await getReferences(doc.uri, pos);
+    const mark = logMark();
+    const refs = await waitForReferences(doc.uri, pos, {
+      predicate: (locations) => locations.length >= 3,
+    });
     console.log(`    References for increment: ${refs.length} location(s)`);
 
     // increment is used in: declaration, @click="increment", @click.prevent="increment"
-    expect(refs.length, "should have at least 3 references").to.be.greaterThanOrEqual(3);
+    expect(
+      refs.length,
+      withFrontierDiagnosis(mark, "should have at least 3 references"),
+    ).to.be.greaterThanOrEqual(3);
   });
 
   test("references on handleCustom finds declaration + @custom template usage", async function () {
@@ -356,10 +370,16 @@ suite(`Script Block [${FIXTURE_NAME}]`, function () {
       return;
     }
 
-    const refs = await getReferences(doc.uri, pos);
+    const mark = logMark();
+    const refs = await waitForReferences(doc.uri, pos, {
+      predicate: (locations) => locations.length >= 2,
+    });
     console.log(`    References for handleCustom: ${refs.length} location(s)`);
 
     // handleCustom: declaration, @custom="handleCustom($event)", @alert="handleCustom"
-    expect(refs.length, "should have at least 2 references").to.be.greaterThanOrEqual(2);
+    expect(
+      refs.length,
+      withFrontierDiagnosis(mark, "should have at least 2 references"),
+    ).to.be.greaterThanOrEqual(2);
   });
 });

@@ -8,6 +8,15 @@ import { computeStartupSegments } from "../src/startupOptimizations";
 import { attestE2eTypeProviderLog, type E2eTypeProviderRoute } from "../src/e2eProviderAttestation";
 import { parseArmedControlDir, verifySharedArmedHandshake } from "../src/sharedTsgoLaunch";
 import { isVirtualCarrierPath } from "./lib/virtualCarrier";
+import { pollBudget, REFERENCES_POLL_INTERVAL_MS, sequenceParent } from "./lib/timeouts";
+
+export { pollBudget, sequenceParent } from "./lib/timeouts";
+import {
+  E2E_BASE_SERVER_PROFILE_ENV,
+  E2E_SERVER_PROFILE_ENV,
+  isE2eServerProfile,
+  type E2eServerProfile,
+} from "./lib/serverProfiles";
 
 // ── Environment ────────────────────────────────────────────────
 
@@ -52,7 +61,10 @@ export function isLspReady(): boolean {
  * LSP when a Vue file is first opened), then polls the log file for
  * "Verter ready".
  */
-export async function waitForExtensionReady(timeoutMs = 45_000): Promise<void> {
+export async function waitForExtensionReady(explicitBudgetMs?: number): Promise<void> {
+  // The registry default is evaluated ONLY when no budget is supplied, so the
+  // large root-path budget never reaches an ordinary caller's deadline.
+  const timeoutMs = explicitBudgetMs ?? pollBudget("waitForExtensionReady");
   const ext = vscode.extensions.getExtension("verter.verter-vscode");
   assert.ok(ext, "Verter extension should be installed");
 
@@ -138,7 +150,7 @@ export async function revealDefinition(
   const sourceUri = uri.toString();
   await vscode.commands.executeCommand("editor.action.revealDefinition");
 
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + pollBudget("revealDefinition");
   while (Date.now() < deadline) {
     const active = vscode.window.activeTextEditor;
     if (active && active.document.uri.toString() !== sourceUri) {
@@ -165,6 +177,13 @@ export async function revealDefinition(
  *
  * Auto-detects a probe position from `{{ identifier }}` patterns in the doc.
  * Falls back to hover probing on `defineProps`/`defineEmits` if no mustache found.
+ *
+ * The default budget stays under the mocha deadline (`POLL_BUDGETS.waitForFileReady`)
+ * so a file that never becomes ready fails with THIS helper's message — naming the
+ * document and the label it waited for — instead of an anonymous
+ * `Timeout of 15000ms exceeded` attributed to whichever test happened to open it.
+ * A caller that legitimately needs longer raises its own `this.timeout(...)` and
+ * passes an explicit `timeoutMs`.
  */
 export async function waitForFileReady(
   doc: vscode.TextDocument,
@@ -177,7 +196,11 @@ export async function waitForFileReady(
     intervalMs?: number;
   } = {},
 ): Promise<void> {
-  const { timeoutMs = 20_000, intervalMs = 150, triggerCharacter } = options;
+  const {
+    timeoutMs = pollBudget("waitForFileReady"),
+    intervalMs = 150,
+    triggerCharacter,
+  } = options;
   let { probePosition, expectedLabel, expectedKinds } = options;
 
   // Auto-detect from mustache expressions if not provided
@@ -307,7 +330,7 @@ export async function waitForOnTypeReady(
   expectedClose: string,
   options: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<void> {
-  const { timeoutMs = 20_000, intervalMs = 150 } = options;
+  const { timeoutMs = pollBudget("waitForOnTypeReady"), intervalMs = 150 } = options;
   const start = Date.now();
   let last = "";
   while (Date.now() - start < timeoutMs) {
@@ -394,7 +417,7 @@ export async function waitForDiagnostics(
     predicate?: (d: vscode.Diagnostic) => boolean;
   } = {},
 ): Promise<vscode.Diagnostic[]> {
-  const { source, timeoutMs = 30_000, minCount = 0, predicate } = options;
+  const { source, timeoutMs = pollBudget("waitForDiagnostics"), minCount = 0, predicate } = options;
 
   const getFiltered = () => {
     let diags = vscode.languages.getDiagnostics(uri);
@@ -451,7 +474,13 @@ export async function waitForNoDiagnosticsMatching(
     predicate: (d: vscode.Diagnostic) => boolean;
   },
 ): Promise<vscode.Diagnostic[]> {
-  const { source, timeoutMs = 30_000, intervalMs = 150, stableMs = 400, predicate } = options;
+  const {
+    source,
+    timeoutMs = pollBudget("waitForNoDiagnosticsMatching"),
+    intervalMs = 150,
+    stableMs = 400,
+    predicate,
+  } = options;
 
   const getFiltered = () => {
     let diags = vscode.languages.getDiagnostics(uri);
@@ -497,7 +526,11 @@ export async function waitForDiagnosticsSettled(
     stableMs?: number;
   },
 ): Promise<vscode.Diagnostic[]> {
-  const { source, timeoutMs = 5_000, stableMs = 500 } = options ?? {};
+  const {
+    source,
+    timeoutMs = pollBudget("waitForDiagnosticsSettled"),
+    stableMs = 500,
+  } = options ?? {};
 
   const getFiltered = () => {
     let diags = vscode.languages.getDiagnostics(uri);
@@ -565,14 +598,20 @@ export interface DecorationState {
 /**
  * Measure hover latency at a specific position.
  * Returns the hover result and the time it took in milliseconds.
+ *
+ * A position with no TypeScript correlate legitimately returns zero hovers, and
+ * several callers branch on exactly that. So the poll budget must stay under the
+ * mocha deadline of the test awaiting it (`POLL_BUDGETS.measureHover`): a
+ * child budget at or above its parent's turns "nothing here" into
+ * `Timeout of 15000ms exceeded`, which reports the harness instead of the
+ * product and hides the assertion the test actually wrote.
  */
 export async function measureHover(
   uri: vscode.Uri,
   position: vscode.Position,
 ): Promise<{ hovers: vscode.Hover[]; latencyMs: number }> {
-  const timeoutMs = 20_000;
   const intervalMs = 150;
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + pollBudget("measureHover");
 
   let latest: vscode.Hover[] = [];
   let latestLatencyMs = 0;
@@ -597,6 +636,13 @@ export async function measureHover(
   return { hovers: latest, latencyMs: latestLatencyMs };
 }
 
+/**
+ * Poll hover until `predicate` holds, then return the latest hovers.
+ *
+ * The budget defaults under the mocha deadline (`POLL_BUDGETS`):
+ * on a genuine miss this returns the LAST result it saw and the caller asserts
+ * on it, so an absence stays a reportable assertion instead of a timeout.
+ */
 export async function waitForHoverMatching(
   uri: vscode.Uri,
   position: vscode.Position,
@@ -607,7 +653,12 @@ export async function waitForHoverMatching(
     predicate: (hovers: readonly vscode.Hover[]) => boolean;
   },
 ): Promise<vscode.Hover[]> {
-  const { timeoutMs = 20_000, intervalMs = 150, stableMs = 400, predicate } = options;
+  const {
+    timeoutMs = pollBudget("waitForHoverMatching"),
+    intervalMs = 150,
+    stableMs = 400,
+    predicate,
+  } = options;
 
   const start = Date.now();
   let matchedSince: number | undefined;
@@ -722,7 +773,10 @@ export async function triggerDecorationRefresh(): Promise<void> {
  * current generation, then polls for "TypeProviderSyncComplete (init generation M)"
  * where M >= N. This prevents stale scanner signals from satisfying the wait.
  */
-export async function waitForTypeProviderSync(timeoutMs = 30_000): Promise<void> {
+export async function waitForTypeProviderSync(explicitBudgetMs?: number): Promise<void> {
+  // The registry default is evaluated ONLY when no budget is supplied, so the
+  // large root-path budget never reaches an ordinary caller's deadline.
+  const timeoutMs = explicitBudgetMs ?? pollBudget("waitForTypeProviderSync");
   const start = Date.now();
 
   // Find current init generation from the ready notification
@@ -810,6 +864,49 @@ export function readTestLog(): string {
  */
 export function logMark(): number {
   return readTestLog().length;
+}
+
+// ── Server profiles ────────────────────────────────────────────
+
+/**
+ * The profile the runner LAUNCHED this extension host with.
+ *
+ * A launch configures one server. Verter's native hover lane is an
+ * INITIALIZATION option, and the extension builds `initializationOptions` once
+ * at activation and re-sends that frozen object on every restart
+ * (`src/extension.ts`), so a running server cannot be moved onto another
+ * profile — measured: after a confirmed `verter.hover.nativeSemantics: true` in
+ * the extension host's configuration and a confirmed server restart, the server
+ * still logged `native hover semantics: disabled (default)`. Each profile
+ * therefore gets its own launch, and this value says which one is running.
+ */
+export function launchServerProfile(): E2eServerProfile {
+  const declared = readE2eEnv(E2E_SERVER_PROFILE_ENV);
+  if (!isE2eServerProfile(declared)) {
+    throw new Error(
+      `VERTER_E2E_${E2E_SERVER_PROFILE_ENV} is "${declared}", which is not a known server ` +
+        "profile; the runner must declare the profile it launched this route with",
+    );
+  }
+  return declared;
+}
+
+/**
+ * The route's BASELINE profile — what a suite that declares nothing runs under.
+ *
+ * Distinct from {@link launchServerProfile}: a legacy route's baseline is
+ * `default` even while its opt-in launch is running, which is what lets suite
+ * selection put each suite in exactly one launch.
+ */
+export function routeBaseServerProfile(): E2eServerProfile {
+  const declared = readE2eEnv(E2E_BASE_SERVER_PROFILE_ENV);
+  if (!isE2eServerProfile(declared)) {
+    throw new Error(
+      `VERTER_E2E_${E2E_BASE_SERVER_PROFILE_ENV} is "${declared}", which is not a known server ` +
+        "profile; the runner must declare this route's baseline profile",
+    );
+  }
+  return declared;
 }
 
 /**
@@ -968,7 +1065,7 @@ export async function waitForCompletionsMatching(
   },
 ): Promise<vscode.CompletionList | undefined> {
   const {
-    timeoutMs = 20_000,
+    timeoutMs = pollBudget("waitForCompletionsMatching"),
     intervalMs = 150,
     stableMs = 400,
     triggerCharacter,
@@ -1136,6 +1233,47 @@ export async function getReferences(
 }
 
 /**
+ * Poll `textDocument/references` until it satisfies `predicate`, then return the
+ * latest locations.
+ *
+ * A project-wide references answer is gated on the workspace-symbol frontier:
+ * TypeScript can only prove it once every carrier in the owning configured
+ * project is a Program root, so Verter FAILS CLOSED and answers nothing until
+ * background carrier publication completes (`provider_state.rs` →
+ * `prepare_workspace_symbol_frontier`). A single unwaited request therefore
+ * reads a refusal as "this binding has no references" — on the single-project
+ * fixture the frontier settles about four seconds after open, and every
+ * one-shot call before that returned zero.
+ *
+ * The predicate is the CALLER's, so an empty result stays representable: this
+ * helper returns whatever the last poll produced and the test asserts on it. It
+ * never converts "no references" into a hang, and it never manufactures one.
+ */
+export async function waitForReferences(
+  uri: vscode.Uri,
+  position: vscode.Position,
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    predicate: (locations: readonly vscode.Location[]) => boolean;
+  },
+): Promise<vscode.Location[]> {
+  const {
+    timeoutMs = pollBudget("waitForReferences"),
+    intervalMs = REFERENCES_POLL_INTERVAL_MS,
+    predicate,
+  } = options;
+  const deadline = Date.now() + timeoutMs;
+  let latest: vscode.Location[] = [];
+  for (;;) {
+    latest = await getReferences(uri, position);
+    if (predicate(latest)) return latest;
+    if (Date.now() >= deadline) return latest;
+    await sleep(intervalMs);
+  }
+}
+
+/**
  * Get document symbols for a file.
  */
 export async function getDocumentSymbols(
@@ -1188,17 +1326,20 @@ let _typeProviderSynced = false;
 const _fileReadyCache = new Map<string, boolean>();
 
 /** Run once per fixture@provider. Idempotent. */
-export async function ensureFixtureWarm(): Promise<void> {
+export async function ensureFixtureWarm(readyBudgetMs?: number): Promise<void> {
   if (_fixtureWarm) return;
-  await waitForExtensionReady();
+  await waitForExtensionReady(readyBudgetMs);
   _fixtureWarm = true;
 }
 
 /** Run once per fixture@provider after ensureFixtureWarm. Idempotent. */
-export async function ensureTypeProviderSynced(): Promise<void> {
+export async function ensureTypeProviderSynced(budgets?: {
+  readyBudgetMs?: number;
+  syncBudgetMs?: number;
+}): Promise<void> {
   if (_typeProviderSynced) return;
-  await ensureFixtureWarm();
-  await waitForTypeProviderSync();
+  await ensureFixtureWarm(budgets?.readyBudgetMs);
+  await waitForTypeProviderSync(budgets?.syncBudgetMs);
   _typeProviderSynced = true;
 }
 
@@ -1263,7 +1404,13 @@ export async function waitForCodeActionsMatching(
     predicate: (items: readonly (vscode.CodeAction | vscode.Command)[]) => boolean;
   },
 ): Promise<(vscode.CodeAction | vscode.Command)[]> {
-  const { kind, timeoutMs = 20_000, intervalMs = 150, stableMs = 400, predicate } = options;
+  const {
+    kind,
+    timeoutMs = pollBudget("waitForCodeActionsMatching"),
+    intervalMs = 150,
+    stableMs = 400,
+    predicate,
+  } = options;
 
   const start = Date.now();
   let matchedSince: number | undefined;

@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
@@ -65,7 +66,9 @@ suite(`Diagnostics [${FIXTURE_NAME}]`, function () {
     const doc = await openVueFile(getAppVuePath());
     const start = Date.now();
 
-    const diags = await waitForDiagnostics(doc.uri, { timeoutMs: 30_000 });
+    const diags = await waitForDiagnostics(doc.uri, {
+      timeoutMs: pollBudget("waitForDiagnostics"),
+    });
     const elapsed = Date.now() - start;
 
     const sources = [...new Set(diags.map((d) => d.source || "unknown"))];
@@ -273,10 +276,10 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
     // diagnostic disappears.
     const compLine = eventPos.line;
     const start = Date.now();
-    const timeout = 20_000;
+
     let diags: vscode.Diagnostic[] = [];
     let editCount = 0;
-    while (Date.now() - start < timeout) {
+    while (Date.now() - start < pollBudget("diagnosticsUnresolvedRetry")) {
       diags = vscode.languages.getDiagnostics(doc.uri);
       const hasUnresolved = diags.some(
         (d) =>
@@ -309,7 +312,9 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
         d.range.start.line === compLine,
     );
     if (stillUnresolved) {
-      console.log(`    Component types not resolved after ${timeout}ms — skip`);
+      console.log(
+        `    Component types not resolved after ${pollBudget("diagnosticsUnresolvedRetry")}ms — skip`,
+      );
       this.skip();
       return;
     }
@@ -432,7 +437,10 @@ export function useLockScroll(target: MaybeRef<HTMLElement | null> = null) {
       let remaining = vscode.languages
         .getDiagnostics(doc.uri)
         .filter((d) => d.source === "verter" && d.message.includes('"sass" is not installed'));
-      while (remaining.length > 0 && Date.now() - clearStart < 20_000) {
+      while (
+        remaining.length > 0 &&
+        Date.now() - clearStart < pollBudget("diagnosticsClearRetry")
+      ) {
         await sleep(250);
         remaining = vscode.languages
           .getDiagnostics(doc.uri)

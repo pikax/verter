@@ -8,6 +8,7 @@
  * Absolute contracts only (TS + Verter product). No Volar / Svelte Official LS.
  */
 import * as vscode from "vscode";
+import { pollBudget } from "../../../lib/timeouts";
 import { FIXTURE_NAME, sleep } from "../../../helpers";
 import {
   assertCleanErrors,
@@ -69,7 +70,7 @@ suite(`Confidence hardening [${FIXTURE_NAME}]`, function () {
       await editor.edit((eb) => eb.insert(doc.positionAt(insertAt), ' totallyFakeProp="nope"'));
       await sleep(200);
       // Poll until an error appears (invalidation / recheck).
-      const deadline = Date.now() + 10_000;
+      const deadline = Date.now() + pollBudget("confidenceProbe");
       let hit = false;
       while (Date.now() < deadline) {
         const errors = await errorDiagnostics(file);

@@ -7,6 +7,7 @@
  * - Product gaps remain failed tests and cite an ISSUES.md row.
  */
 import { strict as assert } from "node:assert";
+import { pollBudget } from "./timeouts";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -103,7 +104,7 @@ export async function pollUntil<T>(
   label: string,
   request: () => Promise<T>,
   ready: (value: T) => boolean,
-  timeoutMs = 12_000,
+  timeoutMs = pollBudget("parityHarnessSettle"),
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let latest = await request();

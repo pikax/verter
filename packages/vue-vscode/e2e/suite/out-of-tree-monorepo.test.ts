@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import { pollBudget, sequenceParent } from "../lib/timeouts";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -95,6 +96,8 @@ if (FIXTURE_NAME === FIXTURE) {
       let diagnostics: vscode.Diagnostic[];
 
       suiteSetup(async function () {
+        // A cold second toolchain then a settle, in series (`POLL_SEQUENCES`).
+        this.timeout(sequenceParent("outOfTreeMonorepoSetup"));
         assert.strictEqual(
           TYPE_PROVIDER,
           "extension",
@@ -133,11 +136,11 @@ if (FIXTURE_NAME === FIXTURE) {
         // compiler. Waiting on it (rather than on any diagnostic) means a run that
         // fails closed times out here instead of passing on an empty set.
         await waitForDiagnostics(document.uri, {
-          timeoutMs: 60_000,
+          timeoutMs: pollBudget("outOfTreeStrictDiagnostic"),
           predicate: (diagnostic) => diagnosticCode(diagnostic) === 2322,
         });
         diagnostics = await waitForDiagnosticsSettled(document.uri, {
-          timeoutMs: 10_000,
+          timeoutMs: pollBudget("outOfTreeSettle"),
           stableMs: 800,
         });
       });

@@ -27,6 +27,16 @@ import {
   type E2eRoute,
 } from "./lib/routeInventory";
 import { installFixtureDeps } from "./lib/fixtureDeps";
+import {
+  E2E_BASE_SERVER_PROFILE_ENV,
+  E2E_SERVER_PROFILE_ENV,
+  E2E_SERVER_PROFILE_SLUGS,
+  serverProfileKeys,
+  serverProfileSettings,
+  serverProfilesForSuites,
+  type E2eServerProfile,
+} from "./lib/serverProfiles";
+import { FIXTURE_SUITE_GLOBS } from "./lib/fixtureSuiteMap";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
@@ -268,6 +278,39 @@ function removeE2eProfile(profile: E2eProfile): void {
   });
 }
 
+/**
+ * Remove every server-profile key from a fixture's generated workspace settings.
+ *
+ * `<fixture>/.vscode/settings.json` is written at runtime by suites that flip
+ * VS Code settings and is gitignored, so it outlives the run that produced it.
+ * Workspace scope beats the user scope the launcher writes, so a leftover
+ * profile key there would decide the server's configuration instead of the
+ * declared profile.
+ */
+function clearProfileKeysFromWorkspaceSettings(fixtureDir: string): void {
+  const settingsPath = path.join(fixtureDir, ".vscode", "settings.json");
+  if (!fs.existsSync(settingsPath)) return;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    // Unparseable generated file: replacing it is strictly better than leaving
+    // VS Code to interpret it.
+    fs.rmSync(settingsPath, { force: true });
+    return;
+  }
+  let changed = false;
+  for (const key of serverProfileKeys()) {
+    if (key in parsed) {
+      delete parsed[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    fs.writeFileSync(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`);
+  }
+}
+
 async function main() {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../");
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
@@ -307,7 +350,29 @@ async function main() {
 
   for (const [index, route] of routesToRun.entries()) {
     const { fixture, typeProvider } = route;
-    const label = e2eRouteLabel(route);
+    const routeLabel = e2eRouteLabel(route);
+    // The product keeps Verter-native semantic enrichment and hover contribution
+    // off by default. Parity fixtures exercise those opt-in surfaces wholesale, so
+    // their BASELINE is that profile; every other fixture baselines on the shipped
+    // default. Individual suites may declare a different profile
+    // (`lib/serverProfiles.ts`), and each distinct profile gets its OWN launch: a
+    // running server cannot be moved between them, because the extension freezes
+    // `initializationOptions` at activation and re-sends them unchanged on restart.
+    // The set is derived from this fixture's suite GLOBS, not from the authored
+    // suite files on disk.
+    const baseServerProfile: E2eServerProfile =
+      fixture in PARITY_FIXTURE_CONFIGS ? "verter-native-semantics" : "default";
+    // A `--only` selection narrows which suites load, so it narrows which
+    // profiles have anything to run. Launching a profile whose selection is empty
+    // would fail the suite runner's zero-selection guard — correctly, since a
+    // launch that runs no tests proves nothing.
+    const selectableSuiteGlobs = (FIXTURE_SUITE_GLOBS[fixture] ?? []).filter(
+      (glob) => !onlyPattern || glob.includes(onlyPattern) || onlyPattern.includes(glob),
+    );
+    const serverProfilesInUse = serverProfilesForSuites(
+      selectableSuiteGlobs.length > 0 ? selectableSuiteGlobs : (FIXTURE_SUITE_GLOBS[fixture] ?? []),
+      baseServerProfile,
+    );
     const templateDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
     const outOfTreeWorkspace = OUT_OF_TREE_FIXTURES.has(fixture)
       ? materializeOutOfTreeWorkspace(fixture, templateDir)
@@ -315,9 +380,12 @@ async function main() {
     const fixtureDir = outOfTreeWorkspace ?? templateDir;
 
     console.log(`\n${"=".repeat(60)}`);
-    console.log(`Running E2E tests for fixture: ${label}`);
+    console.log(`Running E2E tests for fixture: ${routeLabel}`);
     console.log(`Workspace: ${fixtureDir}`);
     if (typeProvider) console.log(`Type provider override: ${typeProvider}`);
+    if (serverProfilesInUse.length > 1) {
+      console.log(`Server profiles: ${serverProfilesInUse.join(", ")} (one launch each)`);
+    }
     console.log("=".repeat(60));
 
     // Install fixture dependencies if needed (for Vue type resolution).
@@ -349,147 +417,171 @@ async function main() {
       }
     }
 
-    // Deliberately OUTSIDE the per-route isolated root: the runner reads this log and the
-    // run summary beside it AFTER the route's root is removed.
-    const logFile = path.join(HARNESS_TEMP_ROOT, `verter-e2e-${label}.log`);
-    const profile = createE2eProfile(label, index);
-    // Isolate every temp-derived LSP artifact — above all the carrier store — to THIS
-    // route of THIS run, so a run's verdict never depends on what ran before it.
-    const tempRoot = createIsolatedTempRoot(label, index);
-    console.log(`  Isolated temp root: ${tempRoot}`);
-    // Delete any stale run summary before the run so a prior-run summary can
-    // never false-green a current zero-exit crash that writes no fresh summary.
-    clearRunArtifacts(logFile);
-    try {
-      const exercisesNativeSemanticSurface = fixture in PARITY_FIXTURE_CONFIGS;
-      writeVsCodeUserSettings(profile.userDataDir, {
-        "verter.experimental.exposeBindingsTesting":
-          fixture === "vue-parity" || fixture === "svelte-parity",
-        // The product intentionally keeps Verter-native semantic enrichment and
-        // hover contribution off by default. Parity fixtures explicitly exercise
-        // those opt-in surfaces; acceptance/performance fixtures keep the default
-        // provider-only hot path.
-        "verter.analysis.enabled": exercisesNativeSemanticSurface,
-        "verter.hover.nativeSemantics": exercisesNativeSemanticSurface,
-        // The extension spawns the LSP with `VERTER_LOG` set from THIS setting, which
-        // OVERWRITES the `VERTER_LOG=debug` the runner puts in `extensionTestsEnv`
-        // (`extension.ts` → `buildServerOptions`). Without it the server runs at `info`
-        // and the fail-closed signal a test needs to distinguish "the provider gave a
-        // wrong answer" from "Verter refused to answer" — the workspace-symbol frontier's
-        // `activated N/M carriers` line — is never emitted at all.
-        //
-        // The value is a `tracing_subscriber` EnvFilter directive, not a bare level:
-        // blanket `debug` is 6x the log volume, and every line is mirrored SYNCHRONOUSLY
-        // to both the output channel and the E2E log file, which measurably slows the
-        // extension host. Raise exactly the one module that owns the signal.
-        "verter.server.logLevel": "info,verter_lsp::server::provider_state=debug",
-      });
-      if (typeProvider === "shared-tsgo") {
-        const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
-        console.log(`  Provisioning ${extension} into the isolated test profile...`);
-        provisionVsCodeExtension({
-          cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
-          extension,
-          extensionsDir: profile.extensionsDir,
-          userDataDir: profile.userDataDir,
-        });
-        // Native Preview's restart/API-session commands exist only after its
-        // enabled server starts. Seed the isolated profile before first activation
-        // so this acceptance exercises the real editor-owned lifecycle.
+    // ONE LAUNCH PER PROFILE. Each gets its own log, VS Code profile directory,
+    // isolated temp root and run summary, so a profile's verdict never depends on
+    // another's. The label is suffixed only when a route actually runs more than
+    // one, keeping every single-profile route's artifact names unchanged.
+    for (const [profileIndex, serverProfile] of serverProfilesInUse.entries()) {
+      // The slug, not the profile name: this label becomes a VS Code user-data
+      // directory whose path becomes a Unix socket path, and the full name blows
+      // the ~103-byte limit (`listen EINVAL`, VS Code never starts).
+      const label =
+        serverProfilesInUse.length > 1
+          ? `${routeLabel}#${E2E_SERVER_PROFILE_SLUGS[serverProfile]}`
+          : routeLabel;
+      const launchIndex = index * serverProfilesInUse.length + profileIndex;
+      // Deliberately OUTSIDE the per-route isolated root: the runner reads this log and the
+      // run summary beside it AFTER the route's root is removed.
+      const logFile = path.join(HARNESS_TEMP_ROOT, `verter-e2e-${label}.log`);
+      const profile = createE2eProfile(label, launchIndex);
+      // Isolate every temp-derived LSP artifact — above all the carrier store — to THIS
+      // route of THIS run, so a run's verdict never depends on what ran before it.
+      const tempRoot = createIsolatedTempRoot(label, launchIndex);
+      console.log(`  Isolated temp root: ${tempRoot}`);
+      // Delete any stale run summary before the run so a prior-run summary can
+      // never false-green a current zero-exit crash that writes no fresh summary.
+      clearRunArtifacts(logFile);
+      // The runner's profile is USER-scope, and several suites write WORKSPACE-scope
+      // settings into `<fixture>/.vscode/settings.json` at runtime (the decorations
+      // suite, `revealDefinition`). That file is gitignored, so it survives between
+      // runs, and workspace scope OUTRANKS user scope — a stale profile key left
+      // there silently defeats this launch's profile and the server comes up
+      // configured as something nobody declared. Strip exactly the keys the profile
+      // owns; everything else in that generated file is the suites' own business.
+      clearProfileKeysFromWorkspaceSettings(fixtureDir);
+      try {
+        // THE single authority: the same table the suite selection resolves each
+        // suite's profile from also writes this launch's settings, so a suite's
+        // declared profile and the server it actually talks to cannot drift.
         writeVsCodeUserSettings(profile.userDataDir, {
-          "js/ts.experimental.useTsgo": true,
+          "verter.experimental.exposeBindingsTesting":
+            fixture === "vue-parity" || fixture === "svelte-parity",
+          ...serverProfileSettings(serverProfile),
+          // The extension spawns the LSP with `VERTER_LOG` set from THIS setting, which
+          // OVERWRITES the `VERTER_LOG=debug` the runner puts in `extensionTestsEnv`
+          // (`extension.ts` → `buildServerOptions`). Without it the server runs at `info`
+          // and the fail-closed signal a test needs to distinguish "the provider gave a
+          // wrong answer" from "Verter refused to answer" — the workspace-symbol frontier's
+          // `activated N/M carriers` line — is never emitted at all.
+          //
+          // The value is a `tracing_subscriber` EnvFilter directive, not a bare level:
+          // blanket `debug` is 6x the log volume, and every line is mirrored SYNCHRONOUSLY
+          // to both the output channel and the E2E log file, which measurably slows the
+          // extension host. Raise exactly the one module that owns the signal.
+          "verter.server.logLevel": "info,verter_lsp::server::provider_state=debug",
         });
-      }
+        if (typeProvider === "shared-tsgo") {
+          const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
+          console.log(`  Provisioning ${extension} into the isolated test profile...`);
+          provisionVsCodeExtension({
+            cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
+            extension,
+            extensionsDir: profile.extensionsDir,
+            userDataDir: profile.userDataDir,
+          });
+          // Native Preview's restart/API-session commands exist only after its
+          // enabled server starts. Seed the isolated profile before first activation
+          // so this acceptance exercises the real editor-owned lifecycle.
+          writeVsCodeUserSettings(profile.userDataDir, {
+            "js/ts.experimental.useTsgo": true,
+          });
+        }
 
-      const workspaceLaunchPath =
-        fixture === "multi-root-parity"
-          ? path.join(fixtureDir, "multi-root-parity.code-workspace")
-          : fixtureDir;
-      const launchArgs = [
-        workspaceLaunchPath,
-        "--disable-updates",
-        "--disable-workspace-trust",
-        "--skip-welcome",
-        "--skip-release-notes",
-        `--extensions-dir=${profile.extensionsDir}`,
-        `--user-data-dir=${profile.userDataDir}`,
-      ];
-      if (typeProvider !== "shared-tsgo") {
-        launchArgs.push("--disable-extensions");
-      }
-      await runTests({
-        vscodeExecutablePath,
-        extensionDevelopmentPath,
-        extensionTestsPath,
-        launchArgs,
-        extensionTestsEnv: {
-          ...process.env,
-          // Every temp-derived artifact the extension host and the LSP it spawns create —
-          // the carrier store above all — lands under this route's own root. `TMPDIR` is
-          // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
-          // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
-          TMPDIR: tempRoot,
-          TMP: tempRoot,
-          TEMP: tempRoot,
-          VERTER_E2E_TEST: "1",
-          VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
-          VERTER_E2E_LOG_FILE: logFile,
-          VERTER_E2E_FIXTURE: fixture,
-          VERTER_E2E_TIMING_FILE: path.join(HARNESS_TEMP_ROOT, `verter-e2e-timing-${label}.json`),
-          VERTER_LOG: "debug",
-          ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
-          ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
-          ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
-            ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
-            : {}),
-          ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
-            ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
-            : fixture === EXTENSION_ACCEPTANCE_FIXTURE
-              ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
-              : CONTRACT_FIXTURES[fixture]
-                ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
-                : fixture in PARITY_FIXTURE_CONFIGS
-                  ? {
-                      VERTER_E2E_ONLY:
-                        onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
-                    }
-                  : onlyPattern
-                    ? { VERTER_E2E_ONLY: onlyPattern }
-                    : {}),
-        },
-      });
-      // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
-      // on some hosts (Windows: VS Code can exit 0 even when the extension test run
-      // rejected). The authoritative oracle is the run summary the mocha runner writes
-      // (`suite/index.ts` → `<logFile>.runsummary`): fail on any reported test failure,
-      // and on a vacuous 0-test execution or a MISSING summary. Every matrix entry is a
-      // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
-      const contract = CONTRACT_FIXTURES[fixture];
-      const parity = requiredParityRun(fixture, onlyPattern);
-      const requiredLoadedFiles = contract
-        ? [`frameworks/${contract.framework}/contract.test.js`]
-        : parity?.loadedFiles;
-      await enforceRunSummary(logFile, label, {
-        expectedFixture: fixture,
-        expectedTypeProvider: typeProvider,
-        requiredLoadedFiles,
-        requiredTestIds: contract
-          ? requiredFrameworkContractIds(contract.framework)
-          : parity?.testIds,
-      });
-      console.log(`  PASSED: ${label}`);
-    } catch (err) {
-      console.error(`  FAILED: ${label}`, err);
-      totalFailures++;
-    } finally {
-      if (readE2eEnv("KEEP_PROFILE") === "1") {
-        console.log(`  Preserved E2E profile: ${profile.root}`);
-        console.log(`  Preserved E2E temp root: ${tempRoot}`);
-        if (outOfTreeWorkspace) console.log(`  Preserved E2E workspace: ${outOfTreeWorkspace}`);
-      } else {
-        removeE2eProfile(profile);
-        removeIsolatedTempRoot(tempRoot);
-        if (outOfTreeWorkspace) removeOutOfTreeWorkspace(outOfTreeWorkspace);
+        const workspaceLaunchPath =
+          fixture === "multi-root-parity"
+            ? path.join(fixtureDir, "multi-root-parity.code-workspace")
+            : fixtureDir;
+        const launchArgs = [
+          workspaceLaunchPath,
+          "--disable-updates",
+          "--disable-workspace-trust",
+          "--skip-welcome",
+          "--skip-release-notes",
+          `--extensions-dir=${profile.extensionsDir}`,
+          `--user-data-dir=${profile.userDataDir}`,
+        ];
+        if (typeProvider !== "shared-tsgo") {
+          launchArgs.push("--disable-extensions");
+        }
+        await runTests({
+          vscodeExecutablePath,
+          extensionDevelopmentPath,
+          extensionTestsPath,
+          launchArgs,
+          extensionTestsEnv: {
+            ...process.env,
+            // Every temp-derived artifact the extension host and the LSP it spawns create —
+            // the carrier store above all — lands under this route's own root. `TMPDIR` is
+            // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
+            // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
+            TMPDIR: tempRoot,
+            TMP: tempRoot,
+            TEMP: tempRoot,
+            VERTER_E2E_TEST: "1",
+            VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
+            VERTER_E2E_LOG_FILE: logFile,
+            VERTER_E2E_FIXTURE: fixture,
+            // What the server was STARTED with. A suite must not infer this from the
+            // live settings — a previous suite may have flipped them — and the
+            // default-configuration pin refuses to run on anything but `default`.
+            [`VERTER_E2E_${E2E_SERVER_PROFILE_ENV}`]: serverProfile,
+            [`VERTER_E2E_${E2E_BASE_SERVER_PROFILE_ENV}`]: baseServerProfile,
+            VERTER_E2E_TIMING_FILE: path.join(HARNESS_TEMP_ROOT, `verter-e2e-timing-${label}.json`),
+            VERTER_LOG: "debug",
+            ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
+            ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
+            ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
+              ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
+              : {}),
+            ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
+              ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
+              : fixture === EXTENSION_ACCEPTANCE_FIXTURE
+                ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
+                : CONTRACT_FIXTURES[fixture]
+                  ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+                  : fixture in PARITY_FIXTURE_CONFIGS
+                    ? {
+                        VERTER_E2E_ONLY:
+                          onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                      }
+                    : onlyPattern
+                      ? { VERTER_E2E_ONLY: onlyPattern }
+                      : {}),
+          },
+        });
+        // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
+        // on some hosts (Windows: VS Code can exit 0 even when the extension test run
+        // rejected). The authoritative oracle is the run summary the mocha runner writes
+        // (`suite/index.ts` → `<logFile>.runsummary`): fail on any reported test failure,
+        // and on a vacuous 0-test execution or a MISSING summary. Every matrix entry is a
+        // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
+        const contract = CONTRACT_FIXTURES[fixture];
+        const parity = requiredParityRun(fixture, onlyPattern);
+        const requiredLoadedFiles = contract
+          ? [`frameworks/${contract.framework}/contract.test.js`]
+          : parity?.loadedFiles;
+        await enforceRunSummary(logFile, label, {
+          expectedFixture: fixture,
+          expectedTypeProvider: typeProvider,
+          requiredLoadedFiles,
+          requiredTestIds: contract
+            ? requiredFrameworkContractIds(contract.framework)
+            : parity?.testIds,
+        });
+        console.log(`  PASSED: ${label}`);
+      } catch (err) {
+        console.error(`  FAILED: ${label}`, err);
+        totalFailures++;
+      } finally {
+        if (readE2eEnv("KEEP_PROFILE") === "1") {
+          console.log(`  Preserved E2E profile: ${profile.root}`);
+          console.log(`  Preserved E2E temp root: ${tempRoot}`);
+          if (outOfTreeWorkspace) console.log(`  Preserved E2E workspace: ${outOfTreeWorkspace}`);
+        } else {
+          removeE2eProfile(profile);
+          removeIsolatedTempRoot(tempRoot);
+          if (outOfTreeWorkspace) removeOutOfTreeWorkspace(outOfTreeWorkspace);
+        }
       }
     }
   }

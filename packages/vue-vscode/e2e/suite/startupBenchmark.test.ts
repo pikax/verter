@@ -2,6 +2,8 @@
  * @ai-generated - Startup benchmark coverage for cold-start timing markers.
  */
 import { expect } from "chai";
+import { sequenceParent } from "../lib/timeouts";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import {
   ensureFixtureWarm,
@@ -23,6 +25,8 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
   });
 
   test("captures typed-completion startup markers and timing report fields", async function () {
+    // Bound so the claimed parent IS the deadline in force.
+    this.timeout(sequenceParent("startupBenchmarkFirstCompletion"));
     const editor = vscode.window.activeTextEditor;
     expect(editor, "A Vue editor should be active").to.exist;
     expect(editor?.document.languageId, "Benchmark should target a Vue file").to.equal("vue");
@@ -101,7 +105,7 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
   });
 });
 
-async function waitForStartupTiming(timeoutMs = 20_000) {
+async function waitForStartupTiming(timeoutMs = pollBudget("startupBenchmarkTiming")) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const timing = parseStartupTiming();

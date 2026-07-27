@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { pollBudget } from "./timeouts";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -90,7 +91,7 @@ async function poll<T>(
   label: string,
   request: () => Promise<T>,
   ready: (value: T) => boolean,
-  timeoutMs = 10_000,
+  timeoutMs = pollBudget("frameworkContractSettle"),
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let latest = await request();

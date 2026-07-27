@@ -911,9 +911,6 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expect(autoDoc.getText(), "the fixture is restored after the acceptance proof").to.equal(
       originalText,
     );
-
-    // at all — `additionalTextEdits` was empty — so reaching here already proves
-    // Negative: the edit must NOT corrupt by landing in the template — it is a
   });
 
   test("completion scenarios do not log panic markers", function () {

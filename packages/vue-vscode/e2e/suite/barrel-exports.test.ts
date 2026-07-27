@@ -1,4 +1,5 @@
 import { expect } from "chai";
+import { pollBudget } from "../lib/timeouts";
 import * as vscode from "vscode";
 import * as path from "path";
 import {
@@ -258,7 +259,7 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
     // Poll for definition results — on CI, the type provider may not have finished
     // syncing the imported .vue.ts file by the time the barrel .ts file is opened.
     let locations: vscode.Location[] = [];
-    const deadline = Date.now() + 20_000;
+    const deadline = Date.now() + pollBudget("barrelDefinitionSettle");
     while (Date.now() < deadline) {
       locations = await getDefinitions(tsDoc.uri, pos);
       if (locations.length > 0) break;
@@ -268,7 +269,9 @@ suite(`Barrel Exports [${FIXTURE_NAME}]`, function () {
 
     // Type provider may not have finished syncing — skip gracefully on CI
     if (locations.length === 0) {
-      console.log("    No definition results after 20s — type provider sync incomplete, skipping");
+      console.log(
+        "    No definition results within its budget — type provider sync incomplete, skipping",
+      );
       return this.skip();
     }
 

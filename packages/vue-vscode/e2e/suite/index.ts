@@ -15,6 +15,9 @@ import {
 import { suiteAllowedForFixture } from "../lib/fixtureSuiteMap";
 import { assertSharedTsgoServedWithoutFallback } from "../../src/e2eProviderAttestation";
 import { assertNotVacuousPassLog } from "../lib/vacuousPass";
+import { pollBudget, sequenceParent, setRunnableAccessor, SUITE_TIMEOUT_MS } from "../lib/timeouts";
+import { launchServerProfile, routeBaseServerProfile } from "../helpers";
+import { serverProfileForSuite } from "../lib/serverProfiles";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -111,7 +114,7 @@ function writeRunSummary(summary: Record<string, unknown>): void {
 export async function run(): Promise<void> {
   const mocha = new Mocha({
     ui: "tdd",
-    timeout: 15_000,
+    timeout: SUITE_TIMEOUT_MS,
     color: true,
   });
 
@@ -119,10 +122,20 @@ export async function run(): Promise<void> {
   const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
   const sourceRoot = path.resolve(testsRoot, "../../../e2e/suite");
 
+  // A LAUNCH configures ONE server, and Verter's native lane is an initialization
+  // option, so a suite that declares a different server profile belongs to a
+  // different launch — never this one. The runner launches once per profile in
+  // use; this filter is the other half of that split, so a suite can never run
+  // against a server configured for someone else's profile.
+  const runProfile = launchServerProfile();
+  const baseProfile = routeBaseServerProfile();
   const files = discoverCompiledTests(testsRoot).filter((file) => {
     const rel = path.relative(path.join(testsRoot), file).replace(/\\/g, "/");
     // Fixture-scoped discovery: specialty fixtures only load matching suite globs.
     if (!suiteAllowedForFixture(FIXTURE_NAME, rel)) {
+      return false;
+    }
+    if (serverProfileForSuite(rel, baseProfile) !== runProfile) {
       return false;
     }
     if (!onlyPattern) return true;
@@ -131,7 +144,7 @@ export async function run(): Promise<void> {
 
   if (files.length === 0) {
     throw new Error(
-      `E2E discovery selected 0 suite files for fixture=${FIXTURE_NAME}` +
+      `E2E discovery selected 0 suite files for fixture=${FIXTURE_NAME} profile=${runProfile}` +
         (onlyPattern ? ` only=${onlyPattern}` : "") +
         ` (sourceRoot=${sourceRoot})`,
     );
@@ -141,15 +154,33 @@ export async function run(): Promise<void> {
     mocha.addFile(f);
   }
 
+  // Hand the budget registry the runnable Mocha is currently executing, so a
+  // registered parent claim is CHECKED against the deadline in force rather than
+  // taken on trust. `runner.currentRunnable` is Mocha's own view of that.
+  let activeRunner: Mocha.Runner | undefined;
+  setRunnableAccessor(() => activeRunner?.currentRunnable);
+
   let rootHookError: string | undefined;
 
   mocha.rootHooks({
     async beforeAll(this: Mocha.Context) {
-      this.timeout(60_000);
+      // Activation, then provider sync, then file readiness — three waits IN
+      // SERIES under this one deadline. Each was individually under the old 60s
+      // and their sum was 87s, so a late first wait could kill the second before
+      // it reached its own budget and the run would blame the hook, naming none
+      // of them. The deadline is derived from the registry's `rootBeforeAll`
+      // sequence, which is checked as a SUM.
+      this.timeout(sequenceParent("rootBeforeAll"));
       try {
-        await ensureFixtureWarm();
+        // The root hook is the ONE place these two may take the large budgets, and
+        // it passes them explicitly rather than letting a shared default carry a
+        // deadline only this hook has.
+        await ensureFixtureWarm(pollBudget("rootExtensionReady"));
         if (TYPE_PROVIDER) {
-          await ensureTypeProviderSynced();
+          await ensureTypeProviderSynced({
+            readyBudgetMs: pollBudget("rootExtensionReady"),
+            syncBudgetMs: pollBudget("rootTypeProviderSync"),
+          });
         }
         // The shared warmup waits for a carrier to answer a typed completion.
         // The extension-hosted provider registers as `TypeProviderKind::Tsserver`
@@ -189,7 +220,7 @@ export async function run(): Promise<void> {
       originalConsoleLog(...args);
     };
 
-    const runner = mocha.run((failures: number) => {
+    const runner: Mocha.Runner = mocha.run((failures: number) => {
       console.log = originalConsoleLog;
       getTimer().flush();
 
@@ -233,6 +264,9 @@ export async function run(): Promise<void> {
       }
       resolve();
     });
+    // Published as soon as the runner exists, BEFORE any test executes: the budget
+    // registry consults it to check each claimed parent against the real deadline.
+    activeRunner = runner;
     runner.on("pass", (test) => passedTestIds.push(test.title));
     runner.on("pending", (test) => pendingTestIds.push(test.title));
     runner.on("fail", (test, err) => {
