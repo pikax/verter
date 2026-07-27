@@ -117,6 +117,13 @@ jobs:
               - 'crates/verter_type_runtime/**'
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
+              # The tsserver carrier-membership plugin and the library it emits
+              # against. The raw-LSP spine smoke BUILDS both as load-bearing
+              # prerequisites and gets no carrier semantics without them, so a
+              # change that breaks the plugin must trip this filter — otherwise
+              # the job that would catch it is skipped for that very change.
+              - 'packages/typescript-plugin/**'
+              - 'packages/language-shared/**'
               - 'scripts/dx/**'
               - '.github/workflows/ci.yml'
             # Dependency closure for the editor-neutral raw-LSP contract. This is
@@ -1096,6 +1103,15 @@ jobs:
       # the gates can import the published dist and drive both real binaries.
       - name: Build DX harness
         run: pnpm --filter "@verter/dx-harness..." build
+      # `@verter/typescript-plugin` is what makes a `.vue` carrier a member of its
+      # configured tsserver project (`getExternalFiles` + `extraFileExtensions`), so
+      # the raw-LSP spine smoke cannot get ANY carrier semantics without it. It is a
+      # `tsc -b` output `pnpm install` does not produce and is NOT in the DX harness's
+      # dependency closure, so it needs its own build step here. Deliberately NOT
+      # `--filter @verter/typescript-plugin...` — the trailing ellipsis pulls in
+      # `@verter/native`'s release napi build.
+      - name: Build the tsserver carrier-membership plugin
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       # Pure-hermetic unit suite (no real binary; the integration specs self-skip
       # without their bin env gates).
       - name: DX harness hermetic unit suite
@@ -1133,6 +1149,30 @@ jobs:
           DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
           DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
         run: node scripts/dx/dx-lsp-smoke.mjs
+      # NEGATIVE CONTROL for the step above. `packages/typescript-plugin/dist` is
+      # the package's OUTPUT directory, not a plugin probe location: tsserver
+      # resolves the package name out of `<probe>/node_modules`, which does not
+      # exist there. It nonetheless used to LOOK correct — the plugin still loaded,
+      # via Node's ancestor walk into pnpm's private `.pnpm/node_modules` hoist
+      # dir — so the smoke passed while the probe it declared did no work.
+      #
+      # Without this control the preflight is never exercised against a wrong
+      # probe by CI, and a regression back to that layout would stay green through
+      # the same fallback. A PASS here is therefore a FAILURE of the gate.
+      - name: Verter raw-LSP spine smoke refuses a non-probe plugin path
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+          DX_PLUGIN_PATH: ${{ github.workspace }}/packages/typescript-plugin/dist
+        run: |
+          if node scripts/dx/dx-lsp-smoke.mjs; then
+            echo "::error::DX raw-LSP smoke accepted a non-probe plugin path; the plugin probe \
+            preflight is not enforcing a direct hit and the gate can pass on the pnpm \
+            ancestor-walk fallback"
+            exit 1
+          fi
+          echo "negative control: a non-probe plugin path is refused"
 
   # ---------------------------------------------------------------------------
   # Editor-client integration (Helix / Lapce / Zed / Neovim)

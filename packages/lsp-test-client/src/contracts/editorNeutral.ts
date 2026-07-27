@@ -38,7 +38,52 @@ export type EditorNeutralContractFeature =
    * rule must produce an EMPTY hover and an EMPTY definition — never a
    * mis-mapped affordance (e.g. a same-named script binding).
    */
-  | "css-class-silent";
+  | "css-class-silent"
+  /**
+   * The DEFAULT-configuration counterpart of an opt-in Verter-native feature:
+   * with no initialization options, the feature must answer NOTHING. Pins the
+   * shipped default so a silent flip in either direction is a test failure.
+   */
+  | "verter-native-default-off";
+
+/**
+ * The server configuration a case is executed against.
+ *
+ * Most of the contract is configuration-independent and runs on `default` — a
+ * bare `initialize` with no `initializationOptions`, exactly what an editor that
+ * wires nothing sends.
+ *
+ * `verter-native-semantics` is the DOCUMENTED opt-in lane. Verter's native
+ * markup/CSS intelligence is deliberately off by default (see
+ * `EDITOR_NEUTRAL_SERVER_PROFILES`), so a case asserting those features has to
+ * request them; asserting them on `default` would be asserting a capability the
+ * product does not claim to offer there.
+ */
+export type EditorNeutralServerProfile = "default" | "verter-native-semantics";
+
+/**
+ * `initializationOptions` for each profile — the single authority shared by the
+ * contract inventory and every driver, so a case's declared profile and the
+ * server it actually talks to cannot drift.
+ *
+ * `hover.nativeSemantics` gates the native hover lane
+ * (`crates/verter_lsp/src/config.rs::parse_hover_init_options`) and
+ * `analysis.enabled` gates the semantic-enrichment snapshot that carries the
+ * TEMPLATE half of the analysis (`parse_native_semantic_options`). CSS class
+ * intelligence needs BOTH: without the first the native lane is never consulted,
+ * and without the second `FileAnalysisSnapshot.template` is `None`, so every
+ * markup-side native feature has nothing to resolve against. Both default to
+ * `false` in the server AND in the shipped VS Code client.
+ */
+export const EDITOR_NEUTRAL_SERVER_PROFILES: Readonly<
+  Record<EditorNeutralServerProfile, Readonly<Record<string, unknown>>>
+> = {
+  default: {},
+  "verter-native-semantics": {
+    hover: { nativeSemantics: true },
+    analysis: { enabled: true },
+  },
+};
 
 export interface LspRange {
   readonly start: LspPosition;
@@ -151,10 +196,25 @@ export interface EditorNeutralContractCase {
   readonly expectedRenameAnchors?: readonly ContractAnchor[];
   readonly requiredHoverFragments?: readonly string[];
   readonly forbiddenHoverPatterns?: readonly RegExp[];
+  /**
+   * Constructs excised from the hover text before {@link forbiddenHoverPatterns}
+   * run. Each is text Verter is SUPPOSED to emit that would otherwise trip a strict
+   * pattern; everything outside them is held to the strict rule.
+   */
+  readonly hoverTextExemptions?: readonly HoverTextExemption[];
   readonly expectedCompletion?: string;
   readonly expectedDiagnosticCode?: number;
   readonly renameTo?: string;
+  /** Server configuration this case runs against; absent means `"default"`. */
+  readonly serverProfile?: EditorNeutralServerProfile;
   readonly providers: readonly EditorNeutralProviderRoute[];
+}
+
+/** The profile a case runs under, resolving the `"default"` default. */
+export function contractServerProfile(
+  testCase: EditorNeutralContractCase,
+): EditorNeutralServerProfile {
+  return testCase.serverProfile ?? "default";
 }
 
 export interface EditorNeutralContractEvidence {
@@ -192,6 +252,8 @@ interface CarrierContractSpec {
   readonly barrelDefinitionAnchor: ContractAnchor;
   readonly requiredPublicHover: readonly string[];
   readonly forbiddenPublicHover: readonly RegExp[];
+  /** Contractual constructs excised before {@link forbiddenPublicHover} runs. */
+  readonly publicHoverExemptions?: readonly HoverTextExemption[];
 }
 
 interface DomEventContractSpec {
@@ -218,6 +280,278 @@ const FILE_START_RANGE: LspRange = {
   end: { line: 0, character: 0 },
 };
 
+/**
+ * `any` in a TYPE-ANNOTATION position (`name: any`).
+ *
+ * A component's public hover prints the FRAMEWORK's own type. Vue's
+ * `DefineComponent<…>` carries `any` among its trailing default type ARGUMENTS
+ * (`…, ComponentProvideOptions, true, {}, any>>`), so a bare `/\bany\b/` fires on
+ * every correct Vue component hover and can never be satisfied — it asserts
+ * nothing about Verter.
+ *
+ * This predicate covers ANNOTATION-position degradation: the binding's own type
+ * (`const JavaScriptCase: any`), a prop's type (`label: any`), a member's type
+ * (`$props: any`). Verified on captured real hovers from all three routes: Vue's
+ * own `…, {}, any>>` does NOT match, while the real shared-tsgo degradation
+ * `const vueTsLocal: any` DOES.
+ *
+ * It is deliberately NOT the whole guard, and annotation position is NOT the only
+ * shape a degradation can take — Verter's own wildcard erasure is positional
+ * (`DefineComponent<{}, {}, any>`, `crates/verter_tsc/src/checker.rs`). Positional
+ * `any` is indistinguishable BY POSITION from the framework's own default type
+ * arguments, so it is caught by the OTHER half of the same case instead: an
+ * erased props surface loses the prop NAMES `requiredPublicHover` demands, and the
+ * required-fragment check fails. The two halves are load-bearing together; neither
+ * alone is sufficient, and the `unknown` twin below is scoped the same way.
+ *
+ * Surfaces that print no framework generic list (script-local hovers, the plain
+ * TypeScript control) keep the stricter bare `/\bany\b/i`.
+ */
+const ANY_IN_ANNOTATION_POSITION = /:\s*any\b/i;
+
+/**
+ * Verter's contractual untyped-emit fallback member, VERBATIM.
+ *
+ * A component whose script declares no `defineEmits` renders exactly this member.
+ * `unknown` is the SAFE top type there and is the contractual answer, so a bare
+ * `/\bunknown\b/` fires on every correct component hover and asserts nothing about
+ * Verter. Excising this one member and holding everything else to the strict rule
+ * is the right polarity: an unforeseen degradation is rejected by default, whereas
+ * enumerating degradation shapes can never be complete.
+ *
+ * It is an EXACT STRING, not a pattern, and that is the whole point. Any pattern
+ * loose enough to be written comfortably over printed type text over-matches, and
+ * an over-broad exemption deletes the evidence before the strict rule ever sees it
+ * — silently greening a degraded hover. A `$emit:\s*\([^)]*\)\s*=>\s*void` shaped
+ * pattern, for instance, also swallows a degraded `$emit: (event: unknown) => void`,
+ * an emit-shaped member nested inside a degraded prop, and — because `[^)]*` stops
+ * at the first inner paren — the leading half of
+ * `$emit: (event: string, cb: (value: unknown) => void) => void`, carrying the only
+ * `unknown` away with it.
+ *
+ * Consequences of exactness, both deliberate:
+ *   - Removal is FIRST-OCCURRENCE only, so a second emit-like member is never
+ *     stripped by the exemption for the first.
+ *   - Any other rendering of the fallback — a different parameter name, a space
+ *     before the colon, a destructured rest — is NOT excised and trips the strict
+ *     rule. That is a LOUD, fixable failure that names this constant; the opposite
+ *     error, a silently widened exemption, is the failure mode this field exists to
+ *     prevent. If Verter or TypeScript ever changes the rendering, update this
+ *     constant from the new captured hover.
+ *
+ * Exact bytes are necessary but NOT sufficient: identical bytes at the wrong
+ * structural POSITION must not be excised either. See {@link HoverTextExemption}
+ * for the sibling-depth anchor that supplies that half.
+ */
+const UNTYPED_EMIT_FALLBACK_MEMBER = "$emit: (event: string, ...args: unknown[]) => void";
+
+/**
+ * An exemption is EXACT TEXT plus a STRUCTURAL POSITION. Both halves are load-bearing.
+ *
+ * Exact text alone is still a substring match, so the same bytes nested inside an
+ * unrelated type are removed too. That is not hypothetical — it silently accepts a
+ * degraded props surface:
+ *
+ * ```
+ * label: { $emit: (event: string, ...args: unknown[]) => void };
+ * $emit: (event: string) => void;
+ * ```
+ *
+ * The required prop NAME survives, the only `unknown` sits inside the WRONG prop
+ * type and is excised, and the real `$emit` carries no `unknown` — so nothing trips
+ * and a wholly wrong hover greens.
+ *
+ * {@link siblingMember} anchors the excision structurally: the exempted text is
+ * removed only where it sits at the SAME BRACE DEPTH as that sibling — i.e. as a
+ * peer member of the same object body, which is what "the contractual member" means.
+ * In the counterexample the nested `$emit` is one brace deeper than `$props`, so it
+ * is not excised and the strict rule sees the `unknown`.
+ *
+ * If the sibling is absent, NOTHING is excised — fail closed, never fail open.
+ */
+interface HoverTextExemption {
+  /** Exact member text to excise, verbatim from captured output. */
+  readonly member: string;
+  /**
+   * A member that must sit at the same brace depth as {@link member} for the
+   * excision to apply — its structural peer in the same object body.
+   */
+  readonly siblingMember: string;
+}
+
+/**
+ * The hover value with its markdown FENCE MARKERS treated as noise — everything
+ * else is one analysable region.
+ *
+ * The obvious reading, "analyse only the contents of fenced blocks", is WRONG
+ * against real output. tsgo and shared-tsgo return a hover whose fence closes after
+ * the FIRST LINE, leaving the rest of the type — `$props`, `$emit`, every member
+ * that matters — outside it:
+ *
+ * ```text
+ * ```typescript
+ * (alias) const JavaScriptCase: __OmitNew<DefineComponent<ExtractPropTypes<{
+ * ```
+ *
+ * label: { … }; … $emit: (event: string, ...args: unknown[]) => void; …
+ * ```
+ *
+ * Fence position is therefore a formatting artifact of how the provider chopped the
+ * payload, not a boundary between code and prose. Excising the markers and keeping
+ * the remainder as one region matches every route's shape.
+ *
+ * This still buys the thing the narrowing was for: with the markers removed, a
+ * BACKTICK in the remaining text can only be a template-literal delimiter, so
+ * `` sep: `$props:` `` and `` sep: `}` `` are handled exactly like their
+ * double-quoted twins instead of being holes.
+ */
+function codeRegions(text: string): readonly { start: number; end: number }[] {
+  const regions: { start: number; end: number }[] = [];
+  const marker = /```[^\n]*\n?/g;
+  let cursor = 0;
+  for (let match = marker.exec(text); match !== null; match = marker.exec(text)) {
+    if (match.index > cursor) regions.push({ start: cursor, end: match.index });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) regions.push({ start: cursor, end: text.length });
+  return regions.length > 0 ? regions : [{ start: 0, end: text.length }];
+}
+
+/**
+ * Per-character brace depth over one code region, ignoring braces inside STRING
+ * LITERALS.
+ *
+ * A naive counter is not merely imprecise here, it fails OPEN: a string-literal
+ * TYPE containing a brace (`sep: "}"`, ordinary TypeScript that QuickInfo prints
+ * verbatim) decrements the count and can equalise a NESTED member's depth with a
+ * top-level one — licensing an excision that hides a degradation. Quote handling is
+ * therefore load-bearing, not cosmetic.
+ *
+ * All three TypeScript delimiters count — `"`, `'` and BACKTICK — because the fence
+ * MARKERS are removed before this runs, leaving no other meaning a backtick could
+ * carry. That is what excising the markers bought: a template-literal type holding a
+ * brace (`` sep: `}` ``) or a member-looking string (`` sep: `$props:` ``) is now
+ * handled exactly like its double-quoted twin, where both were previously holes —
+ * the second of them a FAIL-OPEN one that hid a real degradation.
+ *
+ * KNOWN LIMITATION, deliberately accepted: JSDoc prose is NOT separable from the
+ * type, so an apostrophe in prose (`doesn't`) still opens a literal here. Fence
+ * position cannot be used to tell them apart — tsgo closes its fence mid-type, so
+ * "outside the fence" is where most of the type lives (see `codeRegions`). A single
+ * apostrophe fails CLOSED (nothing is excised, a good hover is falsely rejected —
+ * loud); a PAIR could bracket a span whose braces go uncounted. It is unreachable
+ * for the cases that declare an exemption today: their captured hovers on all three
+ * routes contain no apostrophe. Separating prose would need a real parser, and this
+ * is a test predicate.
+ *
+ * Indices are ABSOLUTE into the original text, so callers can compare candidate
+ * positions across the whole value without translating coordinates.
+ */
+interface TextStructureProfile {
+  readonly depths: ReadonlyMap<number, number>;
+  readonly inLiteral: ReadonlySet<number>;
+}
+
+function braceDepthProfile(
+  text: string,
+  region: { start: number; end: number },
+): TextStructureProfile {
+  const depths = new Map<number, number>();
+  const inLiteral = new Set<number>();
+  let depth = 0;
+  let quote: string | null = null;
+  for (let at = region.start; at < region.end; at += 1) {
+    depths.set(at, depth);
+    if (quote !== null) inLiteral.add(at);
+    const ch = text[at];
+    if (quote !== null) {
+      // A backslash escapes the next character, so an escaped quote does not close.
+      if (ch === "\\") {
+        at += 1;
+        depths.set(at, depth);
+        inLiteral.add(at);
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      // The opening delimiter itself belongs to the literal.
+      inLiteral.add(at);
+    } else if (ch === "{") depth += 1;
+    else if (ch === "}") depth -= 1;
+  }
+  depths.set(region.end, depth);
+  return { depths, inLiteral };
+}
+
+/**
+ * Remove the FIRST occurrence of `member` that is a PEER of `siblingMember` — same
+ * brace depth AND the same enclosing object body. Returns the text unchanged when
+ * no such occurrence exists.
+ *
+ * Equal depth alone is not peerhood, and the difference is a real false-accept:
+ * in `{ $props: … } & { label: string; <member> }` the member sits at the same
+ * depth as `$props` but in a DIFFERENT body, so a depth-only rule excises it and a
+ * hover whose only `unknown` lived there greens. Two positions share a body only if
+ * the depth between them never drops BELOW their common depth — crossing a `}` down
+ * to an outer level means the first body closed.
+ *
+ * Every occurrence of the sibling is considered, not just the first: with the
+ * same-body requirement doing the real work, restricting to the first would only
+ * false-REJECT when the instance body is not the first one printed.
+ *
+ * Both the member and the sibling must be REAL members, not text that merely reads
+ * like one. Candidates are drawn only from CODE regions, and a candidate inside a
+ * STRING LITERAL is discarded: `sep: "$props:"` — and equally `` sep: `$props:` `` —
+ * is valid TypeScript that QuickInfo prints verbatim, and counting it as a sibling
+ * manufactures peerhood at whatever depth the literal happens to sit, authorising an
+ * excision that removes the hover's only `unknown`. The same filter applies to the
+ * member, so contractual bytes quoted inside a literal are never excised either.
+ *
+ * Peerhood is evaluated WITHIN a region: two members in different fenced blocks are
+ * not peers, and prose mentions are not candidates at all.
+ */
+function exciseMemberAtSiblingDepth(text: string, exemption: HoverTextExemption): string {
+  for (const region of codeRegions(text)) {
+    const { depths, inLiteral } = braceDepthProfile(text, region);
+    const within = (at: number): boolean => at >= region.start && at + 1 <= region.end;
+    const candidates = (needle: string): number[] => {
+      const found: number[] = [];
+      for (
+        let at = text.indexOf(needle, region.start);
+        at >= 0;
+        at = text.indexOf(needle, at + 1)
+      ) {
+        if (at + needle.length > region.end) break;
+        if (within(at) && !inLiteral.has(at)) found.push(at);
+      }
+      return found;
+    };
+
+    const siblingIndices = candidates(exemption.siblingMember);
+    if (siblingIndices.length === 0) continue;
+
+    for (const at of candidates(exemption.member)) {
+      const memberDepth = depths.get(at)!;
+      const sharesBody = siblingIndices.some((siblingIndex) => {
+        if (depths.get(siblingIndex) !== memberDepth) return false;
+        const from = Math.min(siblingIndex, at);
+        const to = Math.max(siblingIndex, at);
+        for (let scan = from; scan <= to; scan += 1) {
+          if (depths.get(scan)! < memberDepth) return false;
+        }
+        return true;
+      });
+      if (sharesBody) {
+        return text.slice(0, at) + text.slice(at + exemption.member.length);
+      }
+    }
+  }
+  return text;
+}
+
 const CARRIERS: readonly CarrierContractSpec[] = [
   {
     id: "vue-ts",
@@ -242,7 +576,13 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       offset: 1,
     },
     expectedCompletion: "toFixed",
-    requiredLocalHover: ["number"],
+    // `const vueTsLocal = 1` in a TYPESCRIPT block keeps the literal type `1`;
+    // only `let` (the Svelte carriers) and JavaScript `const` widen to `number`.
+    // The fragment is identifier-qualified so it pins the resolved type OF THIS
+    // BINDING: it fails on an empty hover, on `vueTsLocal: any`, and on a hover
+    // that resolved some other symbol — where a bare `"number"` would have been
+    // satisfied by any incidental mention (`toFixed(fractionDigits?: number)`).
+    requiredLocalHover: ["vueTsLocal: 1"],
     directConsumer: "src/direct-consumer.ts",
     directHoverAnchor: {
       text: "export const directVueTs = VueTypeScriptCase;",
@@ -266,7 +606,12 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       token: "VueTypeScriptCase",
     },
     requiredPublicHover: ["label"],
-    forbiddenPublicHover: [/\bany\b/i, /\bunknown\b/i, /__Verter\w*/],
+    // Vue's `DefineComponent<…>` prints `any` among its own trailing default
+    // type ARGUMENTS, so only annotation-position `any` indicts Verter here.
+    forbiddenPublicHover: [ANY_IN_ANNOTATION_POSITION, /\bunknown\b/i, /__Verter\w*/],
+    // Verter is SUPPOSED to emit the untyped-emit fallback for a component with no
+    // `defineEmits`; every other `unknown` in the printed type is a degradation.
+    publicHoverExemptions: [{ member: UNTYPED_EMIT_FALLBACK_MEMBER, siblingMember: "$props:" }],
   },
   {
     id: "vue-js",
@@ -315,7 +660,12 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       token: "VueJavaScriptCase",
     },
     requiredPublicHover: ["label"],
-    forbiddenPublicHover: [/\bany\b/i, /\bunknown\b/i, /__Verter\w*/],
+    // Vue's `DefineComponent<…>` prints `any` among its own trailing default
+    // type ARGUMENTS, so only annotation-position `any` indicts Verter here.
+    forbiddenPublicHover: [ANY_IN_ANNOTATION_POSITION, /\bunknown\b/i, /__Verter\w*/],
+    // Verter is SUPPOSED to emit the untyped-emit fallback for a component with no
+    // `defineEmits`; every other `unknown` in the printed type is a degradation.
+    publicHoverExemptions: [{ member: UNTYPED_EMIT_FALLBACK_MEMBER, siblingMember: "$props:" }],
   },
   {
     id: "svelte-ts",
@@ -635,6 +985,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         anchor: carrier.directHoverAnchor,
         requiredHoverFragments: carrier.requiredPublicHover,
         forbiddenHoverPatterns: carrier.forbiddenPublicHover,
+        hoverTextExemptions: carrier.publicHoverExemptions,
       },
       {
         ...base,
@@ -653,6 +1004,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         anchor: carrier.barrelHoverAnchor,
         requiredHoverFragments: carrier.requiredPublicHover,
         forbiddenHoverPatterns: carrier.forbiddenPublicHover,
+        hoverTextExemptions: carrier.publicHoverExemptions,
       },
       {
         ...base,
@@ -671,11 +1023,19 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
   // hover, and the fail-closed no-rule boundary. Verter-native results —
   // asserted identically on every provider route (no provider shadowing).
   {
+    // CSS class intelligence is a Verter-native, OPT-IN lane: it needs both
+    // `hover.nativeSemantics` and `analysis.enabled`, and the server and the
+    // shipped VS Code client both default them off. These cases therefore run on
+    // the `verter-native-semantics` profile — they assert the documented opt-in,
+    // not the default. `css.default-off` below pins what the DEFAULT does, so
+    // neither side of that boundary can move unnoticed.
+    const cssProfile = "verter-native-semantics" as const;
     const vueCss = {
       framework: "vue" as const,
       language: "ts" as const,
       providers: ALL_PROVIDERS,
       surface: "standard-lsp" as const,
+      serverProfile: cssProfile,
       document: "src/vue/CssIntel.vue",
     };
     const svelteCss = {
@@ -683,6 +1043,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       language: "ts" as const,
       providers: ALL_PROVIDERS,
       surface: "standard-lsp" as const,
+      serverProfile: cssProfile,
       document: "src/svelte/CssIntel.svelte",
     };
     cases.push(
@@ -775,6 +1136,65 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
           text: ".on {",
           occurrence: 0,
           token: "on",
+        },
+      },
+      // DEFAULT-configuration pins, one per opt-in lane moved above and each on the
+      // SAME anchor its opt-in case asserts. Without them, moving CSS class
+      // intelligence onto `verter-native-semantics` would leave NOTHING asserting
+      // what an editor that wires no options actually gets.
+      //
+      // Each pin holds ONE direction: the default HOVER must stay silent. The
+      // opposite direction — the opt-in going dark — is held by the paired opt-in
+      // case on the same anchor (`vue-css.class.hover`, `svelte-css.class.hover`,
+      // `vue-css.vbind.hover`). It is the PAIR that makes the boundary immovable;
+      // neither case detects both directions by itself.
+      //
+      // The pins cover HOVER only, and that scope is a limitation, NOT a statement
+      // that the current definition behaviour is correct. Under the DEFAULT profile
+      // a Svelte class token resolves to its CSS rule while the Vue one does not —
+      // and neither option is documented to gate definition at all
+      // (`verter.hover.nativeSemantics` is scoped to hover;
+      // `verter.analysis.enabled` is the Analysis sidebar, "TypeScript IDE features
+      // remain independent"), while definition dispatch is unconditional. The Vue
+      // side is therefore a suspected PRODUCT DEFECT, reported separately; it is
+      // deliberately not pinned here, because pinning it would ratify it as
+      // expected behaviour and make the eventual fix look like a regression.
+      //
+      // Known limitation, deliberately not covered: the lane needs BOTH
+      // `hover.nativeSemantics` and `analysis.enabled`, so a pin cannot attribute a
+      // change to one option. Detecting a single-option flip would need a profile per
+      // option, and each profile costs one more server per route.
+      {
+        ...vueCss,
+        serverProfile: "default",
+        id: "vue-css.class.default-off",
+        feature: "verter-native-default-off",
+        anchor: {
+          text: '<div class="chip-live ghost-none">',
+          occurrence: 0,
+          token: "chip-live",
+        },
+      },
+      {
+        ...svelteCss,
+        serverProfile: "default",
+        id: "svelte-css.class.default-off",
+        feature: "verter-native-default-off",
+        anchor: {
+          text: '<div class="chip-live" class:on>',
+          occurrence: 0,
+          token: "chip-live",
+        },
+      },
+      {
+        ...vueCss,
+        serverProfile: "default",
+        id: "vue-css.vbind.default-off",
+        feature: "verter-native-default-off",
+        anchor: {
+          text: "width: v-bind(chipWidth);",
+          occurrence: 0,
+          token: "chipWidth",
         },
       },
     );
@@ -1030,7 +1450,11 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
         occurrence: 0,
         token: "plainControlNumber",
       },
-      requiredHoverFragments: ["number"],
+      // `export const plainControlNumber = 1` in TypeScript keeps the literal
+      // type `1`. Identifier-qualified so the control still fails on an empty
+      // hover, on `plainControlNumber: any`, and on a hover that resolved some
+      // other symbol — see the `vue-ts` carrier note for the full rationale.
+      requiredHoverFragments: ["plainControlNumber: 1"],
       forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
       providers: ALL_PROVIDERS,
     },
@@ -1404,9 +1828,39 @@ export async function executeEditorNeutralContractCase(
           throw new Error(`${testCase.id}: hover is missing ${JSON.stringify(fragment)}: ${text}`);
         }
       }
+      // Forbidden patterns run against the text with each declared CONTRACTUAL
+      // construct excised VERBATIM, first occurrence only. Describing the exemption
+      // exactly and forbidding everything else fails in the safe direction: if the
+      // exempted text ever changes, the excision stops matching and the strict
+      // pattern fires — a loud failure rather than a silently widened predicate.
+      // The reverse (describing every degradation shape) cannot be complete.
+      const exemptions = testCase.hoverTextExemptions ?? [];
+      const applied: string[] = [];
+      const scanned = exemptions.reduce((remaining, exemption) => {
+        // Exact bytes AND structural position: the member is removed only where it
+        // is a peer of its declared sibling, so identical bytes nested inside an
+        // unrelated type stay visible to the forbidden patterns.
+        const excised = exciseMemberAtSiblingDepth(remaining, exemption);
+        if (excised !== remaining) applied.push(exemption.member);
+        return excised;
+      }, text);
       for (const pattern of testCase.forbiddenHoverPatterns ?? []) {
-        if (pattern.test(text)) {
-          throw new Error(`${testCase.id}: hover matched forbidden ${pattern}: ${text}`);
+        if (pattern.test(scanned)) {
+          // Name the exemptions that did NOT apply. When a contractual construct is
+          // re-rendered (a new TypeScript printing, a changed synthesized
+          // signature), the strict pattern fires on text that is actually fine, and
+          // this is the line that says so instead of leaving a bare "forbidden".
+          const unapplied = exemptions
+            .filter((exemption) => !applied.includes(exemption.member))
+            .map((exemption) => exemption.member);
+          const hint =
+            unapplied.length === 0
+              ? ""
+              : ` (declared exemption(s) not excised — either absent verbatim, or present only ` +
+                `at a nested position rather than as a peer of their sibling member; update them ` +
+                `from captured output if the contractual rendering changed: ` +
+                `${JSON.stringify(unapplied)})`;
+          throw new Error(`${testCase.id}: hover matched forbidden ${pattern}${hint}: ${text}`);
         }
       }
       return;
@@ -1476,6 +1930,34 @@ export async function executeEditorNeutralContractCase(
       if (locations.length > 0) {
         throw new Error(
           `${testCase.id}: a rule-less class token must produce NO definition, got ${locations.length} location(s)`,
+        );
+      }
+      return;
+    }
+    case "verter-native-default-off": {
+      // A case that asserts an absence has to prove it is running the intended
+      // configuration, or a mis-declared profile would make it pass for the wrong
+      // reason. Refuse to execute on anything but `default`.
+      if (contractServerProfile(testCase) !== "default") {
+        throw new Error(
+          `${testCase.id}: a default-configuration pin must declare the "default" server profile, ` +
+            `got "${contractServerProfile(testCase)}"`,
+        );
+      }
+      // HOVER only — the option this pin names is scoped to hover. Definition is
+      // deliberately NOT asserted here, and its current behaviour is NOT ratified:
+      // under the DEFAULT profile a Svelte class token resolves to its CSS rule
+      // while the Vue one does not, even though neither option is documented to
+      // gate definition. See the pin definitions for why that asymmetry is treated
+      // as a suspected product defect rather than as expected behaviour.
+      const position = positionFor(testCase, driver, sources);
+      const hover = await driver.hover(testCase.document, position);
+      const text = hoverText(hover);
+      if (text.trim().length > 0) {
+        throw new Error(
+          `${testCase.id}: the DEFAULT configuration must not answer this opt-in hover, but ` +
+            `hover returned: ${text}. If the default was deliberately flipped on, this pin and ` +
+            "the shipped client default must move together.",
         );
       }
       return;

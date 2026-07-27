@@ -30,11 +30,23 @@
  * divergence surface — and the vendored Vue shims stand in for an install. No
  * network, no tsgo download.
  *
+ * Two workspace facts the drive depends on, both enforced as preconditions rather
+ * than left to produce a false spine verdict: `@verter/typescript-plugin` must be
+ * BUILT (it is what makes the `.vue` carrier a member of its configured tsserver
+ * project), and the BASELINE's on-disk generated layer must be PRUNED from the
+ * materialized workspace before verter opens it (verter owns the carrier companion
+ * namespace and fails closed when a real file occupies it). Either one missing
+ * makes every signal come back empty for a reason that has nothing to do with the
+ * spine.
+ *
  * Inputs (env):
  *   - DX_LSP_BIN       (required) absolute path to the built `verter-lsp`.
  *   - DX_BASELINE_BIN  (required) absolute path to the built `verter-dx-baseline`
  *                      (materializes the corpus workspace).
  *   - DX_REPO_ROOT     (optional) repo root; defaults to this script's repo root.
+ *   - DX_PLUGIN_PATH   (optional) tsserver plugin PROBE LOCATION — a directory
+ *                      whose `node_modules` holds `@verter/typescript-plugin`;
+ *                      defaults to `packages/vue-vscode`.
  *   - DX_FIXTURE_DIR   (optional) corpus dir; defaults to the committed vendored
  *                      `minimal-member-access` hermetic scenario.
  *   - DX_SMOKE_OUT     (optional) dir for the response record; defaults to an OS
@@ -54,6 +66,10 @@ const {
   resolveToolRoots,
   createMaterializedWorkspace,
   disposeMaterializedWorkspace,
+  pruneBaselineGeneratedArtifacts,
+  definitionTargets,
+  partitionDefinitionTargets,
+  requireAnchor,
   awaitRawLspStartup,
   extractQuiescenceCounters,
   pollUntilQuiesced,
@@ -92,6 +108,53 @@ if (!baselineBin) {
 }
 if (!existsSync(baselineBin)) fatal(`DX_BASELINE_BIN does not exist: ${baselineBin}`);
 
+// `@verter/typescript-plugin` is what makes a framework carrier a member of its
+// configured tsserver project (`getExternalFiles` + `extraFileExtensions`), so
+// without it verter-lsp reaches readiness and answers every carrier request with
+// NOTHING — indistinguishable from a broken spine.
+//
+// The value travels to tsserver as `--pluginProbeLocations <dir>` alongside
+// `--globalPlugins @verter/typescript-plugin`, and tsserver resolves the package
+// NAME by requiring it out of `<dir>/node_modules`. So the probe location is a
+// directory CONTAINING `node_modules/@verter/typescript-plugin` — NOT the
+// package's own `dist` output directory, and not the package root.
+// `packages/vue-vscode` is that directory: pnpm links the workspace package into
+// its `node_modules`, so the DIRECT candidate `<probe>/node_modules/@verter/…`
+// exists and tsserver loads it on the first try.
+//
+// It is deliberately NOT the form the shipped extension uses. The extension passes
+// `<extensionPath>/node_modules`, whose direct candidate is
+// `node_modules/node_modules/@verter/typescript-plugin` — which does not exist, so
+// production resolves the plugin only through Node's ANCESTOR walk. That is a
+// latent product dependency on package layout, tracked separately; this gate
+// deliberately does not reproduce it, because a gate that relies on the accident
+// cannot detect the accident going away.
+//
+// The check below mirrors what tsserver consumes rather than what this script
+// hands it. It deliberately does NOT use a bare `require.resolve`: Node's
+// resolver walks ANCESTOR `node_modules`, so a wrong probe location still
+// resolves — through pnpm's private `.pnpm/node_modules` hoist dir, an
+// unguaranteed layout detail — and the preflight would pass while the probe
+// location contributed nothing. Only a DIRECT hit under this probe proves
+// tsserver can load the plugin from where it was pointed.
+const pluginPath = process.env.DX_PLUGIN_PATH ?? path.join(repoRoot, "packages", "vue-vscode");
+const pluginPackageDir = path.join(pluginPath, "node_modules", "@verter", "typescript-plugin");
+const pluginEntry = path.join(pluginPackageDir, "dist", "index.js");
+if (!existsSync(pluginPackageDir)) {
+  fatal(
+    `plugin probe location holds no @verter/typescript-plugin: ${pluginPackageDir} does not ` +
+      `exist, so tsserver cannot resolve the plugin from ${pluginPath}. Run: pnpm install`,
+  );
+}
+if (!existsSync(pluginEntry)) {
+  fatal(
+    `@verter/typescript-plugin build is missing its entry: ${pluginEntry}. ` +
+      "Without the plugin, tsserver never owns the .vue carrier and every provider signal is " +
+      "empty. Produce it with: pnpm --filter @verter/language-shared --filter " +
+      "@verter/typescript-plugin build",
+  );
+}
+
 // The committed, vendored hermetic corpus the smoke drives verter-lsp over. The
 // default is the self-contained `minimal-member-access` SFC: a typed `<script
 // setup>` const with a member access — hover/definition/completion all resolve
@@ -118,21 +181,6 @@ function hoverText(result) {
   return "";
 }
 
-function definitionTargets(result) {
-  if (result === null || result === undefined) return [];
-  const arr = Array.isArray(result) ? result : [result];
-  const out = [];
-  for (const raw of arr) {
-    if (raw === null || typeof raw !== "object") continue;
-    const uri = raw.targetUri ?? raw.uri;
-    const range = raw.targetSelectionRange ?? raw.targetRange ?? raw.range;
-    if (typeof uri === "string" && range?.start) {
-      out.push({ uri, line: range.start.line ?? 0, character: range.start.character ?? 0 });
-    }
-  }
-  return out;
-}
-
 function completionLabels(result) {
   if (result === null || result === undefined) return [];
   const items = Array.isArray(result) ? result : (result.items ?? []);
@@ -143,44 +191,78 @@ function completionLabels(result) {
 
 // ── position helpers (the vendored corpus is all-ASCII: offset === character) ──
 
-function offsetToPos(text, offset) {
-  let line = 0;
-  let lineStart = 0;
-  for (let i = 0; i < offset && i < text.length; i++) {
-    if (text[i] === "\n") {
-      line += 1;
-      lineStart = i + 1;
-    }
-  }
-  return { line, character: offset - lineStart };
-}
-
-/** Position at `token` inside the first occurrence of `lineFragment`. */
-function posInFragment(text, lineFragment, token) {
-  const base = text.indexOf(lineFragment);
-  if (base < 0) return null;
-  const rel = lineFragment.indexOf(token);
-  if (rel < 0) return null;
-  return offsetToPos(text, base + rel);
-}
-
 /**
- * Resolve the source position at `token` inside `lineFragment`, REQUIRING the
- * anchor to exist in the vendored corpus. On fixture drift — the committed entry
- * no longer contains the fragment — this FAILS LOUDLY (naming the missing fragment
- * + fixture) instead of silently probing offset 0:0, which would let a hover or
- * definition probe land on `0:0` and pass vacuously.
+ * Resolve the probe position for `token` on the line the named `@dx-anchor`
+ * marks, REQUIRING both to exist.
+ *
+ * The fixture's authored `@dx-anchor` comments are the designed probe mechanism:
+ * the materializer strips them and records each one's post-strip `{ line,
+ * character }` on `ws.anchorMap`. A code-trailing anchor (`const x = a.b; //
+ * @dx-anchor id`) records the position where the comment WAS — end of the code —
+ * so this resolves the anchored LINE and then locates `token` within it.
+ *
+ * Searching the whole document for a token instead would silently match the
+ * FIRST textual occurrence, which in a documented fixture is routinely a mention
+ * inside a preceding comment: a hover probing a comment resolves nothing and the
+ * "spine responded with no content" verdict becomes an artifact of the probe, not
+ * of the server. Both faults FAIL LOUDLY here.
+ *
+ * `token` is matched as a WHOLE IDENTIFIER and `occurrence` selects which one on
+ * the line. A plain `indexOf` is the same defect one level down: on
+ * `const itemLabel = item.label;` it resolves `"item"` at index 6 — inside
+ * `itemLabel` — so a probe documented as "the `item` receiver" silently becomes
+ * "the `itemLabel` binding", and its definition lands on that binding's own
+ * declaration while looking perfectly contentful. Identifier boundaries exclude
+ * the substring match; the explicit occurrence makes "which one" a stated
+ * choice rather than whichever comes first.
  */
-function requireAnchorPos(text, lineFragment, token, entryRel) {
-  const pos = posInFragment(text, lineFragment, token);
-  if (pos === null) {
-    fatal(
-      `anchor not found in hermetic fixture — expected fragment '${lineFragment}' ` +
-        `(token '${token}') in entry '${entryRel}' under '${path.basename(fixtureDir)}'. ` +
-        "Fixture drift: update the smoke anchors or the vendored corpus instead of probing 0:0.",
+function requireAnchoredTokenPos(ws, entryText, anchorName, token, entryRel, occurrence = 0) {
+  const anchors = new Map(ws.anchorMap);
+  let anchor;
+  try {
+    anchor = requireAnchor(anchors, anchorName);
+  } catch (err) {
+    return fatal(
+      `anchor '${anchorName}' is not in the hermetic fixture '${path.basename(fixtureDir)}': ` +
+        `${String(err)}. Fixture drift: re-anchor the corpus or update the smoke.`,
     );
   }
-  return pos;
+  if (anchor.file !== entryRel) {
+    return fatal(
+      `anchor '${anchorName}' resolves to '${anchor.file}', not the driven entry '${entryRel}'.`,
+    );
+  }
+  const lines = entryText.split("\n");
+  const lineText = lines[anchor.line];
+  if (lineText === undefined) {
+    return fatal(
+      `anchor '${anchorName}' names line ${anchor.line}, past the end of '${entryRel}'.`,
+    );
+  }
+  // Whole-identifier matches only: `\w` on either side means the hit is part of a
+  // longer name (`item` inside `itemLabel`) and is not the token asked for.
+  const isIdentChar = (ch) => ch !== undefined && /[\w$]/.test(ch);
+  const columns = [];
+  for (let at = lineText.indexOf(token); at >= 0; at = lineText.indexOf(token, at + 1)) {
+    if (isIdentChar(lineText[at - 1]) || isIdentChar(lineText[at + token.length])) continue;
+    columns.push(at);
+  }
+  if (columns.length === 0) {
+    return fatal(
+      `token '${token}' does not occur as a whole identifier on the line anchored by ` +
+        `'${anchorName}' (${entryRel}:${anchor.line}: ${JSON.stringify(lineText)}). Fixture ` +
+        "drift: update the smoke anchors or the vendored corpus instead of probing an " +
+        "unrelated position.",
+    );
+  }
+  if (occurrence >= columns.length) {
+    return fatal(
+      `token '${token}' occurs ${columns.length} time(s) as a whole identifier on the line ` +
+        `anchored by '${anchorName}', but occurrence ${occurrence} was requested ` +
+        `(${entryRel}:${anchor.line}: ${JSON.stringify(lineText)}).`,
+    );
+  }
+  return { line: anchor.line, character: columns[occurrence] };
 }
 
 // ── verter driver bootstrap ──────────────────────────────────────────────────
@@ -188,11 +270,15 @@ function requireAnchorPos(text, lineFragment, token, entryRel) {
 async function startVerter(root, tsdk) {
   const rootUri = pathToFileURL(root).toString();
   // Pinned tsserver via `--tsdk` — the same repo-pinned TypeScript the strict
-  // baseline gate enforces; fully hermetic, no tsgo download.
+  // baseline gate enforces; fully hermetic, no tsgo download. `--plugin-path`
+  // loads `@verter/typescript-plugin` as a tsserver global language-service
+  // plugin, which is what makes the `.vue` carrier a member of its configured
+  // project; without it every carrier signal resolves empty.
   const client = new LspClient("verter-lsp", lspBin, [
     root,
     "--type-provider=tsserver",
     `--tsdk=${tsdk}`,
+    `--plugin-path=${pluginPath}`,
   ]);
   await client.initialize(
     {
@@ -255,6 +341,10 @@ async function main() {
   const signals = { hover: null, definition: null, completion: null };
   let startupOk = false;
   let client = null;
+  let prunedArtifacts = [];
+  let declAnchorLine = null;
+  let resolvedDefinitionLines = [];
+  let otherDocumentTargets = [];
   try {
     check(
       ws.materializeReport.compileErrors.length === 0,
@@ -262,9 +352,29 @@ async function main() {
         ws.materializeReport.compileErrors,
       )}`,
     );
+
+    // The materializer writes the BASELINE's generated layer as real files beside
+    // the carrier (`App.vue.tsx` entry + `App.vue.ts` twin). verter-lsp owns that
+    // companion namespace: a real file at a carrier's companion path is a
+    // resolution conflict, so the server fails closed
+    // (`CarrierPathOccupiedByRealFile`) and answers every carrier signal empty.
+    // Prune the baseline's layer before pointing verter at the workspace. The
+    // compile-error check above already consumed what the baseline produced.
+    prunedArtifacts = pruneBaselineGeneratedArtifacts(ws);
+    check(
+      prunedArtifacts.length > 0,
+      "materialize emitted no generated artifacts to prune — either the baseline " +
+        "stopped writing its companion layer or the prune silently matched nothing; " +
+        "verter-lsp would be driven over an unverified workspace either way",
+    );
     const entryRel = ws.sourceFiles.find((f) => f.endsWith(".vue"));
-    if (!check(!!entryRel, "vendored corpus has no .vue entry to drive")) {
-      fatal("no .vue entry in the materialized corpus");
+    if (failures.length > 0 || !check(!!entryRel, "vendored corpus has no .vue entry to drive")) {
+      // A corpus that never satisfied its own preconditions cannot produce a
+      // meaningful spine verdict — report the real cause instead of driving verter
+      // over it and surfacing a misleading "responded with NOTHING".
+      disposeMaterializedWorkspace(ws);
+      for (const f of failures) console.error(`::error::DX raw-LSP smoke: ${f}`);
+      fatal(`${failures.length} corpus precondition(s) failed`);
     }
     const entryPath = path.join(ws.root, entryRel);
     const entryUri = pathToFileURL(entryPath).toString();
@@ -282,7 +392,9 @@ async function main() {
     await new Promise((r) => setTimeout(r, 250));
 
     // 2a. Hover on the resolved `.label` member of `item.label`.
-    const hoverPos = requireAnchorPos(entryText, "item.label", "label", entryRel);
+    // `label` as a whole identifier: the `.label` MEMBER, never the `label` inside
+    // the binding name `itemLabel` on the same line.
+    const hoverPos = requireAnchoredTokenPos(ws, entryText, "mma.member", "label", entryRel, 0);
     signals.hover = await driveSignal("hover", () =>
       client.sendRequest(
         "textDocument/hover",
@@ -292,17 +404,39 @@ async function main() {
     );
 
     // 2b. Definition on the `item` receiver — resolves the `const item` decl.
-    const defPos = requireAnchorPos(entryText, "item.label", "item", entryRel);
-    signals.definition = await driveSignal("definition", () =>
-      client.sendRequest(
+    // `item` as a whole identifier: the RHS RECEIVER of `item.label`. A substring
+    // match would land on `itemLabel` and resolve that binding to its own
+    // declaration on this very line, proving nothing about cross-statement
+    // resolution.
+    const defPos = requireAnchoredTokenPos(ws, entryText, "mma.member", "item", entryRel, 0);
+    let resolvedTargets = [];
+    signals.definition = await driveSignal("definition", async () => {
+      const result = await client.sendRequest(
         "textDocument/definition",
         { textDocument: { uri: entryUri }, position: defPos },
         REQUEST_TIMEOUT_MS,
-      ),
-    );
+      );
+      resolvedTargets = resolvedTargets.concat(definitionTargets(result));
+      return result;
+    });
+    // The definition must reach the `const item` DECLARATION, on its own anchored
+    // line. Non-vacuity alone cannot check this: ANY target counts as contentful,
+    // so a probe that silently resolved `itemLabel` — the substring match this
+    // helper exists to prevent — returns its own declaration on the SAME line as
+    // the probe and looks equally healthy. Naming the expected line is what makes
+    // the signal prove cross-statement resolution.
+    // Partitioned by DOCUMENT before any line comparison: a line number alone would
+    // be satisfied by line 12 of some unrelated file, which is not what "resolves
+    // the declaration" means. The split is shared harness logic so it can be tested
+    // against that near-miss directly — the live server always answers in the right
+    // document, so a URI filter cannot be discriminated end-to-end here.
+    declAnchorLine = requireAnchoredTokenPos(ws, entryText, "mma.decl", "item", entryRel, 0).line;
+    const partitioned = partitionDefinitionTargets(resolvedTargets, entryUri);
+    resolvedDefinitionLines = partitioned.inDocument.map((t) => t.line);
+    otherDocumentTargets = partitioned.elsewhere.map((t) => `${t.uri}:${t.line + 1}`);
 
     // 2c. Completion: type `.` after a typed receiver and read the member set.
-    signals.completion = await driveCompletion(client, entryUri, entryText);
+    signals.completion = await driveCompletion(client, ws, entryUri, entryText, entryRel);
   } finally {
     if (client) await client.kill().catch(() => {});
     disposeMaterializedWorkspace(ws);
@@ -324,6 +458,28 @@ async function main() {
   check(
     contentful.length > 0,
     "verter-lsp responded with NOTHING on every signal (no hover content, no definition target, no completion item)",
+  );
+
+  // Definition must reach the RIGHT declaration, not merely some declaration.
+  // Non-vacuity accepts ANY target, so a probe that silently resolved the wrong
+  // token still looks healthy: `item` matched as a substring lands on `itemLabel`,
+  // whose declaration is on the probe's OWN line, and the signal is contentful and
+  // wrong. Naming the anchored declaration line is what makes this signal prove
+  // cross-statement resolution rather than "something answered".
+  check(
+    declAnchorLine !== null && resolvedDefinitionLines.includes(declAnchorLine),
+    `verter-lsp definition did not resolve the anchored declaration: expected a target in the ` +
+      `driven entry at line ` +
+      `${declAnchorLine === null ? "<unresolved anchor>" : declAnchorLine + 1} (the 'mma.decl' ` +
+      `anchored 'const item' declaration), got ${
+        resolvedDefinitionLines.length === 0
+          ? "no targets in that document"
+          : `line(s) ${resolvedDefinitionLines.map((l) => l + 1).join(", ")}`
+      }${
+        otherDocumentTargets.length === 0
+          ? ""
+          : ` (targets in other documents, not accepted: ${otherDocumentTargets.join(", ")})`
+      }`,
   );
 
   // Record the run (never asserted for parity) outside the repo by default.
@@ -385,16 +541,21 @@ async function driveSignal(kind, send) {
  * the RESPONSE is required (the spine must not hang); an empty member set on a
  * cold provider is allowed — non-vacuity is carried by hover/definition.
  */
-async function driveCompletion(client, entryUri, entryText) {
+async function driveCompletion(client, ws, entryUri, entryText, entryRel) {
   try {
-    // Insert `.` after the `item` receiver on the `const sameItem = item` line.
-    const fragment = "const sameItem = item";
-    const base = entryText.indexOf(fragment);
-    if (base < 0) {
-      return { responded: false, contentful: false, error: "completion receiver not found" };
-    }
-    const insertOffset = base + fragment.length; // just after `item`
-    const insertPos = offsetToPos(entryText, insertOffset);
+    // Insert `.` just after the `item` receiver on the anchored incomplete-expression
+    // line. Anchor-scoped for the same reason hover/definition are: a whole-document
+    // token search would match a mention in a preceding comment.
+    const receiverPos = requireAnchoredTokenPos(
+      ws,
+      entryText,
+      "mma.incomplete",
+      // The bare `item` reference, not the `item` inside `sameItem`.
+      "item",
+      entryRel,
+      0,
+    );
+    const insertPos = { line: receiverPos.line, character: receiverPos.character + "item".length };
 
     client.sendNotification("textDocument/didChange", {
       textDocument: { uri: entryUri, version: 2 },

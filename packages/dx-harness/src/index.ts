@@ -140,8 +140,15 @@ export {
 } from "./baseline/bridgeClient.js";
 
 export {
+  definitionTargets,
+  partitionDefinitionTargets,
+  type DefinitionTarget,
+} from "./definitionTargets.js";
+
+export {
   createMaterializedWorkspace,
   disposeMaterializedWorkspace,
+  pruneBaselineGeneratedArtifacts,
   type CreateMaterializedWorkspaceOptions,
   type MaterializedWorkspace,
   type MaterializeRunner,
