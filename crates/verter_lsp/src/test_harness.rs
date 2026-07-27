@@ -122,8 +122,9 @@ fn real_provider_session_gate() -> &'static Arc<tokio::sync::Semaphore> {
 // sibling [`crate::test_harness_gating`] module.
 #[allow(unused_imports)]
 pub(crate) use crate::test_harness_gating::{
-    body_receipt_line, body_receipt_status, handle_absent_provider, provider_absence_outcome,
-    provider_required, BodyReceiptStatus, ProviderAbsence, TestProviderKind,
+    absent_provider_receipt_line, absent_provider_skip_receipt, body_receipt_line,
+    body_receipt_status, handle_absent_provider, provider_absence_outcome, provider_required,
+    BodyReceiptStatus, ProviderAbsence, TestProviderKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -1395,18 +1396,64 @@ export namespace JSX {
 }
 "#;
 
-/// The Svelte 5 callable component contract consumed by the generated public
-/// facade. Keep the fixture dependency-free while preserving the real generic
-/// shape whose props must flow into a plain TypeScript importer.
-const SVELTE_TYPE_STUB_DTS: &str = r#"export interface Component<
-  Props extends Record<string, any> = {},
-  Exports extends Record<string, any> = {},
-  Bindings extends keyof Props | "" = string
-> {
-  (internals: unknown, props: Props): Exports;
-}
-export {};
-"#;
+/// The in-repo vendored minimal `svelte` package (`index.d.ts`,
+/// `elements.d.ts`, `attachments.d.ts`, `store.d.ts`, `transition.d.ts`,
+/// `animate.d.ts`, `package.json`) — the SAME hermetic Svelte 5 surface the
+/// session-side type-check gate vendors, embedded at compile time so the
+/// fixture never depends on a cwd-relative path or an npm install.
+///
+/// A hand-rolled single-file stub is NOT sufficient here: the generated
+/// `.svelte.tsx` prelude imports `svelte/store`, `svelte/attachments`,
+/// `svelte/transition` and `svelte/animate`, and the managed-tsgo Svelte JSX
+/// asset preparation ([`crate::svelte_assets`]) REQUIRES the owner package to
+/// declare an `./elements` type export — a package without it is rejected as
+/// malformed, and the carrier IDE surface then never reaches the engine at all.
+/// Modelling the real export map is what makes the Svelte assertions in this
+/// fixture exercise the production path instead of a degraded one.
+const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[
+    (
+        "package.json",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/package.json"
+        ),
+    ),
+    (
+        "index.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/index.d.ts"
+        ),
+    ),
+    (
+        "elements.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/elements.d.ts"
+        ),
+    ),
+    (
+        "attachments.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/attachments.d.ts"
+        ),
+    ),
+    (
+        "store.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/store.d.ts"
+        ),
+    ),
+    (
+        "transition.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/transition.d.ts"
+        ),
+    ),
+    (
+        "animate.d.ts",
+        include_str!(
+            "../../verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte/animate.d.ts"
+        ),
+    ),
+];
 
 /// Make the `external-ts-dx` fixture self-sufficient for the §2.9 plain-`.ts`-
 /// imports-`.vue`/`.svelte` enhanced-DX contract: provide a flat dependency-free
@@ -1455,19 +1502,20 @@ pub(crate) fn materialize_external_ts_dx_deps() -> std::path::PathBuf {
             )
             .expect("write external-ts-dx vue manifest");
 
-            // The Svelte public facade deliberately uses the native Svelte 5
-            // callable `Component<Props, Exports, Bindings>` type. Materialise
-            // exactly that type so the fixture verifies the authored prop surface
-            // instead of degrading through an unresolved `svelte` import.
+            // The Svelte carrier's generated IDE TSX consumes the native Svelte 5
+            // surface (`Component<Props, Exports, Bindings>` in the public facade,
+            // plus `svelte/store` / `svelte/attachments` / `svelte/transition` /
+            // `svelte/animate` in the prelude) AND its owner-bound JSX asset
+            // preparation resolves the package's `./elements` type export. Vendor
+            // the real (minimal) Svelte 5 export map so the fixture verifies the
+            // authored prop surface through the production path instead of
+            // degrading through an unresolved or malformed `svelte` install.
             let svelte_dir = node_modules.join("svelte");
             std::fs::create_dir_all(&svelte_dir).expect("create external-ts-dx svelte package");
-            std::fs::write(svelte_dir.join("index.d.ts"), SVELTE_TYPE_STUB_DTS)
-                .expect("write external-ts-dx svelte types");
-            std::fs::write(
-                svelte_dir.join("package.json"),
-                r#"{"name":"svelte","version":"5.0.0-stub","types":"index.d.ts","exports":{".":{"types":"./index.d.ts"}}}"#,
-            )
-            .expect("write external-ts-dx svelte manifest");
+            for (name, contents) in VENDORED_SVELTE_PACKAGE {
+                std::fs::write(svelte_dir.join(name), contents)
+                    .unwrap_or_else(|e| panic!("write external-ts-dx svelte {name}: {e}"));
+            }
 
             // `@verter/types` from the bundled standalone declaration.
             let types_dir = node_modules.join("@verter").join("types");

@@ -216,9 +216,55 @@ async fn configless_workspace_performs_zero_candidate_spawns() {
 async fn configured_workspace_admits_then_spawns() {
     let (_temp, root, log) = plant_canary_engine(true);
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
-    // The canary exits 1 on every invocation, so resolution ultimately
-    // fails — but the spawn must have HAPPENED (after admission).
-    let _ = try_spawn_tsgo(&root.to_string_lossy(), &client_cell).await;
+    // The claim under test is about the ORDER of admission and resolution, so the
+    // ambient environment must not decide the outcome. Derived from the real
+    // environment the search space would be whatever engine the host installs: a
+    // working `VERTER_TSGO_BIN`/`PATH` tsgo wins tier 1, the canary is never
+    // reached, and the assertions below silently degrade into "this machine has no
+    // usable tsgo" — true on a bare checkout, false on a machine (or a CI image)
+    // that installs one. So the request is INJECTED, pinning every candidate source
+    // that is named EXPLICITLY: no tier-1 engine (no override, empty `PATH`), no
+    // update cache (tier 3), no bundled sidecar (tier 4).
+    //
+    // Tier 2 is NOT pinned, and cannot be. It is the tier this test exists to
+    // exercise, and `project_root` enables the whole tier: `enumerate_candidates`
+    // walks `root.ancestors()` up to `/` with no depth bound, so a `node_modules`
+    // ABOVE the TempDir contributes candidates too (see the tier-2 arm in
+    // `verter_tsgo_api::toolchain::discovery`). `ResolutionRequest` carries no field
+    // that bounds that walk; `project_root: None` would disable tier 2 outright,
+    // deleting the subject of the test.
+    //
+    // So this is hermetic against the ambient ENVIRONMENT, not against the temp
+    // directory's LOCATION. If it fails here and nowhere else, look for a real tsgo
+    // under a `node_modules` in an ancestor of `$TMPDIR`: the canary is enumerated
+    // first (it is `root`'s own `node_modules`) and still spawns, but the ancestor
+    // engine then validates and resolution returns `Ok`. GitHub Actions runs with
+    // `TMPDIR=/tmp`, which has no such ancestor.
+    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest {
+        requirement: verter_tsgo_api::toolchain::validation::Capability::Api,
+        project_root: Some(root.clone()),
+        env_override: None,
+        path_entries: Vec::new(),
+        cache_root: None,
+        host_exe: None,
+    };
+    let result =
+        try_spawn_tsgo_with_request(&root.to_string_lossy(), &client_cell, Some(request)).await;
+    // The two assertions below fail on different worlds. `log.exists()` is the
+    // primary claim — admission passed and the resolver THEN spawned — and it
+    // already catches a tier-1 leak by itself: a leaked engine validates before
+    // tier 2 is reached, so the canary never runs and the log is absent. `is_err()`
+    // is supplementary there. Its UNIQUE value is the tier-2 residual described
+    // above, where the canary does spawn (log present) and an ancestor engine
+    // validates anyway — the one world in which this assertion fires alone.
+    assert!(
+        result.is_err(),
+        "the canary exits 1 on every invocation and tiers 1/3/4 are empty, so no candidate \
+         this test NAMED can validate and resolution must FAIL. An `Ok` means something else \
+         validated: either the injected request was ignored and the ambient environment leaked \
+         back in, or a real tsgo sits in a `node_modules` above $TMPDIR that tier 2's unbounded \
+         ancestor walk reached"
+    );
     assert!(
         log.exists(),
         "a configured workspace passes admission and the resolver then spawns candidates"

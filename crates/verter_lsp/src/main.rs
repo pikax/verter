@@ -966,6 +966,37 @@ async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Result<Arc<dyn TypeProvider>, String> {
+    try_spawn_tsgo_with_request(workspace_root, client_cell, None).await
+}
+
+/// [`try_spawn_tsgo`] with an explicit toolchain-resolution request (the seam the
+/// admission tests drive).
+///
+/// `request` is the SEARCH SPACE the 4-tier resolver walks — `VERTER_TSGO_BIN`, the
+/// `PATH` entries, the update-cache root, and the running executable that locates the
+/// bundled sidecar. `None` derives it from the real process environment via
+/// [`ResolutionRequest::for_environment`][fe], which is what every production caller
+/// gets and the only thing [`try_spawn_tsgo`] ever passes.
+///
+/// The seam exists because the admission tests assert a statement about the SEARCH,
+/// not about the host: that a configured workspace passes the project-bound gate and
+/// the resolver THEN reaches the planted candidate. Derived from the ambient
+/// environment, that outcome depends on whether the machine happens to install a
+/// working tier-1 engine — one that does wins before any planted candidate is
+/// reached, so the test silently becomes a negative assertion about the host and
+/// diverges between developer machines and CI.
+///
+/// The ambient default is resolved HERE rather than in [`try_spawn_tsgo`] so the
+/// project-bound admission gate still runs BEFORE anything reads the environment,
+/// exactly as it did when this body was one function: a caller passing `None` gets
+/// the same operations in the same order.
+///
+/// [fe]: verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment
+async fn try_spawn_tsgo_with_request(
+    workspace_root: &str,
+    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    request: Option<verter_tsgo_api::toolchain::discovery::ResolutionRequest>,
+) -> Result<Arc<dyn TypeProvider>, String> {
     // The SPAWN PRECONDITION, checked FIRST: owned tsgo is project-bound, so
     // require AT LEAST ONE configured project ANYWHERE under the workspace
     // (bounded — prunes node_modules; accepts `packages/*/tsconfig.json`
@@ -990,10 +1021,12 @@ async fn try_spawn_tsgo(
     // smoke per candidate). A resolution failure is actionable (every
     // rejection is listed); an existing-but-invalid bundled sidecar is a
     // product-integrity error.
-    let request = verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
-        verter_tsgo_api::toolchain::validation::Capability::Api,
-        Some(std::path::PathBuf::from(workspace_root)),
-    );
+    let request = request.unwrap_or_else(|| {
+        verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment(
+            verter_tsgo_api::toolchain::validation::Capability::Api,
+            Some(std::path::PathBuf::from(workspace_root)),
+        )
+    });
     let resolution = verter_tsgo_api::toolchain::discovery::resolve(&request)
         .await
         .map_err(|err| err.to_string())?;

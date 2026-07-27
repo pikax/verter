@@ -473,7 +473,13 @@ async fn assert_carrier_dx_contract_carrier_surface(session: &RealProviderTestSe
     // mapped). This genuinely depends on the OWNED tsgo `--lsp` resolving the
     // template-projected prop and the merge layer mapping the TSX span back through
     // `ProviderPositionMapper` — the carrier-offset mapping S5 delivers.
-    let tmpl_prop = session.find_nth_position(&comp_uri, "verterDxHeadline", 1, 0);
+    //
+    // Anchored on the INTERPOLATION delimiters, not on an occurrence index: the
+    // fixture's own doc comment names `verterDxHeadline` too, so an index-based
+    // lookup silently addresses the `defineProps` declaration (and any future
+    // comment edit re-shifts it). `"{{ "` is 3 bytes, so the delta lands on the
+    // identifier's first byte inside the template expression.
+    let tmpl_prop = session.find_position(&comp_uri, "{{ verterDxHeadline", 3);
     let mut comp_defs = Vec::new();
     for _ in 0..16 {
         comp_defs = session.definition_locations(&comp_uri, tmpl_prop).await;
@@ -528,7 +534,12 @@ async fn assert_carrier_dx_contract_carrier_surface(session: &RealProviderTestSe
         "(1) Svelte: the carrier must resolve under the configured project — no false TS2307; \
          got: {sv_diags:?}"
     );
-    let sv_markup_prop = session.find_nth_position(&widget_uri, "verterDxCaption", 1, 0);
+    // Anchored on the markup expression's opening brace (preceded by the `<div>`
+    // close-angle so the needle is unique), NOT on an occurrence index: the
+    // fixture's doc comment also names `verterDxCaption`, so the index-based
+    // lookup addressed the `export let` DECLARATION while claiming the markup
+    // use. `">{"` is 2 bytes, so the delta lands on the identifier.
+    let sv_markup_prop = session.find_position(&widget_uri, ">{verterDxCaption", 2);
     let mut sv_defs = Vec::new();
     for _ in 0..16 {
         sv_defs = session
@@ -576,6 +587,11 @@ async fn carrier_dx_enhanced_both_engines_both_frameworks_tsserver() {
         return;
     };
     assert_carrier_dx_contract_tsserver(&session).await;
+    // One receipt per terminal path. The no-session path above is receipted by
+    // the shared absent-provider funnel (`SKIPPED-NO-PROVIDER`); this attests
+    // the body itself, so a run cannot look identical whether or not the
+    // assertions executed.
+    session.emit_body_receipt("carrier_dx_enhanced_both_engines_both_frameworks_tsserver");
     session.shutdown().await;
 }
 
@@ -602,5 +618,7 @@ async fn carrier_dx_enhanced_both_engines_both_frameworks_tsgo() {
         return;
     };
     assert_carrier_dx_contract_carrier_surface(&session).await;
+    // One receipt per terminal path (see the tsserver sibling above).
+    session.emit_body_receipt("carrier_dx_enhanced_both_engines_both_frameworks_tsgo");
     session.shutdown().await;
 }
