@@ -16,7 +16,15 @@ mod parse_expression_tests {
     #[test]
     fn empty_span_returns_static() {
         let alloc = Allocator::default();
-        let result = parse_expression(Span::new(0, 0), "", &alloc, tsx(), &[], false);
+        let result = parse_expression(
+            Span::new(0, 0),
+            "",
+            &alloc,
+            tsx(),
+            &[],
+            false,
+            ValueGrammar::Expression,
+        );
         assert!(result.expression.is_none());
         assert!(result.errors.is_none());
         assert!(result.bindings.is_none());
@@ -29,7 +37,15 @@ mod parse_expression_tests {
     fn simple_identifier_maybe_dynamic() {
         let alloc = Allocator::default();
         let input = "foo";
-        let result = parse_expression(Span::new(0, 3), input, &alloc, tsx(), &[], false);
+        let result = parse_expression(
+            Span::new(0, 3),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+            ValueGrammar::Expression,
+        );
 
         assert!(result.expression.is_some());
         assert!(result.errors.is_none());
@@ -52,6 +68,7 @@ mod parse_expression_tests {
             tsx(),
             &[],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -76,6 +93,7 @@ mod parse_expression_tests {
             tsx(),
             &[],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -96,6 +114,7 @@ mod parse_expression_tests {
             tsx(),
             &[],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -119,7 +138,15 @@ mod parse_expression_tests {
     fn ignored_identifier_dynamic() {
         let alloc = Allocator::default();
         let input = "item";
-        let result = parse_expression(Span::new(0, 4), input, &alloc, tsx(), &["item"], false);
+        let result = parse_expression(
+            Span::new(0, 4),
+            input,
+            &alloc,
+            tsx(),
+            &["item"],
+            false,
+            ValueGrammar::Expression,
+        );
 
         assert!(result.expression.is_some());
         let bindings = result.bindings.as_ref().unwrap();
@@ -141,6 +168,7 @@ mod parse_expression_tests {
             tsx(),
             &["item"],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -159,6 +187,7 @@ mod parse_expression_tests {
             tsx(),
             &[],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -179,6 +208,7 @@ mod parse_expression_tests {
             tsx(),
             &[],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -200,6 +230,7 @@ mod parse_expression_tests {
             tsx(),
             &["item"],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_some());
@@ -219,6 +250,7 @@ mod parse_expression_tests {
             tsx(),
             &[],
             false,
+            ValueGrammar::Expression,
         );
 
         assert!(result.expression.is_none());
@@ -232,7 +264,15 @@ mod parse_expression_tests {
         let alloc = Allocator::default();
         let input = "prefix foo suffix";
         // "foo" at offset 7..10
-        let result = parse_expression(Span::new(7, 10), input, &alloc, tsx(), &[], false);
+        let result = parse_expression(
+            Span::new(7, 10),
+            input,
+            &alloc,
+            tsx(),
+            &[],
+            false,
+            ValueGrammar::Expression,
+        );
 
         assert_eq!(result.offset, 7);
         assert!(result.expression.is_some());

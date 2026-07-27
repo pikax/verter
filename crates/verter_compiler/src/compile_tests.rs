@@ -20353,3 +20353,787 @@ fn inline_setup_destructure_official_order() {
         code
     );
 }
+
+// =========================================================================
+// Multi-statement v-on handlers: EVERY statement is binding-resolved
+//
+// A `v-on` value is an inline STATEMENT LIST, not a single expression
+// (`@click="a = 1; b = 2"`). Parsing it as one expression silently stops at
+// the first `;`, leaving every later statement unprefixed: reads resolve to
+// nothing and writes hit the setup-scope `const` directly. Official Vue
+// (`@vue/compiler-sfc`) resolves every statement, and so must Verter.
+// =========================================================================
+
+/// Non-inline (`$setup.`) mode: statement 2+ must be prefixed exactly like
+/// statement 1 — for WRITES and for READS alike.
+#[test]
+fn multi_statement_event_handler_resolves_every_statement() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+</script>
+<template><button @click="a = 1; b = 2">x</button></template>"#,
+    );
+    assert!(
+        code.contains("$setup.a = 1"),
+        "first statement must be prefixed, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$setup.b = 2"),
+        "second statement must be prefixed too, got:\n{}",
+        code
+    );
+    // Negative: the bare, unprefixed write must NOT survive anywhere. In the
+    // generated module `b` is a setup-scope `const`, so a bare `b = 2` is a
+    // build-time const reassignment (rolldown ILLEGAL_REASSIGNMENT).
+    assert!(
+        !code.contains("; b = 2"),
+        "bare unprefixed assignment must not be emitted, got:\n{}",
+        code
+    );
+}
+
+/// The defect is statement POSITION, not assignment: a plain READ in the
+/// second statement is missed the same way.
+#[test]
+fn multi_statement_event_handler_resolves_reads_after_first_statement() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+</script>
+<template><button @click="a = 1; console.log(b)">x</button></template>"#,
+    );
+    assert!(
+        code.contains("$setup.a = 1"),
+        "first statement must be prefixed, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("console.log($setup.b)"),
+        "a read in the second statement must be prefixed, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("console.log(b)"),
+        "bare unprefixed read must not be emitted, got:\n{}",
+        code
+    );
+}
+
+/// Update expressions (`a++`) and compound assignments (`a += 1`) after the
+/// first statement resolve too.
+#[test]
+fn multi_statement_event_handler_resolves_update_and_compound_assignment() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+const c = ref(0)
+</script>
+<template><button @click="a = 1; b++; c += 2">x</button></template>"#,
+    );
+    assert!(
+        code.contains("$setup.b++"),
+        "update expression after the first statement must be prefixed, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$setup.c += 2"),
+        "compound assignment after the first statement must be prefixed, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("; b++"),
+        "bare unprefixed update must not be emitted, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("; c += 2"),
+        "bare unprefixed compound assignment must not be emitted, got:\n{}",
+        code
+    );
+}
+
+/// Inline mode (the shape the playground production build emits): setup refs
+/// are in lexical scope as `const`, so an unprefixed write is a build-time
+/// const reassignment. Every statement must go through `.value`.
+#[test]
+fn multi_statement_event_handler_resolves_every_statement_inline() {
+    let result = compile_sfc_inline(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+</script>
+<template><button @click="a = 1; b = 2">x</button></template>"#,
+    );
+    let code = &result.script.as_ref().expect("script block").code;
+    assert!(
+        code.contains("a.value = 1"),
+        "first statement must unwrap the ref, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("b.value = 2"),
+        "second statement must unwrap the ref, got:\n{}",
+        code
+    );
+    // Negative: a bare `b = 2` reassigns the setup `const b` — exactly the
+    // rolldown ILLEGAL_REASSIGNMENT that broke the playground build.
+    assert!(
+        !code.contains("; b = 2"),
+        "bare const reassignment must not be emitted, got:\n{}",
+        code
+    );
+}
+
+/// A trailing semicolon does not make a value multi-statement, and the
+/// single-statement shape is unchanged by the statement-list grammar.
+///
+/// The container choice is a real behavioural difference from Vue, not a
+/// formatting one, so it is pinned here. Vue's `includes(';')` gives this value
+/// a BLOCK, which returns `undefined`; the expression container RETURNS the
+/// statement's value. Vue's DOM invoker hands the handler to
+/// `callWithAsyncErrorHandling`, which attaches a `.catch` when the return value
+/// is a promise — so for an async handler Verter routes a rejection to the app
+/// error handler where Vue lets it escape unhandled.
+#[test]
+fn single_statement_event_handler_shape_is_unchanged() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+</script>
+<template><button @click="a = 1;">x</button></template>"#,
+    );
+    assert!(
+        code.contains("$setup.a = 1"),
+        "single statement with trailing semicolon must still resolve, got:\n{}",
+        code
+    );
+
+    let async_handler = compile_and_validate_template(
+        r#"<script setup>
+const asyncFn = async () => {}
+</script>
+<template><button @click="asyncFn();">x</button></template>"#,
+    );
+    assert!(
+        async_handler.contains("$event => ($setup.asyncFn())"),
+        "a trailing `;` takes the expression container, which returns the promise, got:\n{async_handler}"
+    );
+    assert!(
+        !async_handler.contains("$event => {$setup.asyncFn();}"),
+        "the block Vue emits here discards the promise and loses the rejection:\n{async_handler}"
+    );
+}
+
+/// A multi-statement handler whose resolved text contains a `.` and no `(`
+/// must still emit parseable TSX. A text-shaped member-expression probe
+/// classifies it as a bare handler reference and emits a JSX expression
+/// container holding a statement list, which does not parse.
+#[test]
+fn tsx_parse_valid_events_multi_statement_member_target() {
+    assert_tsx_parses(
+        r#"<script setup lang="ts">
+import { reactive } from 'vue'
+const obj = reactive({ a: 0, b: 0 })
+</script>
+<template>
+  <button @click="obj.a = 1; obj.b = 2">go</button>
+</template>"#,
+        "event multi-statement member target",
+    );
+}
+
+/// Statement kinds beyond the simple expression statement resolve their
+/// identifiers too. A `v-on` value is a full statement list, so the binding
+/// visitor must descend into every statement form, not just the handful an
+/// expression can nest.
+#[test]
+fn multi_statement_event_handler_resolves_all_statement_kinds() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+const arr = ref([1, 2])
+</script>
+<template>
+  <button @click="a = 1; throw b">throw</button>
+  <button @click="a = 1; switch (b) { case 1: a = 2 }">switch</button>
+  <button @click="a = 1; for (const x of arr) { b = x }">forof</button>
+  <button @click="a = 1; for (const k in arr) { b = k }">forin</button>
+  <button @click="a = 1; try { a = b } catch (e) { a = 2 }">try</button>
+  <button @click="a = 1; do { a = b } while (a < 3)">dowhile</button>
+  <button @click="a = 1; lbl: { a = b }">labeled</button>
+</template>"#,
+    );
+    for expected in [
+        "throw $setup.b",
+        "switch ($setup.b)",
+        "of $setup.arr",
+        "in $setup.arr",
+        "try { $setup.a = $setup.b } catch (e) { $setup.a = 2 }",
+        "do { $setup.a = $setup.b } while ($setup.a < 3)",
+        "lbl: { $setup.a = $setup.b }",
+    ] {
+        assert!(
+            code.contains(expected),
+            "expected {expected:?} in generated code, got:\n{code}"
+        );
+    }
+    // Negative: a `catch (e)` parameter is a handler-local binding and must NOT
+    // be prefixed, and no bare unprefixed reference to `b` may survive.
+    assert!(
+        code.contains("catch (e)") && !code.contains("catch ($setup.e)"),
+        "catch parameter is a local binding, got:\n{code}"
+    );
+    assert!(
+        !code.contains("throw b"),
+        "bare unprefixed throw argument must not be emitted, got:\n{code}"
+    );
+}
+
+// =========================================================================
+// The statement descent is EXHAUSTIVE, and descending into a statement is not
+// the same as descending into all of its PARTS. A `v-on` value is a full
+// statement list, so every statement form and every identifier position inside
+// it resolves — a partially-resolved statement is worse than an unresolved
+// one, because the bare half is a write to a setup-scope `const`.
+//
+// Every expectation below is the byte-for-byte handler body that
+// `@vue/compiler-sfc` 3.5.34 emits for the same SFC.
+// =========================================================================
+
+/// Compile in inline mode and assert the emitted script is parseable JS,
+/// returning it. Inline is where an unresolved WRITE becomes a build failure:
+/// setup bindings are lexical `const`s, so a bare assignment is a
+/// const-reassignment that rolldown rejects (`ILLEGAL_REASSIGNMENT`).
+fn compile_and_validate_inline_script(source: &str) -> String {
+    let result = compile_sfc_inline(source);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let code = result.script.as_ref().expect("script block").code.clone();
+    let alloc = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&alloc, &code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Inline script JS parse error: {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        code
+    );
+    code
+}
+
+/// `for (i = 0; …)` initialises an EXISTING binding, so the init is a real
+/// reference. Visiting only the declaration form of a `for` init leaves the
+/// head half-resolved: `for (i = 0; $setup.i < $setup.n; $setup.i++)`.
+#[test]
+fn event_handler_resolves_for_statement_expression_init() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const i = ref(0)
+const n = ref(3)
+const log = (x) => x
+</script>
+<template><button @click="for (i = 0; i < n; i++) log(i)">x</button></template>"#,
+    );
+    assert!(
+        code.contains("for ($setup.i = 0; $setup.i < $setup.n; $setup.i++) $setup.log($setup.i)"),
+        "every position in the `for` head must resolve, got:\n{code}"
+    );
+    // Negative: the bare init is exactly the half-resolved state.
+    assert!(
+        !code.contains("for (i = 0"),
+        "the `for` init must not stay unprefixed, got:\n{code}"
+    );
+}
+
+/// The same head in INLINE mode, where a bare `i = 0` reassigns the setup
+/// `const i` — a build-time const reassignment, not just a stale read.
+#[test]
+fn event_handler_for_expression_init_never_writes_a_bare_setup_const() {
+    let code = compile_and_validate_inline_script(
+        r#"<script setup>
+import { ref } from 'vue'
+const i = ref(0)
+const n = ref(3)
+const log = (x) => x
+</script>
+<template><button @click="for (i = 0; i < n; i++) log(i)">x</button></template>"#,
+    );
+    assert!(
+        code.contains("for (i.value = 0; i.value < n.value; i.value++) log(i.value)"),
+        "the `for` init must unwrap the ref, got:\n{code}"
+    );
+    assert!(
+        !code.contains("for (i = 0"),
+        "a bare `i = 0` reassigns the setup `const` (rolldown ILLEGAL_REASSIGNMENT), got:\n{code}"
+    );
+}
+
+/// A class DECLARATION's heritage clause is an ordinary value reference. The
+/// class NAME is a binding it introduces, so that stays bare.
+#[test]
+fn event_handler_resolves_class_declaration_heritage() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const Base = class {}
+</script>
+<template><button @click="a = 1; class X extends Base {}">x</button></template>"#,
+    );
+    assert!(
+        code.contains("class X extends $setup.Base {}"),
+        "the heritage clause must resolve, got:\n{code}"
+    );
+    // Negative: the declared class name is a LOCAL binding, never prefixed.
+    assert!(
+        !code.contains("class $setup.X"),
+        "the declared class name must stay local, got:\n{code}"
+    );
+}
+
+/// The same position in EXPRESSION form: `class extends Base {}` reaches the
+/// heritage clause through `Expression::ClassExpression`, not
+/// `Statement::ClassDeclaration`.
+#[test]
+fn event_handler_resolves_class_expression_heritage() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const Base = class {}
+</script>
+<template><button @click="a = 1; const C = class extends Base {}">x</button></template>"#,
+    );
+    assert!(
+        code.contains("const C = class extends $setup.Base {}"),
+        "a class EXPRESSION's heritage clause must resolve too, got:\n{code}"
+    );
+    assert!(
+        !code.contains("class extends Base"),
+        "the heritage clause must not stay unprefixed, got:\n{code}"
+    );
+}
+
+/// `with (obj) { … }` resolves its object and its body, which is what
+/// `@vue/compiler-sfc` emits. (The emitted `with` is a strict-mode error in
+/// both compilers; leaving its identifiers bare would not fix that and would
+/// make the handler silently reference nothing.)
+#[test]
+fn event_handler_resolves_with_statement() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const o = ref({})
+</script>
+<template><button @click="a = 1; with (o) { a = 2 }">x</button></template>"#,
+    );
+    assert!(
+        code.contains("with ($setup.o) { $setup.a = 2 }"),
+        "`with` object and body must both resolve, got:\n{code}"
+    );
+    assert!(
+        !code.contains("with (o)"),
+        "the `with` object must not stay unprefixed, got:\n{code}"
+    );
+}
+
+/// A loop variable the `for` head DECLARES is local and must never be prefixed
+/// or recorded as a binding — including in the test, the update, and the body.
+/// This is the boundary the expression-init arm must not cross: resolving
+/// `for (i = 0; …)` must not start resolving `for (let i = 0; …)`.
+#[test]
+fn a_declared_for_loop_variable_stays_local() {
+    for keyword in ["let", "var", "const"] {
+        // `const` cannot be updated, so give it a body-only loop.
+        let head = if keyword == "const" {
+            "for (const i of arr) log(i)".to_string()
+        } else {
+            format!("for ({keyword} i = 0; i < n; i++) log(i)")
+        };
+        let source = format!(
+            r#"<script setup>
+import {{ ref }} from 'vue'
+const n = ref(3)
+const arr = ref([1, 2])
+const log = (x) => x
+</script>
+<template><button @click="{head}">x</button></template>"#
+        );
+        let code = compile_and_validate_template(&source);
+        // Only the genuine setup bindings resolve.
+        assert!(
+            code.contains("$setup.log(i)"),
+            "[{keyword}] the setup binding must resolve, got:\n{code}"
+        );
+        // Negative: the declared loop variable is local in EVERY position.
+        for forbidden in ["$setup.i", "_ctx.i", "i.value"] {
+            assert!(
+                !code.contains(forbidden),
+                "[{keyword}] a declared loop variable must stay local, found {forbidden:?} in:\n{code}"
+            );
+        }
+        // Same in inline mode, where prefixing a loop variable would emit a
+        // reference to a binding that does not exist.
+        let inline = compile_and_validate_inline_script(&source);
+        assert!(
+            inline.contains("log(i)"),
+            "[{keyword}] inline must keep the loop variable bare, got:\n{inline}"
+        );
+        assert!(
+            !inline.contains("i.value"),
+            "[{keyword}] a declared loop variable is not a ref, got:\n{inline}"
+        );
+    }
+}
+
+/// The audit that produced the exhaustive match also found sub-positions inside
+/// already-visited nodes: a class element that is an `accessor`, a class static
+/// BLOCK reached through a class DECLARATION, the right side of `#p in obj`, and
+/// the options argument of `import(source, options)`. Each was a silent miss —
+/// the identifier came out bare with no compile error.
+#[test]
+fn audited_class_element_and_expression_sub_positions_resolve() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const seed = ref(2)
+const opts = ref({})
+</script>
+<template>
+  <button @click="a = 1; class Q { accessor p = seed; static { a = seed } }">cls</button>
+  <button @click="a = 1; class K { #p; static has(o) { return #p in o } }">priv</button>
+  <button @click="a = 1; import('m', opts)">imp</button>
+</template>"#,
+    );
+    for expected in [
+        // `accessor` property value — was swallowed by the class-element catch-all.
+        "accessor p = $setup.seed",
+        // static block inside a class DECLARATION — the whole declaration was
+        // swallowed by the statement catch-all.
+        "static { $setup.a = $setup.seed }",
+        // `import(source, options)` — only `source` was visited.
+        "import('m', $setup.opts)",
+    ] {
+        assert!(
+            code.contains(expected),
+            "expected {expected:?} in generated code, got:\n{code}"
+        );
+    }
+    // A private name and a method parameter are LOCAL: neither may be prefixed.
+    assert!(
+        code.contains("static has(o) { return #p in o }"),
+        "the `#p in o` operands must stay local, got:\n{code}"
+    );
+    // Negative: the bare, unresolved forms must not survive anywhere.
+    for forbidden in [
+        "accessor p = seed",
+        "static { a = seed }",
+        "import('m', opts)",
+    ] {
+        assert!(
+            !code.contains(forbidden),
+            "unresolved {forbidden:?} must not be emitted, got:\n{code}"
+        );
+    }
+}
+
+// =========================================================================
+// ONE notion of "multi-statement". Every backend's statement-body-vs-paren
+// decision reads the PARSE FACT (`OxcParsedExpression::multi_statement`); the
+// raw-source `value.contains(';')` probes are gone. A `;` scan disagrees with
+// the parse in both directions: a newline-separated list has no `;`, and a `;`
+// inside a string literal is not a statement boundary.
+// =========================================================================
+
+/// A newline-separated handler is two statements with no `;` anywhere. A `;`
+/// scan reads it as one expression and emits `$event => (count++⏎emit(…))`,
+/// which does not parse. VDOM and Vapor must agree, and both must parse.
+#[test]
+fn newline_separated_handler_gets_a_statement_body_in_every_backend() {
+    let source = "<script setup>\nimport { ref } from 'vue'\nconst count = ref(0)\nconst emit = defineEmits(['change'])\n</script>\n<template><button @click=\"count++\nemit('change')\">x</button></template>";
+    // Each helper asserts the emitted JS parses.
+    let vdom = compile_and_validate_template(source);
+    assert!(
+        vdom.contains("$event => {$setup.count++"),
+        "VDOM must give a newline-separated list a statement body, got:\n{vdom}"
+    );
+    let vapor = compile_and_validate_vapor_template(source);
+    assert!(
+        vapor.contains("$event => { _ctx.count++"),
+        "Vapor must give a newline-separated list a statement body, got:\n{vapor}"
+    );
+    let inline = compile_and_validate_inline_script(source);
+    assert!(
+        inline.contains("$event => {count.value++"),
+        "inline must give a newline-separated list a statement body, got:\n{inline}"
+    );
+    for (backend, code) in [("vdom", &vdom), ("vapor", &vapor), ("inline", &inline)] {
+        assert!(
+            !code.contains("$event => ("),
+            "{backend} must not put a statement list in an expression container, got:\n{code}"
+        );
+    }
+}
+
+/// A `;` inside a STRING literal is not a statement boundary. The parse says
+/// one statement, so the handler takes the expression container.
+#[test]
+fn semicolon_inside_a_string_literal_is_not_a_statement_boundary() {
+    let source = r#"<script setup>
+const foo = (s) => s
+</script>
+<template><button @click="foo('a;b')">x</button></template>"#;
+    let vdom = compile_and_validate_template(source);
+    assert!(
+        vdom.contains("$event => ($setup.foo('a;b'))"),
+        "a `;` inside a string must not force a statement body, got:\n{vdom}"
+    );
+    let vapor = compile_and_validate_vapor_template(source);
+    assert!(
+        vapor.contains("$event => (_ctx.foo('a;b'))"),
+        "Vapor must reach the same decision as VDOM, got:\n{vapor}"
+    );
+}
+
+/// A statement list whose text contains a top-level `=>` must not be read as a
+/// bare function-expression handler. The text probe finds the arrow and emits
+/// the list unwrapped into the props object literal, which does not parse.
+#[test]
+fn statement_list_containing_an_arrow_is_not_a_bare_function_handler() {
+    let source = r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(null)
+</script>
+<template><button @click="a = 1; b = () => 2">x</button></template>"#;
+    // The helper's OXC parse is the discriminator: unwrapped, this emits
+    // `onClick: $setup.a = 1; $setup.b = () => 2` inside an object literal.
+    let vdom = compile_and_validate_template(source);
+    assert!(
+        vdom.contains("$event => {$setup.a = 1; $setup.b = () => 2}"),
+        "a statement list must keep its statement body, got:\n{vdom}"
+    );
+    assert!(
+        !vdom.contains("onClick: $setup.a = 1"),
+        "the statement list must not be emitted unwrapped, got:\n{vdom}"
+    );
+    let inline = compile_and_validate_inline_script(source);
+    assert!(
+        inline.contains("$event => {a.value = 1; b.value = () => 2}"),
+        "inline must wrap it too, got:\n{inline}"
+    );
+}
+
+/// A value the STATEMENT grammar cannot read is still not a single expression —
+/// that is why it took the statement path. `a = 1; return` is an illegal
+/// top-level `return` as a Program, yet is valid as the emitted arrow's BODY,
+/// so it must keep the statement container rather than fall into `(…)`.
+#[test]
+fn handler_the_statement_grammar_rejects_still_gets_a_statement_body() {
+    let source = r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+</script>
+<template><button @click="a = 1; return">x</button></template>"#;
+    let vdom = compile_and_validate_template(source);
+    assert!(
+        vdom.contains("$event => {a = 1; return}"),
+        "VDOM must keep the statement body, got:\n{vdom}"
+    );
+    let vapor = compile_and_validate_vapor_template(source);
+    assert!(
+        vapor.contains("$event => { a = 1; return }"),
+        "Vapor must keep the statement body, got:\n{vapor}"
+    );
+}
+
+// =========================================================================
+// A `for…in` / `for…of` head whose target is NOT a declaration.
+//
+// `for (const y of xs)` DECLARES `y`, so the loop variable is local. Drop the
+// keyword and the same position becomes an assignment target: `for (x of xs)`
+// WRITES to the existing binding `x` once per iteration, so the target, the
+// iterated expression and the body are all real references that must resolve.
+//
+// Every `$setup` expectation below is the byte-for-byte handler body that
+// `@vue/compiler-sfc` 3.5.34 emits for the same SFC (with the one documented
+// divergence called out in the destructuring case).
+// =========================================================================
+
+/// Shared fixture for the non-declaration loop-target cases: every identifier a
+/// head can mention is a genuine setup binding, so anything left bare in the
+/// output is an unresolved reference.
+fn loop_target_sfc(head: &str) -> String {
+    format!(
+        r#"<script setup>
+import {{ ref }} from 'vue'
+const x = ref(0)
+const a = ref(0)
+const b = ref(0)
+const obj = ref({{}})
+const xs = ref([])
+const log = (v) => v
+</script>
+<template><button @click="{head}">x</button></template>"#
+    )
+}
+
+/// `for (x of xs)` assigns to `x` on each iteration. Emitting the iterated
+/// expression before the target produced `for (x of $setup.xs$setup.x of xs)`:
+/// the target's prefix landed after the source chunk that already contained it,
+/// and the chunk between them was dropped. That does not parse, where the
+/// pre-change output (`for (x of xs)`, unresolved) at least did.
+#[test]
+fn a_for_of_assignment_target_resolves_in_every_position() {
+    let source = loop_target_sfc("for (x of xs) log(x)");
+
+    let vdom = compile_and_validate_template(&source);
+    assert!(
+        vdom.contains("$event => {for ($setup.x of $setup.xs) $setup.log($setup.x)}"),
+        "VDOM must resolve the target, the iterated expression and the body, got:\n{vdom}"
+    );
+
+    let inline = compile_and_validate_inline_script(&source);
+    assert!(
+        inline.contains("$event => {for (x.value of xs.value) log(x.value)}"),
+        "inline must unwrap every ref in the head, got:\n{inline}"
+    );
+
+    let vapor = compile_and_validate_vapor_template(&source);
+    assert!(
+        vapor.contains("$event => { for (_ctx.x of _ctx.xs) _ctx.log(_ctx.x) }"),
+        "Vapor must resolve the target, got:\n{vapor}"
+    );
+
+    // Negative: the duplicated-iterable shape the out-of-order walk emitted.
+    for corrupt in [
+        "$setup.xs$setup.x",
+        "xs.valuex.value",
+        "_ctx.xs_ctx.x",
+        " of xs)",
+    ] {
+        for (backend, code) in [("VDOM", &vdom), ("inline", &inline), ("Vapor", &vapor)] {
+            assert!(
+                !code.contains(corrupt),
+                "[{backend}] must not re-emit the iterated expression ({corrupt:?}):\n{code}"
+            );
+        }
+    }
+}
+
+/// The `for…in` form is the dangerous one: `for (x in $setup.xs$setup.x in xs)`
+/// PARSES, because `xs$setup` is a legal identifier, so the corruption is a
+/// silent wrong-property read rather than a build failure. Pin the emitted text,
+/// not merely that it parses.
+#[test]
+fn a_for_in_assignment_target_resolves_in_every_position() {
+    let source = loop_target_sfc("for (x in xs) log(x)");
+
+    let vdom = compile_and_validate_template(&source);
+    assert!(
+        vdom.contains("$event => {for ($setup.x in $setup.xs) $setup.log($setup.x)}"),
+        "VDOM must resolve the target, got:\n{vdom}"
+    );
+    // The corrupt form parses, so only the text discriminates.
+    assert!(
+        !vdom.contains("$setup.xs$setup"),
+        "the silently-parseable `xs$setup` member read must be gone:\n{vdom}"
+    );
+
+    let inline = compile_and_validate_inline_script(&source);
+    assert!(
+        inline.contains("$event => {for (x.value in xs.value) log(x.value)}"),
+        "inline must unwrap every ref in the head, got:\n{inline}"
+    );
+
+    let vapor = compile_and_validate_vapor_template(&source);
+    assert!(
+        vapor.contains("$event => { for (_ctx.x in _ctx.xs) _ctx.log(_ctx.x) }"),
+        "Vapor must resolve the target, got:\n{vapor}"
+    );
+}
+
+/// A member target (`for (obj.k of xs)`) writes through the object, so the
+/// object root resolves exactly like any other reference.
+#[test]
+fn a_for_of_member_target_resolves_in_every_position() {
+    let source = loop_target_sfc("for (obj.k of xs) log(obj.k)");
+
+    let vdom = compile_and_validate_template(&source);
+    assert!(
+        vdom.contains("$event => {for ($setup.obj.k of $setup.xs) $setup.log($setup.obj.k)}"),
+        "VDOM must resolve the member target's root, got:\n{vdom}"
+    );
+
+    let inline = compile_and_validate_inline_script(&source);
+    assert!(
+        inline.contains("$event => {for (obj.value.k of xs.value) log(obj.value.k)}"),
+        "inline must unwrap the member target's root ref, got:\n{inline}"
+    );
+
+    let vapor = compile_and_validate_vapor_template(&source);
+    assert!(
+        vapor.contains("$event => { for (_ctx.obj.k of _ctx.xs) _ctx.log(_ctx.obj.k) }"),
+        "Vapor must resolve the member target's root, got:\n{vapor}"
+    );
+}
+
+/// A destructuring target (`for ([a, b] of xs)`) is an assignment PATTERN, not a
+/// declaration: each element writes to an existing binding and must resolve.
+///
+/// This is the one deliberate divergence in the family. `@vue/compiler-sfc`
+/// 3.5.34 emits `for ([a, b] of $setup.xs)` — it leaves the pattern elements
+/// bare, so the loop writes to two undeclared globals and the setup refs are
+/// never updated. Verter resolves them.
+#[test]
+fn a_for_of_destructured_target_resolves_in_every_position() {
+    let source = loop_target_sfc("for ([a, b] of xs) log(a)");
+
+    let vdom = compile_and_validate_template(&source);
+    assert!(
+        vdom.contains("$event => {for ([$setup.a, $setup.b] of $setup.xs) $setup.log($setup.a)}"),
+        "VDOM must resolve both pattern elements, got:\n{vdom}"
+    );
+
+    let inline = compile_and_validate_inline_script(&source);
+    assert!(
+        inline.contains("$event => {for ([a.value, b.value] of xs.value) log(a.value)}"),
+        "inline must unwrap both pattern element refs, got:\n{inline}"
+    );
+
+    let vapor = compile_and_validate_vapor_template(&source);
+    assert!(
+        vapor.contains("$event => { for ([_ctx.a, _ctx.b] of _ctx.xs) _ctx.log(_ctx.a) }"),
+        "Vapor must resolve both pattern elements, got:\n{vapor}"
+    );
+
+    // Negative: the truncated pattern the out-of-order walk emitted, where the
+    // opening `[` was swallowed with the dropped chunk.
+    for (backend, code) in [("VDOM", &vdom), ("inline", &inline), ("Vapor", &vapor)] {
+        assert!(
+            !code.contains("] of xs)"),
+            "[{backend}] must not re-emit the iterated expression:\n{code}"
+        );
+    }
+}

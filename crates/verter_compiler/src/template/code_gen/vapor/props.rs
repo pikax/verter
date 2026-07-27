@@ -9,7 +9,7 @@
 use crate::ast::types::{ElementNode, PropFlags};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::shared::helpers::{
-    self, is_member_expression, VaporHelper, DELEGATABLE_EVENTS,
+    self, is_member_expression, is_multi_statement_handler, VaporHelper, DELEGATABLE_EVENTS,
 };
 use crate::template::code_gen::types::{
     CodeGenOutput, VaporCounters, VaporEffect, VaporElementState,
@@ -384,8 +384,9 @@ fn write_handler_expression(
     let is_member = is_member_expression(handler);
     let resolved = resolve_expr(handler, value_start, oxc_exp, resolver, force_js);
 
-    // Detect multi-statement handlers (semicolons in handler body)
-    let has_semicolons = handler.contains(';');
+    // Whether the handler body is a statement LIST, read from the parse fact —
+    // never probed out of the raw source text.
+    let is_statement_list = is_multi_statement_handler(oxc_exp);
 
     if runtime_mods.is_empty() && key_mods.is_empty() {
         // Vue 3.6: wraps member expressions as arrow functions
@@ -394,7 +395,7 @@ fn write_handler_expression(
             buf.push_str(&resolved);
             buf.push_str("(e)");
         } else {
-            push_inline_handler(buf, &resolved, has_semicolons);
+            push_inline_handler(buf, &resolved, is_statement_list);
         }
         return;
     }
@@ -409,7 +410,7 @@ fn write_handler_expression(
             buf.push_str(&resolved);
             buf.push_str("(e)");
         } else {
-            push_inline_handler(buf, &resolved, has_semicolons);
+            push_inline_handler(buf, &resolved, is_statement_list);
         }
         buf.push_str(", [");
         for (i, m) in runtime_mods.iter().enumerate() {
@@ -426,7 +427,7 @@ fn write_handler_expression(
         buf.push_str(&resolved);
         buf.push_str("(e)");
     } else {
-        push_inline_handler(buf, &resolved, has_semicolons);
+        push_inline_handler(buf, &resolved, is_statement_list);
     }
     if !key_mods.is_empty() {
         buf.push_str(", [");
@@ -442,14 +443,18 @@ fn write_handler_expression(
     }
 }
 
-/// Push an inline handler expression, handling multi-statement handlers
-/// (with semicolons) by wrapping in a block instead of parentheses.
-fn push_inline_handler(buf: &mut String, resolved: &str, has_semicolons: bool) {
-    let trimmed = resolved.trim_end().trim_end_matches(';').trim_end();
+/// Push an inline handler expression, giving a statement LIST a block body and a
+/// single expression a parenthesised one.
+///
+/// `is_statement_list` is the parse fact from
+/// [`is_multi_statement_handler`][helpers::is_multi_statement_handler], never a
+/// probe of the handler text.
+fn push_inline_handler(buf: &mut String, resolved: &str, is_statement_list: bool) {
+    let trimmed = helpers::trim_handler_body(resolved);
     if trimmed.is_empty() {
         // Empty handler: @event="" → no-op
         buf.push_str("$event => {}");
-    } else if has_semicolons {
+    } else if is_statement_list {
         buf.push_str("$event => { ");
         buf.push_str(trimmed);
         buf.push_str(" }");

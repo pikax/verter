@@ -94,6 +94,25 @@ pub fn resolve_simple_expr_segments(
     sink.out
 }
 
+/// Whether the non-ignored bindings are in strictly increasing, non-overlapping
+/// source order — the precondition [`write_prefixed_expr`]'s compound walk
+/// consumes. Ignored bindings carry no prefix and pass through inside a verbatim
+/// run, so they place no constraint.
+///
+/// Not `#[cfg(debug_assertions)]`: `debug_assert!` gates on `cfg!`, a runtime
+/// constant, so its body is still compiled in release and would fail to resolve
+/// a debug-only callee. The `if false` leaves nothing behind.
+fn is_source_ordered(bindings: &[crate::utils::oxc::Binding<'_>]) -> bool {
+    let mut end = 0u32;
+    for binding in bindings.iter().filter(|b| !b.ignore) {
+        if binding.pos < end {
+            return false;
+        }
+        end = binding.pos + binding.name.len() as u32;
+    }
+    true
+}
+
 /// Core resolved-expression walk shared by the flat and segmented builders.
 ///
 /// Mirrors `build_prefixed_expr` exactly: simple identifiers route through
@@ -128,6 +147,22 @@ pub(crate) fn write_prefixed_expr<S: ExprSink>(
     }
 
     // Compound walk: insert prefix/suffix at expression-relative offsets.
+    //
+    // The walk copies the verbatim source run in front of each binding, so it is
+    // only correct in source order — which `BindingExtractionResult` guarantees
+    // by recording bindings in order (`push_binding`). This pins the precondition
+    // at the point it is CONSUMED, so a result assembled by some other route
+    // fails loudly here instead of emitting text that has lost a source run.
+    debug_assert!(
+        is_source_ordered(&bindings.bindings),
+        "resolved-expression bindings must be in source order, got {:?} for {expr:?}",
+        bindings
+            .bindings
+            .iter()
+            .map(|b| (b.name, b.pos, b.ignore))
+            .collect::<Vec<_>>(),
+    );
+
     let expr_start = inner_start as usize;
     let trim_offset = expr.len() - expr.trim_start().len();
     let trimmed = expr.trim();

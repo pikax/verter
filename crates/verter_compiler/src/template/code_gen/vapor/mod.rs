@@ -885,11 +885,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
                     let resolved_value =
                         resolve_expr(value, vs, oxc_exp, &self.resolver, self.options.force_js);
-                    let trimmed_value = resolved_value.trim_end().trim_end_matches(';').trim_end();
+                    let trimmed_value = helpers::trim_handler_body(&resolved_value);
                     if trimmed_value.is_empty() {
                         entry.push_str(": () => {}");
-                    } else if value.contains(';') {
-                        // Multi-statement handler: wrap in a block
+                    } else if helpers::is_multi_statement_handler(oxc_exp) {
+                        // Statement list: wrap in a block
                         entry.push_str(": () => { ");
                         entry.push_str(trimmed_value);
                         entry.push_str(" }");

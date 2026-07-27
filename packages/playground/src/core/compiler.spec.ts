@@ -89,7 +89,7 @@ declare global {
 export {}
 `;
 
-// Must match VERTER_TYPES_AMBIENT_MODULE in crates/verter_core/src/ide/script.rs
+// Must match VERTER_TYPES_AMBIENT_MODULE in crates/verter_compiler/src/ide/script/type_constructs.rs
 const VERTER_TYPES_STUB = `
 declare module "@verter/types" {
   export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};

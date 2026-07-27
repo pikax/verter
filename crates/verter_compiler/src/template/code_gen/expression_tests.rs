@@ -121,6 +121,7 @@ fn two_prop_oxc(
     OxcParsedExpression {
         offset: inner_start,
         expression: None,
+        multi_statement: false,
         errors: None,
         bindings: Some(BindingExtractionResult {
             bindings: vec![

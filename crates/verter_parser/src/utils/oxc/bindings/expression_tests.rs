@@ -461,3 +461,141 @@ fn test_global_dynamism_is_static() {
         "Global with literal args should be Static"
     );
 }
+
+// ===========================================
+// Source-order invariant
+// ===========================================
+
+/// Assert the ordering contract `BindingExtractionResult` publishes: the
+/// non-ignored bindings are in strictly increasing, non-overlapping source
+/// order.
+///
+/// This is the exact precondition the template emitter consumes. It walks the
+/// bindings in vector order and, before each one, copies the verbatim source
+/// run that ends where that binding starts; a binding that arrives at or before
+/// the previous binding's end silently loses its preceding run and lands after
+/// text that already contains it.
+fn assert_source_ordered(source: &str, result: &BindingExtractionResult<'_>) {
+    let mut prev_end = 0u32;
+    let mut prev_name = "";
+    for binding in result.bindings.iter().filter(|b| !b.ignore) {
+        assert!(
+            binding.pos >= prev_end,
+            "bindings must arrive in source order: {:?} at {} follows {:?} ending at {}, in {source:?}\nbindings: {:?}",
+            binding.name,
+            binding.pos,
+            prev_name,
+            prev_end,
+            result
+                .bindings
+                .iter()
+                .map(|b| (b.name, b.pos, b.ignore))
+                .collect::<Vec<_>>(),
+        );
+        prev_end = binding.pos + binding.name.len() as u32;
+        prev_name = binding.name;
+    }
+}
+
+fn extract_program_result<'a>(
+    source: &'a str,
+    alloc: &'a Allocator,
+) -> BindingExtractionResult<'a> {
+    let parsed = Parser::new(alloc, source, SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "fixture must parse: {source:?} → {:?}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+    let program = alloc.alloc(parsed.program);
+    extract_bindings_from_program(program, source, BindingContext::new(0))
+}
+
+/// Source order is an INVARIANT of `BindingExtractionResult`, not a rule each
+/// visitor arm has to remember.
+///
+/// The emitter interleaves each binding with the verbatim source run in front
+/// of it, so it is only correct when the bindings arrive in source order. That
+/// used to be an unwritten obligation on every arm of the descent, and an arm
+/// only has to visit two sub-positions in evaluation order rather than source
+/// order to break it — which no exhaustiveness check can catch, because the arm
+/// itself is present and the variant is covered. The single mutator now places
+/// each binding in source order as it is recorded, so the obligation is gone.
+///
+/// This walks the descent surface — every statement form and every compound
+/// expression form with more than one identifier position — and pins the
+/// property. `for (x of xs)` is the row that fails if the ordering is dropped:
+/// nothing else in the grammar today visits sub-positions out of source order.
+#[test]
+fn extracted_bindings_are_in_source_order_for_every_form() {
+    let sources = [
+        // Loop heads: the target is a real reference whose position precedes
+        // the iterated expression it is evaluated after.
+        "for (x of xs) log(x)",
+        "for (x in xs) log(x)",
+        "for ([a, b] of xs) log(a)",
+        "for ({ k: v } of xs) log(v)",
+        "for (obj.k of xs) log(obj.k)",
+        "for (obj[key] of xs) log(key)",
+        "for (const y of xs) log(y)",
+        "for (i = 0; i < n; i++) log(i)",
+        "for (;;) log(a)",
+        // Other statement forms.
+        "if (a) b(); else c()",
+        "while (a) b()",
+        "do b(); while (a)",
+        "switch (a) { case b: c(); break; default: d() }",
+        "try { a() } catch (e) { b(e) } finally { c() }",
+        "with (a) { b() }",
+        "label: { a(); break label }",
+        "throw a",
+        "const { p = q } = r",
+        "let [s = t] = u",
+        "class C extends Base { static { a() } [k]() { return b } accessor v = c }",
+        "function f(p = a, { q = b } = c) { return p + q + d }",
+        // Compound expressions.
+        "a ? b : c",
+        "a + b * c",
+        "a && b || c",
+        "a?.[b]?.(c)",
+        "obj[key].fn(arg)",
+        "`${a} and ${b}`",
+        "tag`${a}${b}`",
+        "({ ...a, [b]: c, d })",
+        "[a, ...b, c]",
+        "new Ctor(a, b)",
+        "(a = b), (c = d)",
+        "a = b ?? c",
+        "({ a, b } = c)",
+        "[a, b] = c",
+        "a as B",
+        "a satisfies B",
+        "a!.b",
+        "import(a, b)",
+        "(a, b) => a + b + c",
+        "async () => { await a; yield_(b) }",
+        "function* g() { yield a; yield* b }",
+        "typeof a === 'x' ? b : c",
+        "delete a.b",
+        "void a",
+        "-a + +b",
+        "a instanceof B",
+        "#p in obj",
+    ];
+
+    for source in sources {
+        let alloc = Allocator::default();
+        // `#p in obj` is only legal inside a class body.
+        let wrapped = if source.starts_with('#') {
+            format!("class C {{ #p; m(o) {{ return {source} }} }}")
+        } else {
+            source.to_string()
+        };
+        let result = extract_program_result(&wrapped, &alloc);
+        assert_source_ordered(&wrapped, &result);
+    }
+}

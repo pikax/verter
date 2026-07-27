@@ -10782,3 +10782,66 @@ mod spread_event_typing_matrix {
         );
     }
 }
+
+// =========================================================================
+// Multi-statement v-on handlers (IDE/TSX path)
+//
+// A `v-on` value is an inline STATEMENT LIST. Two invariants follow:
+//   1. EVERY statement is binding-resolved, not just the first.
+//   2. A multi-statement value is never a bare handler reference — it must be
+//      wrapped in a handler body, or the JSX expression container holds a
+//      statement list and the emitted TSX does not parse.
+// =========================================================================
+
+#[test]
+fn multi_statement_handler_resolves_every_statement_tsx() {
+    let output = gen_tsx_template_with_bindings(
+        r#"<template><button @click="a = p; zzUnknown = 2">x</button></template>"#,
+        &[("p", BindingType::Props), ("a", BindingType::SetupConst)],
+    );
+    assert!(
+        output.contains("__props.p"),
+        "first statement must resolve the prop: {output}"
+    );
+    assert!(
+        output.contains("___VERTER___instance.zzUnknown"),
+        "an unresolved identifier in the SECOND statement must take the instance prefix: {output}"
+    );
+    assert!(
+        !output.contains("; zzUnknown = 2"),
+        "bare unprefixed second statement must not be emitted: {output}"
+    );
+}
+
+#[test]
+fn multi_statement_handler_is_wrapped_not_treated_as_member_expression() {
+    // `obj.a = 1; obj.b = 2` resolves to a string containing `.` and no `(`.
+    // A text-shaped member-expression probe classifies that as a bare handler
+    // reference and emits `onClick={obj.a = 1; obj.b = 2}` — a JSX expression
+    // container holding two statements, which does not parse.
+    let output = gen_tsx_template_with_bindings(
+        r#"<template><button @click="obj.a = 1; obj.b = 2">x</button></template>"#,
+        &[("obj", BindingType::SetupConst)],
+    );
+    assert!(
+        output.contains("onClick={() => {"),
+        "multi-statement handler must be wrapped in a handler body: {output}"
+    );
+    assert!(
+        !output.contains("onClick={obj.a = 1"),
+        "multi-statement handler must not be emitted as a bare handler reference: {output}"
+    );
+}
+
+#[test]
+fn single_statement_member_handler_stays_a_bare_reference() {
+    // Control: a genuine member-expression handler keeps the unwrapped shape.
+    let output = gen_tsx_template_with_bindings(
+        r#"<template><button @click="obj.handler">x</button></template>"#,
+        &[("obj", BindingType::SetupConst)],
+    );
+    assert!(
+        output.contains("onClick={obj.handler}"),
+        "member-expression handler must stay a bare reference: {output}"
+    );
+}

@@ -88,7 +88,12 @@ pub struct LiteralBinding<'a> {
 /// The result of extracting bindings from an expression (byte-optimized version).
 #[derive(Debug, Clone)]
 pub struct BindingExtractionResult<'a> {
-    /// All identifier bindings found
+    /// All identifier bindings found, in SOURCE ORDER.
+    ///
+    /// Source order is an invariant of this vector, not a convention the walker
+    /// is trusted to follow — see [`BindingExtractionResult::push_binding`], the
+    /// only place a binding is recorded. Consumers that interleave the bindings
+    /// with the source text between them depend on it.
     pub bindings: Vec<Binding<'a>>,
     /// All function expressions found
     pub functions: Vec<FunctionBinding>,
@@ -114,6 +119,34 @@ impl Default for BindingExtractionResult<'_> {
 }
 
 impl<'a> BindingExtractionResult<'a> {
+    /// Record a binding, keeping [`bindings`](Self::bindings) in source order.
+    ///
+    /// This is the ONLY way a binding enters the vector, so source order holds
+    /// by construction rather than by every walker arm remembering to visit
+    /// sub-positions in source order.
+    ///
+    /// That distinction is the point. A walker arm has a legitimate reason to
+    /// visit out of source order — `for (x of xs)` EVALUATES `xs` before it
+    /// assigns to `x` — and an arm reasoning from evaluation order is neither a
+    /// missing arm nor a missing variant, so no exhaustiveness check sees it.
+    /// The consumer, meanwhile, copies the verbatim source run in front of each
+    /// binding, which only works in source order: a binding arriving before the
+    /// previous one's end loses its run and is emitted after text that already
+    /// contains it. Ordering here removes the coupling instead of policing it.
+    ///
+    /// Bindings almost always arrive in order, so the common path is a `push`;
+    /// an equal position keeps arrival order.
+    #[inline]
+    pub fn push_binding(&mut self, binding: Binding<'a>) {
+        match self.bindings.last() {
+            Some(last) if last.pos > binding.pos => {
+                let at = self.bindings.partition_point(|b| b.pos <= binding.pos);
+                self.bindings.insert(at, binding);
+            }
+            _ => self.bindings.push(binding),
+        }
+    }
+
     /// Get all non-ignored binding names (unique)
     pub fn non_ignored_binding_names(&self) -> Vec<&'a str> {
         let mut seen = HashSet::new();
@@ -137,8 +170,13 @@ impl<'a> BindingExtractionResult<'a> {
 
     /// Extend this result with bindings from another result.
     /// Used for propagating parent bindings to child scopes.
+    ///
+    /// Routed through [`push_binding`](Self::push_binding) so a merged result is
+    /// in source order too, whatever order the two inputs cover the source in.
     pub fn extend(&mut self, other: &BindingExtractionResult<'a>) {
-        self.bindings.extend(other.bindings.iter().cloned());
+        for binding in &other.bindings {
+            self.push_binding(binding.clone());
+        }
         self.functions.extend(other.functions.iter().cloned());
         self.literals.extend(other.literals.iter().cloned());
         if other.has_errors {

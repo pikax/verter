@@ -251,7 +251,7 @@ function getVariableType(
 }
 
 // ── Handcrafted declaration (no native binary needed) ───────────────────────
-// Mirrors the output shape of generate_code() from verter_core/src/tsc/script.rs
+// Mirrors the output shape of generate_code() from verter_compiler/src/tsc/script.rs
 
 function makeComponentDecl(name: string, propsFields: string, emitOverloads?: string): string {
   const emit = emitOverloads ?? "(event: string, ...args: unknown[]) => void";
