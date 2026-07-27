@@ -519,8 +519,33 @@ pub(crate) fn apply_specifier_replacements(
 }
 
 /// Sync an OPEN self-file document's provider buffer to the type provider as
-/// UNRESOLVED open-document state, keyed at the document's OWN canonical path
-/// (the Shadow provider path).
+/// open-document Shadow state, keyed at the document's OWN canonical path (the
+/// Shadow provider path), so it is queryable even before resolver ownership is
+/// ready.
+///
+/// The committed state DESCRIBES THE DELIVERY IT JUST PERFORMED: the shadow
+/// buffer is live, it was built from the document's exact source bytes
+/// ([`ProviderSyncState::mark_shadow_delivered`]), and it carries the owner the
+/// live resolver reports (`Unresolved` only while ownership is genuinely
+/// unpublished). Under-reporting any of those facts strands every consumer that
+/// reads committed state as the truth about what the provider holds — above all
+/// the tsgo carrier-import closure, which gates project-wide references and
+/// rename on an owner-matched, current shadow for each rewritten barrel and has
+/// no other leg to re-deliver it (the barrel publication skips an already-live
+/// shadow).
+///
+/// OVER-reporting is the worse failure, so the delivery is claimed only if it
+/// survives a supersession check: both facts are derived before the provider
+/// await and RE-DERIVED against the snapshot published afterwards, and a
+/// mismatch commits liveness alone. Without it a workspace publish landing
+/// inside the await — an alias repointed from one carrier to another, say, which
+/// moves neither the owner key nor the source hash — would leave the closure
+/// reading a live, current, owner-matched shadow over a buffer built from the
+/// superseded resolution, and the frontier would answer references and rename
+/// from a stale projection instead of refusing. That check NARROWS the window
+/// rather than closing it the way the carrier admission path does, and the
+/// refusal it commits is not self-healing — both limits are stated where the
+/// gate is written.
 ///
 /// A self-file document is a Svelte rune module (`<rune prelude> + <rewritten
 /// module bytes>`) or a plain TS-family script (its bytes verbatim — the
@@ -542,7 +567,7 @@ pub(crate) async fn sync_self_file_shadow_state(
     documents: &DocumentRegistry,
     project_sync: &crate::type_provider::project_sync::ProjectSync,
     provider_sync_states: &DashMap<String, crate::provider_sync::ProviderSyncState>,
-    snapshot: Option<&super::PublishedResolverSnapshot>,
+    published_snapshot: &(dyn Fn() -> Option<super::PublishedResolverSnapshot> + Sync),
     uri: &Uri,
     canonical_id: &str,
     file_language: &verter_session::FileLanguage,
@@ -553,6 +578,9 @@ pub(crate) async fn sync_self_file_shadow_state(
     let Some(source) = documents.get(uri).map(|d| d.source.clone()) else {
         return false;
     };
+
+    let snapshot = published_snapshot();
+    let snapshot = snapshot.as_ref();
 
     // Compute the import-specifier rewrites (resolver-backed when a snapshot
     // exists; empty otherwise), refine the document's rewrite-aware projection,
@@ -568,22 +596,41 @@ pub(crate) async fn sync_self_file_shadow_state(
                 .collect()
         })
         .unwrap_or_default();
-    let replacements = if rewrite_import_specifiers {
-        snapshot
+    // The two facts the committed state will assert, BOTH derived from one
+    // resolver snapshot: the specifier rewrite baked into the delivered buffer,
+    // and the owner the delivery is attributed to. They are re-derived after the
+    // provider await and the delivery is only claimed if they still hold — see
+    // the supersession check below.
+    let derive_projection = |snapshot: Option<&super::PublishedResolverSnapshot>| {
+        let replacements = if rewrite_import_specifiers {
+            snapshot
+                .map(|snapshot| {
+                    let ws = documents.host().workspace_read();
+                    compute_specifier_replacements(
+                        &snapshot.resolver,
+                        ws.as_ref(),
+                        canonical_id,
+                        &source,
+                        &module_references,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let owner_binding = snapshot
+            .filter(|snapshot| snapshot.ownership_ready)
             .map(|snapshot| {
-                let ws = documents.host().workspace_read();
-                compute_specifier_replacements(
+                crate::provider_sync::current_owner_binding_for_source(
                     &snapshot.resolver,
-                    ws.as_ref(),
                     canonical_id,
-                    &source,
-                    &module_references,
                 )
             })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+            .unwrap_or(crate::provider_sync::ProviderOwnerBinding::Unresolved);
+        (replacements, owner_binding)
     };
+
+    let (replacements, delivered_owner_binding) = derive_projection(snapshot);
     documents.refresh_self_file_rewrites(uri, &replacements);
 
     let rewritten = apply_specifier_replacements(&source, &replacements);
@@ -600,11 +647,6 @@ pub(crate) async fn sync_self_file_shadow_state(
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ..Default::default()
         });
-    // Bootstrap UNRESOLVED open-document state — force `Unresolved` so a stale
-    // `Owned` binding from a prior committed state is never re-committed here
-    // (mirrors the carrier unresolved-sync discipline).
-    state.owner_binding = crate::provider_sync::ProviderOwnerBinding::Unresolved;
-
     let needs_open =
         state.shadow_path.as_deref() != Some(canonical_id) || !state.shadow_background_loaded;
     let result = if needs_open {
@@ -638,14 +680,98 @@ pub(crate) async fn sync_self_file_shadow_state(
                     source_canonical: canonical_id.to_string(),
                     provider_content: std::sync::Arc::from(built.content.as_str()),
                     source_map,
-                    carrier_source: source,
+                    carrier_source: std::sync::Arc::clone(&source),
                     map_hash,
                     project_owner: None,
                     regen_key: None,
                     engine_recheck: None,
                 });
             state.shadow_path = Some(canonical_id.to_string());
-            state.shadow_background_loaded = true;
+
+            // SUPERSESSION GATE. Both facts above were derived BEFORE the provider
+            // await, so a workspace publish landing inside that window makes them
+            // describe a projection the resolver no longer produces. Re-derive
+            // against the snapshot published NOW and claim the delivery only if
+            // the delivered bytes and owner are still the ones it would produce.
+            //
+            // The ALIAS case is why an owner check alone is not enough: an alias
+            // repointed from carrier A to B leaves the owner key AND the source
+            // hash unchanged, so a state that stamped only those would read as a
+            // live, current, owner-matched closure over a buffer still importing
+            // A — the frontier serving project-wide references and rename from a
+            // stale projection. That is strictly worse than refusing.
+            //
+            // Comparing the DELIVERED derivation (never adopting the new one)
+            // keeps the committed state a description of what this call actually
+            // sent. Equality — not a snapshot generation — is the test, so an
+            // unrelated config churn cannot starve a slow load: a publish that
+            // does not change THIS file's projection still commits.
+            //
+            // SCOPE, both directions. This NARROWS the window; it does not close
+            // it structurally the way the carrier path's
+            // `CarrierTransactionCoordinator::admit_owned` does — that one holds
+            // the barrier entry guard across its epoch check and
+            // compare-and-swaps the commit stamp under the map entry, refusing
+            // rather than overwriting, whereas `commit_sync_transition` is a bare
+            // `states.insert` and the re-derivation below is a value comparison
+            // taken just before it. Against the three peer shadow writers
+            // (`workspace_scanner`, `background_drain`, `import_publication`) it
+            // runs the other way: none of them re-derives anything after its own
+            // provider await, so their exposure spans the whole await and this
+            // one's is strictly narrower. Same race class, three exposures.
+            //
+            // A publish landing AFTER the commit is a separate hole this gate
+            // does not claim to cover, and it predates the gate: currency keys on
+            // the source hash alone, so nothing re-validates a written claim, and
+            // the same live/current/owner-matched state ends up over a superseded
+            // rewrite with no race at all. Closing that needs publish-side
+            // invalidation of shadow witnesses across all four writers.
+            let (current_replacements, current_owner_binding) =
+                derive_projection(published_snapshot().as_ref());
+            let superseded = current_owner_binding != delivered_owner_binding
+                || apply_specifier_replacements(&source, &current_replacements) != rewritten;
+            if superseded {
+                // Liveness only: the buffer IS open, but its projection is no
+                // longer the current one, so nothing may read it as a current,
+                // owner-matched delivery, and the frontier refuses rather than
+                // answering from a stale projection.
+                //
+                // NOTHING RE-DRIVES THIS SYNC on the publish that superseded it.
+                // The Shadow surface was recorded ABOVE, before this gate, so
+                // `ensure_current_file_synced` captures it and returns without
+                // re-syncing; the barrel publication skips on the liveness flag
+                // this branch is about to set; and the debounced coordinator is
+                // signalled only from `did_open`/`did_change`. What clears the
+                // refusal is a fresh open or edit of THIS document, or the
+                // config-change rescan (`trigger_registry_rebuild`), whose
+                // non-carrier pass re-delivers unconditionally and runs for tsgo
+                // — the provider whose closure this gate protects. So the closed
+                // state is bounded by the next such event rather than
+                // self-healing, and a bounded refusal still beats a wrong
+                // project-wide answer.
+                tracing::debug!(
+                    "self-file shadow sync superseded during delivery: {canonical_id} \
+                     stays uncommitted as a current delivery"
+                );
+                state.shadow_background_loaded = true;
+                state.owner_binding = crate::provider_sync::ProviderOwnerBinding::Unresolved;
+                state.shadow_delivered_source_hash = None;
+                crate::provider_sync::commit_sync_transition(
+                    provider_sync_states,
+                    canonical_id,
+                    state,
+                );
+                return true;
+            }
+
+            // The rewritten buffer WAS delivered here, built from exactly these
+            // source bytes under this owner, so the committed state records both
+            // facts — liveness AND currency. Setting liveness alone leaves a
+            // delivered buffer reading as undelivered to every consumer of the
+            // committed state, and no other leg can correct it: the barrel
+            // re-publication skips an already-live shadow.
+            state.owner_binding = delivered_owner_binding;
+            state.mark_shadow_delivered(&source);
             crate::provider_sync::commit_sync_transition(provider_sync_states, canonical_id, state);
             true
         }

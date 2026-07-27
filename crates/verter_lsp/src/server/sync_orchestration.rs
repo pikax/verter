@@ -1724,9 +1724,9 @@ impl VerterLanguageServer {
     }
 
     /// Sync an OPEN self-file document's provider buffer to the provider as
-    /// UNRESOLVED open-document state, keyed at the document's OWN canonical
+    /// open-document Shadow state, keyed at the document's OWN canonical
     /// path (the Shadow provider path), so it is QUERYABLE before resolver
-    /// ownership is ready.
+    /// ownership is ready (and stays owner-bound once it is).
     ///
     /// Mirrors [`Self::sync_carrier_ide_unresolved`] but for a SELF-FILE
     /// document (a Svelte rune module OR a plain TS-family script): the
@@ -1754,7 +1754,9 @@ impl VerterLanguageServer {
             &self.documents,
             sync,
             &self.provider_sync_states,
-            self.published_resolver().as_ref(),
+            // Re-readable, not a captured borrow: the sync revalidates the
+            // published snapshot AFTER its provider await.
+            &|| self.published_resolver(),
             uri,
             &canonical_id,
             &file_language,

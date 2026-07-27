@@ -340,7 +340,9 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         return;
     };
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
-    let Some(snapshot) = ({
+    // Re-readable: the self-file sync below revalidates the published snapshot
+    // AFTER its provider await, so it needs the accessor, not one capture.
+    let published_snapshot = || {
         let ws = deps.vfs_workspace.read();
         ws.as_ref().and_then(|ws| {
             let published = ws.load_published()?;
@@ -349,7 +351,8 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 ownership_ready: published.ownership_ready,
             })
         })
-    }) else {
+    };
+    let Some(snapshot) = published_snapshot() else {
         tracing::debug!(
             "sync_coordinator: deferring sync without resolver snapshot {canonical_id}"
         );
@@ -375,7 +378,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 &deps.documents,
                 project_sync,
                 &deps.provider_sync_states,
-                Some(&snapshot),
+                &published_snapshot,
                 &uri,
                 canonical_id,
                 &file_language,

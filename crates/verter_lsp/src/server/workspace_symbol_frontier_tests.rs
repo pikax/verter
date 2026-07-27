@@ -10,6 +10,14 @@
 //! route with a scripted provider: the child's declaration must fail CLOSED
 //! while its API companion is unopened, and must include the parent's usage
 //! once the import-dependency publication has delivered it.
+//!
+//! The closure's other arm is the rewritten BARREL shadow. Its demand is
+//! satisfied by whichever leg delivered the buffer, so every writer of one must
+//! record the delivery it performed — including the open-document own-path sync,
+//! which is what runs when a user simply opens the barrel `.ts` in the editor.
+//! A writer that under-reports strands the closure permanently (the barrel
+//! re-publication leg skips an already-live shadow), collapsing project-wide
+//! references and rename to nothing for the rest of the session.
 
 use std::sync::Arc;
 
@@ -34,6 +42,16 @@ const PARENT_RENAMED_SOURCE: &str = "<script setup lang=\"ts\">\nimport ZChild f
 /// The child after a template TEXT edit — no macro and no root-element change,
 /// so the public surface (props + the root's inherited attrs) is UNCHANGED.
 const CHILD_TEMPLATE_EDIT_SOURCE: &str = "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>{{ title }} edited</div></template>\n";
+/// A barrel that RE-EXPORTS the carrier: its `export … from './ZChild.vue'`
+/// specifier is rewritten for the provider, so the barrel reaches TSGO only as
+/// a delivered SHADOW buffer.
+const BARREL_SOURCE: &str = "export { default as ZChild } from './ZChild.vue'\n";
+/// The parent reaching the child THROUGH the barrel.
+const BARREL_PARENT_SOURCE: &str = "<script setup lang=\"ts\">\nimport { ZChild } from './barrel'\nconst parentHeading = 'x'\n</script>\n<template>\n  <ZChild :title=\"parentHeading\" />\n</template>\n";
+/// A barrel re-exporting through an ALIASED specifier: the file the rewrite
+/// points at is a resolver decision, so republishing the alias moves the
+/// delivered projection while the barrel's own bytes never change.
+const ALIAS_BARREL_SOURCE: &str = "export { default as ZChild } from '@dep/child'\n";
 
 struct FrontierFixture {
     _temp: tempfile::TempDir,
@@ -64,12 +82,27 @@ impl FrontierFixture {
 /// (`membership.materialized_files`), so the expected-source set is the whole
 /// project rather than only the file under the cursor.
 async fn frontier_fixture() -> FrontierFixture {
+    frontier_fixture_with(PARENT_SOURCE, &[], &[]).await
+}
+
+/// [`frontier_fixture`] with an alternate parent source and additional
+/// non-carrier files written to disk (a barrel, for example). The extra files
+/// are NOT opened as documents — they reach the provider only through the
+/// background publication, exactly as they do in an editor session.
+async fn frontier_fixture_with(
+    parent_source: &str,
+    extra_files: &[(&str, &str)],
+    paths: &[(&str, &str)],
+) -> FrontierFixture {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("workspace dir");
     std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
     std::fs::write(workspace.join("src/ZChild.vue"), CHILD_SOURCE).expect("write child");
-    std::fs::write(workspace.join("src/AParent.vue"), PARENT_SOURCE).expect("write parent");
+    std::fs::write(workspace.join("src/AParent.vue"), parent_source).expect("write parent");
+    for (relative_path, contents) in extra_files {
+        std::fs::write(workspace.join(relative_path), contents).expect("write extra file");
+    }
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -108,12 +141,12 @@ async fn frontier_fixture() -> FrontierFixture {
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),
     )]);
-    install_materialized_workspace(server, &workspace_id);
+    install_materialized_workspace_with_paths(server, &workspace_id, paths);
 
     let mut semantic_ready = server.documents.subscribe_semantic_ready();
     for (relative_path, source) in [
         ("src/ZChild.vue", CHILD_SOURCE),
-        ("src/AParent.vue", PARENT_SOURCE),
+        ("src/AParent.vue", parent_source),
     ] {
         let canonical_id = format!("{workspace_id}/{relative_path}");
         let uri = crate::uri::path_to_file_uri(&canonical_id).expect("file uri");
@@ -141,8 +174,15 @@ async fn frontier_fixture() -> FrontierFixture {
     }
 }
 
-/// Publish a snapshot whose ONE configured project materializes both carriers.
-fn install_materialized_workspace(server: &VerterLanguageServer, root: &str) {
+/// Publish a snapshot whose ONE configured project materializes both carriers,
+/// with `compilerOptions.paths` on that project. Re-publishing with a DIFFERENT
+/// mapping under the SAME `tsconfig_path` is how a test moves a specifier's
+/// resolution without moving the owner key.
+fn install_materialized_workspace_with_paths(
+    server: &VerterLanguageServer,
+    root: &str,
+    paths: &[(&str, &str)],
+) {
     let vfs_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
         verter_workspace::FilesystemOptions::default(),
     ));
@@ -196,13 +236,22 @@ fn install_materialized_workspace(server: &VerterLanguageServer, root: &str) {
             },
         },
     ];
-    let resolver = verter_workspace::ProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
-            root.to_string(),
-            root.to_string(),
-            Some(tsconfig.clone()),
-        ),
-    ]);
+    let mut project_config = crate::project_resolver::IdeProjectConfig::new(
+        root.to_string(),
+        root.to_string(),
+        Some(tsconfig.clone()),
+    );
+    if !paths.is_empty() {
+        project_config.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
+            base_url: Some(root.to_string()),
+            paths: paths
+                .iter()
+                .map(|(find, target)| (find.to_string(), vec![target.to_string()]))
+                .collect(),
+            ..Default::default()
+        };
+    }
+    let resolver = verter_workspace::ProjectResolver::new(vec![project_config]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
@@ -600,6 +649,392 @@ async fn an_api_neutral_edit_keeps_the_frontier_ready_without_republication() {
             .any(|location| location.uri == parent_uri && location.range == expected_usage),
         "the immediately-served answer must still include the parent's usage \
          ({expected_usage:?}): {locations:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// Open the barrel `.ts` in the editor exactly as `did_open` does: the plain
+/// TS-family script is a SELF-FILE document, so the ingress routes it through
+/// the own-path shadow sync rather than any carrier path.
+async fn open_barrel_document(fixture: &FrontierFixture, relative_path: &str, source: &str) {
+    let uri = fixture.uri(relative_path);
+    super::super::lifecycle::handle_did_open(
+        fixture.server(),
+        tower_lsp_server::ls_types::DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri,
+                language_id: "typescript".to_string(),
+                version: 1,
+                text: source.to_string(),
+            },
+        },
+    )
+    .await;
+}
+
+/// Positive control for the barrel shape: a parent that reaches the child
+/// THROUGH a re-exporting barrel serves references once the publication has
+/// delivered both the child's API companion and the barrel's rewritten shadow.
+/// Without this half the retraction test below could pass against a frontier
+/// that never serves this shape at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn references_serve_through_a_barrel_reexport_after_publication() {
+    let fixture = frontier_fixture_with(
+        BARREL_PARENT_SOURCE,
+        &[("src/barrel.ts", BARREL_SOURCE)],
+        &[],
+    )
+    .await;
+    let server = fixture.server();
+    let child_uri = fixture.uri("src/ZChild.vue");
+    let parent_uri = fixture.uri("src/AParent.vue");
+
+    server.ensure_current_file_synced(&parent_uri).await;
+    server.ensure_current_file_synced(&child_uri).await;
+    server
+        .publish_import_dependencies_settled(&parent_uri)
+        .await;
+
+    let barrel_canonical = format!("{}/src/barrel.ts", fixture.workspace_id);
+    let delivered = server
+        .provider_sync_state_for_source(&barrel_canonical)
+        .expect("the publication commits the re-exporting barrel's shadow state");
+    let barrel_source = server
+        .documents
+        .host()
+        .get_source(&barrel_canonical)
+        .expect("the barrel source is loaded");
+    assert!(
+        delivered.shadow_is_live_and_current(&barrel_source),
+        "precondition: the publication delivered the barrel's rewritten shadow \
+         from these exact bytes: {delivered:?}"
+    );
+
+    let position = position_of(server, &child_uri, "title: string", 0);
+    let expected_usage = seed_parent_usage(&fixture, &child_uri, position).await;
+
+    let locations = references_at(server, &child_uri, position)
+        .await
+        .expect("references must serve once the barrel closure is delivered");
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == parent_uri && location.range == expected_usage),
+        "the served answer must include the parent's `:title` usage range-exact \
+         ({expected_usage:?}): {locations:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// OPENING the barrel in the editor must not RETRACT the project's references
+/// surface.
+///
+/// The own-path shadow sync delivers the same rewritten projection the
+/// publication delivers, so the provider still holds a resolvable barrel. It
+/// must therefore commit that delivery as it happened — the owner it resolved
+/// and the source it was built from — and not a state that reads as
+/// owner-unresolved with no delivery at all. A state that under-reports its own
+/// delivery fails the tsgo carrier-import closure permanently: the barrel
+/// re-publication leg skips an already-live shadow, so nothing re-delivers it,
+/// and every references/rename answer for every carrier in the project collapses
+/// to nothing for the rest of the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_the_barrel_document_keeps_the_project_references_surface() {
+    let fixture = frontier_fixture_with(
+        BARREL_PARENT_SOURCE,
+        &[("src/barrel.ts", BARREL_SOURCE)],
+        &[],
+    )
+    .await;
+    let server = fixture.server();
+    let child_uri = fixture.uri("src/ZChild.vue");
+    let parent_uri = fixture.uri("src/AParent.vue");
+
+    server.ensure_current_file_synced(&parent_uri).await;
+    server.ensure_current_file_synced(&child_uri).await;
+    server
+        .publish_import_dependencies_settled(&parent_uri)
+        .await;
+
+    // The user opens the barrel — the ONLY new event.
+    open_barrel_document(&fixture, "src/barrel.ts", BARREL_SOURCE).await;
+
+    let position = position_of(server, &child_uri, "title: string", 0);
+    let expected_usage = seed_parent_usage(&fixture, &child_uri, position).await;
+
+    let locations = references_at(server, &child_uri, position)
+        .await
+        .expect("opening the barrel must not retract the references surface");
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == parent_uri && location.range == expected_usage),
+        "the served answer must still include the parent's `:title` usage \
+         ({expected_usage:?}): {locations:?}"
+    );
+
+    assert_barrel_state_witnesses_its_delivery(&fixture, "src/barrel.ts");
+
+    fixture.shutdown().await;
+}
+
+/// The other arrival order, and the one an editor session actually produces:
+/// the barrel is OPEN BEFORE any publication delivers it. The open path is then
+/// the only thing that ever delivers the barrel's shadow — the publication's
+/// barrel leg skips an already-live shadow — so if the open records no delivery
+/// the closure has nothing left to wait for and refuses every references answer
+/// in the project forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_the_barrel_before_publication_still_serves_project_references() {
+    let fixture = frontier_fixture_with(
+        BARREL_PARENT_SOURCE,
+        &[("src/barrel.ts", BARREL_SOURCE)],
+        &[],
+    )
+    .await;
+    let server = fixture.server();
+    let child_uri = fixture.uri("src/ZChild.vue");
+    let parent_uri = fixture.uri("src/AParent.vue");
+
+    server.ensure_current_file_synced(&parent_uri).await;
+    server.ensure_current_file_synced(&child_uri).await;
+
+    // The barrel is opened FIRST, so its shadow state is created by the
+    // open-document path rather than cloned from a publication commit.
+    open_barrel_document(&fixture, "src/barrel.ts", BARREL_SOURCE).await;
+    server
+        .publish_import_dependencies_settled(&parent_uri)
+        .await;
+
+    let position = position_of(server, &child_uri, "title: string", 0);
+    let expected_usage = seed_parent_usage(&fixture, &child_uri, position).await;
+
+    let locations = references_at(server, &child_uri, position)
+        .await
+        .expect("a barrel opened before publication must not retract references");
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == parent_uri && location.range == expected_usage),
+        "the served answer must include the parent's `:title` usage \
+         ({expected_usage:?}): {locations:?}"
+    );
+
+    assert_barrel_state_witnesses_its_delivery(&fixture, "src/barrel.ts");
+
+    fixture.shutdown().await;
+}
+
+/// The committed barrel state must describe the delivery that actually
+/// happened: the buffer is live, it was built from these exact source bytes,
+/// and it is bound to the owner the resolver reports.
+fn assert_barrel_state_witnesses_its_delivery(fixture: &FrontierFixture, relative_path: &str) {
+    let server = fixture.server();
+    let canonical = format!("{}/{relative_path}", fixture.workspace_id);
+    let state = server
+        .provider_sync_state_for_source(&canonical)
+        .expect("the barrel keeps a committed provider state");
+    let source = server
+        .documents
+        .host()
+        .get_source(&canonical)
+        .expect("the barrel source is loaded");
+    assert!(
+        state.shadow_background_loaded,
+        "the barrel's shadow buffer must be live: {state:?}"
+    );
+    assert!(
+        state.shadow_is_live_and_current(&source),
+        "the delivered buffer was built from these exact bytes, so the committed \
+         state must witness that delivery: {state:?}"
+    );
+    assert_eq!(
+        state.owner_binding.owner_key(),
+        Some(format!("{}/tsconfig.json", fixture.workspace_id).as_str()),
+        "the committed state must carry the owner the resolver currently reports, \
+         never a downgrade of an owned non-carrier to unresolved: {state:?}"
+    );
+}
+
+/// An aliased-barrel fixture: `@dep/child` resolves to whichever carrier the
+/// PUBLISHED snapshot maps it to, so republishing the mapping under the SAME
+/// `tsconfig_path` moves the delivered rewrite without moving the owner key or
+/// the barrel's source bytes.
+async fn alias_barrel_fixture(alias_target: &str) -> FrontierFixture {
+    frontier_fixture_with(
+        BARREL_PARENT_SOURCE,
+        &[
+            ("src/barrel.ts", ALIAS_BARREL_SOURCE),
+            ("src/ZOther.vue", CHILD_SOURCE),
+        ],
+        &[("@dep/child", alias_target)],
+    )
+    .await
+}
+
+/// Re-sync the OPEN barrel through the production self-file path while a
+/// workspace publish lands INSIDE the provider await, and return the state
+/// committed for it. `supersede` runs once the provider call has been entered
+/// and before it is allowed to return.
+async fn resync_barrel_with_publish_during_delivery(
+    fixture: &FrontierFixture,
+    supersede: impl FnOnce(),
+) -> crate::provider_sync::ProviderSyncState {
+    let server = fixture.server();
+    let barrel_uri = fixture.uri("src/barrel.ts");
+    let barrel_canonical = format!("{}/src/barrel.ts", fixture.workspace_id);
+
+    // The barrel's buffer is already live at its own path, so this re-sync takes
+    // the UPDATE verb — the seam that can be paused mid-flight.
+    let (entered, release) = fixture.provider.block_update_file(&barrel_canonical);
+    let synced = {
+        let deliver = server.sync_self_file_shadow_unresolved(&barrel_uri);
+        let publish_mid_flight = async {
+            entered.notified().await;
+            supersede();
+            release.notify_one();
+        };
+        let (synced, ()) = tokio::join!(deliver, publish_mid_flight);
+        synced
+    };
+    assert!(
+        synced,
+        "the provider delivery itself succeeds — supersession is about what may be CLAIMED for it"
+    );
+
+    server
+        .provider_sync_state_for_source(&barrel_canonical)
+        .expect("the barrel keeps a committed provider state")
+}
+
+/// Control for the test below: the SAME paused delivery with no publish landing
+/// inside it commits the delivery normally. Without this, a supersession check
+/// that refused unconditionally would look correct.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_delivery_with_no_publish_still_claims_its_shadow() {
+    let fixture = alias_barrel_fixture("src/ZChild.vue").await;
+    let server = fixture.server();
+    server
+        .ensure_current_file_synced(&fixture.uri("src/AParent.vue"))
+        .await;
+    open_barrel_document(&fixture, "src/barrel.ts", ALIAS_BARREL_SOURCE).await;
+
+    let state = resync_barrel_with_publish_during_delivery(&fixture, || {}).await;
+
+    let barrel_source = server
+        .documents
+        .host()
+        .get_source(&format!("{}/src/barrel.ts", fixture.workspace_id))
+        .expect("the barrel source is loaded");
+    assert!(
+        state.shadow_is_live_and_current(&barrel_source),
+        "an undisturbed delivery must still be claimed: {state:?}"
+    );
+    assert_eq!(
+        state.owner_binding.owner_key(),
+        Some(format!("{}/tsconfig.json", fixture.workspace_id).as_str()),
+        "an undisturbed delivery must still carry its owner: {state:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// A snapshot published INSIDE the provider await must not be claimed as the
+/// delivery that was made under the previous one.
+///
+/// This is the shape an owner check alone cannot see: the alias is repointed
+/// from one carrier to another, so the owner key is unchanged and the barrel's
+/// source bytes are unchanged, and only the rewrite baked into the delivered
+/// buffer moved. A state stamped from the pre-await derivation would then read
+/// to the carrier-import closure as a LIVE, CURRENT, OWNER-MATCHED shadow while
+/// the provider's barrel still imports the superseded target — the frontier
+/// answering project-wide references and rename over a stale projection, which
+/// is worse than the refusal it replaced. The delivery is claimed only if the
+/// snapshot published at commit time still produces the bytes that were sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_published_during_delivery_is_never_claimed_as_that_delivery() {
+    let fixture = alias_barrel_fixture("src/ZChild.vue").await;
+    let server = fixture.server();
+    server
+        .ensure_current_file_synced(&fixture.uri("src/AParent.vue"))
+        .await;
+    open_barrel_document(&fixture, "src/barrel.ts", ALIAS_BARREL_SOURCE).await;
+
+    let workspace_id = fixture.workspace_id.clone();
+    let state = resync_barrel_with_publish_during_delivery(&fixture, || {
+        // Same tsconfig, same barrel bytes — only where `@dep/child` lands.
+        install_materialized_workspace_with_paths(
+            server,
+            &workspace_id,
+            &[("@dep/child", "src/ZOther.vue")],
+        );
+    })
+    .await;
+
+    assert!(
+        state.shadow_background_loaded,
+        "liveness is a true statement — that buffer really is open: {state:?}"
+    );
+    assert_eq!(
+        state.shadow_delivered_source_hash, None,
+        "the delivered rewrite is not the one the published snapshot now produces, \
+         so no currency may be claimed for it: {state:?}"
+    );
+    assert_eq!(
+        state.owner_binding.owner_key(),
+        None,
+        "and no owner-matched delivery may be claimed either, so the closure \
+         refuses instead of serving from the superseded projection: {state:?}"
+    );
+
+    // Drive the sync BY HAND under the now-published snapshot: it delivers the
+    // NEW target and claims it. That is an EXIT CONDITION, not a scheduled
+    // recovery — no publish-driven leg re-drives this sync in production. The
+    // Shadow surface recorded before the gate makes
+    // `ensure_current_file_synced` return early, the barrel publication skips on
+    // the liveness flag the refusal sets, and the coordinator is signalled only
+    // from `did_open`/`did_change`; a real session therefore clears the refusal
+    // on the next open/edit of this document or on a config-change rescan, not
+    // off the publish itself. What this call proves is the narrower thing the
+    // assertions below need: the refused state is RECLAIMABLE rather than
+    // poisoned, and the mid-flight publish genuinely moved the rewrite — a no-op
+    // publish would deliver the same bytes and could never have discriminated
+    // anything above.
+    assert!(
+        server
+            .sync_self_file_shadow_unresolved(&fixture.uri("src/barrel.ts"))
+            .await,
+        "a sync under the live snapshot re-delivers the barrel"
+    );
+    let delivered = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&format!("{workspace_id}/src/barrel.ts"))
+        .expect("the re-delivery records a Shadow surface");
+    assert!(
+        delivered.provider_content.contains("ZOther"),
+        "the mid-flight publish genuinely repointed the rewrite; the re-delivery \
+         must carry the NEW target: {:?}",
+        delivered.provider_content
+    );
+    let recovered = server
+        .provider_sync_state_for_source(&format!("{workspace_id}/src/barrel.ts"))
+        .expect("the barrel keeps a committed provider state");
+    let barrel_source = server
+        .documents
+        .host()
+        .get_source(&format!("{workspace_id}/src/barrel.ts"))
+        .expect("the barrel source is loaded");
+    assert!(
+        recovered.shadow_is_live_and_current(&barrel_source)
+            && recovered.owner_binding.owner_key()
+                == Some(format!("{workspace_id}/tsconfig.json").as_str()),
+        "a sync under the live snapshot reclaims the barrel, so the refusal \
+         leaves no poisoned state — production reaches this through a fresh \
+         open/edit or a config-change rescan, never off the publish that caused \
+         it: {recovered:?}"
     );
 
     fixture.shutdown().await;
