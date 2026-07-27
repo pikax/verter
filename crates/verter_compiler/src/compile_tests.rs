@@ -2192,14 +2192,39 @@ const items = ref([1, 2, 3])
 
 // ==================== Multi-statement event handlers ====================
 
+/// A multi-statement handler must be wrapped in `$event => { … }` AND every
+/// statement in the list must resolve against the setup bindings.
+///
+/// The `<script setup>` block is load-bearing. A binding-less fixture gives the
+/// compiler nothing to prefix, so a wrapping-only assertion is structurally
+/// incapable of observing whether the statements after the first `;` were
+/// resolved or copied through verbatim — which is exactly how a four-month-old
+/// truncating parse survived under this test's name.
 #[test]
-fn multi_statement_event_handler_wrapped() {
+fn multi_statement_event_handler_wrapped_and_every_statement_resolved() {
     let code = compile_and_validate_template(
-        r#"<template><button @click="emit('x'); doStuff();">go</button></template>"#,
+        r#"<script setup>
+const emit = defineEmits(['x'])
+function doStuff() {}
+</script>
+<template><button @click="emit('x'); doStuff();">go</button></template>"#,
     );
     assert!(
         code.contains("$event => {"),
         "Multi-statement handler should be wrapped in $event => {{ ... }}\n{}",
+        code
+    );
+    assert!(
+        code.contains("$event => {$setup.emit('x'); $setup.doStuff();}"),
+        "every statement in the list must resolve, not just the first, got:\n{}",
+        code
+    );
+    // Negative: the truncating parse resolved statement 1 and copied statement 2
+    // through verbatim. `doStuff` is a setup-scope binding, so an unprefixed call
+    // reads an undeclared global and fails silently at runtime.
+    assert!(
+        !code.contains("; doStuff()"),
+        "the unresolved second statement must not survive, got:\n{}",
         code
     );
 }
@@ -2478,15 +2503,37 @@ fn vapor_component_event_with_hyphen_camelcased() {
     );
 }
 
+/// Vapor must wrap a multi-statement handler in a block AND resolve every
+/// statement in it.
+///
+/// As above, the `<script setup>` bindings are load-bearing: without them the
+/// wrapping assertion alone cannot distinguish a fully resolved handler from one
+/// truncated at the first `;`.
 #[test]
-fn vapor_event_with_multi_statement_handler() {
-    // Multi-statement handlers with semicolons must be wrapped in { }
+fn vapor_event_with_multi_statement_handler_resolves_every_statement() {
     let code = compile_and_validate_vapor_template(
-        r#"<template><MyComp @click="a = 1; b = 2" /></template>"#,
+        r#"<script setup>
+import { ref } from 'vue'
+const a = ref(0)
+const b = ref(0)
+</script>
+<template><MyComp @click="a = 1; b = 2" /></template>"#,
     );
     assert!(
         code.contains("() => {"),
         "Multi-statement handler should be wrapped in block\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => { _ctx.a = 1; _ctx.b = 2 }"),
+        "both statements must resolve, not just the first, got:\n{}",
+        code
+    );
+    // Negative: `b` is a setup-scope `const` in the generated module, so a bare
+    // `b = 2` is a build-time const reassignment (rolldown ILLEGAL_REASSIGNMENT).
+    assert!(
+        !code.contains("; b = 2"),
+        "the unresolved second statement must not survive, got:\n{}",
         code
     );
 }
