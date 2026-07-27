@@ -331,8 +331,56 @@ fn fs_paths_equal_under_folds_iff_case_insensitive() {
     // Slash normalization is unconditional (backslash vs forward-slash, any host).
     assert!(fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/A.ts", true));
     assert!(fs_paths_equal_under(r"C:\ws\A.ts", "C:/ws/A.ts", false));
+    // The DRIVE fold is unconditional too — `canonicalize_path` lowercases the drive
+    // letter on every host, so a drive-case divergence is the same file even under
+    // the case-SENSITIVE policy. Slash-only normalization made this pair compare
+    // unequal on Linux while `InjectedPathKey` keyed it equal.
+    assert!(fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/A.ts", false));
+    // Extended-length prefix and trailing slash are likewise folded on every host.
+    assert!(fs_paths_equal_under(r"\\?\C:\ws\A.ts", "c:/ws/A.ts", false));
+    assert!(fs_paths_equal_under("/ws/src/", "/ws/src", false));
     // Distinct basenames never match, regardless of the case policy.
     assert!(!fs_paths_equal_under("/ws/src/A.ts", "/ws/src/B.ts", true));
+    // NEGATIVE: canonicalizing must not make the case-sensitive branch permissive —
+    // a non-drive case variant stays DISTINCT.
+    assert!(!fs_paths_equal_under("/ws/src/A.ts", "/ws/src/a.ts", false));
+    assert!(!fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/a.ts", false));
+}
+
+/// The agreement invariant, proven on EVERY host under BOTH policy values:
+/// `InjectedPathKey` equality and `fs_paths_equal` are the same relation, because
+/// both derive from the one shared `canonicalize_path` normalization.
+///
+/// Discriminating: with the pre-fix slash-only comparison core, every drive-case /
+/// extended-prefix / trailing-slash row below disagrees under `case_insensitive =
+/// false` (the key folds, the predicate does not). The case-insensitive branch
+/// agreed by accident — `eq_ignore_ascii_case` folds the drive letter too — which is
+/// exactly why this class of bug reached CI as a Linux-only failure.
+#[test]
+fn key_equality_and_fs_paths_equal_are_the_same_relation_under_both_policies() {
+    // (left, right) pairs spanning every normalization axis plus genuine distinctness.
+    let pairs = [
+        (r"C:\proj\Foo.vue.tsx", "c:/proj/Foo.vue.tsx"),
+        (r"C:\ws\A.ts", "c:/ws/A.ts"),
+        (r"\\?\C:\ws\A.ts", "c:/ws/A.ts"),
+        ("/ws/src/", "/ws/src"),
+        ("/ws/src/A.ts", "/ws/src/a.ts"),
+        ("c:/proj/FOO.vue.tsx", "c:/proj/foo.vue.tsx"),
+        ("/ws/src/A.ts", "/ws/src/B.ts"),
+        ("c:/a/Foo.vue.tsx", "d:/a/Foo.vue.tsx"),
+    ];
+    for case_insensitive in [true, false] {
+        for (left, right) in pairs {
+            let keys_equal = injected_key_under(left, case_insensitive)
+                == injected_key_under(right, case_insensitive);
+            let paths_equal = fs_paths_equal_under(left, right, case_insensitive);
+            assert_eq!(
+                keys_equal, paths_equal,
+                "InjectedPathKey equality must equal fs_paths_equal for \
+                 ({left:?}, {right:?}) under case_insensitive={case_insensitive}"
+            );
+        }
+    }
 }
 
 /// Discriminating macOS-membership witness, runnable on EVERY host: the bug was the

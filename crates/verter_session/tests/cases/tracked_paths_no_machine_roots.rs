@@ -176,6 +176,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// The 64 fixed machine/user/session/orchestration markers, each built
 /// from split fragments via `concat!` so the CONST INITIALIZER (the
@@ -286,18 +287,71 @@ const MACHINE_MARKERS: &[&str] = &[
 const SELF_FILE_REPO_PATH: &str =
     "crates/verter_session/tests/cases/tracked_paths_no_machine_roots.rs";
 
+/// Per-first-byte candidate lists over [`MACHINE_MARKERS`]: `starts[b]` holds
+/// the marker indices whose first byte is `b`, ascending. Built once per
+/// process.
+///
+/// A zero-length marker has no first byte, so it is indexed nowhere and can
+/// never match — the same explicit guarantee the previous `!needle.is_empty()`
+/// check gave, now structural rather than a per-comparison test.
+fn marker_starts() -> &'static [Vec<u16>; 256] {
+    static STARTS: OnceLock<[Vec<u16>; 256]> = OnceLock::new();
+    STARTS.get_or_init(|| {
+        let mut starts: [Vec<u16>; 256] = std::array::from_fn(|_| Vec::new());
+        for (idx, marker) in MACHINE_MARKERS.iter().enumerate() {
+            if let Some(&first) = marker.as_bytes().first() {
+                starts[first as usize].push(idx as u16);
+            }
+        }
+        starts
+    })
+}
+
 /// The single "do these RAW BYTES contain a marker" predicate — the one
 /// the TREE SCAN uses. Searches the file's raw bytes for each marker's
 /// bytes as a contiguous sub-slice, so a marker embedded in an otherwise
 /// non-UTF-8 / binary blob is still caught (every marker is pure ASCII).
 /// Returns the FIRST marker found, or `None`.
+///
+/// "First" is by [`MACHINE_MARKERS`] index, not by position in `content` —
+/// unchanged from the original `iter().find(...)` shape, and asserted by
+/// `machine_marker_first_hit_is_lowest_indexed_marker_not_earliest_position`.
+///
+/// ONE pass over `content` with a first-byte prefilter, rather than one full
+/// `windows()` pass per marker. The per-marker shape ran all
+/// `MACHINE_MARKERS.len()` passes to completion on every clean file (`find`
+/// short-circuits only on a hit, and the tree is clean by construction), which
+/// is ~6.6e9 window comparisons across ~98 MB of tracked content — enough to
+/// push this guard past the CI per-test timeout on a loaded 4-core runner.
 fn machine_marker_hit_bytes(content: &[u8]) -> Option<&'static str> {
-    MACHINE_MARKERS.iter().copied().find(|marker| {
-        let needle = marker.as_bytes();
-        // An empty marker would match everything; the set has none, but be
-        // explicit so a future empty literal cannot silently match.
-        !needle.is_empty() && content.windows(needle.len()).any(|w| w == needle)
-    })
+    let starts = marker_starts();
+    // The lowest MACHINE_MARKERS index seen so far. The scan continues past a
+    // hit because a lower-indexed marker may still appear later in `content`,
+    // which is what keeps the return value identical to the per-marker shape.
+    let mut best: Option<usize> = None;
+    for (pos, &byte) in content.iter().enumerate() {
+        let candidates = &starts[byte as usize];
+        if candidates.is_empty() {
+            continue;
+        }
+        let rest = &content[pos..];
+        for &candidate in candidates {
+            let candidate = candidate as usize;
+            // Already holding an equal-or-better (lower) index.
+            if best.is_some_and(|found| found <= candidate) {
+                continue;
+            }
+            let needle = MACHINE_MARKERS[candidate].as_bytes();
+            if rest.starts_with(needle) {
+                if candidate == 0 {
+                    // Index 0 is minimal; nothing later can beat it.
+                    return Some(MACHINE_MARKERS[0]);
+                }
+                best = Some(candidate);
+            }
+        }
+    }
+    best.map(|found| MACHINE_MARKERS[found])
 }
 
 /// The `&str` twin of [`machine_marker_hit_bytes`], used by the
@@ -386,8 +440,12 @@ fn tracked_files_contain_no_machine_specific_path_markers() {
     for rel in &paths {
         // Allowlist exactly one file by its EXACT repo-relative path: this
         // guard's own source. `git ls-files` emits forward slashes on all
-        // platforms; the `replace` is harmless insurance.
-        if rel.replace('\\', "/") == SELF_FILE_REPO_PATH {
+        // platforms; the `replace` is harmless insurance, so take it only on
+        // the paths that could possibly need it rather than allocating a
+        // `String` for every tracked path.
+        if rel == SELF_FILE_REPO_PATH
+            || (rel.contains('\\') && rel.replace('\\', "/") == SELF_FILE_REPO_PATH)
+        {
             continue;
         }
 
@@ -633,6 +691,69 @@ fn constructed_markers_equal_intended_bytes() {
     let posix_mnt_temp = MACHINE_MARKERS[61];
     assert_eq!(posix_mnt_temp, "/mnt/d/dev/temp/");
     assert_eq!(posix_mnt_temp.matches("temp").count(), 1);
+}
+
+/// The matcher reports the lowest-indexed [`MACHINE_MARKERS`] entry present in
+/// the content, NOT the one that happens to occur earliest in the bytes.
+///
+/// This pins the return-value contract the single-pass prefilter scan has to
+/// preserve. It is the discriminating check against the obvious "faster"
+/// rewrites: a leftmost-first multi-pattern searcher (e.g. Aho-Corasick) or any
+/// scan that returns on its first positional hit answers with the LATER-indexed
+/// marker here, because that marker is planted FIRST in the haystack.
+#[test]
+fn machine_marker_first_hit_is_lowest_indexed_marker_not_earliest_position() {
+    // Two markers that are not substrings of one another, planted with the
+    // HIGHER-indexed one first in the bytes.
+    let (low_idx, high_idx) = (0usize, MACHINE_MARKERS.len() - 1);
+    let low = MACHINE_MARKERS[low_idx];
+    let high = MACHINE_MARKERS[high_idx];
+    assert!(
+        !low.contains(high) && !high.contains(low),
+        "fixture needs two markers that do not contain each other: `{low}` / `{high}`"
+    );
+
+    let high_first = format!("lead {high} middle {low} tail");
+    assert_eq!(
+        machine_marker_hit(&high_first),
+        Some(low),
+        "the lowest-indexed marker wins even when planted later in the bytes"
+    );
+
+    // Order in the haystack must not change the answer.
+    let low_first = format!("lead {low} middle {high} tail");
+    assert_eq!(
+        machine_marker_hit(&low_first),
+        Some(low),
+        "the lowest-indexed marker wins when planted earlier too"
+    );
+
+    // A single higher-indexed marker on its own is still reported.
+    let only_high = format!("lead {high} tail");
+    assert_eq!(machine_marker_hit(&only_high), Some(high));
+}
+
+/// A marker straddling the very end of the content must not be reported, and a
+/// marker ending exactly at the end must be. Pins the bounds handling of the
+/// prefilter scan, whose candidate compare starts at a first-byte hit and so
+/// must tolerate a remainder shorter than the needle. Verified discriminating:
+/// against an unchecked `&rest[..needle.len()]` compare this panics with
+/// `range end index out of range` instead of returning `None`.
+#[test]
+fn machine_marker_truncated_at_end_of_content_is_not_a_hit() {
+    let marker = MACHINE_MARKERS[0];
+    let truncated = &marker[..marker.len() - 1];
+    assert_eq!(
+        machine_marker_hit(&format!("lead {truncated}")),
+        None,
+        "a marker cut short by the end of the content is not a hit"
+    );
+    // The full marker at the exact end IS a hit.
+    assert_eq!(
+        machine_marker_hit(&format!("lead {marker}")),
+        Some(marker),
+        "a marker ending exactly at the end of the content is a hit"
+    );
 }
 
 #[test]

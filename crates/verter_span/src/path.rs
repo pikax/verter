@@ -131,11 +131,21 @@ pub fn fs_paths_equal(a: &str, b: &str) -> bool {
 }
 
 /// The pure FS-identity comparison core, parameterized by the case-sensitivity bit
-/// so it is host-independent (and unit-testable on every platform). Slash-normalizes
-/// both sides, then folds ASCII case iff `case_insensitive`.
+/// so it is host-independent (and unit-testable on every platform). Applies the ONE
+/// shared normalization ([`canonicalize_path_cow`]), then folds ASCII case iff
+/// `case_insensitive`.
+///
+/// Normalizing through [`canonicalize_path_cow`] rather than an ad-hoc slash replace
+/// is what keeps this predicate in lockstep with [`InjectedPathKey`], which derives
+/// its key the same way. A partial normalization here (slash-only) made the two
+/// disagree on a case-SENSITIVE host for every input differing in drive case,
+/// extended-length prefix, or trailing slash: the unconditional drive fold lives in
+/// `canonicalize_path`, so `C:\ws\A.ts` and `c:/ws/A.ts` keyed equal while this
+/// predicate called them distinct. The case-insensitive branch masked it, which is
+/// why only Linux saw it.
 fn fs_paths_equal_under(a: &str, b: &str, case_insensitive: bool) -> bool {
-    let a = a.replace('\\', "/");
-    let b = b.replace('\\', "/");
+    let a = canonicalize_path_cow(a);
+    let b = canonicalize_path_cow(b);
     if case_insensitive {
         a.eq_ignore_ascii_case(&b)
     } else {

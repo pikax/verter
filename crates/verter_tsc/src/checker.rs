@@ -2440,15 +2440,21 @@ mod tests {
     const MOCK_LSP_HANDSHAKE_SH: &str = r#"
 for arg in "$@"; do
   if [ "$arg" = "--lsp" ]; then
+    # POSIX-portable carriage return. `$'\r'` is bash/ksh/zsh ANSI-C quoting, NOT
+    # POSIX: macOS `/bin/sh` is bash and expands it, Debian/Ubuntu `/bin/sh` is
+    # dash and does not — there the pattern stays the literal `$\r`, no CR is
+    # stripped, the blank header separator never compares empty, and this loop
+    # consumes the body as headers until the resolver's handshake timeout.
+    cr=$(printf '\r')
     while IFS= read -r line; do
-      line=${line%$'\r'}
+      line=${line%"$cr"}
       len=0
       while [ -n "$line" ]; do
         case "$line" in
           [Cc]ontent-[Ll]ength:*) len=$(printf '%s' "${line#*:}" | tr -d ' ') ;;
         esac
         IFS= read -r line || exit 0
-        line=${line%$'\r'}
+        line=${line%"$cr"}
       done
       [ "$len" -gt 0 ] || continue
       body=$(dd bs=1 count="$len" 2>/dev/null)
