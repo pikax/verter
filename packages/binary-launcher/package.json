@@ -1,6 +1,6 @@
 {
   "name": "@verter/binary-launcher",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Shared platform resolution for Verter's per-platform binary packages",
   "keywords": [
     "binary",

@@ -3,7 +3,7 @@ members = ["crates/*", "xtask"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 edition = "2021"
 # Floor pinned by transitive deps in `[workspace.dependencies]`:
 # `oxc_*` 0.126 requires rustc 1.92. `rust-toolchain.toml` selects

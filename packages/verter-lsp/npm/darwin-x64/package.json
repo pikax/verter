@@ -1,6 +1,6 @@
 {
   "name": "@verter/lsp-darwin-x64",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "verter-lsp server binary for macOS x64",
   "license": "MIT",
   "repository": {

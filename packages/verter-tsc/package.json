@@ -1,6 +1,6 @@
 {
   "name": "verter-tsc",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Vue SFC type checker — verter-native vue-tsc replacement",
   "keywords": [
     "type-check",

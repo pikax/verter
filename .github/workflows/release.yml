@@ -1512,13 +1512,6 @@ jobs:
       # Package per platform
       - name: Package VSIX
         run: |
-          IS_PRE="${{ needs.validate.outputs.is-prerelease }}"
-
-          PRE_RELEASE_FLAG=""
-          if [ "$IS_PRE" = "true" ]; then
-            PRE_RELEASE_FLAG="--pre-release"
-          fi
-
           # Map: vsce target → rust target → native .node filename → lsp artifact
           declare -A RUST_TARGET=(
             [linux-x64]="x86_64-unknown-linux-gnu"
@@ -1588,7 +1581,7 @@ jobs:
 
             # --- Build & package (package.mjs handles dep copying + version patching + vsce) ---
             cd packages/vue-vscode
-            node package.mjs --target "$platform" $PRE_RELEASE_FLAG
+            node package.mjs --target "$platform"
             cd "$GITHUB_WORKSPACE"
             unset VERTER_RELAY_SHIM_BINARY
 
@@ -1645,15 +1638,11 @@ jobs:
           name: vsix
           path: /tmp/vsix
 
+      # Published to the ordinary Marketplace channel, not the pre-release one —
+      # see the packaging step in build-vsix for why the extension's independent
+      # version does not track the monorepo's npm pre-release channel.
       - name: Publish VSIXes to the Marketplace
         run: |
-          IS_PRE="${{ needs.validate.outputs.is-prerelease }}"
-
-          PRE_RELEASE_FLAG=""
-          if [ "$IS_PRE" = "true" ]; then
-            PRE_RELEASE_FLAG="--pre-release"
-          fi
-
           # One VSIX per platform packaged by build-vsix. A short count is a
           # partial release, not something to publish quietly.
           EXPECTED=5
@@ -1670,7 +1659,7 @@ jobs:
           for vsix in "${vsixes[@]}"; do
             echo ""
             echo "--- Publishing $(basename "$vsix") ---"
-            pnpm exec vsce publish --packagePath "$vsix" $PRE_RELEASE_FLAG
+            pnpm exec vsce publish --packagePath "$vsix"
           done
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

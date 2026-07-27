@@ -1,6 +1,6 @@
 {
   "name": "@verter/lsp-linux-x64-gnu",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "verter-lsp server binary for Linux x64 (glibc)",
   "license": "MIT",
   "repository": {

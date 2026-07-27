@@ -1,6 +1,6 @@
 {
   "name": "verter-lsp",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Language Server Protocol server for Vue and Svelte single-file components",
   "keywords": [
     "language-server",

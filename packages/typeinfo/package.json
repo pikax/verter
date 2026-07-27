@@ -1,6 +1,6 @@
 {
   "name": "@verter/typeinfo",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "Typeinfo session — wraps the Rust host typeinfo substrate (list symbols, resolve named symbol, evaluate type expression) for downstream consumers",
   "keywords": [
     "type-resolution",

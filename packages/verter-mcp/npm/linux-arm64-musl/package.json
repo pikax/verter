@@ -1,6 +1,6 @@
 {
   "name": "@verter/mcp-linux-arm64-musl",
-  "version": "0.0.1-beta.2",
+  "version": "0.0.1-beta.3",
   "description": "verter-mcp server binary for Linux ARM64 (musl)",
   "license": "MIT",
   "repository": {
