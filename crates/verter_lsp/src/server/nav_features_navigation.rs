@@ -17,12 +17,14 @@ use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
-use crate::features::rename::{is_css_rename_position, rename_at_position};
 use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
-use super::rename_prepare::multi_claimant_rename_unavailable_error;
+use super::rename_plan::{
+    rename_request_admission, RenameAdmission, RenameTargetResolution, SameFileProof,
+};
+use super::rename_prepare::rename_incompleteness_error;
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
@@ -950,28 +952,14 @@ pub(super) async fn handle_rename(
     let position = &params.text_document_position.position;
     let new_name = &params.new_name;
 
-    // Virtual file: not supported (renaming in generated code isn't meaningful)
-    if server.documents.get_virtual_source_uri(uri).is_some() {
-        return Ok(None);
-    }
-
-    if server.editor_owns_carrier_rename() {
-        return Ok(None);
-    }
-
-    // A carrier owned by MULTIPLE configured projects now resolves to a single tsgo
-    // default owner for per-file features (hover / definition / completion /
-    // references all serve), but a PROVIDER rename runs only within that one owner
-    // project. Renaming a symbol that ESCAPES the owner (exported + imported by a
-    // sibling configured project) would silently leave it dangling in the
-    // siblings — a partial cross-project rename. Cheaply proving escape is not
-    // feasible without the cross-project rename fan-out (not yet implemented), so rename
-    // FAILS CLOSED here with a clear message rather than shipping a partial edit;
-    // every other IDE feature still serves from the resolved owner. A
-    // uniquely-owned carrier renames normally. (Checked AFTER the editor-owned
-    // yield so an editor-plugin route still defers to the editor's own rename.)
-    if server.carrier_is_multi_claimant(uri) {
-        return Err(multi_claimant_rename_unavailable_error());
+    // The SHARED admission gate — the same one `prepare_rename` runs, so the
+    // handshake cannot advertise a rename this handler would refuse: an
+    // editor-owned carrier rename and a generated virtual buffer answer nothing,
+    // and a multi-claimant carrier fails closed with a user-visible reason.
+    match rename_request_admission(server, uri) {
+        RenameAdmission::Decline => return Ok(None),
+        RenameAdmission::Refuse(error) => return Err(error),
+        RenameAdmission::Serve => {}
     }
 
     // `didChange` never performs provider I/O. A rename is an interactive
@@ -992,45 +980,19 @@ pub(super) async fn handle_rename(
     // partial edit. The request never joins the background lane.
     let dependency_readiness = server.dependency_readiness_capture(uri);
 
-    let verter_result = (|| {
-        let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks(&doc.source);
-        let mut edit = rename_at_position(
-            position,
-            new_name,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-        )?;
-
-        // Fix up sentinel URIs in workspace edit
-        if let Some(ref mut changes) = edit.changes {
-            let sentinel = crate::features::rename::SAME_FILE_URI.clone();
-            if let Some(edits) = changes.remove(&sentinel) {
-                changes.insert(uri.clone(), edits);
-            }
-        }
-
-        Some(edit)
-    })();
-    // Captured from the SAME snapshot as `verter_result`, before any await, so a
-    // mid-flight edit cannot make the two disagree.
-    let expected_same_file_ranges = same_file_rename_expectation(server, uri, position);
-    let native_rename_is_css = server
-        .documents
-        .get(uri)
-        .and_then(|doc| {
-            let analysis = server.documents.get_analysis(uri)?;
-            Some(is_css_rename_position(
-                position,
-                &doc.source,
-                &analysis,
-                &doc.line_index,
-            ))
-        })
-        .unwrap_or(false);
+    // ONE classification of the cursor, from ONE document snapshot, through the
+    // SHARED rename-plan owner — the same classifier `prepare_rename` consumed.
+    // Verter's own edit, the same-file completeness expectation, and the
+    // native-CSS exemption are projections of this single value, so a mid-flight
+    // edit cannot make them disagree. The resolution is captured under the
+    // document-commit fence and refuses a source/analysis revision mismatch, so
+    // the offsets it measures and the spans it reads describe one revision.
+    // Re-resolved HERE, per request: a prepare that said yes is not authority
+    // transferable across a race.
+    let resolution = RenameTargetResolution::resolve(server, uri, position).await;
+    let verter_result = resolution.native_workspace_edit(uri, new_name);
+    let same_file_proof = resolution.same_file_proof();
+    let native_rename_is_css = resolution.is_css();
 
     // Classify the cursor with respect to the cross-file `<Child prop=…>` rename
     // ONCE, up front — so the MERGED-EDIT COMPLETENESS GATE applies on EVERY return
@@ -1238,7 +1200,7 @@ pub(super) async fn handle_rename(
                                     negotiated_encoding.clone(),
                                 )
                             };
-                            result = merge::merge_rename_locations(
+                            let merged = merge::merge_rename_locations(
                                 verter_result,
                                 type_locs,
                                 new_name,
@@ -1258,6 +1220,51 @@ pub(super) async fn handle_rename(
                                     })
                                 },
                             );
+                            // CROSS-FILE COMPLETENESS GATE. The merge reports every
+                            // provider location it could not map onto authored bytes.
+                            // A drop in a file no other gate covers is an occurrence
+                            // the provider named and this transaction will NOT edit, so
+                            // the remainder is a PARTIAL rename that leaves that file
+                            // bound to a name which no longer exists — a dangling
+                            // reference the editor applies as a success. The same-file
+                            // gate cannot see it: it proves THIS file's authored
+                            // occurrences, which the surviving edits cover. So refuse
+                            // the WHOLE transaction — no partial, not the same-file
+                            // half, and never the verter-only remainder. A drop on the
+                            // CURRENT companion is delegated to that same-file gate ONLY
+                            // when the gate's proof enumerates this file's WHOLE authored
+                            // occurrence set — otherwise the delegation covers nothing
+                            // and the drop stays unguarded. See
+                            // `unguarded_rename_drops`.
+                            let unguarded =
+                                nav_features_navigation_rename_gate::unguarded_rename_drops(
+                                    &merged.dropped,
+                                    &ctx.tsx_path,
+                                    &same_file_proof,
+                                );
+                            if !unguarded.is_empty() {
+                                tracing::warn!(
+                                    "rename: refusing an incomplete edit set — {} provider \
+                                     location(s) in files this transaction does not edit could \
+                                     not be mapped to a source edit: {:?}",
+                                    unguarded.len(),
+                                    unguarded
+                                );
+                                // Same refusal either way — no edit ships. But a
+                                // drop stays unguarded precisely BECAUSE Verter's
+                                // own same-file inventory does not cover this
+                                // file, and where that shortfall has a terminal,
+                                // author-fixable cause, say so: a rename that
+                                // silently no-ops leaves the user with no way to
+                                // tell refusal from "nothing to rename".
+                                if let Some(error) =
+                                    rename_incompleteness_error(resolution.unenumerated_region())
+                                {
+                                    return Err(error);
+                                }
+                                return Ok(None);
+                            }
+                            result = merged.edit;
                             // INITIATING-USAGE LEG SYNTHESIS (provider-agnostic,
                             // same doctrine as the child-declaration leg): the
                             // provider's own usage edit maps back through the
@@ -1321,7 +1328,7 @@ pub(super) async fn handle_rename(
         &rename_class,
         new_name,
         uri,
-        expected_same_file_ranges.as_deref(),
+        &same_file_proof,
     ))
 }
 
@@ -1478,9 +1485,7 @@ fn workspace_edit_satisfies_child_prop_rename(
 
 #[path = "nav_features_navigation_rename_gate.rs"]
 mod nav_features_navigation_rename_gate;
-use nav_features_navigation_rename_gate::{
-    finalize_rename_transaction, same_file_rename_expectation,
-};
+use nav_features_navigation_rename_gate::finalize_rename_transaction;
 
 #[cfg(test)]
 #[path = "nav_features_navigation_tests.rs"]

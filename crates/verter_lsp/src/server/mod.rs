@@ -120,6 +120,10 @@ mod nav_features;
 // prepare_rename, rename.
 mod nav_features_css;
 mod nav_features_navigation;
+// The single rename-plan owner (admission + ONE cursor classification) that
+// BOTH `rename_prepare::handle_prepare_rename` and
+// `nav_features_navigation::handle_rename` consume.
+mod rename_plan;
 mod rename_prepare;
 
 #[cfg(test)]

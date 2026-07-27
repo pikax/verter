@@ -54,6 +54,67 @@ pub(super) fn gate_cross_file_child_prop_rename(
     }
 }
 
+/// The dropped provider locations NO completeness gate covers — the ones that
+/// must fail the whole rename closed.
+///
+/// [`merge::merge_rename_locations`] reports every location it could not turn
+/// into a source edit. A drop is covered by another authority in exactly ONE
+/// case, and that case is decided by PROOF COMPLETENESS, never by path identity
+/// alone:
+///
+/// * A drop on the CURRENT request's own provider companion
+///   (`current_provider_path`) is an offset in the generated projection that maps
+///   to no authored byte. That is what synthetic generated code looks like there:
+///   Verter's IDE surface deliberately re-spells authored bindings in unmapped
+///   constructs (the setup-return shim spells a binding three times:
+///   `doubled: doubled as unknown as typeof doubled`), a provider correctly
+///   reports every one as a rename location, and the mapper cannot tell
+///   "synthetic" from "authored but mis-mapped" — unmapped is the same answer for
+///   both. So the provider's list carries no completeness information about this
+///   file, and refusing on any such drop would refuse essentially every real
+///   rename. The drop may be delegated to [`same_file_rename_is_complete`] —
+///   BUT ONLY when that gate is a strictly better oracle, which requires its
+///   proof to enumerate the file's WHOLE authored occurrence set
+///   (`same_file_proof.enumerates_whole_file()`). Then an authored occurrence
+///   behind the drop resurfaces as a missing REQUIRED range and the transaction
+///   fails there instead.
+///
+///   When the proof is a strict SUBSET, the delegation has no substance. A
+///   `ProviderOnlyInstanceMember` proof is the cursor token alone, so the file's
+///   other spelling of the same instance member (`:title="count"` beside
+///   `{{ count }}`) is behind neither gate; an `Unavailable` position requires
+///   nothing at all; and a carrier with no template occurrence inventory (every
+///   Svelte carrier — its markup occurrences are never enumerated) hides every
+///   markup occurrence. In each case the drop is unguarded and the whole rename
+///   fails closed, rather than shipping a transaction that renames part of the
+///   file.
+/// * A drop on ANY OTHER path — a FOREIGN carrier companion, a carrier
+///   PUBLIC-API surface, a real `.ts`/`.js` file — names an occurrence in a file
+///   the transaction will NOT edit and that NO gate covers. The provider computed
+///   those offsets from that file's own content, so the occurrence is real:
+///   shipping the remainder renames the symbol here and leaves that file bound to
+///   a name which no longer exists. That is the write-side dangling reference,
+///   and it is what this gate closes.
+///
+/// Same-file identity is the shared filesystem-identity primitive, never a raw
+/// `==`: the provider may spell the companion path differently (slashes,
+/// drive-letter case, a `\\?\` prefix) and treating that spelling as foreign
+/// would refuse a healthy rename.
+pub(super) fn unguarded_rename_drops<'a>(
+    dropped: &'a [merge::DroppedRenameLocation],
+    current_provider_path: &str,
+    same_file_proof: &SameFileProof,
+) -> Vec<&'a merge::DroppedRenameLocation> {
+    let same_file_gate_covers_the_file = same_file_proof.enumerates_whole_file();
+    dropped
+        .iter()
+        .filter(|drop| {
+            !(same_file_gate_covers_the_file
+                && verter_span::path::fs_paths_equal(&drop.path, current_provider_path))
+        })
+        .collect()
+}
+
 /// Canonicalize and prove the final rename transaction, or fail closed.
 ///
 /// 1. MERGED-EDIT COMPLETENESS GATE: for a CONFIRMED cross-file child-prop
@@ -68,7 +129,7 @@ pub(super) fn finalize_rename_transaction(
     rename_class: &ChildPropRenameClass,
     new_name: &str,
     uri: &Uri,
-    expected_same_file_ranges: Option<&[Range]>,
+    same_file_proof: &SameFileProof,
 ) -> Option<WorkspaceEdit> {
     let emitted =
         gate_cross_file_child_prop_rename(result, rename_class, new_name).map(|mut edit| {
@@ -78,7 +139,7 @@ pub(super) fn finalize_rename_transaction(
     if !same_file_rename_is_complete(
         emitted.as_ref(),
         uri,
-        expected_same_file_ranges,
+        same_file_proof,
         new_name,
         rename_class,
     ) {
@@ -92,26 +153,6 @@ pub(super) fn finalize_rename_transaction(
     emitted
 }
 
-/// The same-file ranges Verter's own typed analysis proves are occurrences of the
-/// identifier a rename at `position` targets — the oracle
-/// [`same_file_rename_is_complete`] proves the emitted transaction against.
-pub(super) fn same_file_rename_expectation(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-    position: &Position,
-) -> Option<Vec<Range>> {
-    let doc = server.documents.get(uri)?;
-    let analysis = server.documents.get_analysis(uri);
-    let blocks = scan_sfc_blocks(&doc.source);
-    crate::features::rename::same_file_rename_ranges(
-        position,
-        &doc.source,
-        &blocks,
-        analysis.as_ref(),
-        &doc.line_index,
-    )
-}
-
 /// The SAME-FILE completeness gate — the write-side answer to "the provider
 /// returned SOMETHING, so the non-emptiness check passed". Non-emptiness cannot
 /// see a partial: a 2-of-4 edit set renames the declaration and leaves the
@@ -123,13 +164,26 @@ pub(super) fn same_file_rename_expectation(
 /// `defineProps(…)` call span of a macro bound to the name, and a provider's
 /// comment/string matches that `findRenameLocations` correctly excludes), so a
 /// count comparison would refuse valid renames. This compares the EMITTED
-/// transaction against [`same_file_rename_expectation`] — the exact set of
-/// same-file ranges Verter's own typed analysis proves are occurrences of this
-/// identifier, which is by construction the set Verter itself emits. Every one
-/// must be present for THIS file at its exact range with the new name; a missing
-/// range means something downstream (the provider merge, the URI-spelling
-/// coalesce, the usage synthesis) dropped an edit, which is always a bug.
-/// Cross-file additions are unconstrained.
+/// transaction against
+/// [`RenameTargetResolution::same_file_proof`](super::rename_plan::RenameTargetResolution::same_file_proof)
+/// — for a natively-owned symbol the exact set of same-file ranges Verter's own
+/// typed analysis proves are occurrences of this identifier, which is by
+/// construction the set Verter itself emits, and for a PROVIDER-ONLY instance
+/// member the authored token under the cursor. Every proved range must be present
+/// for THIS file at its exact range with the new name; a missing range means
+/// something downstream (the provider merge, the URI-spelling coalesce, the usage
+/// synthesis) dropped an edit, or the provider answered for a different
+/// occurrence — both of which ship a rename of something the caller did not ask
+/// for. This gate constrains the REQUESTED file only; the files a provider
+/// location names and the transaction does not edit are proven separately by
+/// [`unguarded_rename_drops`], which is the authority for every path but this
+/// one.
+///
+/// [`SameFileProof::Unprovable`] fails closed. A [`SameFileProof::Requires`] set
+/// is empty ONLY for a position Verter cannot classify at all, where it asserts
+/// nothing rather than suppressing a provider-owned result — and where it
+/// therefore also vouches for no dropped companion leg
+/// ([`unguarded_rename_drops`]).
 ///
 /// A CONFIRMED cross-file child-prop rename is exempt: it re-anchors the
 /// initiating usage edit itself and is already held to the stricter
@@ -137,17 +191,19 @@ pub(super) fn same_file_rename_expectation(
 pub(super) fn same_file_rename_is_complete(
     emitted: Option<&WorkspaceEdit>,
     uri: &Uri,
-    expected: Option<&[Range]>,
+    proof: &SameFileProof,
     new_name: &str,
     rename_class: &ChildPropRenameClass,
 ) -> bool {
     if !matches!(rename_class, ChildPropRenameClass::NotChildProp) {
         return true;
     }
-    let Some(expected) = expected else {
-        return true;
-    };
-    workspace_edit_covers_same_file_ranges(emitted, uri, expected, new_name)
+    match proof {
+        SameFileProof::Unprovable => false,
+        SameFileProof::Requires { ranges, .. } => {
+            workspace_edit_covers_same_file_ranges(emitted, uri, ranges, new_name)
+        }
+    }
 }
 
 /// Whether `edit` overwrites EVERY `expected` range of `uri` with `new_name`.

@@ -31,7 +31,7 @@ use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::type_provider::merge::{
     merge_code_actions, merge_references, merge_rename_locations, ExternalApiResolver,
-    ExternalIdeContext, ExternalIdeResolver,
+    ExternalIdeContext, ExternalIdeResolver, RenameDropReason,
 };
 use verter_lsp::type_provider::protocol::{
     RenameLocation, TypeCodeAction, TypeCodeEdit, TypeLocation,
@@ -260,7 +260,7 @@ fn external_ts_rename_keeps_the_real_line_not_zero() {
     );
     let no_external: Option<ExternalIdeResolver> = None;
 
-    let result = merge_rename_locations(
+    let outcome = merge_rename_locations(
         None,
         type_locations,
         "newFormatCount",
@@ -274,6 +274,15 @@ fn external_ts_rename_keeps_the_real_line_not_zero() {
         PositionEncodingKind::UTF16,
         &read_source,
     );
+    // The OVER-DROP half: this location mapped, so nothing may be reported as
+    // dropped. `dropped` is what the handler's cross-file completeness gate reads,
+    // and a spurious entry there refuses this healthy rename outright.
+    assert_eq!(
+        outcome.dropped,
+        vec![],
+        "a location that mapped to a real edit must not ALSO be reported dropped"
+    );
+    let result = outcome.edit;
 
     let edit = result.expect("a cross-file rename edit must survive with a real range");
     let changes = edit.changes.expect("rename produces changes");
@@ -318,7 +327,7 @@ fn external_rename_with_unresolvable_source_is_dropped_not_zeroed() {
     let no_external: Option<ExternalIdeResolver> = None;
     let read_source = no_source_reader();
 
-    let result = merge_rename_locations(
+    let outcome = merge_rename_locations(
         None,
         type_locations,
         "whatever",
@@ -332,6 +341,34 @@ fn external_rename_with_unresolvable_source_is_dropped_not_zeroed() {
         PositionEncodingKind::UTF16,
         &read_source,
     );
+    // What makes this test's NAME true. An empty `edit` is also what a merge that
+    // silently discarded the location produces, and the two are opposite outcomes
+    // downstream: a REPORTED drop fails the whole rename closed, a silent one ships
+    // the remainder as a success. Only `dropped` distinguishes them.
+    assert_eq!(
+        outcome.dropped.len(),
+        1,
+        "the unresolvable location must be REPORTED, not silently discarded: {:?}",
+        outcome.dropped
+    );
+    assert_eq!(
+        (
+            outcome.dropped[0].path.as_str(),
+            outcome.dropped[0].start,
+            outcome.dropped[0].end,
+            outcome.dropped[0].reason
+        ),
+        (
+            "/virtual/unreadable.ts",
+            100,
+            110,
+            RenameDropReason::TargetSourceUnreadable
+        ),
+        "the drop must carry the location's own identity and the reason it could not be \
+         mapped — a caller can only name what it is refusing if this is exact: {:?}",
+        outcome.dropped[0]
+    );
+    let result = outcome.edit;
 
     assert!(
         result.is_none(),
@@ -538,7 +575,7 @@ fn carrier_ide_rename_mapping_failure_is_dropped_not_zeroed() {
     let no_external: Option<ExternalIdeResolver> = None;
     let read_source = |_p: &str| -> Option<Arc<str>> { None };
 
-    let result = merge_rename_locations(
+    let outcome = merge_rename_locations(
         None,
         type_locations,
         "newName",
@@ -552,6 +589,27 @@ fn carrier_ide_rename_mapping_failure_is_dropped_not_zeroed() {
         PositionEncodingKind::UTF16,
         &read_source,
     );
+    // As above: the reported drop, not the empty edit, is what this test's name
+    // claims and what the handler's completeness gate acts on.
+    assert_eq!(
+        outcome.dropped.len(),
+        1,
+        "the unmappable carrier-IDE location must be REPORTED, not silently discarded: {:?}",
+        outcome.dropped
+    );
+    assert_eq!(
+        (
+            outcome.dropped[0].start,
+            outcome.dropped[0].end,
+            outcome.dropped[0].reason
+        ),
+        (9_000, 9_010, RenameDropReason::CarrierIdeUnmapped),
+        "the reason must be the carrier-IDE mapping failure specifically — a location that fell \
+         through to the source-read branch would report `TargetSourceUnreadable` and would mean \
+         this lane exercised the wrong route: {:?}",
+        outcome.dropped[0]
+    );
+    let result = outcome.edit;
     assert!(
         result.is_none(),
         "a carrier-IDE rename edit whose offsets do not map must be DROPPED (fail-closed) — a \
@@ -708,7 +766,7 @@ fn barrel_reexport_rename_keeps_real_line() {
         LineIndex::new_utf16("x"),
     );
     let no_external: Option<ExternalIdeResolver> = None;
-    let result = merge_rename_locations(
+    let outcome = merge_rename_locations(
         None,
         type_locations,
         "WidgetRenamed",
@@ -722,6 +780,14 @@ fn barrel_reexport_rename_keeps_real_line() {
         PositionEncodingKind::UTF16,
         &read_source,
     );
+    // The OVER-DROP half for the barrel route: a spurious drop entry here would
+    // refuse this healthy re-export rename at the handler's completeness gate.
+    assert_eq!(
+        outcome.dropped,
+        vec![],
+        "the barrel re-export location mapped, so nothing may be reported dropped"
+    );
+    let result = outcome.edit;
     let edit = result.expect("barrel re-export rename survives");
     let changes = edit.changes.expect("changes present");
     let te = changes.values().next().unwrap().first().unwrap();

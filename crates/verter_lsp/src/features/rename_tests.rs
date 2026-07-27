@@ -57,14 +57,8 @@ fn test_rename_binding_across_blocks() {
         .offset_to_position(template_count as u32)
         .unwrap();
 
-    let edit = rename_at_position(
-        &position,
-        "counter",
-        source,
-        &blocks,
-        Some(&analysis),
-        &line_index,
-    );
+    let edit = classify_rename_target(&position, source, &blocks, Some(&analysis), &line_index)
+        .same_file_workspace_edit(&SAME_FILE_URI, "counter");
     assert!(edit.is_some());
 
     let edit = edit.unwrap();
@@ -78,14 +72,14 @@ fn test_rename_binding_across_blocks() {
 }
 
 #[test]
-fn test_prepare_rename_returns_range() {
+fn test_classify_script_binding_is_native_with_the_word_range() {
     let source = "<script setup>\nconst count = ref(0)\n</script>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let count_offset = source.find("count").unwrap() as u32;
-    // prepare_rename uses word_at_offset (SFC-level), so span values don't affect it.
-    // But keep consistent: use script-relative spans (OXC convention).
+    // The anchor comes from `word_at_offset` (SFC-level), so span values don't
+    // affect it. But keep consistent: use script-relative spans (OXC convention).
     let script_block = blocks.iter().find(|b| b.tag_name == "script").unwrap();
     let content_start = script_block.content_range().0;
     let count_relative = count_offset - content_start;
@@ -107,9 +101,11 @@ fn test_prepare_rename_returns_range() {
 
     let position = line_index.offset_to_position(count_offset).unwrap();
 
-    let range = prepare_rename(&position, source, &blocks, Some(&analysis), &line_index);
-    assert!(range.is_some());
-    let range = range.unwrap();
+    let target = classify_rename_target(&position, source, &blocks, Some(&analysis), &line_index);
+    assert_eq!(target.class, RenameTargetClass::Native);
+    let range = target
+        .anchor
+        .expect("a native target offers its word range");
     assert_eq!(range.start, position);
 }
 
@@ -124,8 +120,13 @@ fn test_cannot_rename_unknown_word() {
     let offset = source.find("const").unwrap();
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
-    let range = prepare_rename(&position, source, &blocks, Some(&analysis), &line_index);
-    assert!(range.is_none());
+    let target = classify_rename_target(&position, source, &blocks, Some(&analysis), &line_index);
+    assert_eq!(target.class, RenameTargetClass::Unavailable);
+    assert!(
+        target.anchor.is_none(),
+        "nothing renameable offers no range"
+    );
+    assert!(target.same_file_ranges.is_empty());
 }
 
 // =========================================================================
@@ -133,7 +134,7 @@ fn test_cannot_rename_unknown_word() {
 // =========================================================================
 
 #[test]
-fn test_prepare_rename_css_class_in_template() {
+fn test_classify_css_class_in_template_is_css() {
     let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -155,8 +156,13 @@ fn test_prepare_rename_css_class_in_template() {
     };
 
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
-    let range = prepare_rename(&pos, source, &blocks, Some(&analysis), &line_index);
-    assert!(range.is_some(), "should allow renaming CSS class");
+    let target = classify_rename_target(&pos, source, &blocks, Some(&analysis), &line_index);
+    assert_eq!(
+        target.class,
+        RenameTargetClass::Css,
+        "a CSS class token is owned by Verter's native workspace index"
+    );
+    assert!(target.anchor.is_some(), "should allow renaming CSS class");
 }
 
 #[test]
@@ -182,14 +188,8 @@ fn test_rename_css_class_across_template_and_style() {
     };
 
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
-    let edit = rename_at_position(
-        &pos,
-        "button",
-        source,
-        &blocks,
-        Some(&analysis),
-        &line_index,
-    );
+    let edit = classify_rename_target(&pos, source, &blocks, Some(&analysis), &line_index)
+        .same_file_workspace_edit(&SAME_FILE_URI, "button");
     assert!(edit.is_some());
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
@@ -304,7 +304,8 @@ fn test_rename_css_id_across_template_and_style() {
 
     let id_offset = source.find("app\"").unwrap();
     let pos = line_index.offset_to_position(id_offset as u32).unwrap();
-    let edit = rename_at_position(&pos, "root", source, &blocks, Some(&analysis), &line_index);
+    let edit = classify_rename_target(&pos, source, &blocks, Some(&analysis), &line_index)
+        .same_file_workspace_edit(&SAME_FILE_URI, "root");
     assert!(edit.is_some(), "should allow renaming CSS ID");
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
@@ -349,14 +350,8 @@ fn test_rename_css_class_doesnt_affect_other_names() {
 
     let btn_offset = source.find("btn ").unwrap();
     let pos = line_index.offset_to_position(btn_offset as u32).unwrap();
-    let edit = rename_at_position(
-        &pos,
-        "button",
-        source,
-        &blocks,
-        Some(&analysis),
-        &line_index,
-    );
+    let edit = classify_rename_target(&pos, source, &blocks, Some(&analysis), &line_index)
+        .same_file_workspace_edit(&SAME_FILE_URI, "button");
     assert!(edit.is_some());
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
@@ -394,8 +389,14 @@ fn test_cannot_rename_type_only_import() {
     let offset = source.find("Props").unwrap();
     let position = line_index.offset_to_position(offset as u32).unwrap();
 
-    let range = prepare_rename(&position, source, &blocks, Some(&analysis), &line_index);
-    assert!(range.is_none());
+    let target = classify_rename_target(&position, source, &blocks, Some(&analysis), &line_index);
+    assert_eq!(
+        target.class,
+        RenameTargetClass::Unavailable,
+        "a type-only import is not natively renameable"
+    );
+    assert!(target.anchor.is_none());
+    assert!(target.same_file_ranges.is_empty());
 }
 
 /// Template text containing the binding name as plain text (not an expression)
@@ -441,14 +442,8 @@ fn test_span_based_rename_no_false_positives() {
     };
 
     let position = line_index.offset_to_position(interp_count as u32).unwrap();
-    let edit = rename_at_position(
-        &position,
-        "counter",
-        source,
-        &blocks,
-        Some(&analysis),
-        &line_index,
-    );
+    let edit = classify_rename_target(&position, source, &blocks, Some(&analysis), &line_index)
+        .same_file_workspace_edit(&SAME_FILE_URI, "counter");
     assert!(edit.is_some());
     let edit = edit.unwrap();
     let changes = edit.changes.unwrap();
@@ -522,14 +517,8 @@ fn test_rename_with_dual_script_blocks() {
         .offset_to_position(template_count as u32)
         .unwrap();
 
-    let edit = rename_at_position(
-        &position,
-        "counter",
-        source,
-        &blocks,
-        Some(&analysis),
-        &line_index,
-    );
+    let edit = classify_rename_target(&position, source, &blocks, Some(&analysis), &line_index)
+        .same_file_workspace_edit(&SAME_FILE_URI, "counter");
     assert!(edit.is_some());
 
     let edit = edit.unwrap();

@@ -4336,7 +4336,8 @@ fn merge_rename_verter_only() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
     let result = result.expect("rename remains available");
     assert_eq!(
         result.changes.as_ref().map(std::collections::HashMap::len),
@@ -4408,6 +4409,7 @@ fn merge_rename_accepts_provider_pre_remapped_current_carrier_locations() {
         PositionEncodingKind::UTF16,
         &no_source,
     )
+    .edit
     .expect("the provider-remapped source rename survives");
 
     let edits = result
@@ -4449,7 +4451,8 @@ fn merge_rename_neither() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
     assert!(result.is_none());
 }
 
@@ -4483,7 +4486,8 @@ fn merge_rename_foreign_carrier_fails_closed_without_resolver() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
     assert!(
         dropped.is_none(),
         "a FOREIGN carrier rename edit with no resolver must be DROPPED — a line-0/wrong-file \
@@ -4510,7 +4514,8 @@ fn merge_rename_foreign_carrier_fails_closed_without_resolver() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
     let edit = kept.expect("the same-file carrier rename must survive");
     let changes = edit.changes.expect("rename produces changes");
     let (uri, edits) = changes.iter().next().expect("one change set");
@@ -4528,6 +4533,152 @@ fn merge_rename_foreign_carrier_fails_closed_without_resolver() {
         "the same-file rename maps to the carrier `const msg`, got {:?}",
         edits[0].range.start
     );
+}
+
+/// The drop signal is per-location PROVENANCE, and the emitted transaction is a
+/// PARTIAL whenever it is non-empty.
+///
+/// The caller cannot reconstruct this from what it can see. `edit` alone looks
+/// like a successful rename — here it carries the mapped same-file edit — so
+/// without `dropped` the unmappable foreign leg vanishes and the transaction
+/// ships as a success while the foreign carrier keeps referencing the old name.
+#[test]
+fn merge_rename_reports_the_unmappable_location_alongside_the_surviving_edit() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let outcome = merge_rename_locations(
+        None,
+        vec![
+            // Maps through the in-context mapper onto the carrier `const msg`.
+            RenameLocation {
+                path: "/test.vue.tsx".to_string(),
+                start: 6,
+                end: 9,
+            },
+            // A FOREIGN companion with no resolver context: unmappable.
+            RenameLocation {
+                path: "/other.vue.tsx".to_string(),
+                start: 6,
+                end: 9,
+            },
+        ],
+        "renamed",
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None::<ExternalIdeResolver>,
+        None::<ExternalApiResolver>,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+
+    let edit = outcome
+        .edit
+        .as_ref()
+        .expect("the mappable leg still produces an edit — that is what makes this a PARTIAL");
+    let total: usize = edit
+        .changes
+        .as_ref()
+        .expect("rename changes")
+        .values()
+        .map(Vec::len)
+        .sum();
+    assert_eq!(
+        total, 1,
+        "exactly the mappable leg survived, so the transaction is one edit short of the \
+         provider's answer: {edit:?}"
+    );
+    assert_eq!(
+        outcome.dropped,
+        vec![DroppedRenameLocation {
+            path: "/other.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+            reason: RenameDropReason::CarrierIdeUnmapped,
+        }],
+        "the merge must name the foreign location it could not map, not merely omit its edit"
+    );
+}
+
+/// A location that produced no NEW edit is NOT a drop — the property that makes
+/// the signal impossible to derive from a count.
+///
+/// The provider reports the SAME occurrence Verter's own half already edits. The
+/// merge's `(uri, range.start)` dedup keeps one edit, so the transaction has ONE
+/// edit for ONE provider location plus one verter edit — an arithmetic shortfall
+/// against any total the caller could compute. The location IS covered, so
+/// `dropped` is empty and the rename proceeds. A count-based signal would refuse
+/// this rename; the provenance signal admits it.
+#[test]
+fn merge_rename_records_no_drop_when_a_location_dedups_onto_an_existing_edit() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let uri: Uri = "file:///test.vue".parse().unwrap();
+    // Verter's own half already covers the carrier `const msg` at line 5 col 6 —
+    // the exact range the provider's `/test.vue.tsx` 6..9 maps onto.
+    let covered_range = Range {
+        start: Position {
+            line: 5,
+            character: 6,
+        },
+        end: Position {
+            line: 5,
+            character: 9,
+        },
+    };
+    let verter = Some(WorkspaceEdit {
+        changes: Some({
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(
+                uri.clone(),
+                vec![TextEdit {
+                    range: covered_range,
+                    new_text: "renamed".to_string(),
+                }],
+            );
+            changes
+        }),
+        ..Default::default()
+    });
+
+    let outcome = merge_rename_locations(
+        verter,
+        vec![RenameLocation {
+            path: "/test.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+        }],
+        "renamed",
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None::<ExternalIdeResolver>,
+        None::<ExternalApiResolver>,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+
+    assert!(
+        outcome.dropped.is_empty(),
+        "the location is COVERED by the edit already at its start slot — a dedup collapse is not \
+         a drop, or every rename whose two halves agree would be refused: {:?}",
+        outcome.dropped
+    );
+    let edit = outcome.edit.expect("the covered rename survives");
+    let edits = edit
+        .changes
+        .as_ref()
+        .and_then(|changes| changes.get(&uri))
+        .expect("the carrier edit set exists");
+    assert_eq!(
+        edits.len(),
+        1,
+        "the collapse is real: one edit covers the provider location AND the verter half, so an \
+         edit total below the location total proves nothing about completeness: {edits:?}"
+    );
+    assert_eq!(edits[0].range, covered_range);
 }
 
 // ── Definition merge tests (Bug 2) ───────────────────────────────
@@ -5234,7 +5385,8 @@ fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &read_source,
-    );
+    )
+    .edit;
 
     let edit = result.expect("the real-file rename edit must be produced in place, not dropped");
     let changes = edit.changes.expect("changes map");
@@ -5361,7 +5513,8 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
     assert!(
         dropped.is_none(),
         "a carrier API target with no API resolver must be DROPPED, never line-0'd: {dropped:?}"
@@ -5381,7 +5534,8 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
 
     let edit = result.expect("carrier API rename edit must be produced, not dropped");
     let changes = edit.changes.expect("changes map");
@@ -5508,7 +5662,8 @@ fn merge_rename_carrier_api_target_utf8_session_nonascii_prefix_maps_correct_ran
         &carrier_source_exists,
         PositionEncodingKind::UTF8, // ← UTF-8-negotiated session
         &no_source,
-    );
+    )
+    .edit;
 
     let edit = result.expect("carrier API rename edit must be produced under a UTF-8 session");
     let changes = edit.changes.expect("changes map");
@@ -5560,7 +5715,8 @@ fn merge_rename_vue_dts_is_dropped_not_zeroed() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-    );
+    )
+    .edit;
     assert!(
         result.is_none(),
         "a {{carrier}}.d.ts rename whose offsets have no carrier sourcemap must be dropped, not \
@@ -5604,7 +5760,8 @@ fn merge_rename_carrier_api_unsynced_surface_no_backing_file_is_dropped() {
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &no_source, // no real backing file
-    );
+    )
+    .edit;
 
     assert!(
         result.is_none(),
@@ -5670,7 +5827,8 @@ fn merge_rename_superseded_virtual_surface_with_real_backing_file_fails_closed()
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &read_source,
-    );
+    )
+    .edit;
 
     // FAIL CLOSED: nothing is edited. NOT the real `Child.vue.ts` (corruption the bare-Option
     // fall-through caused), NOT `Child.vue` (no source map vouched it).
@@ -5725,7 +5883,8 @@ fn merge_rename_not_virtual_path_with_real_backing_file_edits_in_place() {
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &read_source,
-    );
+    )
+    .edit;
 
     let edit = result.expect("a NotVirtual real-file rename edit must be produced in place");
     let changes = edit.changes.expect("changes map");
@@ -5826,7 +5985,8 @@ fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &read_source,
-    );
+    )
+    .edit;
 
     assert!(
         result.is_none(),
@@ -5881,7 +6041,8 @@ fn merge_rename_store_unknown_path_with_real_backing_edits_in_place_end_to_end()
         &carrier_source_exists,
         PositionEncodingKind::UTF16,
         &read_source,
-    );
+    )
+    .edit;
 
     let edit = result.expect("an unknown-path real-file rename edit must be produced in place");
     let changes = edit.changes.expect("changes map");

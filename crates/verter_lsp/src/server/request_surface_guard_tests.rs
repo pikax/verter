@@ -91,6 +91,7 @@ fn provider_backed_handlers_do_not_read_live_context_ingredients() {
         "server/aux_features.rs",
         "server/child_prop_rename.rs",
         "server/component_resolve.rs",
+        "server/rename_prepare.rs",
     ];
     for file in handler_files {
         let source = read_server_source(file);
@@ -131,6 +132,9 @@ fn provider_backed_handlers_validate_after_the_provider_await() {
         ("server/nav_features.rs", 3),
         // definition, type_definition, references, rename.
         ("server/nav_features_navigation.rs", 4),
+        // The prepare-rename provider probe: it maps the provider's rename
+        // locations back onto the authored anchor, so it validates first.
+        ("server/rename_prepare.rs", 1),
         // document_highlight, signature_help, code_action, semantic_tokens,
         // inlay_hint.
         ("server/aux_features.rs", 5),

@@ -6,39 +6,14 @@ use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
+// The positional instance-member rule is DEFINED once, next to the rename
+// classifier that owns rename semantics (`features::rename`). References
+// consumes that same single definition for the references half of the identical
+// symbol-identity question; this module owns NO rename classification.
+use crate::features::rename::offset_is_instance_member_access;
 
 pub use super::sentinel_uris::SAME_FILE_URI;
 pub use super::sentinel_uris::SAME_FILE_URI_STR;
-
-/// Whether `offset` lands inside a template `unresolved_bindings` span — an
-/// INSTANCE MEMBER access, not a use of a same-named script declaration.
-///
-/// One map decides both facts. `TemplateAnalysisSnapshot::unresolved_bindings`
-/// receives exactly the template occurrences the compiler's template bindings
-/// map did NOT contain, and that same map picks the generated IDE accessor: a
-/// name in the map lowers to a bare identifier, a name outside it lowers to
-/// `___VERTER___instance.<name>`. For a plain `<script>` SFC that map holds only
-/// the Options-API surface (data/props/computed/methods/inject on the default
-/// export), so a top-level `const` is never in it and `{{ count }}` is an
-/// instance property — a different symbol from `const count`.
-///
-/// Nothing local can tell a VALID instance property (supplied by a
-/// `ComponentCustomProperties` augmentation in another file, which cannot change
-/// this file's compiler inputs, generated carrier, or analysis snapshot) from a
-/// missing one. So the name-based native surface must not answer for such a
-/// position, and must not claim such a span as an occurrence of a script symbol:
-/// the TypeScript provider is the sole semantic authority there.
-pub(crate) fn offset_is_instance_member_access(
-    offset: u32,
-    analysis: &FileAnalysisSnapshot,
-) -> bool {
-    analysis.template.as_ref().is_some_and(|template| {
-        template
-            .unresolved_bindings
-            .iter()
-            .any(|binding| offset >= binding.span.start && offset < binding.span.end)
-    })
-}
 
 /// Find all references to the symbol at the given position.
 ///

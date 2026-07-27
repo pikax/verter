@@ -20,7 +20,7 @@ use crate::features::document_symbol::build_document_symbols;
 use crate::features::folding_range::build_folding_ranges;
 use crate::features::hover::hover_at_position;
 use crate::features::references::references_at_position;
-use crate::features::rename::{prepare_rename, rename_at_position};
+use crate::features::rename::{classify_rename_target, RenameTargetClass};
 
 /// Helper: take an OWNED snapshot of an open document.
 ///
@@ -457,7 +457,7 @@ const msg = 'hello'
     let blocks = scan_sfc_blocks(&doc.source);
 
     let position = position_of(source, "msg = ");
-    let result = prepare_rename(
+    let target = classify_rename_target(
         &position,
         &doc.source,
         &blocks,
@@ -465,7 +465,8 @@ const msg = 'hello'
         &doc.line_index,
     );
 
-    assert!(result.is_some(), "Should allow rename on 'msg'");
+    assert_eq!(target.class, RenameTargetClass::Native);
+    assert!(target.anchor.is_some(), "Should allow rename on 'msg'");
 }
 
 #[test]
@@ -484,14 +485,14 @@ const msg = 'hello'
     let blocks = scan_sfc_blocks(&doc.source);
 
     let position = position_of(source, "msg = ");
-    let edit = rename_at_position(
+    let edit = classify_rename_target(
         &position,
-        "message",
         &doc.source,
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
-    );
+    )
+    .same_file_workspace_edit(&crate::features::rename::SAME_FILE_URI, "message");
 
     assert!(edit.is_some(), "Should produce a workspace edit for rename");
     let edit = edit.unwrap();

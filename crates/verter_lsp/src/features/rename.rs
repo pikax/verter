@@ -1,5 +1,10 @@
-// Rename — rename bindings across script/template blocks in a single file.
-// Enhanced with cross-file rename from TypeProvider.
+// Rename — classify WHICH AUTHORITY owns the symbol a rename at a position
+// targets, and build the same-file edit set Verter's own analysis owns.
+//
+// [`classify_rename_target`] is the SOLE rename classification. The server
+// resolves it ONCE per request (`server::rename_plan`) and BOTH
+// `textDocument/prepareRename` and `textDocument/rename` consume that one
+// resolution, so the two can never disagree about who owns the cursor.
 
 use std::collections::HashMap;
 
@@ -10,37 +15,300 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::references::{
     collect_css_ref_spans, find_css_target_in_style_refs, find_css_target_in_template_refs,
-    offset_is_instance_member_access, CssRefTarget,
+    CssRefTarget,
 };
 
 pub use super::sentinel_uris::SAME_FILE_URI;
 pub use super::sentinel_uris::SAME_FILE_URI_STR;
 
-/// Check if the symbol at the given position can be renamed.
+/// Whether `offset` lands inside a template `unresolved_bindings` span — an
+/// INSTANCE MEMBER access, not a use of a same-named script declaration.
 ///
-/// Returns a `Range` of the symbol if renaming is allowed, or `None` if not.
+/// One map decides both facts. `TemplateAnalysisSnapshot::unresolved_bindings`
+/// receives exactly the template occurrences the compiler's template bindings
+/// map did NOT contain, and that same map picks the generated IDE accessor: a
+/// name in the map lowers to a bare identifier, a name outside it lowers to
+/// `___VERTER___instance.<name>`. For a plain `<script>` SFC that map holds only
+/// the Options-API surface (data/props/computed/methods/inject on the default
+/// export), so a top-level `const` is never in it and `{{ count }}` is an
+/// instance property — a different symbol from `const count`.
 ///
-/// An instance-member template access ([`offset_is_instance_member_access`]) is
-/// NOT natively renameable: the name-based match below would hand the editor the
-/// word range of a same-named script declaration, which is a different symbol.
-/// Only the TypeScript provider can resolve that position, so this surface
-/// declines it.
-pub fn prepare_rename(
-    position: &Position,
-    source: &str,
-    _blocks: &[SfcBlock],
-    analysis: Option<&FileAnalysisSnapshot>,
-    line_index: &LineIndex,
-) -> Option<Range> {
-    let analysis = analysis?;
-    let offset = line_index.position_to_offset(position)? as usize;
-    let word = word_at_offset(source, offset)?;
+/// Nothing local can tell a VALID instance property (supplied by a
+/// `ComponentCustomProperties` augmentation in another file, which cannot change
+/// this file's compiler inputs, generated carrier, or analysis snapshot) from a
+/// missing one. So the name-based native surface must not answer for such a
+/// position, and must not claim such a span as an occurrence of a script symbol:
+/// the TypeScript provider is the sole semantic authority there.
+///
+/// THE SINGLE DEFINITION of that positional rule, owned here with the rename
+/// classifier. Rename semantics read it in exactly ONE place —
+/// [`classify_rename_target`] — and [`crate::features::references`] consumes
+/// this same definition for the references half of the identical
+/// symbol-identity question. There is no second predicate anywhere.
+pub(crate) fn offset_is_instance_member_access(
+    offset: u32,
+    analysis: &FileAnalysisSnapshot,
+) -> bool {
+    analysis.template.as_ref().is_some_and(|template| {
+        template
+            .unresolved_bindings
+            .iter()
+            .any(|binding| offset >= binding.span.start && offset < binding.span.end)
+    })
+}
 
-    if offset_is_instance_member_access(offset as u32, analysis) {
-        return prepare_rename_css(offset, source, analysis, line_index);
+/// Which authority owns the symbol under a rename cursor.
+///
+/// The classification is a property of the POSITION, not of the request: prepare
+/// and rename read the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameTargetClass {
+    /// Verter's own name-based analysis resolves the symbol (a script binding,
+    /// a value import, or a macro binding). Its same-file occurrence set is
+    /// complete for this file; a provider may add cross-file occurrences.
+    Native,
+    /// The cursor sits inside an instance-member template access
+    /// ([`offset_is_instance_member_access`]). Verter's file-local analysis
+    /// cannot resolve it — a same-named script declaration is a DIFFERENT symbol
+    /// — so the TypeScript provider is the SOLE semantic authority, and with no
+    /// provider answer the correct result is no edit at all.
+    ProviderOnlyInstanceMember,
+    /// A CSS class/id owned by Verter's native workspace index. This surface is
+    /// complete WITHOUT a TypeScript provider (a class name has no TS
+    /// correlate), so an empty provider answer never revokes it.
+    Css,
+    /// Nothing under the cursor is renameable by any authority Verter can reach.
+    Unavailable,
+}
+
+/// Whether Verter's own same-file occurrence inventory for a rename target
+/// PROVABLY enumerates every authored occurrence of that symbol in the file.
+///
+/// This is a POSITIVE property, and it is what licenses the rename transaction to
+/// delegate a dropped provider location on the request's OWN generated companion
+/// to the same-file completeness gate instead of refusing: if the inventory is
+/// the whole file, an authored occurrence hidden behind that drop resurfaces as a
+/// missing REQUIRED range. Where the inventory is a strict SUBSET, nothing covers
+/// the drop and the remainder is a partial rename.
+///
+/// The claim is complete when BOTH of its two regions are enumerated, and each
+/// conjunct is a positive fact — never the absence of a known counterexample:
+///
+/// 1. SCRIPT — always enumerated. Every `<script>` block's content is searched
+///    exhaustively for the identifier, so no script spelling can be missing.
+/// 2. MARKUP — enumerated only when the owner GRANTS it
+///    ([`RenameTarget::grant_markup_occurrence_enumeration`]), which asserts that
+///    this file's template analysis produces the markup occurrence inventory
+///    (`binding_occurrences` / `unresolved_bindings`) this surface reads. The
+///    classifier itself cannot know that, so it leaves the conjunct ungranted and
+///    the claim is a strict subset until the owner says otherwise — the default is
+///    fail-closed, never a silent vouch.
+/// 3. `<style>` `v-bind()` — a style expression naming this very identifier is an
+///    authored occurrence the claim carries no span for, and
+///    `FileAnalysisSnapshot::style_vbind_roots` records exactly those root
+///    identifiers, so it is decided per NAME and exactly.
+///
+/// Note what is deliberately NOT the witness: neither the EXISTENCE of a template
+/// snapshot nor a lexical scan of the source. A Svelte carrier's template snapshot
+/// exists with its occurrence inventories permanently empty, so an `is_some()`
+/// test would vouch for markup that was never modelled; and a lexical scan has
+/// FALSE NEGATIVES on exactly the framework spellings that matter — a store read
+/// `$count` and a kebab-cased prop usage `:my-prop` are different words from
+/// `count` and `myProp`, so a scan would report "every spelling accounted for"
+/// while the authored occurrence sits unclaimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameFileEnumeration {
+    /// Every spelling of the identifier in this file is inside an enumerated
+    /// region.
+    Complete,
+    /// The inventory is a strict SUBSET of the file's authored occurrences.
+    Partial(UnenumeratedRegion),
+}
+
+/// Why a [`SameFileEnumeration::Partial`] inventory does not account for the file
+/// — named so the resulting refusal can say what it could not prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnenumeratedRegion {
+    /// This file's MARKUP occurrences are not enumerated, so every authored
+    /// occurrence outside the script blocks is invisible to the claim.
+    MarkupOccurrences,
+    /// A `<style>` `v-bind()` expression references this very identifier
+    /// (`FileAnalysisSnapshot::style_vbind_roots`). The claim carries no span for
+    /// it, so it is an authored occurrence a satisfied claim would still leave
+    /// behind.
+    StyleVBindExpression,
+    /// This surface owns no occurrence inventory for the position at all: the
+    /// TypeScript provider is the authority and Verter proves at most the
+    /// authored token under the cursor.
+    NoOccurrenceInventory,
+}
+
+/// Whether the file's own template analysis produces the MARKUP occurrence
+/// inventory (`binding_occurrences` / `unresolved_bindings`) that
+/// [`classify_rename_target`] reads.
+///
+/// A capability of the FILE's carrier, resolved by the caller
+/// (`server::rename_plan`) — this module never asks which framework it is looking
+/// at. Today exactly one carrier produces that inventory; a carrier whose template
+/// analysis models no occurrences passes
+/// [`MarkupOccurrenceInventory::NotModelled`], which makes every same-file rename
+/// claim on it a strict subset and keeps the transaction fail-closed instead of
+/// shipping a markup-incomplete rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkupOccurrenceInventory {
+    /// The markup occurrence inventory is produced for this file.
+    Enumerated,
+    /// It is not: the carrier's markup occurrences are in no inventory.
+    NotModelled,
+}
+
+/// The ONE synchronous rename classification of a cursor position: who owns the
+/// symbol, the authored token range an editor would rename, and every same-file
+/// range Verter's own typed analysis proves is an occurrence of it.
+///
+/// Both consumers read this one value: prepare offers [`RenameTarget::anchor`],
+/// rename builds its native edit from [`RenameTarget::same_file_ranges`] and
+/// proves the emitted transaction covers exactly that set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameTarget {
+    /// The owning authority.
+    pub class: RenameTargetClass,
+    /// The authored identifier/token range under the cursor — what an editor
+    /// pre-selects for the rename. `None` when the position converts to no
+    /// range (fail closed: never a fabricated line-0 range) or nothing is
+    /// renameable.
+    pub anchor: Option<Range>,
+    /// Every range in THIS file a rename at the position must overwrite.
+    ///
+    /// EMPTY for [`RenameTargetClass::ProviderOnlyInstanceMember`] (the provider
+    /// owns the whole occurrence set — Verter must not claim a same-named script
+    /// declaration) and for [`RenameTargetClass::Unavailable`].
+    pub same_file_ranges: Vec<Range>,
+    /// Whether this target's same-file occurrence inventory provably enumerates
+    /// the whole file — see [`SameFileEnumeration`].
+    pub same_file_enumeration: SameFileEnumeration,
+}
+
+impl RenameTarget {
+    /// The fail-closed target: no authority, no anchor, no claimed occurrence,
+    /// and no enumeration of anything.
+    /// Also what a caller with no open document resolves to.
+    pub fn unavailable() -> Self {
+        Self {
+            class: RenameTargetClass::Unavailable,
+            anchor: None,
+            same_file_ranges: Vec::new(),
+            same_file_enumeration: SameFileEnumeration::Partial(
+                UnenumeratedRegion::NoOccurrenceInventory,
+            ),
+        }
     }
 
-    // Only allow renaming known bindings and non-type imports
+    /// Grant the MARKUP conjunct of this target's completeness witness: this
+    /// file's template analysis DOES produce the markup occurrence inventory
+    /// ([`MarkupOccurrenceInventory::Enumerated`]) the classifier read.
+    ///
+    /// MONOTONE and narrow. It promotes ONLY the grantable state
+    /// ([`UnenumeratedRegion::MarkupOccurrences`], where markup was the sole
+    /// outstanding region) to [`SameFileEnumeration::Complete`]. A terminal
+    /// `Partial` — a `<style>` `v-bind()` occurrence the claim cannot carry, or a
+    /// position with no occurrence inventory at all — is left exactly as it is, so
+    /// no capability can widen a claim into something it does not cover.
+    pub fn grant_markup_occurrence_enumeration(&mut self) {
+        if self.same_file_enumeration
+            == SameFileEnumeration::Partial(UnenumeratedRegion::MarkupOccurrences)
+        {
+            self.same_file_enumeration = SameFileEnumeration::Complete;
+        }
+    }
+
+    /// The same-file `WorkspaceEdit` this target's occurrence set requires,
+    /// keyed by `uri`.
+    ///
+    /// `None` when this surface owns no same-file range — which for
+    /// [`RenameTargetClass::ProviderOnlyInstanceMember`] is the fail-closed
+    /// answer: the provider is the authority and an absent/empty provider
+    /// answer must ship no edit at all.
+    pub fn same_file_workspace_edit(&self, uri: &Uri, new_name: &str) -> Option<WorkspaceEdit> {
+        if self.same_file_ranges.is_empty() {
+            return None;
+        }
+        let edits: Vec<TextEdit> = self
+            .same_file_ranges
+            .iter()
+            .map(|range| TextEdit {
+                range: *range,
+                new_text: new_name.to_string(),
+            })
+            .collect();
+
+        #[allow(clippy::mutable_key_type)] // Uri has interior mutability but we only insert once
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), edits);
+
+        Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        })
+    }
+}
+
+/// Classify the rename target at `position` — the single rename classifier.
+///
+/// Order is semantic, not incidental:
+///
+/// 1. No analysis, no position, or no identifier word under the cursor ⇒
+///    [`RenameTargetClass::Unavailable`]. (Both rename surfaces have always
+///    required an authored word here, the CSS legs included.)
+/// 2. Inside an instance-member template access ⇒ the POSITIONAL CSS owner
+///    still wins when a class/id token lives at that offset (its surface needs
+///    no provider); otherwise [`RenameTargetClass::ProviderOnlyInstanceMember`]
+///    — Verter's name-based branch must not answer, because it would hand back
+///    the word range of a same-named script declaration, a different symbol.
+/// 3. A known binding / value import / macro binding ⇒
+///    [`RenameTargetClass::Native`].
+/// 4. Otherwise the positional CSS owner, else
+///    [`RenameTargetClass::Unavailable`].
+pub fn classify_rename_target(
+    position: &Position,
+    source: &str,
+    blocks: &[SfcBlock],
+    analysis: Option<&FileAnalysisSnapshot>,
+    line_index: &LineIndex,
+) -> RenameTarget {
+    let Some(analysis) = analysis else {
+        return RenameTarget::unavailable();
+    };
+    let Some(offset) = line_index
+        .position_to_offset(position)
+        .map(|offset| offset as usize)
+    else {
+        return RenameTarget::unavailable();
+    };
+    let Some(word) = word_at_offset(source, offset) else {
+        return RenameTarget::unavailable();
+    };
+
+    // THE read of the positional `unresolved_bindings` rule for rename
+    // semantics. Nothing else in the rename path consults it.
+    if offset_is_instance_member_access(offset as u32, analysis) {
+        return css_target(offset, source, analysis, line_index).unwrap_or_else(|| RenameTarget {
+            class: RenameTargetClass::ProviderOnlyInstanceMember,
+            anchor: word_range(source, offset, &word, line_index),
+            same_file_ranges: Vec::new(),
+            // The provider owns the occurrence SET here. Verter enumerates none
+            // of it: the file's OTHER spellings of the same instance member
+            // (`:title="count"` alongside `{{ count }}`) are not in any inventory
+            // this surface builds, so at most the authored token under the cursor
+            // is provable.
+            same_file_enumeration: SameFileEnumeration::Partial(
+                UnenumeratedRegion::NoOccurrenceInventory,
+            ),
+        });
+    }
+
+    // Only known bindings, non-type imports and macro bindings are natively
+    // renameable.
     let is_binding = analysis.bindings.iter().any(|b| b.name == word);
     let is_import = analysis
         .imports
@@ -52,48 +320,67 @@ pub fn prepare_rename(
         .any(|m| m.binding_name.as_ref().is_some_and(|n| n == &word));
 
     if !is_binding && !is_import && !is_macro {
-        // Try CSS class/ID rename
-        return prepare_rename_css(offset, source, analysis, line_index);
+        return css_target(offset, source, analysis, line_index)
+            .unwrap_or_else(RenameTarget::unavailable);
     }
 
-    // Return the range of the word at the cursor
+    RenameTarget {
+        class: RenameTargetClass::Native,
+        anchor: word_range(source, offset, &word, line_index),
+        same_file_ranges: to_ranges(
+            native_rename_spans(&word, source, blocks, analysis),
+            line_index,
+        ),
+        same_file_enumeration: claim_enumeration_without_markup(&word, analysis),
+    }
+}
+
+/// The [`SameFileEnumeration`] witness a claim over `name` can establish WITHOUT
+/// knowing whether the file's markup occurrences are enumerated — the safe state.
+///
+/// Two conjuncts decide completeness. This resolves the one the classifier can
+/// see (`<style>` `v-bind()`) and leaves the other UNGRANTED, so the default is
+/// fail-closed: a caller that never learns the carrier's markup capability holds a
+/// strict-subset claim and cannot vouch for a dropped provider location.
+/// `server::rename_plan` grants the markup conjunct through
+/// [`RenameTarget::grant_markup_occurrence_enumeration`].
+///
+/// * `Partial(StyleVBindExpression)` is TERMINAL — a style expression naming this
+///   identifier is an authored occurrence the claim carries no span for, and no
+///   markup capability can make that whole.
+/// * `Partial(MarkupOccurrences)` is the grantable state: script spellings are
+///   already complete (collected by exhaustive lexical search over every
+///   `<script>` block), so markup is the only outstanding region.
+fn claim_enumeration_without_markup(
+    name: &str,
+    analysis: &FileAnalysisSnapshot,
+) -> SameFileEnumeration {
+    if analysis.style_vbind_roots.iter().any(|root| root == name) {
+        return SameFileEnumeration::Partial(UnenumeratedRegion::StyleVBindExpression);
+    }
+    SameFileEnumeration::Partial(UnenumeratedRegion::MarkupOccurrences)
+}
+
+/// The authored range of the identifier `word` containing `offset`. `None` when
+/// either endpoint does not convert (fail closed — never a line-0 range).
+fn word_range(source: &str, offset: usize, word: &str, line_index: &LineIndex) -> Option<Range> {
     let word_start = find_word_start(source.as_bytes(), offset);
     let word_end = word_start + word.len();
-
-    let start = line_index.offset_to_position(word_start as u32)?;
-    let end = line_index.offset_to_position(word_end as u32)?;
-    Some(Range { start, end })
+    Some(Range {
+        start: line_index.offset_to_position(word_start as u32)?,
+        end: line_index.offset_to_position(word_end as u32)?,
+    })
 }
 
-/// Whether the target is a CSS class/id owned by Verter's native workspace
-/// index. This surface is complete without a TypeScript provider.
-pub fn is_css_rename_position(
-    position: &Position,
-    source: &str,
-    analysis: &FileAnalysisSnapshot,
-    line_index: &LineIndex,
-) -> bool {
-    let Some(offset) = line_index
-        .position_to_offset(position)
-        .map(|value| value as usize)
-    else {
-        return false;
-    };
-    analysis
-        .template
-        .as_ref()
-        .and_then(|template| find_css_target_in_template_refs(offset, source, template))
-        .or_else(|| find_css_target_in_style_refs(offset, source, analysis))
-        .is_some()
-}
-
-/// Check if a CSS class/ID name can be renamed.
-fn prepare_rename_css(
+/// The CSS class/id target at `offset`, as a [`RenameTargetClass::Css`] rename
+/// target: the whole cross-region span set, anchored on the span the cursor sits
+/// in. `None` when no CSS name owns the offset.
+fn css_target(
     offset: usize,
     source: &str,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
-) -> Option<Range> {
+) -> Option<RenameTarget> {
     let target = if let Some(template) = &analysis.template {
         find_css_target_in_template_refs(offset, source, template)
     } else {
@@ -101,108 +388,45 @@ fn prepare_rename_css(
     }
     .or_else(|| find_css_target_in_style_refs(offset, source, analysis))?;
 
-    let name = match &target {
-        CssRefTarget::Class(n) | CssRefTarget::Id(n) => n,
-    };
-
-    // Find the range of the CSS name at cursor — scan for its boundaries
     let spans = collect_css_ref_spans(&target, source, analysis);
-    // Find the span that contains the cursor
-    for (start, end) in &spans {
-        if offset as u32 >= *start && (offset as u32) < *end {
-            let s = line_index.offset_to_position(*start)?;
-            let e = line_index.offset_to_position(*end)?;
-            return Some(Range { start: s, end: e });
-        }
-    }
-
-    // Fallback: use the name length
-    let _ = name;
-    None
-}
-
-/// Perform a rename of the symbol at the given position to `new_name`.
-///
-/// Finds all occurrences in script and template blocks and returns a
-/// `WorkspaceEdit` with text edits for each occurrence.
-///
-pub fn rename_at_position(
-    position: &Position,
-    new_name: &str,
-    source: &str,
-    blocks: &[SfcBlock],
-    analysis: Option<&FileAnalysisSnapshot>,
-    line_index: &LineIndex,
-) -> Option<WorkspaceEdit> {
-    let ranges = same_file_rename_ranges(position, source, blocks, analysis, line_index)?;
-    let edits: Vec<TextEdit> = ranges
-        .into_iter()
-        .map(|range| TextEdit {
-            range,
-            new_text: new_name.to_string(),
-        })
-        .collect();
-    if edits.is_empty() {
+    if spans.is_empty() {
         return None;
     }
-
-    #[allow(clippy::mutable_key_type)] // Uri has interior mutability but we only insert once
-    let mut changes = HashMap::new();
-    changes.insert(SAME_FILE_URI.clone(), edits);
-
-    Some(WorkspaceEdit {
-        changes: Some(changes),
-        ..Default::default()
+    let anchor = spans
+        .iter()
+        .find(|(start, end)| offset as u32 >= *start && (offset as u32) < *end)
+        .and_then(|(start, end)| {
+            Some(Range {
+                start: line_index.offset_to_position(*start)?,
+                end: line_index.offset_to_position(*end)?,
+            })
+        });
+    // A CSS class/id's claim spans the markup class attributes and the `<style>`
+    // selectors, so the same markup conjunct decides completeness. A `v-bind()`
+    // expression cannot reference a class NAME, so that conjunct never applies —
+    // but it is evaluated through the one shared witness rather than a second
+    // rule.
+    let name = match &target {
+        CssRefTarget::Class(name) | CssRefTarget::Id(name) => name.clone(),
+    };
+    let same_file_enumeration = claim_enumeration_without_markup(&name, analysis);
+    Some(RenameTarget {
+        class: RenameTargetClass::Css,
+        anchor,
+        same_file_ranges: to_ranges(spans, line_index),
+        same_file_enumeration,
     })
 }
 
-/// Every range in THIS file that a rename at `position` must overwrite.
-///
-/// The single authority for the same-file rename surface: [`rename_at_position`]
-/// builds its `TextEdit`s from exactly this set, and the server proves the
-/// emitted (possibly provider-merged) transaction still covers it. `None` means
-/// nothing under the cursor is renameable BY THIS SURFACE — either nothing
-/// resolves, or the position belongs to a symbol only the TypeScript provider
-/// can resolve (an instance-member template access), in which case the provider
-/// is the sole authority and an empty provider answer must ship no edit at all.
-pub fn same_file_rename_ranges(
-    position: &Position,
+/// Every same-file span a NATIVE rename of `word` must overwrite: its
+/// declaration, its value-import bindings, its template occurrences, and its
+/// lexical script occurrences.
+fn native_rename_spans(
+    word: &str,
     source: &str,
     blocks: &[SfcBlock],
-    analysis: Option<&FileAnalysisSnapshot>,
-    line_index: &LineIndex,
-) -> Option<Vec<Range>> {
-    let analysis = analysis?;
-    let offset = line_index.position_to_offset(position)? as usize;
-    let word = word_at_offset(source, offset)?;
-
-    // The cursor sits inside an instance-member template access
-    // (`___VERTER___instance.<name>`). A same-named script declaration is a
-    // DIFFERENT symbol, so the name-based surface below must not answer: yield
-    // to the positional CSS owner (which answers `None` here) and let the
-    // provider own the position.
-    if offset_is_instance_member_access(offset as u32, analysis) {
-        return css_rename_spans(offset, source, analysis)
-            .map(|spans| to_ranges(spans, line_index));
-    }
-
-    // Verify renaming is allowed
-    let is_binding = analysis.bindings.iter().any(|b| b.name == word);
-    let is_import = analysis
-        .imports
-        .iter()
-        .any(|i| !i.is_type_only && i.bindings.iter().any(|b| b.name == word && !b.is_type_only));
-    let is_macro = analysis
-        .macros
-        .iter()
-        .any(|m| m.binding_name.as_ref().is_some_and(|n| n == &word));
-
-    if !is_binding && !is_import && !is_macro {
-        // Try CSS class/ID rename
-        return css_rename_spans(offset, source, analysis)
-            .map(|spans| to_ranges(spans, line_index));
-    }
-
+    analysis: &FileAnalysisSnapshot,
+) -> Vec<(u32, u32)> {
     let mut spans: Vec<(u32, u32)> = Vec::new();
     let push_span = |spans: &mut Vec<(u32, u32)>, start: u32, end: u32| {
         if !spans.iter().any(|(existing, _)| *existing == start) {
@@ -251,35 +475,14 @@ pub fn same_file_rename_ranges(
         let (content_start, content_end) = block.content_range();
         let content = &source[content_start as usize..content_end as usize];
 
-        for occ_offset in find_all_word_occurrences(content, &word) {
+        for occ_offset in find_all_word_occurrences(content, word) {
             let abs_offset = content_start as usize + occ_offset;
             let abs_end = abs_offset + word.len();
             push_span(&mut spans, abs_offset as u32, abs_end as u32);
         }
     }
 
-    Some(to_ranges(spans, line_index))
-}
-
-/// The CSS class/ID spans a rename at `offset` must overwrite, across template
-/// and style blocks.
-fn css_rename_spans(
-    offset: usize,
-    source: &str,
-    analysis: &FileAnalysisSnapshot,
-) -> Option<Vec<(u32, u32)>> {
-    let target = if let Some(template) = &analysis.template {
-        find_css_target_in_template_refs(offset, source, template)
-    } else {
-        None
-    }
-    .or_else(|| find_css_target_in_style_refs(offset, source, analysis))?;
-
-    let spans = collect_css_ref_spans(&target, source, analysis);
-    if spans.is_empty() {
-        return None;
-    }
-    Some(spans)
+    spans
 }
 
 /// Convert SFC-absolute spans to `Range`s, dropping any that do not convert
