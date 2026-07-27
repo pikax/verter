@@ -763,6 +763,418 @@ export async function preflightFreshnessTooling(opts) {
 }
 
 // ----------------------------------------------------------------------------------------------------
+// BUILD-PREREQUISITE PREFLIGHT — the FIRST thing the gate does, before the freshness preflight, before
+// the archive build, before a single test runs.
+//
+// WHY IT EXISTS. Parts of the Rust suite load artifacts that CARGO DOES NOT BUILD: the real-provider
+// suites spawn the pinned `tsserver` with `--globalPlugins @verter/typescript-plugin
+// --pluginProbeLocations <repo>/packages/vue-vscode/node_modules`, and that probe dir is a pnpm symlink
+// to `packages/typescript-plugin`, whose `main` is `dist/index.js` — a `tsc -b` OUTPUT. `pnpm install`
+// creates the symlink but NOT the `dist`. In that state tsserver silently loads no plugin, cannot resolve
+// `.vue`/`.svelte` carriers, and ~64 `*_tsserver` tests fail with `TS2307: Cannot find module
+// './Comp.vue' or its corresponding type declarations.` — sixty-four opaque failures that read exactly
+// like a compiler regression and cost a full investigation to trace back to one missing build step.
+//
+// That is the failure class CLAUDE.md's "Verification Must Prove Execution (MANDATORY)" names directly:
+// a gate must prove "required source, build, and fixture prerequisites matched the tested tree" and that
+// "unexpected prerequisite skips were zero". A gate that cannot tell "the code is broken" from "an
+// artifact was never built" fails that rule. So the gate FAILS CLOSED here and names what is wrong.
+//
+// THE ORACLE IS A REAL LOAD, NOT A FILE LIST. The check LOADS the plugin entry the way tsserver does —
+// `require()` of the probe directory in a child process — and treats any load failure as the refusal.
+// This is deliberate. A list of `index.js` paths to `stat` is a MIRROR OF THE EMIT GRAPH, and it drifts:
+// the plugin entry eagerly requires its emitted helpers (`dist/helpers/carrierStore.js` and friends) and
+// `@verter/language-shared`'s entry eagerly re-exports a dozen emitted siblings, so a tree with both
+// `index.js` files present and ONE helper missing satisfies every stat and still throws inside tsserver —
+// exactly the condition this preflight exists to prevent. Loading proves the transitive closure actually
+// RESOLVES, costs one process spawn, and cannot fall out of step with what `tsc` emits.
+//
+// WHAT IT DOES NOT PROVE: freshness. A dist that loads but was emitted from an older commit passes here.
+// That is a DIFFERENT problem (a stale-but-loadable artifact) and is deliberately out of scope for this
+// check — it is not an oversight. The check answers exactly one question: can the plugin tsserver is
+// about to load actually be loaded?
+//
+// IT DOES NOT BUILD FOR YOU, and it does not skip the affected tests. Building implicitly would make the
+// gate's verdict depend on a mutation it performed itself; skipping would reintroduce the silent pass
+// (with NO install at all the affected tests SKIP and the gate goes green while proving nothing — the
+// "unexpected prerequisite skips" half of the rule). The only correct outcome is a loud refusal.
+//
+// WHY IT RUNS BEFORE THE FRESHNESS PREFLIGHT. The freshness preflight may run `pnpm install
+// --frozen-lockfile`, which is precisely what turns the SILENT-SKIP state (no node_modules ⇒ tsserver not
+// found ⇒ tests skip ⇒ false green) into the LOUD-FAILURE state (tsserver found, plugin dist absent ⇒ 64
+// failures). Checking first catches both states with one message, before any install and before any cargo.
+// It is deliberately NOT applied to `--prepare`, which builds the archive and runs no test.
+//
+// SCOPE OF THE PRODUCER COMMAND. Two workspace packages produce the closure the load walks: the plugin
+// itself, and `@verter/language-shared`, which its entry requires at load time. `@verter/native` is
+// deliberately NOT among them — the plugin's tsconfig is `"files": ["src/index.ts"]`, so `src/tsc/`, its
+// only consumer, is not in the built plugin, and no Rust test loads a `.node`. Requiring it would drag a
+// full `napi build --release` into the gate's prerequisites.
+// ----------------------------------------------------------------------------------------------------
+
+// The stable marker every build-prerequisite refusal carries. Operators and the self-test key on it to
+// tell this refusal apart from every other exit-127 setup failure the gate can emit.
+export const BUILD_PREREQUISITE_MARKER = "BUILD-PREREQUISITE MISSING";
+
+// The ONE command that produces the closure, in dependency order. `pnpm` runs a multi-filter recursive
+// script topologically, so `@verter/language-shared` builds before `@verter/typescript-plugin` (which
+// type-checks against its emitted `.d.ts`). NOT `pnpm build` (native + LSP + wasm + every TS package) and
+// NOT `--filter @verter/typescript-plugin...`: the trailing ellipsis selects the package AND ITS
+// DEPENDENCIES, which pulls in `@verter/native` and its `napi build --release`.
+export const BUILD_PREREQUISITE_COMMAND =
+  "pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build";
+
+// The workspace packages whose `build` the command above runs. DOCUMENTATION for the refusal message —
+// NOT the oracle, and deliberately not a file list: the oracle is the load probe, which walks whatever
+// `tsc` actually emitted. Adding an entry here changes the message, never the verdict.
+export const BUILD_PREREQUISITE_PACKAGES = [
+  {
+    id: "@verter/language-shared",
+    why: "its entry is `require`d by the plugin entry at load time (and re-exports a dozen emitted siblings)",
+  },
+  {
+    id: "@verter/typescript-plugin",
+    why: "its `dist/index.js` is the plugin entry tsserver loads (and it eagerly requires its emitted helpers)",
+  },
+];
+
+// The path the probe loads: the EXACT `--pluginProbeLocations` directory the real-provider harness passes
+// to tsserver (`crates/verter_lsp/src/test_harness.rs`), joined with the plugin's package name. Node
+// resolves a directory path through its `package.json` `main`, which is the same `dist/index.js` tsserver
+// ends up executing — so the probe walks the real chain: probe dir → package manifest → emitted entry →
+// emitted helpers → `@verter/language-shared` → its emitted siblings.
+export const BUILD_PREREQUISITE_PROBE_SEGMENTS = [
+  "packages",
+  "vue-vscode",
+  "node_modules",
+  "@verter",
+  "typescript-plugin",
+];
+
+// ----------------------------------------------------------------------------------------------------
+// PROBE ENVIRONMENT EQUIVALENCE. The probe's claim is "the plugin tsserver is about to load can be
+// loaded", so it MUST run under the same Node environment tsserver does. It does not by default:
+// `TsserverTypeProvider::spawn` REMOVES a denylist of Node/Electron env vars before launching node
+// (`crates/verter_type_runtime/src/tsserver/ipc.rs`, `CHILD_PROCESS_ENV_DENYLIST`), and an inheriting
+// probe therefore runs with strictly MORE influence than the process it speaks for.
+//
+// That gap is exploitable, not theoretical. Measured: with the entry requiring a helper that does not
+// exist, `NODE_OPTIONS=--require=<preload>` where the preload patches `Module._load` to return a dummy for
+// `process.argv[1]` makes the probe exit 0 and report `loaded: true`, while tsserver still fails on the
+// missing helper — the exact false positive this probe replaced the stat oracle to prevent, reached
+// through the environment instead of the filesystem.
+//
+// The denylist is READ FROM THE RUST CALL SITE rather than restated here, so the two cannot drift. A
+// committed generated mirror was the alternative and is rejected for a bootstrap reason: its freshness
+// test lives in the Rust suite, which this probe runs BEFORE, so a stale mirror would be exactly the
+// silent drift window the mirror was meant to close. If the const cannot be found or parsed the probe
+// FAILS CLOSED — without knowing tsserver's sanitization we cannot claim equivalence, and guessing is how
+// the gap reappears.
+//
+// It strips EXACTLY that denylist and nothing more. Equivalence is the goal, not maximal hardening: a var
+// tsserver also inherits (`NODE_PATH`, say) influences the real load identically, so stripping it here
+// would make the probe stricter than the thing it models and could refuse a tree tsserver handles fine.
+// ----------------------------------------------------------------------------------------------------
+export const TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS = [
+  "crates",
+  "verter_type_runtime",
+  "src",
+  "tsserver",
+  "ipc.rs",
+];
+export const TSSERVER_ENV_DENYLIST_CONST_NAME = "CHILD_PROCESS_ENV_DENYLIST";
+
+// Extract the denylisted env-var names from the Rust source. Returns the names, or `null` when the
+// declaration cannot be located or yields nothing — the caller treats `null` as fail-closed, never as
+// "nothing to strip".
+// DECLARATION-BOUNDED on purpose. The previous version scanned for the bare NAME and then took the next
+// `[`…`]`, so a COMMENTED-OUT `// const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"];` earlier in
+// the file parsed as `["UNRELATED"]` — a plausible list, silently wrong, and precisely the drift this
+// reads the live Rust const to avoid. Reading the source is only safe if a stale or dead mention CANNOT
+// win: comments are stripped first, and the match then requires the real declaration SHAPE
+// (`const NAME: &[&str] = &[ … ]`), so anything else fails closed to `null`.
+export function parseTsserverEnvDenylist(rustSource) {
+  if (typeof rustSource !== "string") return null;
+  const withoutComments = rustSource
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((line) => {
+      const lineComment = line.indexOf("//");
+      return lineComment === -1 ? line : line.slice(0, lineComment);
+    })
+    .join("\n");
+  const declaration = new RegExp(
+    `\\bconst\\s+${TSSERVER_ENV_DENYLIST_CONST_NAME}\\s*:\\s*&\\s*\\[\\s*&\\s*str\\s*\\]\\s*=\\s*&\\s*\\[([^\\]]*)\\]`,
+  ).exec(withoutComments);
+  if (!declaration) return null;
+  const names = [...declaration[1].matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((m) => m[1]);
+  return names.length > 0 ? names : null;
+}
+
+// Build the child environment the probe must run under: the caller's env MINUS the denylist the tsserver
+// launcher strips. Returns `{ env, denylist, source }` or `{ error }` (fail-closed). On Windows the delete
+// folds case, mirroring both `Command::env_remove` and this gate's own `buildCargoEnv`; on POSIX it stays
+// case-exact, because a differently-cased name there is a different variable node never reads — and
+// deleting it would make the probe diverge from the process it models.
+export function resolveProbeChildEnv(opts) {
+  const {
+    repoRoot,
+    env = process.env,
+    readFileFn = readFileSync,
+    joinFn = join,
+    windows = IS_WINDOWS,
+  } = opts;
+  const source = joinFn(repoRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS);
+  let rustSource;
+  try {
+    rustSource = readFileFn(source, "utf8");
+  } catch (error) {
+    return {
+      error:
+        `cannot read the tsserver launcher at ${source} (${error && error.message}), so the environment ` +
+        "tsserver runs under is unknown and the probe cannot claim equivalence",
+    };
+  }
+  const denylist = parseTsserverEnvDenylist(rustSource);
+  if (!denylist) {
+    return {
+      error:
+        `could not parse \`${TSSERVER_ENV_DENYLIST_CONST_NAME}\` out of ${source}, so the environment ` +
+        "tsserver runs under is unknown and the probe cannot claim equivalence (did the const move or " +
+        "change shape?)",
+    };
+  }
+  const childEnv = { ...env };
+  for (const name of denylist) {
+    if (windows) {
+      const wanted = name.toUpperCase();
+      for (const key of Object.keys(childEnv)) {
+        if (key.toUpperCase() === wanted) delete childEnv[key];
+      }
+    } else {
+      delete childEnv[name];
+    }
+  }
+  return { env: childEnv, denylist, source };
+}
+
+// The child-process probe body. Kept as a single-expression `-e` script (no temp file, no shell) that
+// reports a load failure as STRUCTURED JSON on stdout plus a distinctive exit code, so the parent never
+// has to scrape a Node stack trace. `process.argv[1]` under `-e` is the first extra argument — the
+// absolute target path — so nothing is interpolated into the source and no quoting can go wrong.
+export const BUILD_PREREQUISITE_PROBE_SOURCE =
+  "try { require(process.argv[1]); } catch (e) { " +
+  "process.stdout.write(JSON.stringify({ message: String(e && e.message || e), code: e && e.code, " +
+  "requireStack: (e && e.requireStack) || [] })); process.exit(3); }";
+
+// The signal the probe's timeout kills with. MUST be unignorable. `spawnSync`'s default `killSignal` is
+// SIGTERM, which a child can trap — and then `timeout` is not a bound at all: the parent stays BLOCKED
+// until the child chooses to exit, and if it exits 0 `spawnSync` reports status 0 and the probe would
+// answer `loaded: true`. Measured with a child doing `process.on("SIGTERM", () => {})` plus an open
+// handle: under the default the parent blocked for the child's FULL 25s lifetime and then read status 0
+// (a hang AND a false positive); with SIGKILL it returned in ~700ms with `ETIMEDOUT`.
+//
+// That matters here more than the milliseconds suggest: this probe is the gate's FIRST step and it runs
+// with the single-flight mutex HELD, so an unbounded block does not stall one run — it holds the lock,
+// the stale-heavy-gate-lock hazard already tracked as GI-12 in docs/arch/gate-integrity-ledger.md.
+//
+// SIGKILL with NO graceful phase is deliberate, not a shortcut. The child's entire job is one
+// `require()`: it owns no transaction, buffers nothing a reader depends on, and has no cleanup that a
+// SIGTERM grace window would let it finish — so an escalation would add a tunable delay and a second
+// failure mode while buying nothing. (Contrast `runContainedStep`, which DOES escalate: it reaps whole
+// cargo/rustc/test process TREES that legitimately need a chance to flush.) Honest limit: this kills the
+// direct child only. A module that spawns a detached grandchild on require would leak it — the same
+// documented limitation the contained-step runner carries, and out of proportion to fix here.
+export const BUILD_PREREQUISITE_PROBE_KILL_SIGNAL = "SIGKILL";
+
+// Upper bound on the probe. The EFFECTIVE budget is the SMALLER of this cap and the gate's own remaining
+// wallclock (see `probeBudgetMs`): an independent constant here could outlive the `--timeout` deadline the
+// probe sits inside, which is not a bound at all — it is a second, longer deadline nobody asked for.
+export const BUILD_PREREQUISITE_PROBE_MAX_MS = 60_000;
+
+// The probe budget for a gate whose deadline is `deadlineMs` at wallclock `nowMsValue`: the remaining
+// time, capped at MAX. It MAY be zero or negative, and there is deliberately NO FLOOR.
+//
+// A floor was here and was wrong. It made `probeBudgetMs(0, 10_000)` return 2000ms, so an expired deadline
+// (or `--timeout 0s`) bought the probe two seconds of holding the SINGLE-FLIGHT MUTEX past the gate's own
+// wallclock limit. The mutex is what is at stake, so a bounded overshoot is still an overshoot: with no
+// time remaining the correct answer is to refuse IMMEDIATELY, which `runBuildPrerequisiteLoadProbe` does
+// without spawning at all.
+//
+// Refusing to spawn on a non-positive budget is load-bearing for a second, sharper reason: Node applies
+// `spawnSync`'s timeout only when it is `> 0`, so passing `0` or a negative value would SILENTLY DISABLE
+// the timeout — turning an expired deadline into an UNBOUNDED probe, the exact inverse of the intent.
+export function probeBudgetMs(deadlineMs, nowMsValue) {
+  const remaining = deadlineMs - nowMsValue;
+  if (!Number.isFinite(remaining)) return BUILD_PREREQUISITE_PROBE_MAX_MS;
+  return Math.min(BUILD_PREREQUISITE_PROBE_MAX_MS, remaining);
+}
+
+// Run the load probe. Returns `{ loaded, detail }`. FAIL-CLOSED on every non-success shape: a structured
+// load failure (exit 3), a spawn error, a TIMEOUT, a crash, or ANY other non-zero exit all report
+// `loaded: false` with whatever diagnostic is available — the gate must never read "the probe itself did
+// not work" as "the prerequisite is present". `spawnFn` and `nodePath` are injected so the self-test can
+// drive every one of those shapes without a real subprocess.
+export function runBuildPrerequisiteLoadProbe(opts) {
+  const {
+    repoRoot,
+    nodePath = process.execPath,
+    spawnFn = spawnSync,
+    joinFn = join,
+    env = process.env,
+    readFileFn = readFileSync,
+    windows = IS_WINDOWS,
+    timeoutMs = BUILD_PREREQUISITE_PROBE_MAX_MS,
+  } = opts;
+  const target = joinFn(repoRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+  // NO TIME, NO SPAWN. A non-positive budget means the gate's own deadline is spent; launching here would
+  // hold the single-flight mutex past it. It would ALSO be unbounded: Node applies `spawnSync`'s timeout
+  // only when it is `> 0`, so a `0`/negative value silently disables it. Refuse immediately instead.
+  if (!(timeoutMs > 0)) {
+    return {
+      target,
+      loaded: false,
+      reason: "timeout",
+      detail:
+        `no gate wallclock remained for the probe (budget ${timeoutMs}ms) — refusing to launch it rather ` +
+        "than hold the single-flight mutex past the gate deadline",
+    };
+  }
+  // Equivalence first: without knowing what the tsserver launcher strips, a "loaded" answer is not about
+  // the same environment tsserver runs in and must not be given.
+  const childEnv = resolveProbeChildEnv({ repoRoot, env, readFileFn, joinFn, windows });
+  if (childEnv.error) {
+    return { target, loaded: false, reason: "environment-unknown", detail: childEnv.error };
+  }
+  let res;
+  try {
+    res = spawnFn(nodePath, ["-e", BUILD_PREREQUISITE_PROBE_SOURCE, target], {
+      encoding: "utf8",
+      env: childEnv.env,
+      timeout: timeoutMs,
+      killSignal: BUILD_PREREQUISITE_PROBE_KILL_SIGNAL,
+      windowsHide: true,
+    });
+  } catch (error) {
+    return {
+      target,
+      loaded: false,
+      reason: "spawn-error",
+      detail: `probe could not be spawned: ${error && error.message}`,
+    };
+  }
+  if (!res) {
+    return { target, loaded: false, reason: "spawn-error", detail: "probe returned no result" };
+  }
+  // TIMEOUT FIRST. On a timeout Node sets BOTH `error` (code `ETIMEDOUT`) AND `signal` (the killSignal),
+  // so an `error`-before-timeout ordering reports a real timeout as "could not be spawned: … ETIMEDOUT" —
+  // fail-closed but pointing at the wrong cause, which on the gate's first step is how someone spends an
+  // hour on the wrong thing.
+  if (res.error && res.error.code === "ETIMEDOUT") {
+    return {
+      target,
+      loaded: false,
+      reason: "timeout",
+      detail:
+        `probe TIMED OUT after ${timeoutMs}ms and was killed with ` +
+        `${BUILD_PREREQUISITE_PROBE_KILL_SIGNAL}${res.signal ? ` (signal ${res.signal})` : ""} — the ` +
+        "plugin entry did not finish loading, or it left the probe process alive",
+    };
+  }
+  if (res.error) {
+    return {
+      target,
+      loaded: false,
+      reason: "spawn-error",
+      detail: `probe could not be spawned: ${res.error.message}`,
+    };
+  }
+  if (res.signal) {
+    return {
+      target,
+      loaded: false,
+      reason: "signalled",
+      detail: `probe was killed by signal ${res.signal}`,
+    };
+  }
+  if (res.status === 0) return { target, loaded: true, reason: "loaded", detail: "" };
+  if (res.status === 3) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(res.stdout || "");
+    } catch {
+      /* fall through to the raw shape below */
+    }
+    if (parsed && parsed.message) {
+      const stack =
+        Array.isArray(parsed.requireStack) && parsed.requireStack.length > 0
+          ? `\n  require stack: ${parsed.requireStack.join(" <- ")}`
+          : "";
+      // MODULE_NOT_FOUND is the ARTIFACT-MISSING class specifically — the only failure a caller may treat
+      // as "this tree was never built". Every other load error is the plugin failing for its own reasons
+      // and must NOT be read as a missing build.
+      return {
+        target,
+        loaded: false,
+        reason: parsed.code === "MODULE_NOT_FOUND" ? "module-not-found" : "load-error",
+        detail: `${parsed.code ? `${parsed.code}: ` : ""}${parsed.message}${stack}`,
+      };
+    }
+  }
+  const stderr = (res.stderr || "").trim().split("\n").slice(0, 8).join("\n");
+  return {
+    target,
+    loaded: false,
+    reason: "unknown-exit",
+    detail: `probe exited ${res.status}${stderr ? `\n${stderr}` : ""}`,
+  };
+}
+
+// The preflight itself. Returns `{ ok, target, reason, detail, lines }` — `lines` is the operator-facing
+// report, already naming what failed to load, the packages that produce it, and the exact producer
+// command. `reason` is the TYPED failure class (see `runBuildPrerequisiteLoadProbe`); callers that need to
+// distinguish "this tree was never built" from "the probe could not answer" read it instead of matching on
+// `detail`, so an infrastructure failure can never be mistaken for a missing artifact.
+//
+// `timeoutMs` is threaded through so the caller can bound the probe by ITS OWN deadline rather than an
+// independent constant — a probe that can outlive the whole-gate deadline it sits inside is not bounded.
+// `loadProbe` is injected so the self-test can drive both directions in-process; production passes the
+// real `runBuildPrerequisiteLoadProbe`.
+export function checkBuildPrerequisites(opts) {
+  const { repoRoot, loadProbe = runBuildPrerequisiteLoadProbe, timeoutMs } = opts;
+  const probe = loadProbe({ repoRoot, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
+  if (probe.loaded) {
+    return {
+      ok: true,
+      target: probe.target,
+      reason: probe.reason || "loaded",
+      detail: "",
+      lines: [],
+    };
+  }
+  const lines = [
+    `${BUILD_PREREQUISITE_MARKER}: the tsserver plugin the real-provider suites load could not be ` +
+      "loaded from this tree. Running the gate now would report test failures that are really a missing " +
+      "build step.",
+    `  probe target: ${probe.target}`,
+    `  load failure: ${probe.detail}`,
+    "  produced by:",
+  ];
+  for (const pkg of BUILD_PREREQUISITE_PACKAGES) {
+    lines.push(`    ${pkg.id} — ${pkg.why}`);
+  }
+  lines.push(
+    "Produce them with (from the repo root, after `pnpm install --frozen-lockfile` — the probe target is " +
+      "an install-created directory, so a failure naming it means the install is missing too):",
+    `    ${BUILD_PREREQUISITE_COMMAND}`,
+    "The gate refuses to build them for you (its verdict must not depend on a mutation it performed) and " +
+      "refuses to skip the tests that need them (with no install at all those tests SKIP and the gate " +
+      "goes green while proving nothing). This check proves the plugin RESOLVES, not that it is fresh; a " +
+      "stale-but-loadable dist is a separate problem and is out of scope here.",
+  );
+  return { ok: false, target: probe.target, reason: probe.reason, detail: probe.detail, lines };
+}
+// ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
 // whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the
 // tools are genuinely absent); when the tools are present or were installed, a FAIL of one of these names

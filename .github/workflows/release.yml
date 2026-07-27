@@ -121,6 +121,15 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # REQUIRED for a non-vacuous gate — the same prerequisite ci.yml's rust-test job builds, and the same
+      # one gate.mjs's BUILD-PREREQUISITE PREFLIGHT refuses to run without. The real-provider suites spawn
+      # the pinned tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a `tsc -b`
+      # output `pnpm install` does not produce; without it ~64 `*_tsserver` tests fail with `TS2307: Cannot
+      # find module './Comp.vue'`. Narrowest sufficient scope (the plugin entry plus the
+      # `@verter/language-shared` it requires at load time) — deliberately NOT `pnpm build` and NOT the
+      # `@verter/typescript-plugin...` ellipsis, which would drag in `@verter/native`'s release build.
+      - name: Build the Rust gate's TypeScript prerequisites
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Rust gate

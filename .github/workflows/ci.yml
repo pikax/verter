@@ -282,6 +282,23 @@ jobs:
       # gate's freshness preflight then verdict-gates tolerance OFF, making a
       # freshness failure a HARD failure rather than PASS-WITH-TOLERATED.
       - run: pnpm install --frozen-lockfile
+      # REQUIRED for a non-vacuous gate — see gate.mjs's BUILD-PREREQUISITE PREFLIGHT. The real-provider
+      # suites spawn the pinned tsserver with `--globalPlugins @verter/typescript-plugin
+      # --pluginProbeLocations packages/vue-vscode/node_modules`; that probe dir is a pnpm SYMLINK to
+      # packages/typescript-plugin, whose `main` is `dist/index.js` — a `tsc -b` OUTPUT. `pnpm install`
+      # creates the symlink but NOT the dist, so this job used to run the gate against a tree where
+      # tsserver loaded no plugin, could not resolve `.vue`/`.svelte` carriers, and ~64 `*_tsserver` tests
+      # failed with `TS2307: Cannot find module './Comp.vue' or its corresponding type declarations.`
+      #
+      # NARROWEST SUFFICIENT SCOPE. Only two BUILD-produced artifacts are loaded from disk by the Rust
+      # suite: the plugin entry, and `@verter/language-shared`, which that entry `require`s at load time.
+      # NOT `pnpm build` (native + LSP + wasm + every TS package) and NOT `--filter
+      # @verter/typescript-plugin...` — the trailing ellipsis selects the package AND ITS DEPENDENCIES,
+      # dragging in `@verter/native` and its `napi build --release`. pnpm orders a multi-filter recursive
+      # script topologically, so language-shared builds first (the plugin type-checks against its emitted
+      # .d.ts; built alone it fails with TS2307 while still emitting a dist that throws at load).
+      - name: Build the Rust gate's TypeScript prerequisites
+        run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Anti-binary-growth integration-test layout
         run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest

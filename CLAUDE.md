@@ -359,6 +359,34 @@ cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncate
 non-exempt file above 1,500 lines as `path (N lines)`. File size is informational and never affects the
 gate verdict.
 
+**Build-prerequisite preflight (fail-closed, the gate's FIRST step).** Parts of the Rust suite load
+artifacts cargo does not build: the real-provider suites spawn the pinned tsserver with `--globalPlugins
+@verter/typescript-plugin --pluginProbeLocations packages/vue-vscode/node_modules`, a pnpm symlink to
+`packages/typescript-plugin` whose `main` is `dist/index.js` — a `tsc -b` OUTPUT that `pnpm install` does
+NOT produce. With the symlink present but the dist absent, tsserver loads no plugin and ~64 `*_tsserver`
+tests fail with `TS2307: Cannot find module './Comp.vue'`, indistinguishable from a compiler regression.
+So before the freshness preflight, before cargo, and before any test, `gate.mjs` **loads** that plugin
+entry in a child process (`require()` of the probe directory, exactly what tsserver resolves) and on any
+load failure FAILS CLOSED (exit 127, marker `BUILD-PREREQUISITE MISSING`) naming the probe target, the
+load error, the producing packages, and the producer command. The oracle is a real load, not a list of
+files to stat: the entry eagerly requires its emitted helpers and `@verter/language-shared`'s entry
+re-exports a dozen emitted siblings, so a stat list mirrors the emit graph and drifts — both `index.js`
+present with one helper missing passes every stat and still throws inside tsserver. The probe runs under
+**tsserver's** environment, not the gate's — it strips the `CHILD_PROCESS_ENV_DENYLIST` the tsserver
+launcher strips, read out of `crates/verter_type_runtime/src/tsserver/ipc.rs` so the two cannot drift,
+because otherwise a `NODE_OPTIONS` preload can forge a status-0 load — and its timeout is a hard `SIGKILL`
+bounded by the gate's own remaining deadline, since `spawnSync`'s default SIGTERM is trappable and a
+trapping child both hangs the gate (with the single-flight mutex held) and returns a false positive.
+Failure classes are typed (`reason`), so only `module-not-found` may ever be read as "never built". It
+proves the closure **resolves**, not that it is **fresh**; a stale-but-loadable dist is a separate,
+deliberately out-of-scope problem. It never builds the artifacts (the verdict must not depend on a mutation the gate performed) and
+never skips the affected tests (with no install at all those tests SKIP and the gate goes green while
+proving nothing). Produce them with `pnpm --filter @verter/language-shared --filter
+@verter/typescript-plugin build` — deliberately NOT `pnpm build` and NOT `--filter
+@verter/typescript-plugin...` (the trailing ellipsis pulls in `@verter/native`'s `napi build --release`).
+`--prepare` is exempt; it runs no test. `(GB9)` in `scripts/gate-selftest.mjs` proves the discrimination in
+six directions against the real production CLI on a synthetic miniature of the package graph.
+
 ### End-of-change Checks
 
 Run after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:

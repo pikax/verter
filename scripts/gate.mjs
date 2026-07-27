@@ -117,6 +117,35 @@
 //      pinned in `NEXTEST_FAILURE_STATUSES` + `classifyNextestStatusField` from nextest's own status
 //      literals; widen it there, and only there, if a future nextest adds a spelling.
 //
+// BUILD-PREREQUISITE PREFLIGHT (gate mode only; runs FIRST, before everything below)
+//   Parts of the Rust suite load artifacts CARGO DOES NOT BUILD. The real-provider suites spawn the pinned
+//   `tsserver` with `--globalPlugins @verter/typescript-plugin --pluginProbeLocations
+//   packages/vue-vscode/node_modules`; that probe dir is a pnpm symlink to `packages/typescript-plugin`,
+//   whose `main` is `dist/index.js` — a `tsc -b` OUTPUT that `pnpm install` does NOT produce. With the
+//   symlink present but the `dist` absent, tsserver loads no plugin, cannot resolve `.vue`/`.svelte`
+//   carriers, and ~64 `*_tsserver` tests fail with `TS2307: Cannot find module './Comp.vue' or its
+//   corresponding type declarations.` — sixty-four opaque failures that read exactly like a compiler
+//   regression. CLAUDE.md's "Verification Must Prove Execution (MANDATORY)" requires a gate to prove
+//   "required source, build, and fixture prerequisites matched the tested tree"; a gate that cannot tell
+//   "the code is broken" from "an artifact was never built" fails that rule.
+//   So as its FIRST step — before the freshness preflight, before cargo, before any test — the gate LOADS
+//   that plugin entry in a child process (`require()` of the probe directory, exactly what tsserver
+//   resolves) and, on any load failure, FAILS CLOSED with exit 127 naming the probe target, the load
+//   error, the producing packages and the exact producer command (marker: `BUILD-PREREQUISITE MISSING`).
+//   A REAL LOAD, not a list of files to stat: the entry eagerly requires its emitted helpers and
+//   `@verter/language-shared`'s entry re-exports a dozen emitted siblings, so a stat list mirrors the emit
+//   graph and drifts — a tree with both `index.js` files present and one helper missing satisfies every
+//   stat and still throws inside tsserver. The load proves the transitive closure RESOLVES; it does NOT
+//   prove freshness, and a stale-but-loadable dist is a separate, deliberately out-of-scope problem.
+//   It does NOT build the artifacts (the verdict must not depend on a mutation the gate performed) and
+//   does NOT skip the affected tests (with no install at all those tests SKIP, the silent-pass half of the
+//   same rule). It precedes the freshness preflight because that preflight's `pnpm install` is precisely
+//   what converts the silent-skip state into the 64-failure state. `--prepare` is exempt: it builds the
+//   archive and runs no test.
+//   Two workspace packages produce the closure: the plugin, and `@verter/language-shared`.
+//   `@verter/native` is deliberately NOT among them (the plugin's `"files": ["src/index.ts"]` excludes
+//   `src/tsc/`, its only consumer), so the gate never demands a `napi build --release`.
+//
 // FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
 //   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
 //   through the workspace `buf` + `oxfmt` binaries (resolved under `node_modules/.bin` first, PATH second).
@@ -183,7 +212,8 @@
 //   124 TIMEOUT       (whole-gate wallclock deadline tripped)
 //   125 STALL         (no progress within the stall window)
 //   126 LOCK-REFUSED  (another gate holds the single-flight mutex and is alive / lock uninspectable)
-//   127 USAGE/SETUP   (bad arguments, repo root not found, archive/list setup failure)
+//   127 USAGE/SETUP   (bad arguments, repo root not found, a MISSING BUILD PREREQUISITE, archive/list
+//                      setup failure)
 //
 // ENV VARS HONORED
 //   VERTER_GATE_LOCK / MOM_GATE_LOCK   lockdir path (default: OS temp dir keyed by repo realpath)
@@ -222,6 +252,9 @@ import {
   mapStepReason,
   analyzeNextestSurface,
   analyzeLibtestSurface,
+  // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
+  checkBuildPrerequisites,
+  probeBudgetMs,
   // freshness-tooling preflight (verdict-gating authority)
   preflightFreshnessTooling,
   pnpmInstallCommand,
@@ -948,6 +981,7 @@ async function runVueMacroOracleChecks(ctx) {
 
 // ----------------------------------------------------------------------------------------------------
 // runGate: the full canonical gate.
+//   0. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
 //   1. Verify the pinned Vue macro oracle and its extractor.
 //   2. archive (build ONCE) + list (parse rust-suites).
 //   3. SURFACE 1 — nextest run from the archive (process isolation).
@@ -957,6 +991,39 @@ async function runVueMacroOracleChecks(ctx) {
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+
+  // ---------- BUILD-PREREQUISITE PREFLIGHT (the FIRST step of the gate) ----------
+  // Parts of the suite load artifacts cargo does not build: the real-provider suites spawn the pinned
+  // tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a `tsc -b` output that
+  // `pnpm install` does NOT produce. Without it tsserver resolves no carrier and ~64 `*_tsserver` tests
+  // fail with `TS2307: Cannot find module './Comp.vue'` — indistinguishable, from the gate's output, from
+  // a real compiler regression.
+  //
+  // The oracle is a REAL LOAD of that plugin entry in a child process, NOT a list of files to stat: the
+  // entry eagerly requires its emitted helpers and `@verter/language-shared`'s entry re-exports a dozen
+  // emitted siblings, so a stat list is a mirror of the emit graph that drifts (both `index.js` present +
+  // one helper missing passes every stat and still throws inside tsserver). It proves resolvability, NOT
+  // freshness — a stale-but-loadable dist is a separate, deliberately out-of-scope problem.
+  //
+  // Ordering: this is the first step of the gate proper. It runs BEFORE `preflightFreshnessTooling` ON
+  // PURPOSE — that preflight may `pnpm install`, and the install is exactly what converts the SILENT-SKIP
+  // state (no node_modules ⇒ no tsserver ⇒ the affected tests skip ⇒ a green gate that proved nothing)
+  // into the LOUD-FAILURE state. Checking first catches both with one actionable message. (The mutex,
+  // the runner target dir and the whole-gate deadline are established by `main` before runGate is
+  // entered; this precedes every install, every cargo step and every test, not every statement.)
+  // See `checkBuildPrerequisites` for why the gate refuses to build or to skip.
+  // The probe is bounded by the GATE's remaining wallclock, not by its own constant: it runs with the
+  // single-flight mutex held, so a probe that could outlive `--timeout` would hold the lock past the
+  // deadline that is supposed to release it.
+  const prerequisites = checkBuildPrerequisites({
+    repoRoot: repoRealpath,
+    timeoutMs: probeBudgetMs(deadlineMs, nowMs()),
+  });
+  if (!prerequisites.ok) {
+    for (const line of prerequisites.lines) err(line);
+    return EXIT_USAGE;
+  }
+  log(`build-prerequisite preflight: SATISFIED — ${prerequisites.target} loaded`);
 
   // ---------- FRESHNESS-TOOLING PREFLIGHT (verdict-gating authority) ----------
   // BEFORE the archive build (and inside the held mutex + containment model), self-ensure the typeinfo

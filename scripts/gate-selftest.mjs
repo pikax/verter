@@ -161,6 +161,28 @@
 //                           agreement. Discriminates: pre-fix buildCargoEnv left PATH unchanged, assigned ""
 //                           on all-implicit, KEPT non-dot relative / `..` / drive-relative / Windows root-
 //                           relative entries, and left a `PaTh` key unsanitized.
+//   (GB9)  BUILD-PREREQUISITE PREFLIGHT — the gate distinguishes "the code is broken" from "an artifact was
+//                           never built". Parts of the Rust suite load artifacts cargo does not build (the
+//                           real-provider suites spawn tsserver with `--globalPlugins
+//                           @verter/typescript-plugin`, whose entry is a `tsc -b` output `pnpm install` does
+//                           NOT produce); without them ~64 `*_tsserver` tests failed with `TS2307: Cannot
+//                           find module './Comp.vue'` and the gate reported them as ordinary regressions.
+//                           The oracle is a REAL LOAD of that entry in a child process, so the case a
+//                           stat-based check ACCEPTS is covered: both `index.js` present with one EMITTED
+//                           HELPER missing still throws inside tsserver and must still refuse. Leg 1 drives
+//                           the real `checkBuildPrerequisites` / `runBuildPrerequisiteLoadProbe` in-process
+//                           over injected probe outcomes (incl. every fail-closed shape: spawn error,
+//                           signal, timeout, unparseable output); legs 2-6 drive the REAL PRODUCTION CLI (a
+//                           byte-copy rooted in a SYNTHETIC git repo holding a miniature of the package
+//                           graph, so nothing in the developer's tree is touched and the production gate
+//                           keeps its zero test seams). Discriminates in six directions: nothing built /
+//                           plugin entry missing / language-shared missing / helper missing => exit 127
+//                           carrying the marker, the probe target and the producer command, with NEITHER
+//                           the freshness preflight NOR the archive build reached (the ordering half — the
+//                           freshness preflight's `pnpm install` is what turns the silent-SKIP state into
+//                           the 64-failure state); everything built => no refusal, SATISFIED, and the run
+//                           PROCEEDS. Every plant is stat-PROVEN applied before the run and re-stated
+//                           after it.
 //
 // Exit non-zero if any property fails.
 
@@ -173,6 +195,7 @@ import {
   existsSync,
   mkdirSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -209,6 +232,17 @@ import {
   // the CLOSED cwd-independent invariant, no preflight-vs-test disagreement.
   buildCargoEnv,
   sanitizePathValue,
+  // build-prerequisite preflight — the non-cargo artifacts the Rust suite loads from disk (GB9).
+  checkBuildPrerequisites,
+  runBuildPrerequisiteLoadProbe,
+  parseTsserverEnvDenylist,
+  probeBudgetMs,
+  BUILD_PREREQUISITE_PACKAGES,
+  BUILD_PREREQUISITE_PROBE_SEGMENTS,
+  BUILD_PREREQUISITE_PROBE_MAX_MS,
+  BUILD_PREREQUISITE_COMMAND,
+  BUILD_PREREQUISITE_MARKER,
+  TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS,
 } from "./gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -254,6 +288,7 @@ const EXIT_FAIL = 1;
 const EXIT_TIMEOUT = 124;
 const EXIT_STALL = 125;
 const EXIT_LOCK_REFUSED = 126;
+const EXIT_USAGE = 127;
 
 let PASS_COUNT = 0;
 let FAIL_COUNT = 0;
@@ -330,6 +365,25 @@ function runGate(args, env) {
   // spawnSync sets .status (exit code) or .signal. A signalled exit yields null status.
   if (r.status === null && r.signal) return { code: 128, signal: r.signal };
   return { code: r.status === null ? 1 : r.status };
+}
+
+// Run a PRODUCTION gate.mjs CLI (the real file, or a byte-copy of it rooted elsewhere) and CAPTURE its
+// output. Used by (GB9), which drives the real CLI against a SYNTHETIC repo root so it can observe the
+// build-prerequisite refusal in both directions without mutating the developer's tree. Returns
+// { code, out } where `out` is stdout+stderr concatenated.
+function runGateCapture(gatePath, args, env) {
+  const child = { ...process.env, ...env };
+  // The gate honors VERTER_GATE_TARGET_DIR; every (GB9) leg passes --target-dir explicitly, so drop the
+  // ambient value rather than let a developer's export decide where the synthetic run writes.
+  delete child.VERTER_GATE_TARGET_DIR;
+  const r = spawnSync(process.execPath, [gatePath, ...args], {
+    env: child,
+    encoding: "utf8",
+    timeout: 300_000,
+  });
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  if (r.status === null && r.signal) return { code: 128, signal: r.signal, out };
+  return { code: r.status === null ? 1 : r.status, out };
 }
 
 // Run the SELF-TEST-ONLY runner synchronously in single-command mode (`--st-cmd`): the given shell command
@@ -2123,6 +2177,38 @@ async function main() {
       if (IS_WINDOWS) {
         skip(
           "(xix) STUB-INVOKED — POSIX bash cargo-stub + PATH override (no portable Windows cargo-stub stand-in here)",
+        );
+        break posix_xix;
+      }
+      // PRECONDITION, not an assertion. This scenario runs the REAL gate against the REAL repo root and
+      // expects it to reach cargo. The gate's FIRST step is the build-prerequisite preflight, which exits
+      // 127 on a tree whose tsserver plugin cannot be loaded — long before the archive step. On such a
+      // tree this scenario would report "the stub was NOT invoked" and "expected 1, got 127", which says
+      // nothing about the property under test. Worse, it makes the self-test's own verdict depend on the
+      // very tree state the gate is checking for: a green run would only ever be reachable when the
+      // artifacts happen to exist. So the state is measured and declared as a TRUE skip (counted in SKIP,
+      // never in PASS) rather than silently mis-measured.
+      const stubPrereq = checkBuildPrerequisites({ repoRoot: REPO_REALPATH });
+      // The SKIP is allowed for exactly ONE cause: the artifacts are demonstrably absent
+      // (`module-not-found`). Any OTHER failure class — an EPERM/spawn failure, a probe timeout, the
+      // plugin throwing for its own reasons, an unreadable tsserver launcher — means the prerequisite
+      // could not be ANSWERED, not that it is missing, and skipping on those would green-skip a scenario
+      // whose artifacts are present: a narrower version of the very silent pass this precondition was
+      // added to remove. `finish()` exits 0 while FAIL is zero, so a wrong SKIP here is invisible.
+      if (!stubPrereq.ok && stubPrereq.reason === "module-not-found") {
+        skip(
+          "(xix) STUB-INVOKED — SKIPPED: this tree's build prerequisites are absent, so the real gate " +
+            `exits 127 at its build-prerequisite preflight before reaching cargo (${stubPrereq.detail.split("\n")[0]}). ` +
+            `Build them with \`${BUILD_PREREQUISITE_COMMAND}\` and re-run to exercise this scenario.`,
+        );
+        break posix_xix;
+      }
+      if (!stubPrereq.ok) {
+        fail(
+          `(xix) the build-prerequisite probe could not ANSWER (reason=${stubPrereq.reason}): ` +
+            `${stubPrereq.detail.split("\n")[0]}. That is an infrastructure failure, not a missing build, ` +
+            "so this scenario must FAIL rather than skip — a skip here would hide a scenario whose " +
+            "artifacts are present.",
         );
         break posix_xix;
       }
@@ -6148,6 +6234,887 @@ async function main() {
           "mixed-case name there is a different variable nextest never reads (discriminating — a blanket " +
           "case-insensitive strip fails the POSIX control, and the previous case-sensitive strip left " +
           "Nextest_Profile / Nextest_Some_Future_Knob / Force_Color alive on Windows)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB9) BUILD-PREREQUISITE PREFLIGHT — the gate must tell "the code is broken" apart from "an artifact
+  // was never built".
+  //
+  // THE BUG IT GUARDS. Parts of the Rust suite load artifacts cargo does not build: the real-provider
+  // suites spawn the pinned tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a
+  // `tsc -b` output that `pnpm install` does NOT produce. In that state ~64 `*_tsserver` tests failed with
+  // `TS2307: Cannot find module './Comp.vue'` and the gate reported them as ordinary test failures.
+  //
+  // THE ORACLE UNDER TEST IS A REAL LOAD, and that is what makes the interesting cases interesting. A
+  // list of `index.js` paths to stat would be a mirror of the emit graph: the plugin entry eagerly
+  // requires its emitted helpers and `@verter/language-shared`'s entry re-exports emitted siblings, so a
+  // tree with BOTH `index.js` files present and ONE HELPER missing satisfies every stat and still throws
+  // inside tsserver. Leg 5 below is exactly that tree, and it is the case a stat-based check accepts.
+  //
+  // HOW IT IS DRIVEN. Leg 1 calls the real `checkBuildPrerequisites` in-process against injected probe
+  // outcomes (including every fail-closed shape: spawn error, signal, timeout, unparseable output). Legs
+  // 2-6 drive the REAL PRODUCTION CLI end-to-end — a byte-copy of `gate.mjs` + `gate-internals.mjs` in a
+  // SYNTHETIC git root holding a faithful MINIATURE of the real package graph (probe dir → package
+  // manifest → emitted entry → emitted helper → language-shared entry → its emitted sibling), so every
+  // artifact can be genuinely present or absent without touching the developer's tree and without a test
+  // seam on the production gate (which has none). The miniature uses absolute `main` fields rather than
+  // symlinks so it is portable to hosts that refuse symlink creation.
+  //
+  // DISCRIMINATION (six directions, so a green run is not vacuous). Each end-to-end leg re-stats its
+  // planted files AFTER the CLI returns, so a run whose verdict was produced against a different tree
+  // state than intended is caught rather than trusted:
+  //   * nothing built            => exit 127, marker + probe target + producer command, and NEITHER the
+  //                                 freshness preflight NOR the archive build was reached (the ordering
+  //                                 half — the freshness preflight's `pnpm install` is what turns the
+  //                                 silent-SKIP state into the 64-failure state).
+  //   * plugin entry missing     => 127.
+  //   * language-shared missing  => 127 (the REVERSE single-missing direction).
+  //   * a transitively-required
+  //     HELPER missing, BOTH
+  //     entries present          => 127 — the case a stat-based check accepts.
+  //   * everything present       => no refusal, SATISFIED, and the run PROCEEDS into the freshness
+  //                                 preflight.
+  // --------------------------------------------------------------------------------------------------
+  {
+    let ok = true;
+
+    // ---- Leg 1: the real checker, in-process, over injected probe outcomes ----
+    const loaded = checkBuildPrerequisites({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({ target: "/synthetic/probe", loaded: true, detail: "" }),
+    });
+    if (!loaded.ok || loaded.lines.length !== 0) {
+      fail(
+        `(GB9.1) a successful load must report ok with NO report lines; got ok=${loaded.ok} ` +
+          `lines=${loaded.lines.length}`,
+      );
+      ok = false;
+    }
+    const failedLoad = checkBuildPrerequisites({
+      repoRoot: "/synthetic",
+      loadProbe: () => ({
+        target: "/synthetic/probe",
+        loaded: false,
+        detail: "MODULE_NOT_FOUND: Cannot find module './helpers/carrierStore'",
+      }),
+    });
+    const failedReport = failedLoad.lines.join("\n");
+    if (
+      failedLoad.ok ||
+      !failedReport.includes(BUILD_PREREQUISITE_MARKER) ||
+      !failedReport.includes("/synthetic/probe") ||
+      !failedReport.includes("./helpers/carrierStore") ||
+      !failedReport.includes(BUILD_PREREQUISITE_COMMAND)
+    ) {
+      fail(
+        `(GB9.1) a failed load must report NOT ok, carrying the marker, the probe target, the load error ` +
+          `and the producer command; got ok=${failedLoad.ok}:\n${failedReport}`,
+      );
+      ok = false;
+    }
+    for (const pkg of BUILD_PREREQUISITE_PACKAGES) {
+      if (!failedReport.includes(pkg.id)) {
+        fail(`(GB9.1) the refusal must name the producing package ${pkg.id}`);
+        ok = false;
+      }
+    }
+    // Every in-process probe call below injects a launcher source. The probe resolves tsserver's env
+    // denylist BEFORE spawning and fail-closes as `environment-unknown` when it cannot, so a call with a
+    // nonexistent `repoRoot` never reaches the spawn at all — the injected `spawnFn` would be dead code and
+    // every "fail-closed" assertion below would pass VACUOUSLY. Each shape therefore also asserts its
+    // expected `reason`, so a future short-circuit cannot quietly re-hollow them.
+    const fakeLauncher = () => 'pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["NODE_OPTIONS"];';
+
+    // FAIL-CLOSED on every probe shape that is not a clean exit-0. "The probe itself did not work" must
+    // never read as "the prerequisite is present" — each of these is a distinct route into the same
+    // refusal, driven through the REAL `runBuildPrerequisiteLoadProbe` with an injected spawn.
+    const probeShapes = [
+      [
+        "a throwing spawn",
+        "spawn-error",
+        () => {
+          throw new Error("EACCES");
+        },
+      ],
+      ["a null result", "spawn-error", () => null],
+      ["a spawn error", "spawn-error", () => ({ error: new Error("ENOENT") })],
+      ["a killed probe", "signalled", () => ({ signal: "SIGKILL", status: null })],
+      [
+        "an unparseable structured failure",
+        "unknown-exit",
+        () => ({ status: 3, stdout: "not json", stderr: "" }),
+      ],
+      [
+        "an unexpected non-zero exit",
+        "unknown-exit",
+        () => ({ status: 9, stdout: "", stderr: "boom" }),
+      ],
+      [
+        "a MODULE_NOT_FOUND load failure",
+        "module-not-found",
+        () => ({
+          status: 3,
+          stdout: JSON.stringify({ message: "Cannot find module './x'", code: "MODULE_NOT_FOUND" }),
+          stderr: "",
+        }),
+      ],
+      [
+        "an unrelated load error",
+        "load-error",
+        () => ({
+          status: 3,
+          stdout: JSON.stringify({ message: "boom", code: "ERR_SOMETHING" }),
+          stderr: "",
+        }),
+      ],
+      // The REAL timeout shape. Node sets BOTH `error` (code ETIMEDOUT) AND `signal` (the killSignal), so
+      // this row exists to pin the dual shape specifically — the earlier "a spawn error" row carries no
+      // `code` and would not exercise the timeout branch. Previously this case was CLAIMED in the comment
+      // and not injected.
+      [
+        "a timeout (dual error+signal ETIMEDOUT)",
+        "timeout",
+        () => ({
+          error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }),
+          signal: "SIGKILL",
+          status: null,
+        }),
+      ],
+    ];
+    for (const [label, wantReason, spawnFn] of probeShapes) {
+      const probe = runBuildPrerequisiteLoadProbe({
+        repoRoot: "/synthetic",
+        readFileFn: fakeLauncher,
+        spawnFn,
+      });
+      if (probe.loaded) {
+        fail(`(GB9.1) ${label} must NOT report the prerequisite as loaded`);
+        ok = false;
+      }
+      if (!probe.detail) {
+        fail(`(GB9.1) ${label} must carry a diagnostic`);
+        ok = false;
+      }
+      // The reason pins that the intended BRANCH ran. Without it, a probe that short-circuits before the
+      // spawn (as it does when the launcher is unreadable) would satisfy both assertions above while the
+      // injected shape was never evaluated — a vacuous pass this scenario actually hit once.
+      if (probe.reason !== wantReason) {
+        fail(
+          `(GB9.1) ${label} must classify as ${wantReason}; got ${probe.reason} — the injected shape was ` +
+            "not the branch that decided",
+        );
+        ok = false;
+      }
+    }
+    // A timeout must be DIAGNOSED as a timeout, not as a spawn failure. Both fail closed, but a gate's
+    // first step pointing at the wrong cause costs the reader an hour.
+    const timedOut = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      timeoutMs: 700,
+      spawnFn: () => ({
+        error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }),
+        signal: "SIGKILL",
+        status: null,
+      }),
+    });
+    if (!/TIMED OUT/.test(timedOut.detail) || /could not be spawned/.test(timedOut.detail)) {
+      fail(
+        `(GB9.1) a timeout must be diagnosed as a TIMEOUT, not as a spawn failure; got: ${timedOut.detail}`,
+      );
+      ok = false;
+    }
+    // The timeout must be enforced with an UNIGNORABLE signal. `spawnSync`'s default killSignal is
+    // SIGTERM, which a child can trap — and then `timeout` bounds nothing. The captured options also prove
+    // the denylisted var is absent from the child env, so the equivalence strip is not merely computed.
+    let capturedOpts = null;
+    runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      env: { PATH: "/usr/bin", NODE_OPTIONS: "--require=/tmp/evil.cjs" },
+      spawnFn: (_cmd, _args, options) => {
+        capturedOpts = options;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    if (!capturedOpts || !capturedOpts.env || "NODE_OPTIONS" in capturedOpts.env) {
+      fail(
+        "(GB9.1) the probe must spawn with the denylisted NODE_OPTIONS REMOVED from the child env; got " +
+          `env keys ${JSON.stringify(Object.keys((capturedOpts && capturedOpts.env) || {}))}`,
+      );
+      ok = false;
+    }
+    if (capturedOpts && capturedOpts.env && capturedOpts.env.PATH !== "/usr/bin") {
+      fail(
+        "(GB9.1) the probe must PRESERVE non-denylisted env vars (equivalence, not sanitization)",
+      );
+      ok = false;
+    }
+    if (!capturedOpts || capturedOpts.killSignal !== "SIGKILL" || !capturedOpts.timeout) {
+      fail(
+        `(GB9.1) the probe spawn must carry a timeout AND killSignal SIGKILL; got ` +
+          `timeout=${capturedOpts && capturedOpts.timeout} killSignal=${JSON.stringify(capturedOpts && capturedOpts.killSignal)}`,
+      );
+      ok = false;
+    }
+    // …and the positive control on the same real probe, so the shapes above prove fail-closed rather than
+    // "this function always returns false".
+    const okProbe = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      spawnFn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    if (!okProbe.loaded || okProbe.reason !== "loaded") {
+      fail(
+        `(GB9.1) a clean exit-0 probe must report the prerequisite as loaded; got loaded=${okProbe.loaded} ` +
+          `reason=${okProbe.reason}`,
+      );
+      ok = false;
+    }
+    // stderr on an exit-0 child is NOT a failure — a plugin that warns still loaded.
+    const noisyOk = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: fakeLauncher,
+      spawnFn: () => ({ status: 0, stdout: "", stderr: "a deprecation warning" }),
+    });
+    if (!noisyOk.loaded) {
+      fail("(GB9.1) stderr on an exit-0 probe must NOT be read as a load failure");
+      ok = false;
+    }
+    // …and the env resolution's own fail-closed direction, driven through the same real probe: an
+    // unreadable launcher must refuse BEFORE spawning (the spawn must never run).
+    let spawnRan = false;
+    const envUnknown = runBuildPrerequisiteLoadProbe({
+      repoRoot: "/synthetic",
+      readFileFn: () => {
+        throw new Error("ENOENT");
+      },
+      spawnFn: () => {
+        spawnRan = true;
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    if (envUnknown.loaded || envUnknown.reason !== "environment-unknown" || spawnRan) {
+      fail(
+        `(GB9.1) an unreadable tsserver launcher must refuse as environment-unknown WITHOUT spawning; got ` +
+          `loaded=${envUnknown.loaded} reason=${envUnknown.reason} spawnRan=${spawnRan}`,
+      );
+      ok = false;
+    }
+
+    // ---- Leg 1b: the hard kill, with a REAL SIGTERM-IGNORING child ----
+    // The argument-level assertion above proves the option is PASSED; this proves it WORKS, which is the
+    // part a future reader would not think to test. The probe target is a module that traps SIGTERM and
+    // leaves an open handle, so under `spawnSync`'s DEFAULT killSignal the parent is not merely slow — it
+    // blocks until the child chooses to exit, and if the child exits 0 the probe answers `loaded: true`.
+    // Measured pre-fix: 25050ms elapsed, status 0, loaded TRUE (a hang AND a false positive). Post-fix:
+    // ~700ms, ETIMEDOUT, loaded FALSE.
+    //
+    // The child SELF-EXITS after 25s so this scenario always terminates: a pre-fix run FAILS both
+    // assertions (elapsed far past the bound, loaded true) instead of hanging the whole self-test, and no
+    // process is left behind either way. The bound is generous (7s against a 700ms timeout) so a loaded
+    // machine cannot flake it, while the pre-fix 25s is nowhere near it.
+    hardkill: {
+      if (IS_WINDOWS) {
+        skip(
+          "(GB9.1b) hard-kill bound — POSIX-only (SIGTERM-trapping stand-in; the Windows taskkill path is " +
+            "statically reviewed, not exercised here)",
+        );
+        break hardkill;
+      }
+      const hangRoot = mkdtempSync(join(tmpdir(), "gate-selftest-prereq-hang-"));
+      registerClean(hangRoot);
+      const hangProbe = join(hangRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+      mkdirSync(hangProbe, { recursive: true });
+      writeFileSync(
+        join(hangProbe, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: "index.js" }),
+      );
+      writeFileSync(
+        join(hangProbe, "index.js"),
+        'process.on("SIGTERM", () => {});\n' +
+          'process.on("SIGINT", () => {});\n' +
+          "setInterval(() => {}, 1000);\n" +
+          "setTimeout(() => process.exit(0), 25000);\n" +
+          "module.exports = function init() {};\n",
+      );
+      // PLANT PROOF: the trapping module must actually be where the probe will resolve it.
+      const hangEntry = join(hangProbe, "index.js");
+      let hangPlanted = false;
+      try {
+        hangPlanted = statSync(hangEntry).isFile();
+      } catch {
+        hangPlanted = false;
+      }
+      if (!hangPlanted) {
+        fail(`(GB9.1b) plant did not apply: ${hangEntry} is not a file`);
+        ok = false;
+        break hardkill;
+      }
+      // The probe needs the repo's tsserver launcher to resolve its env denylist; copy it into the
+      // synthetic root so this leg exercises the real equivalence path rather than the fail-closed one.
+      const hangLauncher = join(hangRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS);
+      mkdirSync(dirname(hangLauncher), { recursive: true });
+      writeFileSync(
+        hangLauncher,
+        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS)),
+      );
+      const startedAt = Date.now();
+      const hangResult = runBuildPrerequisiteLoadProbe({ repoRoot: hangRoot, timeoutMs: 700 });
+      const elapsedMs = Date.now() - startedAt;
+      if (hangResult.loaded) {
+        fail(
+          "(GB9.1b) a probe child that traps SIGTERM and never exits must NOT report the prerequisite as " +
+            "loaded (pre-fix the child's own exit-0 was read as a successful load)",
+        );
+        ok = false;
+      }
+      if (elapsedMs >= 7000) {
+        fail(
+          `(GB9.1b) the probe timeout must be a HARD bound: a SIGTERM-trapping child left the probe ` +
+            `blocked for ${elapsedMs}ms against a 700ms timeout. spawnSync's default killSignal is ` +
+            "SIGTERM, which this child ignores; the timeout must kill with SIGKILL.",
+        );
+        ok = false;
+      }
+      if (hangResult.reason !== "timeout") {
+        fail(
+          `(GB9.1b) a stubborn child must be diagnosed as a timeout; got reason=${hangResult.reason}`,
+        );
+        ok = false;
+      }
+      // VERIFIED REAP. The kill must have actually REMOVED the process, not merely been issued. The child
+      // self-exits only at 25s, so at ~700ms any survivor means the signal did not take.
+      //
+      // Counted by PARSING `ps` in JS and matching argv[0]'s basename `node` AND the unique synthetic root
+      // in the argv — the same argv[0]-basename technique `countArgvSleeps` uses, and for the same reason.
+      // A `sh -c 'ps | grep -c <root>'` count is WRONG: the `sh`, the `ps` and the `grep` each carry the
+      // pattern in their OWN argv, so the floor is 3 rather than 0 — measured against a marker no process
+      // could possibly reference, after that exact mistake produced a false "child SURVIVED" failure here.
+      // This harness's own `node scripts/gate-selftest.mjs` is excluded because the root is a runtime value
+      // that never appears in its argv.
+      //
+      // A ZERO FROM THIS COUNTER IS ONLY MEANINGFUL IF THE COUNTER CAN RETURN NON-ZERO. `ps` failing, or a
+      // matcher that recognises nothing, both yield an empty list — indistinguishable from "nothing
+      // survived", which is the same vacuity shape this scenario has already been bitten by three times.
+      // So the counter reports whether it could LOOK, and the positive control below is COMMITTED rather
+      // than performed once by hand: a real node process holding the marker must be SEEN (>=1) and then,
+      // once killed, must be seen to CLEAR (0). Only after both does a zero from the probe leg mean
+      // anything.
+      const countSurvivors = () => {
+        const psOut = spawnSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" });
+        if (psOut.error || psOut.status !== 0 || !psOut.stdout) {
+          return {
+            looked: false,
+            lines: [],
+            why: psOut.error
+              ? `ps failed to spawn: ${psOut.error.message}`
+              : `ps exited ${psOut.status} with ${psOut.stdout ? "output" : "NO output"}`,
+          };
+        }
+        const lines = psOut.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.includes(hangRoot))
+          .filter((line) => {
+            const argv0 = (line.split(/\s+/)[1] || "").split("/").pop();
+            return argv0 === "node" || argv0 === "node.exe";
+          });
+        return { looked: true, lines, why: "" };
+      };
+      const pollSurvivors = async (want) => {
+        for (let attempt = 0; attempt < 60; attempt++) {
+          const seen = countSurvivors();
+          if (!seen.looked) return seen;
+          if (want === "present" ? seen.lines.length > 0 : seen.lines.length === 0) return seen;
+          await delay(100);
+        }
+        return countSurvivors();
+      };
+
+      // POSITIVE CONTROL, committed: a live node process carrying the marker must be COUNTED.
+      const sentinel = spawn(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 30000)", join(hangRoot, "reap-counter-sentinel")],
+        { stdio: "ignore" },
+      );
+      const sentinelSeen = await pollSurvivors("present");
+      if (!sentinelSeen.looked) {
+        fail(
+          `(GB9.1b) the survivor counter could not LOOK (${sentinelSeen.why}) — a zero from it is not evidence`,
+        );
+        ok = false;
+      } else if (sentinelSeen.lines.length === 0) {
+        fail(
+          "(GB9.1b) the survivor counter did NOT see a live node process holding the marker, so it cannot " +
+            "distinguish 'nothing survived' from 'I recognised nothing' — every zero below would be vacuous",
+        );
+        ok = false;
+      }
+      sentinel.kill("SIGKILL");
+      const sentinelCleared = await pollSurvivors("absent");
+      if (sentinelCleared.looked && sentinelCleared.lines.length !== 0) {
+        fail(
+          "(GB9.1b) the control sentinel did not clear after SIGKILL, so the probe-leg zero below cannot " +
+            "be attributed to the probe's own reap",
+        );
+        ok = false;
+      }
+
+      const survivors = countSurvivors();
+      const survivorLines = survivors.lines;
+      if (!survivors.looked) {
+        fail(
+          `(GB9.1b) the reap could not be VERIFIED (${survivors.why}) — an unverifiable reap is not a ` +
+            "passing reap",
+        );
+        ok = false;
+      } else if (survivorLines.length > 0) {
+        fail(
+          `(GB9.1b) the probe child SURVIVED its hard kill (${survivorLines.length} node process(es) still ` +
+            `referencing ${hangRoot}) — the timeout issued a signal but did not reap:\n  ` +
+            survivorLines.join("\n  "),
+        );
+        ok = false;
+      }
+      note(
+        `(GB9.1b) SIGTERM-trapping child: loaded=${hangResult.loaded} reason=${hangResult.reason} ` +
+          `elapsed=${elapsedMs}ms survivors=${survivorLines.length} ` +
+          `(counter proven live: sentinel-seen=${sentinelSeen.lines.length} cleared=${sentinelCleared.lines.length})`,
+      );
+    }
+
+    // ---- Leg 1c: environment equivalence — a forged NODE_OPTIONS cannot fake a load ----
+    // The probe's whole claim is "the plugin tsserver is about to load CAN be loaded", so it must run
+    // under the environment tsserver runs under. `TsserverTypeProvider::spawn` strips
+    // `CHILD_PROCESS_ENV_DENYLIST` (NODE_OPTIONS among them); an inheriting probe has strictly more
+    // influence than the process it speaks for, and that gap is exploitable: measured pre-fix, a preload
+    // patching `Module._load` to return a dummy for `process.argv[1]` made the probe exit 0 and report
+    // loaded on a tree whose entry requires a helper that does not exist.
+    //
+    // Both directions are asserted, so this cannot pass by simply breaking node: with the helper ABSENT
+    // the forged env must NOT yield loaded; with the helper PRESENT and the SAME forged env it must.
+    envforge: {
+      const forgeRoot = mkdtempSync(join(tmpdir(), "gate-selftest-prereq-env-"));
+      registerClean(forgeRoot);
+      const forgeProbe = join(forgeRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+      mkdirSync(forgeProbe, { recursive: true });
+      writeFileSync(
+        join(forgeProbe, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: "index.js" }),
+      );
+      writeFileSync(
+        join(forgeProbe, "index.js"),
+        'require("./helpers/carrierStore");\nmodule.exports = function init() {};\n',
+      );
+      const forgeLauncher = join(forgeRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS);
+      mkdirSync(dirname(forgeLauncher), { recursive: true });
+      writeFileSync(
+        forgeLauncher,
+        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS)),
+      );
+      const preload = join(forgeRoot, "forge.cjs");
+      writeFileSync(
+        preload,
+        'const Module = require("node:module");\n' +
+          "const real = Module._load;\n" +
+          "Module._load = function (request) {\n" +
+          "  if (request === process.argv[1]) return { forged: true };\n" +
+          "  return real.apply(this, arguments);\n" +
+          "};\n",
+      );
+      // PLANT PROOF: the forging preload and the unloadable entry must both be where they are claimed.
+      const forgePlanted = [preload, join(forgeProbe, "index.js"), forgeLauncher].every((p) => {
+        try {
+          return statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      });
+      const helperPath = join(forgeProbe, "helpers", "carrierStore.js");
+      let helperAbsent = true;
+      try {
+        helperAbsent = !statSync(helperPath).isFile();
+      } catch {
+        helperAbsent = true;
+      }
+      if (!forgePlanted || !helperAbsent) {
+        fail(
+          `(GB9.1c) plant did not apply: preload/entry/launcher present=${forgePlanted} ` +
+            `helperAbsent=${helperAbsent}`,
+        );
+        ok = false;
+        break envforge;
+      }
+      // The forgery is delivered through the AMBIENT environment, NOT through an `env` option.
+      //
+      // This is load-bearing and was got wrong once: passing `env: { ...process.env, NODE_OPTIONS }`
+      // delivers the forgery through the very option the strip uses, so removing the strip ALSO removes
+      // the delivery and this leg passed VACUOUSLY against its own regression. The ambient route is also
+      // the realistic threat model — a developer or runner with `NODE_OPTIONS` exported — and it is what a
+      // reverted strip actually inherits. `process.env` is restored in a `finally`; the probe calls are
+      // synchronous, so nothing else in this single-threaded harness observes the window.
+      const priorNodeOptions = process.env.NODE_OPTIONS;
+      let forged;
+      let forgedButComplete;
+      let unknownEnv;
+      try {
+        process.env.NODE_OPTIONS = `--require=${preload}`;
+        forged = runBuildPrerequisiteLoadProbe({ repoRoot: forgeRoot });
+        // CONTROL: the same ambient forgery with the helper PRESENT must still load, so the assertion
+        // above proves the env was SANITIZED rather than that node was merely broken by it.
+        mkdirSync(dirname(helperPath), { recursive: true });
+        writeFileSync(helperPath, "module.exports = {};\n");
+        forgedButComplete = runBuildPrerequisiteLoadProbe({ repoRoot: forgeRoot });
+        // And the fail-closed half: an unreadable/absent tsserver launcher means the environment tsserver
+        // runs under is UNKNOWN, so no load may be reported even though the tree is complete.
+        rmSync(forgeLauncher, { force: true });
+        unknownEnv = runBuildPrerequisiteLoadProbe({ repoRoot: forgeRoot });
+      } finally {
+        if (priorNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+        else process.env.NODE_OPTIONS = priorNodeOptions;
+      }
+      if (forged.loaded) {
+        fail(
+          "(GB9.1c) a forged ambient NODE_OPTIONS preload must NOT be able to report a load: the probe " +
+            "must run under the environment the tsserver launcher uses, which strips NODE_OPTIONS " +
+            "(CHILD_PROCESS_ENV_DENYLIST). Pre-fix this exited 0 and reported loaded on a tree whose " +
+            "entry requires a missing helper.",
+        );
+        ok = false;
+      }
+      if (!forgedButComplete.loaded) {
+        fail(
+          "(GB9.1c) control failed: with the helper PRESENT the same forged env must still load — " +
+            `otherwise the negative above proves nothing about sanitization (reason=${forgedButComplete.reason})`,
+        );
+        ok = false;
+      }
+      if (unknownEnv.loaded || unknownEnv.reason !== "environment-unknown") {
+        fail(
+          "(GB9.1c) with the tsserver launcher unreadable the probe must FAIL CLOSED as " +
+            `environment-unknown; got loaded=${unknownEnv.loaded} reason=${unknownEnv.reason}`,
+        );
+        ok = false;
+      }
+      note(
+        `(GB9.1c) forged NODE_OPTIONS: loaded=${forged.loaded} (control=${forgedButComplete.loaded}, ` +
+          `launcher-missing=${unknownEnv.reason})`,
+      );
+    }
+
+    // The denylist parser itself: it must read the REAL const out of the REAL launcher, and must return
+    // null (fail-closed) rather than an empty list when the declaration is gone or reshaped.
+    const realLauncher = readFileSync(
+      join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS),
+      "utf8",
+    );
+    const parsedDenylist = parseTsserverEnvDenylist(realLauncher);
+    if (!parsedDenylist || !parsedDenylist.includes("NODE_OPTIONS")) {
+      fail(
+        `(GB9.1d) the denylist parser must extract NODE_OPTIONS from the real tsserver launcher; got ` +
+          `${JSON.stringify(parsedDenylist)}`,
+      );
+      ok = false;
+    }
+    for (const [label, source] of [
+      ["a source without the const", "fn main() {}\n"],
+      ["a const with no string literals", "pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &[];\n"],
+      ["a non-string input", 42],
+      // DECLARATION-BOUNDED. A commented-out declaration is DEAD CODE, and latching onto one reintroduces
+      // exactly the drift that reading the live Rust const exists to prevent — silently, with a plausible
+      // list. A bare mention (the `for var in CHILD_PROCESS_ENV_DENYLIST` loop) must not latch either.
+      [
+        "a line-commented declaration only",
+        '// pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"];\n',
+      ],
+      [
+        "a block-commented declaration only",
+        '/* pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"]; */\n',
+      ],
+      [
+        "a bare mention with an unrelated array nearby",
+        'for var in CHILD_PROCESS_ENV_DENYLIST {\n    let other = ["UNRELATED"];\n}\n',
+      ],
+    ]) {
+      if (parseTsserverEnvDenylist(source) !== null) {
+        fail(`(GB9.1d) ${label} must parse to null (fail-closed), not to a usable list`);
+        ok = false;
+      }
+    }
+    // The decisive case: a commented-out decoy EARLIER in the file must not win over the real declaration
+    // later in it. Pre-fix this returned ["UNRELATED"].
+    const decoyed = parseTsserverEnvDenylist(
+      '// pub const CHILD_PROCESS_ENV_DENYLIST: &[&str] = &["UNRELATED"];\n' + realLauncher,
+    );
+    if (!decoyed || decoyed.includes("UNRELATED") || !decoyed.includes("NODE_OPTIONS")) {
+      fail(
+        `(GB9.1d) a commented-out decoy before the real declaration must not win; got ` +
+          `${JSON.stringify(decoyed)}`,
+      );
+      ok = false;
+    }
+
+    // The probe budget must be the gate's OWN remaining wallclock, clamped — an independent constant can
+    // outlive the `--timeout` deadline the probe sits inside, which is not a bound.
+    for (const [label, deadline, now, want] of [
+      ["a long deadline clamps to the cap", 10_000_000, 0, BUILD_PREREQUISITE_PROBE_MAX_MS],
+      ["a short deadline shortens the probe", 5_000, 0, 5_000],
+      // NO FLOOR. A floor let an expired deadline buy the probe time to hold the single-flight mutex past
+      // the gate's own wallclock limit; the budget must go non-positive and the probe must then refuse.
+      ["an exhausted deadline yields zero", 10_000, 10_000, 0],
+      ["an already-passed deadline goes negative", 0, 10_000, -10_000],
+    ]) {
+      const got = probeBudgetMs(deadline, now);
+      if (got !== want) {
+        fail(`(GB9.1e) ${label}: probeBudgetMs(${deadline}, ${now}) = ${got}, expected ${want}`);
+        ok = false;
+      }
+    }
+    // …and a non-positive budget must refuse WITHOUT SPAWNING. Launching would hold the mutex past the
+    // deadline, and it would also be UNBOUNDED: Node applies `spawnSync`'s timeout only when it is `> 0`,
+    // so a 0/negative value silently disables it — an expired deadline becoming an unlimited probe.
+    for (const budget of [0, -1, -10_000]) {
+      let spawnAttempted = false;
+      const refused = runBuildPrerequisiteLoadProbe({
+        repoRoot: "/synthetic",
+        readFileFn: fakeLauncher,
+        timeoutMs: budget,
+        spawnFn: () => {
+          spawnAttempted = true;
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      });
+      if (refused.loaded || refused.reason !== "timeout" || spawnAttempted) {
+        fail(
+          `(GB9.1e) a ${budget}ms budget must refuse as a timeout WITHOUT spawning; got ` +
+            `loaded=${refused.loaded} reason=${refused.reason} spawnAttempted=${spawnAttempted}`,
+        );
+        ok = false;
+      }
+    }
+
+    // ---- Legs 2-6: the REAL production CLI against a synthetic repo root ----
+    let gitAvailable = true;
+    const synthRoot = mkdtempSync(join(tmpdir(), "gate-selftest-prereq-"));
+    registerClean(synthRoot);
+    try {
+      execFileSync("git", ["init", "-q", synthRoot], { stdio: "ignore" });
+    } catch {
+      gitAvailable = false;
+    }
+
+    if (!gitAvailable) {
+      // TRUE skip (counted in SKIP, never in PASS): without git the production CLI cannot resolve a
+      // synthetic repo root, so the end-to-end legs cannot run. The in-process leg above still ran.
+      skip(
+        "(GB9.2-6) end-to-end build-prerequisite legs SKIPPED — `git init` is unavailable, so the " +
+          "production CLI cannot resolve a synthetic repo root",
+      );
+    } else {
+      const synthScripts = join(synthRoot, "scripts");
+      mkdirSync(synthScripts, { recursive: true });
+      // A BYTE-COPY of the production CLI and its internals — the real code path, rooted elsewhere.
+      for (const name of ["gate.mjs", "gate-internals.mjs"]) {
+        writeFileSync(join(synthScripts, name), readFileSync(join(SELFTEST_DIR, name)));
+      }
+      const synthGate = join(synthScripts, "gate.mjs");
+      const synthTarget = join(synthRoot, "target", "gate-runner");
+      const gateArgs = ["--timeout", "120s", "--stall", "60s", "--target-dir", synthTarget];
+      const gateEnv = { VERTER_GATE_LOCK: join(synthRoot, "gate.lock.d") };
+
+      // Freshness shims, so the freshness preflight resolves "already-present" and never attempts a
+      // `pnpm install` inside the synthetic root. Both the POSIX (extensionless) and the Windows (.CMD)
+      // spellings are written so the leg is deterministic on either host.
+      const synthBin = join(synthRoot, "node_modules", ".bin");
+      mkdirSync(synthBin, { recursive: true });
+      for (const tool of ["buf", "oxfmt"]) {
+        writeFileSync(join(synthBin, tool), "");
+        writeFileSync(join(synthBin, `${tool}.CMD`), "");
+      }
+
+      // The MINIATURE package graph. Every edge the real chain has, and nothing else:
+      //   <probe dir>/package.json  --main-->  <plugin>/dist/index.js
+      //   <plugin>/dist/index.js    requires   ./helpers/carrierStore   (an EMITTED sibling)
+      //   <plugin>/dist/index.js    requires   @verter/language-shared  (via <plugin>/node_modules)
+      //   <language-shared>/dist/index.js requires ./carrier/store      (an EMITTED sibling)
+      // `main` fields are ABSOLUTE so no symlink is needed (portable to hosts that refuse them); Node
+      // resolves `main` with path.resolve, so an absolute value is honoured.
+      const pluginPkg = join(synthRoot, "packages", "typescript-plugin");
+      const sharedPkg = join(synthRoot, "packages", "language-shared");
+      const pluginEntry = join(pluginPkg, "dist", "index.js");
+      const pluginHelper = join(pluginPkg, "dist", "helpers", "carrierStore.js");
+      const sharedEntry = join(sharedPkg, "dist", "index.js");
+      const sharedSibling = join(sharedPkg, "dist", "carrier", "store.js");
+      const probeDir = join(synthRoot, ...BUILD_PREREQUISITE_PROBE_SEGMENTS);
+      const sharedLink = join(pluginPkg, "node_modules", "@verter", "language-shared");
+
+      const writeFile = (p, body) => {
+        mkdirSync(dirname(p), { recursive: true });
+        writeFileSync(p, body);
+      };
+      const isFile = (p) => {
+        try {
+          return statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      };
+      // The probe resolves the environment tsserver runs under from the Rust launcher, so the miniature
+      // carries a copy: without it every leg would fail closed as `environment-unknown` and leg 6 could
+      // never reach SATISFIED — the legs would still refuse, but for the wrong reason, which is a
+      // vacuous version of this scenario.
+      writeFile(
+        join(synthRoot, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS),
+        readFileSync(join(REPO_REALPATH, ...TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS), "utf8"),
+      );
+      // The static scaffolding: manifests and the emitted siblings that never move between legs.
+      writeFile(
+        join(probeDir, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+      );
+      writeFile(
+        join(pluginPkg, "package.json"),
+        JSON.stringify({ name: "@verter/typescript-plugin", main: pluginEntry }),
+      );
+      writeFile(
+        join(sharedLink, "package.json"),
+        JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+      );
+      writeFile(
+        join(sharedPkg, "package.json"),
+        JSON.stringify({ name: "@verter/language-shared", main: sharedEntry }),
+      );
+
+      // The four EMITTED files a build produces. `plant(state)` installs exactly the requested subset and
+      // PROVES the resulting tree by stat-ing all four — a plant that silently failed to apply would
+      // otherwise be indistinguishable from correct behavior.
+      const emitted = [
+        [
+          pluginEntry,
+          'require("./helpers/carrierStore");\nrequire("@verter/language-shared");\nmodule.exports = function init() {};\n',
+        ],
+        [pluginHelper, "module.exports = { carrierStore: true };\n"],
+        [sharedEntry, 'require("./carrier/store");\nmodule.exports = { languageShared: true };\n'],
+        [sharedSibling, "module.exports = { store: true };\n"],
+      ];
+      const plant = (label, present) => {
+        for (const [p, body] of emitted) {
+          if (present.includes(p)) writeFile(p, body);
+          else rmSync(p, { force: true });
+        }
+        for (const [p] of emitted) {
+          const want = present.includes(p);
+          if (isFile(p) !== want) {
+            throw new Error(
+              `(GB9) plant "${label}" did not apply: ${p} should be ${want ? "present" : "absent"}`,
+            );
+          }
+        }
+      };
+      // Re-stat AFTER the CLI returns: the verdict must have been produced against the tree we planted.
+      const assertUnchanged = (label, present) => {
+        for (const [p] of emitted) {
+          const want = present.includes(p);
+          if (isFile(p) !== want) {
+            fail(
+              `(GB9.${label}) the tree changed under the run: ${p} is no longer ${want ? "present" : "absent"}`,
+            );
+            ok = false;
+          }
+        }
+      };
+
+      const allEmitted = emitted.map(([p]) => p);
+      const refusalLegs = [
+        ["2", "nothing built", []],
+        ["3", "the plugin entry missing", allEmitted.filter((p) => p !== pluginEntry)],
+        [
+          "4",
+          "language-shared missing (the REVERSE single-missing direction)",
+          allEmitted.filter((p) => p !== sharedEntry),
+        ],
+        [
+          "5",
+          "a transitively-required HELPER missing while BOTH entries are present",
+          allEmitted.filter((p) => p !== pluginHelper),
+        ],
+      ];
+      for (const [id, label, present] of refusalLegs) {
+        plant(label, present);
+        const run = runGateCapture(synthGate, gateArgs, gateEnv);
+        if (run.code !== EXIT_USAGE || !run.out.includes(BUILD_PREREQUISITE_MARKER)) {
+          fail(
+            `(GB9.${id}) with ${label} the gate must FAIL SETUP (127) carrying the marker; got ` +
+              `${run.code}\n${run.out}`,
+          );
+          ok = false;
+        }
+        if (!run.out.includes(probeDir) || !run.out.includes(BUILD_PREREQUISITE_COMMAND)) {
+          fail(`(GB9.${id}) the refusal must name the probe target and the producer command`);
+          ok = false;
+        }
+        // The refusal must be about a MISSING MODULE, not about the probe being unable to answer. Without
+        // this, a miniature that lost its tsserver-launcher copy would refuse as `environment-unknown` and
+        // every leg above would still pass while testing nothing about missing artifacts.
+        if (!run.out.includes("MODULE_NOT_FOUND")) {
+          fail(
+            `(GB9.${id}) the refusal must report MODULE_NOT_FOUND (a missing artifact), not a probe that ` +
+              `could not answer:\n${run.out}`,
+          );
+          ok = false;
+        }
+        // ORDERING, the load-bearing half: the refusal precedes the freshness preflight (whose `pnpm
+        // install` is exactly what turns the silent-skip state into the 64-failure state) and any cargo.
+        if (
+          run.out.includes("freshness-tooling preflight:") ||
+          run.out.includes("archiving workspace test universe")
+        ) {
+          fail(
+            `(GB9.${id}) the refusal must run BEFORE the freshness preflight and before the archive ` +
+              `build; the run reached one of them:\n${run.out}`,
+          );
+          ok = false;
+        }
+        assertUnchanged(id, present);
+      }
+
+      // Leg 6 — EVERYTHING BUILT. The check must pass and the run must PROCEED (not stop quietly).
+      plant("everything built", allEmitted);
+      const allThere = runGateCapture(synthGate, gateArgs, gateEnv);
+      if (allThere.out.includes(BUILD_PREREQUISITE_MARKER)) {
+        fail(`(GB9.6) with the whole closure loadable the refusal must NOT fire:\n${allThere.out}`);
+        ok = false;
+      }
+      if (!allThere.out.includes("build-prerequisite preflight: SATISFIED")) {
+        fail(`(GB9.6) the satisfied preflight must be reported:\n${allThere.out}`);
+        ok = false;
+      }
+      if (!allThere.out.includes("freshness-tooling preflight:")) {
+        fail(
+          `(GB9.6) a satisfied build-prerequisite preflight must let the gate PROCEED into the freshness ` +
+            `preflight; it did not:\n${allThere.out}`,
+        );
+        ok = false;
+      }
+      assertUnchanged("6", allEmitted);
+    }
+
+    if (ok) {
+      pass(
+        "(GB9) BUILD-PREREQUISITE PREFLIGHT: the gate refuses, loudly and as its FIRST step, when the " +
+          "tsserver plugin the real-provider suites load cannot be loaded from this tree — naming the " +
+          "probe target, the load error and the producer command (exit 127), instead of running the suite " +
+          "and reporting ~64 opaque `TS2307: Cannot find module './Comp.vue'` failures. The oracle is a " +
+          "REAL LOAD, so the discriminator a stat-based check FAILS is covered: both entries present with " +
+          "one emitted HELPER missing is still a refusal. Six directions through the REAL production CLI " +
+          "on a synthetic miniature of the package graph — nothing built / plugin entry missing / " +
+          "language-shared missing / helper missing => 127 before the freshness preflight and before " +
+          "cargo; everything built => SATISFIED and the run proceeds — plus every fail-closed probe shape " +
+          "(spawn error, signal, timeout, unparseable output) in-process. Every plant is stat-proven " +
+          "applied and re-stated after the run.",
       );
     }
   }
