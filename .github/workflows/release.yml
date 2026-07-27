@@ -973,6 +973,13 @@ jobs:
           ref: 74b06c6c75e4eeb3108ec01852001636d85a932b
           path: .ci/plenary.nvim
 
+      # The verdict below decides this job. Prove it can still separate a green
+      # suite from a failing one BEFORE spending a suite run on it — a guard that
+      # cannot match plenary's real (ANSI-coloured) output makes the job either
+      # unpassable or unfailable, and both look like an ordinary red job.
+      - name: Plenary verdict guard
+        run: node --test scripts/editor-contracts/plenary-outcome-guard.test.mjs
+
       - name: Run plenary busted suite
         shell: bash
         env:
@@ -1011,10 +1018,20 @@ jobs:
             -c "qa!" 2>&1) || rc=$?
           rc=${rc:-0}
           echo "$out"
+          # plenary COLOURISES its summary counters: the bytes are
+          # `\033[32mSuccess: \033[0m<TAB>43`, not `Success: 43`. ESC is not
+          # `[[:space:]]`, so a pattern matched against the raw capture stops at
+          # the escape and never reaches the digit — the success proof below
+          # becomes unsatisfiable and the failure proof survives only on whichever
+          # token happens to be uncoloured. Strip SGR/CSI sequences once, here,
+          # and decide on the plain text. `$'\033'` puts a literal ESC in the sed
+          # script rather than an escape sed itself must interpret; GNU and BSD
+          # sed disagree about `\x1b` and this job has run on both.
+          plain=$(printf '%s\n' "$out" | sed $'s/\033\\[[0-9;]*[A-Za-z]//g')
           # Whitespace-tolerant failure tokens. plenary prints `Failed : <n>`
           # and `Errors : <n>` (ONE space, variable padding), so a two-space
           # pattern never matches and the gate could go green on a real failure.
-          if printf '%s\n' "$out" | grep -Eq 'Tests Failed|Schedule Error|Failed[[:space:]]*:[[:space:]]*[1-9]|Errors?[[:space:]]*:[[:space:]]*[1-9]'; then
+          if printf '%s\n' "$plain" | grep -Eq 'Tests Failed|Schedule Error|Failed[[:space:]]*:[[:space:]]*[1-9]|Errors?[[:space:]]*:[[:space:]]*[1-9]'; then
             echo "::error::Neovim plenary suite reported failures"
             exit 1
           fi
@@ -1022,7 +1039,7 @@ jobs:
             echo "::error::Neovim exited non-zero ($rc)"
             exit "$rc"
           fi
-          if ! printf '%s\n' "$out" | grep -Eq 'Success(es)?[[:space:]]*:[[:space:]]*[1-9]|[1-9][0-9]*[[:space:]]+success'; then
+          if ! printf '%s\n' "$plain" | grep -Eq 'Success(es)?[[:space:]]*:[[:space:]]*[1-9]|[1-9][0-9]*[[:space:]]+success'; then
             echo "::error::Neovim test output did not prove that any assertion-bearing test ran"
             exit 1
           fi

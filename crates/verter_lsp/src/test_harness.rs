@@ -6,9 +6,14 @@
 //! that generates both tsserver and TSGO test variants from a single test body.
 //!
 //! Fixture source is read from the repository and document content is fed through
-//! in-memory APIs (`host.upsert()` + `did_open()`). Tests that need package contracts
-//! materialize deterministic declarations under gitignored fixture `node_modules`, and
-//! every real-provider session owns an isolated temporary carrier store.
+//! in-memory APIs (`host.upsert()` + `did_open()`). A fixture that needs package
+//! contracts is STAGED first: its authored tree is copied into a per-process
+//! directory that excludes `node_modules`, and deterministic declarations are
+//! materialized into that copy. The authored tree's own `node_modules` is gitignored
+//! and shared with the VS Code E2E suite, so it accumulates whatever ran last on the
+//! machine; a run never reads it. Every real-provider session owns an isolated
+//! temporary carrier store. See `test_harness_fixture_dependencies` for the staging
+//! and materialization rules.
 
 use std::sync::Arc;
 

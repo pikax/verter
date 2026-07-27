@@ -50,8 +50,10 @@ export {
 } from "./anchors.js";
 
 export {
+  normalizeToolPath,
   readTypescriptVersionFromDisk,
   resolveToolRoots,
+  toolRootMatchesPin,
   type ResolveToolRootsOptions,
   type ToolRoots,
 } from "./toolRoots.js";

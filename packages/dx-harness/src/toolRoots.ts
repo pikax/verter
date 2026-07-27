@@ -22,9 +22,50 @@
  * across macOS, Windows, and Linux.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 
 import { canonicalizePath, joinCanonical } from "./paths.js";
+
+/**
+ * Normalise an on-disk TOOL path to a value that identifies the FILE rather than
+ * the spelling — the TypeScript mirror of `verter_dx_baseline`'s
+ * `provider::normalize_tool_path`.
+ *
+ * {@link canonicalizePath} is a pure string normaliser (it mirrors
+ * `verter_span::path::canonicalize_path`, which cannot touch the filesystem), so
+ * it cannot see through a symlink. pnpm installs one: the pinned tsdk
+ * `packages/vue-vscode/node_modules/typescript` is a link into
+ * `node_modules/.pnpm/typescript@<v>/node_modules/typescript`. C resolves the
+ * link when it reports which tool root it used, so comparing C's answer against
+ * B's unresolved spelling compares two names for one file and always disagrees —
+ * on Linux and macOS, where pnpm links; Windows happened to dodge it.
+ *
+ * A path that does not exist has no filesystem identity, so it degrades to
+ * string canonicalisation — the same fallback C uses, which keeps two absent
+ * paths comparable instead of throwing.
+ */
+export function normalizeToolPath(raw: string): string {
+  try {
+    return canonicalizePath(realpathSync.native(raw));
+  } catch {
+    return canonicalizePath(raw);
+  }
+}
+
+/**
+ * Whether a tool root C reports having used IS the tool root B pinned.
+ *
+ * The TypeScript mirror of `provider::enforce_tsserver_path_match`: a pure
+ * comparison of two {@link normalizeToolPath} values. It must stay able to say
+ * NO — this is the check that catches a provider drifting onto an ambient or
+ * global-npm TypeScript, and a predicate that collapsed every path to one value
+ * would report success for exactly the case it exists to reject. An empty
+ * argument is never a match: "no tool root reported" is not "the pinned one".
+ */
+export function toolRootMatchesPin(reported: string | null | undefined, pinned: string): boolean {
+  if (!reported || !pinned) return false;
+  return normalizeToolPath(reported) === normalizeToolPath(pinned);
+}
 
 /** The resolved, pinned TypeScript tool root the baseline runs against. */
 export interface ToolRoots {

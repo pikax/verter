@@ -1,0 +1,91 @@
+Starting...Scheduling: editors/nvim/tests/on_attach_spec.lua
+Scheduling: editors/nvim/tests/diagnostic_publications_spec.lua
+Scheduling: editors/nvim/tests/smoke_spec.lua
+Scheduling: editors/nvim/tests/config_spec.lua
+
+========================================	
+Testing: 	/home/runner/work/verter/verter/editors/nvim/tests/diagnostic_publications_spec.lua	
+[32mSuccess[0m	||	real-client diagnostic publication tracker stays unsatisfied until the exact fixture URI publishes diagnostics	
+[32mSuccess[0m	||	real-client diagnostic publication tracker records publication only after the wrapped Neovim handler completes	
+	
+[32mSuccess: [0m	2	
+[31mFailed : [0m	0	
+[31mErrors : [0m	0	
+========================================	
+
+========================================	
+Testing: 	/home/runner/work/verter/verter/editors/nvim/tests/config_spec.lua	
+[32mSuccess[0m	||	verter.config.build_cmd_args uses --type-provider=tsgo by default (never tgo)	
+[32mSuccess[0m	||	verter.config.build_cmd_args honours an explicit type_provider override	
+[32mSuccess[0m	||	verter.config.build_cmd_args respects a custom cmd_path as the binary	
+[32mSuccess[0m	||	verter.config.build_cmd_args appends the resolved root as the trailing positional when set	
+[32mSuccess[0m	||	verter.config.build_cmd_args omits the positional root when root_dir is unset (cwd fallback)	
+[32mSuccess[0m	||	verter.config.build_cmd_args omits the positional root when root_dir is an empty string	
+[32mSuccess[0m	||	verter.config.build_cmd_args places server_args BEFORE the positional root (root stays last)	
+[32mSuccess[0m	||	verter.config.build_cmd_args rejects a server_args entry that overrides --type-provider	
+[32mSuccess[0m	||	verter.config.build_cmd_args rejects a server_args entry that injects --tsdk or --plugin-path	
+[32mSuccess[0m	||	verter.config.build_cmd_args accepts a benign server_args entry (negative control for the rejection)	
+[32mSuccess[0m	||	verter.config.build_cmd returns a function (root-aware cmd), not a static list	
+[32mSuccess[0m	||	verter.config.build_cmd spawns via rpc.start with the resolved root and forwards VERTER_LOG	
+[32mSuccess[0m	||	verter.config.build_cmd preserves an explicit VERTER_TSGO_BIN override in the function-form spawn	
+[32mSuccess[0m	||	verter.config.build_init_options maps lint.enabled through to the wire table	
+[32mSuccess[0m	||	verter.config.build_init_options emits camelCase wire keys the server actually reads	
+[32mSuccess[0m	||	verter.config.build_init_options translates snake_case opts into camelCase wire keys (no snake_case leak)	
+[32mSuccess[0m	||	verter.config.build_init_options omits VS-Code-UI-only keys even when they are present in opts	
+[32mSuccess[0m	||	verter.config.build_init_options emits EXACTLY the server-read top-level keys (closed whitelist)	
+[32mSuccess[0m	||	verter.config.build_capabilities forces didChangeWatchedFiles.dynamicRegistration false by default	
+[32mSuccess[0m	||	verter.config.build_capabilities flips dynamicRegistration to true when watch_files is opted in	
+[32mSuccess[0m	||	verter.config.build_capabilities preserves a user-supplied blink-shaped completionItem.resolveSupport	
+[32mSuccess[0m	||	verter.config.build_capabilities preserves nvim built-in defaults when the user passes a PARTIAL caps table	
+[32mSuccess[0m	||	verter.config.build_capabilities does NOT mutate the caller's capabilities table	
+[32mSuccess[0m	||	verter.setup registers .vue / .svelte filetype detection	
+[32mSuccess[0m	||	verter.setup registers a 'verter' config whose filetypes cover vue + svelte	
+[32mSuccess[0m	||	verter.setup registers the carrier root_markers (package.json + .git among them)	
+[32mSuccess[0m	||	verter.setup does NOT register a broken client when the binary is missing	
+[32mSuccess[0m	||	verter.setup refuses to register on an invalid type_provider (fail-closed)	
+[32mSuccess[0m	||	verter.setup registers when type_provider is a valid value (positive control)	
+[32mSuccess[0m	||	verter.setup uses the PRODUCT default type_provider (tsgo, never tgo) end-to-end	
+	
+[32mSuccess: [0m	30	
+[31mFailed : [0m	0	
+[31mErrors : [0m	0	
+========================================	
+
+========================================	
+Testing: 	/home/runner/work/verter/verter/editors/nvim/tests/on_attach_spec.lua	
+[32mSuccess[0m	||	verter.config.on_attach save-notify autocmd registers a BufWritePost *.js,*.ts autocmd when watch_files is off	
+[32mSuccess[0m	||	verter.config.on_attach save-notify autocmd does NOT register the save-notify autocmd when watch_files is on	
+[32mSuccess[0m	||	verter.config.on_attach save-notify autocmd notifies $/onFileChanged {type='update'} for a saved .ts file	
+[32mSuccess[0m	||	verter.config.on_attach save-notify autocmd notifies for a .js save too (pattern covers *.js)	
+[32mSuccess[0m	||	verter.config.on_attach save-notify autocmd does NOT notify for a saved .vue or .css file (pattern is *.js/*.ts only)	
+[32mSuccess[0m	||	verter.config.on_attach multi-client save-notify notifies BOTH clients (one per root) on a .ts save — no augroup clobber	
+[32mSuccess[0m	||	verter.config.on_attach multi-client save-notify re-attaching the same client id does not stack duplicate notifies	
+[32mSuccess[0m	||	verter.config.on_attach multi-client save-notify keeps notifying after one buffer detaches; tears down only at last detach	
+[32mSuccess[0m	||	verter.config.on_attach semantic-tokens opt-out clears server semanticTokensProvider when semantic_tokens is false	
+[32mSuccess[0m	||	verter.config.on_attach semantic-tokens opt-out leaves a pre-set semanticTokensProvider untouched when enabled	
+	
+[32mSuccess: [0m	10	
+[31mFailed : [0m	0	
+[31mErrors : [0m	0	
+========================================	
+vim.lsp.stop_client() is deprecated. Run ":checkhealth vim.deprecated" for more information
+
+========================================	
+Testing: 	/home/runner/work/verter/verter/editors/nvim/tests/smoke_spec.lua	
+[31mFail[0m	||	verter real Neovim client contract serves Vue/Svelte JS+TS semantics through exactly one UTF-8 client	
+            ...ner/work/verter/verter/editors/nvim/tests/smoke_spec.lua:275: ...ner/work/verter/verter/editors/nvim/tests/smoke_spec.lua:256: markup rename must return a workspace edit
+            Expected objects to not be the same.
+            Passed in:
+            (nil)
+            Did not expect:
+            type nil
+            
+            stack traceback:
+            	...ner/work/verter/verter/editors/nvim/tests/smoke_spec.lua:275: in function <...ner/work/verter/verter/editors/nvim/tests/smoke_spec.lua:109>
+            	
+	
+[32mSuccess: [0m	0	
+[31mFailed : [0m	1	
+[31mErrors : [0m	0	
+========================================	
+Tests Failed. Exit: 1	

@@ -9,9 +9,10 @@
  *   1. Pinned tool root — `repoRoot` / `tsserverTsdk` / `expectedTsserverJs`
  *      / TypeScript version are all present, the pinned `tsserver.js` exists on
  *      disk, and it lives UNDER the repository (never an ambient/global-npm
- *      TypeScript). The live strict bridge then reports the SAME pinned path back
- *      as `baselineToolRootUsed`, proving a real provider matched the pin rather
- *      than drifting onto a discovered one.
+ *      TypeScript). The live strict bridge then reports the SAME pinned FILE back
+ *      as `baselineToolRootUsed` — compared by filesystem identity, since pnpm
+ *      links the pinned tsdk and the bridge resolves the link — proving a real
+ *      provider matched the pin rather than drifting onto a discovered one.
  *   2. Vendored Vue declaration version-sync — every vendored `vue`/`@vue/*`
  *      package carries the pinned line AND that line equals the Vue version the
  *      repo resolves for its provider-facing tests, so the hermetic differential
@@ -51,6 +52,8 @@ const HARNESS_DIST = new URL("../../packages/dx-harness/dist/index.js", import.m
 const {
   resolveToolRoots,
   canonicalizePath,
+  normalizeToolPath,
+  toolRootMatchesPin,
   VENDORED_VUE_VERSION,
   collectVuePackageVersions,
   createMaterializedWorkspace,
@@ -193,12 +196,18 @@ try {
     if (hello.type === "hello") {
       check(hello.ok === true, "strict hello not ok");
       check(hello.skipped === false, `strict hello SKIPPED (must not skip): ${hello.skipReason}`);
-      // The live provider must report the SAME pinned path — proof it matched the
-      // pin rather than drifting onto a discovered/ambient tsserver.
+      // The live provider must report the SAME pinned FILE — proof it matched the
+      // pin rather than drifting onto a discovered/ambient tsserver. Compared by
+      // filesystem identity, not by spelling: pnpm links the pinned tsdk into
+      // `node_modules/.pnpm/…`, and C resolves that link before reporting, so a
+      // string comparison here compares two names for one file and can never
+      // agree. `toolRootMatchesPin` mirrors C's own `normalize_tool_path` +
+      // `enforce_tsserver_path_match` pair.
       check(
-        !!hello.baselineToolRootUsed &&
-          canonicalizePath(hello.baselineToolRootUsed) === expectedCanon,
-        `strict hello tool root ${hello.baselineToolRootUsed} != pinned ${expectedCanon}`,
+        toolRootMatchesPin(hello.baselineToolRootUsed, expectedCanon),
+        `strict hello tool root ${hello.baselineToolRootUsed} != pinned ${expectedCanon} ` +
+          `(resolved: ${normalizeToolPath(hello.baselineToolRootUsed ?? "")} != ` +
+          `${normalizeToolPath(expectedCanon)})`,
       );
     }
 
