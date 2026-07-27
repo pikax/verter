@@ -177,7 +177,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       # build-native was the ONLY build matrix with no cargo cache at all —
-      # build-tsc, build-lsp and build-mcp-server all had one — so every
+      # build-tsc, build-lsp and build-mcp all had one — so every
       # release recompiled the full napi dependency graph from scratch on
       # all seven target legs.
       - uses: Swatinem/rust-cache@v2
@@ -403,17 +403,17 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Build verter-mcp-server (matrix — standalone MCP HTTP/stdio binary)
+  # Build verter-mcp (matrix — the `verter-mcp` npm platform packages and the
+  # standalone MCP stdio/HTTP binary)
   #
-  # `verter_mcp` ships independently of `verter_lsp`: the LSP binary no
-  # longer embeds the MCP server (Tier 3 §5.1 Step 3.1 retired the
-  # embedding point + Cargo dep). Consumers that previously routed MCP
-  # via `verter-lsp --mcp-port=...` spawn `verter-mcp-server` in its
-  # own OS process. This job mirrors `build-lsp`'s platform matrix so
-  # the standalone binary ships per-platform alongside the LSP.
+  # `verter_mcp` ships independently of `verter_lsp`: the LSP binary does not
+  # embed the MCP server, so a client spawns `verter-mcp` in its own OS
+  # process. Artifacts are named after the npm platform package they feed
+  # (`mcp-<npm-pkg>`), matching build-lsp, so publish-npm stages each one by
+  # directory name with no mapping table.
   # ---------------------------------------------------------------------------
-  build-mcp-server:
-    name: Build MCP Server (${{ matrix.target }})
+  build-mcp:
+    name: Build MCP (${{ matrix.target }})
     needs: validate
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -423,25 +423,35 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
-            asset-target: linux-x64
-            binary: verter-mcp-server
+            npm-pkg: linux-x64-gnu
+            binary: verter-mcp
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-x64-musl
+            binary: verter-mcp
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use-cross: true
-            asset-target: linux-arm64
-            binary: verter-mcp-server
+            npm-pkg: linux-arm64-gnu
+            binary: verter-mcp
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            npm-pkg: linux-arm64-musl
+            binary: verter-mcp
           - target: x86_64-apple-darwin
             os: macos-15-intel
-            asset-target: darwin-x64
-            binary: verter-mcp-server
+            npm-pkg: darwin-x64
+            binary: verter-mcp
           - target: aarch64-apple-darwin
             os: macos-15
-            asset-target: darwin-arm64
-            binary: verter-mcp-server
+            npm-pkg: darwin-arm64
+            binary: verter-mcp
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            asset-target: win32-x64
-            binary: verter-mcp-server.exe
+            npm-pkg: win32-x64-msvc
+            binary: verter-mcp.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     steps:
@@ -451,7 +461,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: build-mcp-server-${{ matrix.target }}
+          key: build-mcp-${{ matrix.target }}
       - name: Setup Zig
         if: matrix.use-cross
         uses: mlugg/setup-zig@v2
@@ -465,17 +475,21 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
-      - name: Build verter-mcp-server binary
+      # `verter_mcp` owns the `verter-mcp` binary. `verter_mcp_server` builds a
+      # second, byte-for-byte equivalent entry point that exists only so the LSP
+      # crate need not depend on `verter_mcp`; the shipped binary comes from the
+      # crate whose binary is already named for the tool.
+      - name: Build verter-mcp binary
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cargo zigbuild --release --package verter_mcp_server --target ${{ matrix.target }}
+            cargo zigbuild --release --package verter_mcp --bin verter-mcp --target ${{ matrix.target }}
           else
-            cargo build --release --package verter_mcp_server --target ${{ matrix.target }}
+            cargo build --release --package verter_mcp --bin verter-mcp --target ${{ matrix.target }}
           fi
         shell: bash
       - uses: actions/upload-artifact@v6
         with:
-          name: mcp-server-${{ matrix.asset-target }}
+          name: mcp-${{ matrix.npm-pkg }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
@@ -547,7 +561,7 @@ jobs:
         # Verification runs on Linux ONLY. macOS and Windows runners bill at
         # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
         # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
           # - os: macos-latest
           #   slug: macos
@@ -582,7 +596,7 @@ jobs:
         # Verification runs on Linux ONLY. macOS and Windows runners bill at
         # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
         # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
         include:
           - os: ubuntu-latest
@@ -716,7 +730,7 @@ jobs:
         # Verification runs on Linux ONLY. macOS and Windows runners bill at
         # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
         # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
         include:
           - os: ubuntu-latest
@@ -807,7 +821,7 @@ jobs:
         # Verification runs on Linux ONLY. macOS and Windows runners bill at
         # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
         # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
         include:
           - os: ubuntu-latest
@@ -907,7 +921,7 @@ jobs:
         # Verification runs on Linux ONLY. macOS and Windows runners bill at
         # 10x and 2x, and these legs TEST rather than ship: the macOS/Windows
         # binaries users receive still come from build-native / build-tsc /
-        # build-lsp / build-mcp-server, which are untouched. Uncomment to
+        # build-lsp / build-mcp, which are untouched. Uncomment to
         # restore cross-OS verification.
           # - os: macos-latest
           #   slug: macos
@@ -1068,6 +1082,7 @@ jobs:
         editor-neovim,
         build-native,
         build-lsp,
+        build-mcp,
         build-tsc,
         build-wasm,
       ]
@@ -1182,6 +1197,53 @@ jobs:
           done
           if [ "$missing" -gt 0 ]; then
             echo "::error::$missing verter-lsp platform package(s) missing a binary"
+            exit 1
+          fi
+
+      # Download all MCP artifacts into platform package dirs, by the same
+      # by-name staging as the LSP binaries above.
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-*
+          path: /tmp/mcp-artifacts
+
+      - name: Move mcp artifacts to platform packages
+        run: |
+          for dir in /tmp/mcp-artifacts/mcp-*/; do
+            platform=$(basename "$dir")
+            platform=${platform#mcp-}  # strip "mcp-" prefix
+            target_dir="packages/verter-mcp/npm/${platform}"
+            if [ ! -d "$target_dir" ]; then
+              echo "Warning: no mcp platform dir for $platform"
+              continue
+            fi
+            if [ "$platform" = "win32-x64-msvc" ]; then
+              bin="verter-mcp.exe"
+            else
+              bin="verter-mcp"
+            fi
+            cp "${dir}${bin}" "${target_dir}/${bin}"
+            chmod +x "${target_dir}/${bin}" 2>/dev/null || true
+            echo "Copied ${bin} -> ${target_dir}/"
+          done
+
+          # Every platform package must carry its binary: publishing an empty
+          # one produces an install that resolves and then cannot start.
+          missing=0
+          for dir in packages/verter-mcp/npm/*/; do
+            platform=$(basename "$dir")
+            if [ "$platform" = "win32-x64-msvc" ]; then
+              bin="verter-mcp.exe"
+            else
+              bin="verter-mcp"
+            fi
+            if [ ! -f "${dir}${bin}" ]; then
+              echo "::error::verter-mcp platform package ${platform} has no ${bin}"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::$missing verter-mcp platform package(s) missing a binary"
             exit 1
           fi
 
@@ -1357,6 +1419,7 @@ jobs:
             "@verter/types"
             "@verter/unplugin"
             "verter-lsp"
+            "verter-mcp"
           )
 
           MISSING=0
@@ -1590,13 +1653,13 @@ jobs:
   # GitHub Release
   #
   # Gated on the BUILD jobs only — every asset it uploads (native bindings,
-  # WASM, the mcp-server binaries, the platform VSIXes) is build output. A
+  # WASM, the verter-mcp binaries, the platform VSIXes) is build output. A
   # failed npm or Marketplace publish no longer withholds the release and its
   # downloadable assets; publishing runs in parallel and is retried on its own.
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-native, build-lsp, build-wasm, build-mcp-server, build-vsix]
+    needs: [validate, build-native, build-lsp, build-mcp, build-wasm, build-vsix]
     if: needs.validate.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1677,15 +1740,15 @@ jobs:
           pattern: lsp-*
           path: /tmp/release-assets/lsp
 
-      # `verter-mcp-server` ships as a separate per-platform binary so
-      # downstream consumers (IDE integrations, container images,
-      # automation) can pick it up without pulling the LSP binary or
-      # vice versa. The decoupling is enforced at the source level by
-      # the `no_cross_product_binary_imports` architecture guard.
+      # `verter-mcp` ships as a separate per-platform binary so downstream
+      # consumers (IDE integrations, container images, automation) can pick it
+      # up without pulling the LSP binary or vice versa. The decoupling is
+      # enforced at the source level by the `no_cross_product_binary_imports`
+      # architecture guard.
       - uses: actions/download-artifact@v7
         with:
-          pattern: mcp-server-*
-          path: /tmp/release-assets/mcp-server
+          pattern: mcp-*
+          path: /tmp/release-assets/mcp
 
       # Stage every asset under an explicit, platform-qualified name.
       #
@@ -1703,7 +1766,7 @@ jobs:
 
           EXPECTED_NATIVE=7
           EXPECTED_LSP=7
-          EXPECTED_MCP=5
+          EXPECTED_MCP=7
           EXPECTED_VSIX=5
 
           FAILURES=0
@@ -1760,20 +1823,20 @@ jobs:
           done
           expect_count "verter-lsp" "$EXPECTED_LSP" "$count"
 
-          # --- verter-mcp-server ---
+          # --- verter-mcp ---
           count=0
-          for dir in /tmp/release-assets/mcp-server/mcp-server-*/; do
+          for dir in /tmp/release-assets/mcp/mcp-*/; do
             [ -d "$dir" ] || continue
-            target=$(basename "$dir")
-            target=${target#mcp-server-}
-            if [ "$target" = "win32-x64" ]; then
-              stage "${dir}verter-mcp-server.exe" "verter-mcp-server-${target}.exe"
+            platform=$(basename "$dir")
+            platform=${platform#mcp-}
+            if [ "$platform" = "win32-x64-msvc" ]; then
+              stage "${dir}verter-mcp.exe" "verter-mcp-${platform}.exe"
             else
-              stage "${dir}verter-mcp-server" "verter-mcp-server-${target}"
+              stage "${dir}verter-mcp" "verter-mcp-${platform}"
             fi
             count=$((count + 1))
           done
-          expect_count "verter-mcp-server" "$EXPECTED_MCP" "$count"
+          expect_count "verter-mcp" "$EXPECTED_MCP" "$count"
 
           # --- WASM: the module plus its bindgen glue, by name ---
           for wasm_file in verter_wasm_bg.wasm verter_wasm.js; do

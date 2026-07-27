@@ -1,12 +1,12 @@
 {
-  "name": "verter-lsp",
+  "name": "verter-mcp",
   "version": "0.0.1-beta.2",
-  "description": "Language Server Protocol server for Vue and Svelte single-file components",
+  "description": "Model Context Protocol server exposing Verter's Vue and Svelte analysis to AI agents",
   "keywords": [
-    "language-server",
-    "lsp",
+    "ai",
+    "mcp",
+    "model-context-protocol",
     "svelte",
-    "typescript",
     "vue"
   ],
   "homepage": "https://verterjs.dev/",
@@ -17,7 +17,7 @@
     "url": "https://github.com/pikax/verter"
   },
   "bin": {
-    "verter-lsp": "./bin/run.js"
+    "verter-mcp": "./bin/run.js"
   },
   "files": [
     "bin",
@@ -46,13 +46,13 @@
     "vitest": "^4.1.7"
   },
   "optionalDependencies": {
-    "@verter/lsp-darwin-arm64": "workspace:*",
-    "@verter/lsp-darwin-x64": "workspace:*",
-    "@verter/lsp-linux-arm64-gnu": "workspace:*",
-    "@verter/lsp-linux-arm64-musl": "workspace:*",
-    "@verter/lsp-linux-x64-gnu": "workspace:*",
-    "@verter/lsp-linux-x64-musl": "workspace:*",
-    "@verter/lsp-win32-x64-msvc": "workspace:*"
+    "@verter/mcp-darwin-arm64": "workspace:*",
+    "@verter/mcp-darwin-x64": "workspace:*",
+    "@verter/mcp-linux-arm64-gnu": "workspace:*",
+    "@verter/mcp-linux-arm64-musl": "workspace:*",
+    "@verter/mcp-linux-x64-gnu": "workspace:*",
+    "@verter/mcp-linux-x64-musl": "workspace:*",
+    "@verter/mcp-win32-x64-msvc": "workspace:*"
   },
   "engines": {
     "node": ">=22"

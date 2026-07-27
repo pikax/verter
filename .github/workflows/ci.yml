@@ -376,12 +376,12 @@ jobs:
         # so `pnpm -r run test` never reaches these specs — same convention as
         # the carrier-routing guards step above.
         run: pnpm run test:scripts
-      - name: verter-lsp distribution guards (platform packages + release wiring)
-        # The launcher's platform matrix reconciled against its platform
+      - name: Binary distribution guards (platform packages + release wiring)
+        # Each binary family's platform matrix reconciled against its platform
         # packages, the release build matrix, and the derived publish set. Run
         # by explicit path for the same reason as the steps above — this job
         # does not run `pnpm -r run test`, so an unreferenced spec never runs.
-        run: pnpm vitest run packages/verter-lsp
+        run: pnpm vitest run packages/binary-launcher packages/verter-lsp packages/verter-mcp
       - name: Extension-provider headless guards (auto-import + diagnostics)
         # Regression-guards the in-process EXTENSION type provider headlessly (no
         # VS Code, no LSP) via `ExtensionTsService`:

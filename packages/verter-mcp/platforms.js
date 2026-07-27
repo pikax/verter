@@ -1,16 +1,16 @@
 "use strict";
 
 /**
- * Canonical supported-platform matrix for `verter-lsp`.
+ * Canonical supported-platform matrix for `verter-mcp`.
  *
  * The AUTHORITATIVE source is `SUPPORTED_RUST_TARGETS` — the rust targets the
- * release actually builds `verter_lsp` for. Every other location that
+ * release actually builds `verter_mcp` for. Every other location that
  * enumerates platforms is reconciled against the matrix derived from it:
  *
  *   - `package.json#optionalDependencies`
  *   - the `npm/<suffix>/package.json` platform packages
  *   - the runtime resolver in `index.js`
- *   - the `build-lsp` job matrix in `.github/workflows/release.yml`
+ *   - the `build-mcp` job matrix in `.github/workflows/release.yml`
  *
  * The decomposition of a rust target into an npm suffix, package name, binary
  * name and os/cpu/libc is shared with every other Verter binary family
@@ -23,7 +23,7 @@
 
 const { buildPlatformMatrix: buildMatrix } = require("@verter/binary-launcher");
 
-/** Rust targets the release builds `verter_lsp` for. */
+/** Rust targets the release builds `verter_mcp` for. */
 const SUPPORTED_RUST_TARGETS = Object.freeze([
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
@@ -34,11 +34,11 @@ const SUPPORTED_RUST_TARGETS = Object.freeze([
   "x86_64-pc-windows-msvc",
 ]);
 
-/** The on-disk stem of the server binary (no extension). */
-const BINARY_STEM = "verter-lsp";
+/** The on-disk stem of the MCP server binary (no extension). */
+const BINARY_STEM = "verter-mcp";
 
 /** The npm scope the per-platform binary packages live in. */
-const PLATFORM_PACKAGE_PREFIX = "@verter/lsp-";
+const PLATFORM_PACKAGE_PREFIX = "@verter/mcp-";
 
 /** Build a matrix for this family from an arbitrary rust-target list. */
 function buildPlatformMatrix(rustTargets) {

@@ -1,0 +1,25 @@
+{
+  "name": "@verter/mcp-linux-arm64-musl",
+  "version": "0.0.1-beta.2",
+  "description": "verter-mcp server binary for Linux ARM64 (musl)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
+  "files": [
+    "verter-mcp"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,19 +1,18 @@
 "use strict";
 
 /**
- * `verter-lsp` server resolution.
+ * `verter-mcp` server resolution.
  *
- * The published package is a launcher: the native server binary ships in one
- * per-platform optional dependency (`@verter/lsp-<suffix>`) and this module
- * resolves the one that matches the host. Editor clients should resolve the
- * path through here and spawn the native binary DIRECTLY — the CLI shim in
- * `bin/run.js` exists for `npx` and for editors that launch a bare
- * `verter-lsp` command, and deliberately keeps no proxy on the per-message
- * path.
+ * The published package is a launcher: the native MCP server binary ships in
+ * one per-platform optional dependency (`@verter/mcp-<suffix>`) and this module
+ * resolves the one that matches the host. An MCP client normally launches the
+ * CLI shim over stdio (`npx -y verter-mcp`); the shim hands the client's stdio
+ * straight to the native binary and keeps no proxy on the message path. A host
+ * that spawns the binary itself should resolve the path through here.
  *
  * Resolution itself lives in `@verter/binary-launcher`, shared with every
  * other Verter binary family; this module supplies only what is specific to
- * the LSP server.
+ * the MCP server.
  */
 
 const { join } = require("node:path");
@@ -23,7 +22,7 @@ const { createLauncher, isMusl, packageDirResolver } = require("@verter/binary-l
 const { PLATFORM_MATRIX, SUPPORTED_TARGETS } = require("./platforms.js");
 
 const launcher = createLauncher({
-  toolName: "verter-lsp",
+  toolName: "verter-mcp",
   matrix: PLATFORM_MATRIX,
   // Repository root, for development-build discovery.
   workspaceRoot: join(__dirname, "..", ".."),

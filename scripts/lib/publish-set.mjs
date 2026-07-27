@@ -26,6 +26,7 @@ export const PRODUCT_ROOTS = [
   "@verter/unplugin",
   "@verter/nuxt",
   "verter-lsp",
+  "verter-mcp",
   "verter-tsc",
   "verter-vscode",
 ];

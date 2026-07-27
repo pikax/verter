@@ -18,6 +18,7 @@ import {
 const ROOT = resolve(import.meta.dirname, "../..");
 
 const EXPECTED_NPM = [
+  "@verter/binary-launcher",
   "@verter/component-meta",
   "@verter/language-shared",
   "@verter/native",
@@ -31,6 +32,7 @@ const EXPECTED_NPM = [
   "@verter/unplugin",
   "@verter/wasm",
   "verter-lsp",
+  "verter-mcp",
   "verter-tsc",
 ];
 
@@ -43,6 +45,7 @@ test("derived npm set equals the expected product closure minus marketplace-only
     "@verter/unplugin",
     "@verter/nuxt",
     "verter-lsp",
+    "verter-mcp",
     "verter-tsc",
     "verter-vscode",
   ]);
@@ -55,7 +58,7 @@ test("derived npm set equals the expected product closure minus marketplace-only
 test("every binary family's platform dirs are in the platform publish set", () => {
   const set = computePublishSet();
   const dirs = set.platform.map((dir) => dir.split("\\").join("/"));
-  for (const family of ["native", "verter-lsp", "verter-tsc"]) {
+  for (const family of ["native", "verter-lsp", "verter-mcp", "verter-tsc"]) {
     const familyDirs = dirs.filter((dir) => dir.startsWith(`packages/${family}/npm/`));
     assert.equal(
       familyDirs.length,

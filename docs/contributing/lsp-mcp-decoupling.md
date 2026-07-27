@@ -38,18 +38,22 @@ The architecture guard `lsp_mcp_dependency_direction`
 
 There are now two supported ways to run the MCP server:
 
-### Option 1 — Spawn the standalone `verter-mcp-server` binary
+### Option 1 — Spawn the standalone MCP binary
 
 ```bash
-cargo build -p verter_mcp_server
-./target/debug/verter-mcp-server --project-root /path/to/project
+cargo build -p verter_mcp --bin verter-mcp
+./target/debug/verter-mcp --project-root /path/to/project
 ```
 
-`verter-mcp-server` is a thin binary in `crates/verter_mcp_server/`.
-It runs MCP in its own OS process and shares no in-process state
-with `verter-lsp`. Clients pick whichever transport they prefer
-(stdio for local agents, HTTP for remote agents) and route
+This is the binary the release ships, both as the `verter-mcp` npm package and
+as a `verter-mcp-<platform>` GitHub Release asset. It runs MCP in its own OS
+process and shares no in-process state with `verter-lsp`. Clients pick whichever
+transport they prefer (stdio for local agents, HTTP for remote agents) and route
 notifications/requests directly to that process.
+
+`crates/verter_mcp_server/` builds a second, byte-for-byte equivalent entry
+point (`verter-mcp-server`) that exists so the LSP crate need not depend on
+`verter_mcp`. It is not distributed; use `verter-mcp`.
 
 This is the recommended path for IDEs that previously asked
 `verter-lsp` to start MCP via `--mcp-port`. Spawning a dedicated
