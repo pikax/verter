@@ -178,6 +178,36 @@ export function selectE2eRoutes(options: {
   return selected;
 }
 
+/**
+ * Resolve a launcher's `E2E_FIXTURE` / `E2E_TYPE_PROVIDER` environment into a
+ * fixture that is known to exist.
+ *
+ * The launchers join this value onto `e2e/fixtures/`, so an unchecked one
+ * escapes the fixture directory entirely: `E2E_FIXTURE=../..` resolves to
+ * `packages/vue-vscode`, which has a `package.json` and a pnpm-managed
+ * `node_modules`. That was inert while a launcher only ever SKIPPED an existing
+ * `node_modules`; it stopped being inert when deciding about a dependency tree
+ * became an action that displaces one. A selector must therefore name a route in
+ * the canonical inventory before anything builds a path from it — which is a
+ * closed list of literal names, so no traversal spelling can satisfy it.
+ *
+ * `runTests.ts` was never exposed: it resolves routes through
+ * {@link selectE2eRoutes} already. This is that same check, for the launchers
+ * that read the environment directly.
+ */
+export function resolveE2eFixtureSelection(options: {
+  readonly rawFixture?: string;
+  readonly typeProvider?: string;
+}): { readonly fixture: string; readonly typeProvider: string } {
+  const raw = options.rawFixture?.trim() || "single-project";
+  const split = raw.indexOf("@");
+  const fixture = split === -1 ? raw : raw.slice(0, split);
+  const typeProvider = split === -1 ? (options.typeProvider ?? "") : raw.slice(split + 1);
+  // Throws when the pair names no route, which is the validation.
+  selectE2eRoutes({ fixture, typeProvider: typeProvider || undefined });
+  return { fixture, typeProvider };
+}
+
 export function buildGitHubActionsMatrix(): {
   readonly include: Array<{
     readonly fixture: string;

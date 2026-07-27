@@ -4,6 +4,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { downloadAndUnzipVSCode, runTests } from "@vscode/test-electron";
 
+const { prepareFixtureWorkspace } = await import("../out-test/e2e/lib/fixtureDeps.js");
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionDevelopmentPath = path.resolve(__dirname, "..");
 const extensionTestsPath = path.resolve(
@@ -34,7 +36,15 @@ main().catch((error) => {
 async function main() {
   fs.mkdirSync(resultsDir, { recursive: true });
 
-  const fixtureDir = path.resolve(__dirname, "fixtures", fixtureName);
+  // The SHARED preparation, for the same reason as `startupBenchmark.mjs`: this
+  // opens the fixture through `@vscode/test-electron`, which does not read
+  // `.vscode-test.mjs`. It also validates the fixture name, which arrives from
+  // the environment and is joined onto a path.
+  const { workspace: fixtureDir, decision } = prepareFixtureWorkspace(
+    path.resolve(__dirname, "fixtures"),
+    { rawFixture: fixtureName },
+  );
+  console.log(`Fixture dependencies: ${decision.reason}`);
   const workspaceFile = createWorkspaceOverlay(fixtureDir);
   const fileToOpen = path.join(fixtureDir, relativePath);
   const vscodeExecutablePath = await downloadAndUnzipVSCode("stable");

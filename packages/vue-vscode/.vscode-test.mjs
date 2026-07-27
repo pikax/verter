@@ -3,14 +3,19 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import os from "os";
-import { execSync } from "child_process";
+
+// The SHARED preparation, not a second copy of it. This config used to carry
+// its own `node_modules`-exists shortcut; when that shortcut was replaced in
+// `runTests.ts` the copy here kept the old behaviour, and this launcher went on
+// serving stale trees. It also validates the selector before joining it onto a
+// path: `E2E_FIXTURE=../..` is this package, which has a `package.json` and a
+// pnpm-managed `node_modules` the install decision would otherwise act on.
+// `files` below already requires `out-test`, so importing the compiled module
+// adds no prerequisite this config did not have.
+const { installFixtureDeps, prepareFixtureWorkspace } =
+  await import("./out-test/e2e/lib/fixtureDeps.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rawFixture = process.env.E2E_FIXTURE || "single-project";
-const atIndex = rawFixture.indexOf("@");
-const fixture = atIndex === -1 ? rawFixture : rawFixture.slice(0, atIndex);
-const typeProvider =
-  atIndex === -1 ? process.env.E2E_TYPE_PROVIDER || "" : rawFixture.slice(atIndex + 1);
 const onlyTest = process.env.VERTER_E2E_ONLY || "";
 const vscodeVersion = process.env.VERTER_E2E_VSCODE_VERSION || "stable";
 const testFiles = onlyTest
@@ -76,33 +81,16 @@ function copyLspBinaryToTemp() {
 
 const lspBinaryPath = copyLspBinaryToTemp();
 
-/**
- * Install dependencies in a fixture directory if it has a package.json.
- * Skips if node_modules already exists.
- */
-function installFixtureDeps(fixtureDir) {
-  const pkgJson = path.join(fixtureDir, "package.json");
-  const nodeModules = path.join(fixtureDir, "node_modules");
-
-  if (!fs.existsSync(pkgJson) || fs.existsSync(nodeModules)) {
-    return;
-  }
-
-  console.log(`Installing dependencies in ${fixtureDir}...`);
-  try {
-    execSync("npm install --no-package-lock --ignore-scripts", {
-      cwd: fixtureDir,
-      stdio: "pipe",
-      timeout: 60_000,
-    });
-  } catch (err) {
-    console.warn(`Warning: npm install failed in ${fixtureDir}:`, err.message);
-  }
-}
-
-// Install fixture dependencies before launching VS Code
-const fixtureDir = path.join(__dirname, "e2e", "fixtures", fixture);
-installFixtureDeps(fixtureDir);
+// Validate the selector, derive the workspace from it, and make its
+// dependencies current — all before VS Code is launched at it.
+const {
+  fixture,
+  typeProvider,
+  workspace: fixtureDir,
+} = prepareFixtureWorkspace(path.join(__dirname, "e2e", "fixtures"), {
+  rawFixture: process.env.E2E_FIXTURE,
+  typeProvider: process.env.E2E_TYPE_PROVIDER,
+});
 // For monorepo, also install workspace package deps
 if (fixture === "monorepo") {
   const packagesDir = path.join(fixtureDir, "packages");
@@ -117,7 +105,7 @@ export default defineConfig({
   files: testFiles,
   version: vscodeVersion,
   extensionDevelopmentPath: __dirname,
-  workspaceFolder: path.join(__dirname, "e2e", "fixtures", fixture),
+  workspaceFolder: fixtureDir,
   launchArgs: ["--disable-extensions", "--disable-updates"],
   env: {
     ...process.env,

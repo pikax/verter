@@ -107,7 +107,32 @@ Cross-platform: Windows gets `.exe` suffix, Unix gets `chmod 755`.
 
 ## Fixture Dependency Installation
 
-Fixtures with `package.json` need `node_modules/vue` for type resolution. Both `runTests.ts` and `.vscode-test.mjs` run `npm install --no-package-lock --ignore-scripts` in fixtures that have `package.json` but no `node_modules/`. For monorepo fixtures, workspace sub-packages are also installed.
+Fixtures with `package.json` need `node_modules/vue` for type resolution. Every launcher — `runTests.ts`, `.vscode-test.mjs`, `startupBenchmark.mjs`, `completionBenchmark.mjs` — goes through `e2e/lib/fixtureDeps.ts`, which installs by PROVENANCE rather than by whether `node_modules/` exists. A tree that exists says nothing about which manifest produced it: a four-month-old `@verter/types` in one fixture once shadowed the workspace package and decided eight test outcomes.
+
+An install records a stamp (`node_modules/.verter-e2e-install.json`) covering the manifest bytes AND a fingerprint of the installed tree, so editing `package.json` reinstalls and so does a package added, removed, or re-pointed inside `node_modules` without touching the manifest.
+
+What happens to the tree already there:
+
+| State | Action |
+| --- | --- |
+| Stamped, manifest and tree both match | Reused, untouched |
+| Stamped, only the manifest changed | Renamed aside, installed clean, predecessor deleted **after** success (restored if the install fails) |
+| Unstamped, legacy stamp, or tree changed | **Moved to a quarantine**, absolute recovery path printed, then installed clean |
+| Undecidable (unreadable current-format stamp, unreadable tree, `node_modules` is a symlink, move fails) | **Refuses**, having changed nothing |
+
+Nothing is ever deleted outright except a predecessor proven to be this module's own output. Quarantines live in `.verter-e2e-quarantine/` at the **repository root**, which is gitignored: the move is a `rename` and a rename cannot cross filesystems, so anchoring it to the temp directory made whether it worked at all a property of the machine's disk layout. `VERTER_E2E_FIXTURE_QUARANTINE_DIR` still overrides it and must name a path on the repository's own filesystem. They are removed only on request:
+
+```bash
+pnpm --filter verter-vscode test:e2e:fixtures:clean-quarantine
+```
+
+`VERTER_E2E_ADOPT_FIXTURE_DEPS=<fixture>[,<fixture>]` uses an existing tree as-is without installing or stamping, printing a `NON-HERMETIC` banner. It is per-fixture (no wildcards) and is REJECTED under CI. A `node_modules.verter-rollback-*` holding a killed run left inside the fixture is still recovered to the quarantine, in adopt mode too — that is a PREVIOUS tree rather than the one being adopted, and TypeScript's default `exclude` matches the literal name `node_modules`, so leaving it puts the whole holding in the fixture's program.
+
+The decide → displace → install → stamp sequence runs under a cross-process lock (`e2e/lib/fixtureLock.ts`) and re-decides once it owns one, so two concurrent runs cannot both replace one fixture. A wedged lock surfaces as a timeout naming the file to remove. The lock is published with `link`, which is exclusive and atomic in one step; an exclusive create takes over only where hard links are POSITIVELY classified as unavailable (a probe that fails every attempt of a bounded retry, with an errno that says the capability is absent). A link failure that is transient or unexplained is retried and then REFUSES — the fallback is not atomic on NFSv3, so an unexplained failure is never read as licence to use it.
+
+An install failure is FATAL, not a warning — a fixture nobody finished assembling produces results about nothing. A `file:`/`link:` dependency whose target is missing is diagnosed before anything moves, naming the absolute path (`ecosystem-parity` points at a sibling `verter-release-clean` checkout that most machines do not have).
+
+`E2E_FIXTURE` is validated against the canonical route inventory before it is joined onto a path. For monorepo and multi-root fixtures, sub-packages are installed too.
 
 ## File Opening Triggers LSP
 

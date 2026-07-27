@@ -129,6 +129,11 @@ export function prepareCommittedKeystrokeWorkspace(
   mkdirSync(path.join(workspace, ".vscode"), { recursive: true });
 
   if (options?.installDeps !== false) {
+    // Existence is a sound test HERE, unlike at the fixture launchers: `workspace`
+    // is a `mkdtemp` copy created a few lines above, so the directory can only
+    // exist if this call created it. Nothing accumulates across runs, so there is
+    // no stale tree to detect and no shared directory to take a lock on. See
+    // `e2e/lib/fixtureDeps.ts` for why the in-tree fixtures cannot use this shape.
     const nodeModules = path.join(workspace, "node_modules");
     if (!existsSync(nodeModules)) {
       execSync("npm install --no-package-lock --ignore-scripts", {

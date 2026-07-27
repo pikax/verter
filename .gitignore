@@ -40,6 +40,21 @@ nul
 # Benchmark results (generated artifacts)
 packages/bench/results/
 packages/benchmark/benchmark-results/
+# Where `e2e/startupBenchmark.mjs` and `e2e/completionBenchmark.mjs` write every
+# run they make. Untracked because a measurement of one machine on one afternoon
+# is not a repository artifact, and because `git add -A` after a benchmark run
+# otherwise sweeps one in — which is exactly what happened, and had to be
+# reverted. The pinned baselines beside it are committed deliberately.
+packages/vue-vscode/e2e/benchmarks/results/
+
+# Dependency trees the E2E fixture harness moved out of a fixture. Kept until
+# somebody asks for them to go (`test:e2e:fixtures:clean-quarantine`), and inside
+# the repository so the rename that fills them cannot cross a device — which is
+# precisely why they have to be ignored rather than merely untracked.
+/.verter-e2e-quarantine/
+# A rollback's undo buffer, alive for one install and removed with it. Only a
+# killed run leaves one, and the next run for that fixture recovers it.
+node_modules.verter-rollback-*
 
 # Integration test cloned repos
 .integration-tests/

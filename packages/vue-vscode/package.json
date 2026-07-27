@@ -38,6 +38,7 @@
     "test:e2e:matrix": "pnpm run prepare:e2e && node out-test/e2e/runTests.js",
     "test:e2e:lib:unit": "vitest run -c e2e/lib/vitest.config.mts",
     "test:e2e:acceptance:unit": "vitest run -c e2e/acceptance/vitest.config.ts",
+    "test:e2e:fixtures:clean-quarantine": "node e2e/scripts/clean-fixture-quarantine.mjs",
     "pretest:e2e:acceptance": "pnpm run prepare:e2e",
     "test:e2e:acceptance": "node out-test/e2e/acceptance/launch.js",
     "prepare:e2e:dx": "pnpm --filter @verter/dx-harness build && pnpm run prepare:e2e",

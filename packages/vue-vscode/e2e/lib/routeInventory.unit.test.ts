@@ -15,6 +15,7 @@ import {
   buildGitHubActionsMatrix,
   buildRequiredE2eRouteInventory,
   parseE2eRouteLabel,
+  resolveE2eFixtureSelection,
   selectE2eRoutes,
 } from "./routeInventory";
 
@@ -129,5 +130,47 @@ describe("VS Code E2E route inventory", () => {
     );
     expect(() => parseE2eRouteLabel("sveltte-contract@tsgo")).toThrow(/matched nothing/i);
     expect(() => parseE2eRouteLabel("no-config@shared-tsgo")).toThrow(/matched nothing/i);
+  });
+});
+
+describe("resolveE2eFixtureSelection", () => {
+  it("resolves the ordinary selections a launcher is given", () => {
+    expect(resolveE2eFixtureSelection({})).toEqual({
+      fixture: "single-project",
+      typeProvider: "",
+    });
+    expect(resolveE2eFixtureSelection({ rawFixture: "barrel-exports" })).toEqual({
+      fixture: "barrel-exports",
+      typeProvider: "",
+    });
+    expect(resolveE2eFixtureSelection({ rawFixture: "no-config", typeProvider: "tsgo" })).toEqual({
+      fixture: "no-config",
+      typeProvider: "tsgo",
+    });
+    // The `<fixture>@<provider>` spelling, and it beats the separate variable.
+    expect(
+      resolveE2eFixtureSelection({ rawFixture: "monorepo@tsgo", typeProvider: "tsserver" }),
+    ).toEqual({ fixture: "monorepo", typeProvider: "tsgo" });
+  });
+
+  it("refuses a selection that names no route, before anyone builds a path from it", () => {
+    // A launcher joins this onto `e2e/fixtures/`, so an unchecked value escapes
+    // the fixture directory: `../..` is `packages/vue-vscode`, which has a
+    // `package.json` and a pnpm-managed `node_modules`. Deciding to replace a
+    // dependency tree is now a real action, so the value that selects the tree
+    // has to name a route that exists.
+    expect(() => resolveE2eFixtureSelection({ rawFixture: "../.." })).toThrow(/matched nothing/i);
+    expect(() => resolveE2eFixtureSelection({ rawFixture: ".." })).toThrow(/matched nothing/i);
+    expect(() => resolveE2eFixtureSelection({ rawFixture: "/etc" })).toThrow(/matched nothing/i);
+    expect(() =>
+      resolveE2eFixtureSelection({ rawFixture: "../../../e2e/fixtures/single-project" }),
+    ).toThrow(/matched nothing/i);
+    // A real fixture directory that is not a route is still not selectable here.
+    expect(() => resolveE2eFixtureSelection({ rawFixture: "external-ts-dx" })).toThrow(
+      /matched nothing/i,
+    );
+    expect(() => resolveE2eFixtureSelection({ rawFixture: "single-project@nope" })).toThrow(
+      /unsupported.*provider/i,
+    );
   });
 });

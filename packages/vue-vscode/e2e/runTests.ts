@@ -1,6 +1,5 @@
 import * as path from "path";
 import * as fs from "fs";
-import { execSync } from "child_process";
 import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-electron";
 import * as os from "os";
 import {
@@ -27,6 +26,7 @@ import {
   selectE2eRoutes,
   type E2eRoute,
 } from "./lib/routeInventory";
+import { installFixtureDeps } from "./lib/fixtureDeps";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
@@ -145,27 +145,6 @@ function materializeOutOfTreeWorkspace(fixture: string, templateDir: string): st
 function removeOutOfTreeWorkspace(root: string): void {
   assertRemovablePath(root, "verter-e2e-ws-", "workspace");
   fs.rmSync(path.resolve(root), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-}
-
-/**
- * Install dependencies in a fixture directory if it has a package.json.
- * Uses npm (available everywhere) to install deps for Vue type resolution.
- * Skips if node_modules already exists.
- */
-function installFixtureDeps(fixtureDir: string): void {
-  const pkgJson = path.join(fixtureDir, "package.json");
-  const nodeModules = path.join(fixtureDir, "node_modules");
-
-  if (!fs.existsSync(pkgJson) || fs.existsSync(nodeModules)) {
-    return;
-  }
-
-  console.log(`  Installing dependencies in ${fixtureDir}...`);
-  execSync("npm install --no-package-lock --ignore-scripts", {
-    cwd: fixtureDir,
-    stdio: "pipe",
-    timeout: 60_000,
-  });
 }
 
 /**
