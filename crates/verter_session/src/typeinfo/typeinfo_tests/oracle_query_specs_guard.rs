@@ -712,15 +712,15 @@ fn relation_registry_holds_the_26_identities_and_maps_the_28_contracts() {
         ]
     );
 
-    // The known-mismatch ledger is exactly 9 rows: 6 `UnsupportedKey` pins
+    // The known-mismatch ledger is exactly 8 rows: 6 `UnsupportedKey` pins
     // (exactly the binder-carrying infer rows — a direct inference target is
-    // outside the engine's supported key) + 3 named `MismatchedVerdict` pins
+    // outside the engine's supported key) + 2 named `MismatchedVerdict` pins
     // with their source-proven engine answers.
     let pins: Vec<(&str, EngineObservationPin)> = RELATION_QUERY_SPECS
         .iter()
         .filter_map(|s| s.engine_pin.map(|p| (s.row_function, p)))
         .collect();
-    assert_eq!(pins.len(), 9, "the ledger seats exactly 9 rows");
+    assert_eq!(pins.len(), 8, "the ledger seats exactly 8 rows");
     let unsupported: Vec<&str> = RELATION_QUERY_SPECS
         .iter()
         .filter(|s| s.engine_pin == Some(EngineObservationPin::UnsupportedKey))
@@ -737,10 +737,6 @@ fn relation_registry_holds_the_26_identities_and_maps_the_28_contracts() {
         "the UnsupportedKey pins are exactly the 6 infer rows"
     );
     for (row, pinned) in [
-        (
-            "relation_optional_to_required",
-            RelationEngineVerdict::Assignable,
-        ),
         (
             "relation_readonly_to_mutable",
             RelationEngineVerdict::NotAssignable,

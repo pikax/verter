@@ -237,8 +237,7 @@ fn is_definitely_non_object_root(
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::Function { .. }
-            | SemanticNodeData::ConstructorType { .. } => return true,
+            | SemanticNodeData::Signature { .. } => return true,
             SemanticNodeData::Alias(inner) => subject = *inner,
             SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_)

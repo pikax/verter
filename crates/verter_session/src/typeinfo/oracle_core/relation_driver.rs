@@ -12,16 +12,16 @@
 //! `ObservedRelationVerdict` of the addendum — the SAME boundary the oracle
 //! DTO and the wire decoder share).
 //!
-//! The observation adapter calls `relate_nodes` ONLY for the engine's actually
-//! supported identity (assignable, default policy, regular source freshness,
-//! NO inference context) and REJECTS broader keys (a binder-carrying target
+//! The observation adapter calls the SOLE relation authority
+//! (`execute(SemanticQueryKey::Relate)` via the full-key constructor
+//! `execute_relate_pair`) ONLY for the engine's actually supported
+//! identity (assignable, default policy, regular source freshness, NO
+//! inference context) and REJECTS broader keys (a binder-carrying target
 //! pattern IS an inference context — `EngineObservation::UnsupportedKey`).
 //! `Unknown` / `Miss` / `BudgetExceeded` are ENGINE FAILURES, never oracle
-//! verdicts. The family `execute(SemanticQueryKey::Relate)` path is NOT wired
-//! to the relation engine this block — it stays an explicit `Miss` (guarded by
-//! `relate_family_execute_stays_an_explicit_miss` in
-//! `typeinfo_tests/relation_verdict_oracle.rs`); this driver rides
-//! `relate_nodes`, never the family `execute` path (no RI-3).
+//! verdicts. The adapter swap is itself guarded: zero remaining
+//! oracle-consumer calls to the deleted `relate_nodes` entry point (the
+//! retired-symbol guard in `typeinfo_tests/relation_verdict_oracle.rs`).
 //!
 //! Parity enforcement is DISABLED for the known-mismatch ledger rows (the
 //! registry's `engine_pin`): a pinned row asserts the engine observation
@@ -91,10 +91,10 @@ pub(crate) enum RelationDriverError {
 pub(crate) enum EngineObservation {
     /// The adapter REJECTED the key: the target pattern carries `infer`
     /// binders (an inference context), outside the engine's supported
-    /// `relate_nodes` identity this block.
+    /// identity this block.
     UnsupportedKey,
-    /// `relate_nodes` returned `Unknown` (or an operand failed to resolve) —
-    /// an engine failure, never an oracle verdict.
+    /// `execute(Relate)` returned an undecided judgement (or an operand
+    /// failed to resolve) — an engine failure, never an oracle verdict.
     Unknown(String),
     /// The engine produced a verdict. Bindings are ALWAYS empty this block
     /// (the supported key carries no inference context, so there is nothing to
@@ -106,12 +106,14 @@ pub(crate) enum EngineObservation {
 
 /// Observe the engine's live answer for a spec: REJECT a broader-than-
 /// supported key (inference context) WITHOUT touching the engine; otherwise
-/// resolve both operands through the ONE shared resolver and call
-/// `relate_nodes` under its actual supported identity (assignable, default
-/// policy, regular source, no inference context).
+/// resolve both operands through the ONE shared resolver and call the SOLE
+/// relation authority (`execute(SemanticQueryKey::Relate)` via the full-key
+/// constructor `execute_relate_pair`) under its actual supported identity
+/// (assignable, default policy, regular source, no inference context).
 pub(crate) fn observe_engine(spec: &RelationQuerySpec) -> EngineObservation {
+    use crate::project_semantic_dispatch::relation_txn::RelationStep;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, RelationResult};
+    use crate::semantic_query::ProjectionMode;
     use crate::typeinfo::typeinfo_tests::support::{make_host_with_footprint, upsert_ts};
 
     if !spec.binder_layout.is_empty() {
@@ -146,11 +148,11 @@ pub(crate) fn observe_engine(spec: &RelationQuerySpec) -> EngineObservation {
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    match dispatch.relate_nodes(source, target).0 {
-        RelationResult::Assignable { bindings } => {
+    match dispatch.execute_relate_pair(source, target) {
+        RelationStep::Assignable { bindings } => {
             if !bindings.is_empty() {
                 return EngineObservation::Unknown(format!(
-                    "relate_nodes returned {} unexpected inference bindings on a binder-free key",
+                    "execute(Relate) returned {} unexpected inference bindings on a binder-free key",
                     bindings.len()
                 ));
             }
@@ -159,13 +161,16 @@ pub(crate) fn observe_engine(spec: &RelationQuerySpec) -> EngineObservation {
                 bindings: Vec::new(),
             })
         }
-        RelationResult::NotAssignable => EngineObservation::Verdict(RelationVerdictValue {
+        RelationStep::NotAssignable => EngineObservation::Verdict(RelationVerdictValue {
             verdict: RelationVerdict::NotAssignable,
             bindings: Vec::new(),
         }),
-        RelationResult::Unknown => {
-            EngineObservation::Unknown("relate_nodes returned Unknown".to_string())
-        }
+        RelationStep::Unknown | RelationStep::BudgetExceeded(_) => EngineObservation::Unknown(
+            "execute(Relate) returned an undecided judgement".to_string(),
+        ),
+        RelationStep::Assumed => EngineObservation::Unknown(
+            "execute(Relate) hit an unexpected open assumption at the root".to_string(),
+        ),
     }
 }
 

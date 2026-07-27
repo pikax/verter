@@ -106,13 +106,6 @@ pub fn display(
             DisplayString(rendered.join("; "))
         }
         SemanticQueryValue::Relation(payload) => display_relation(payload),
-        // The engine-internal compute-side verdict lives only inside the
-        // `Relate` family memo (never an `execute` output — the `Relate`
-        // execute arm is `Miss`), so reaching it here is a logic error.
-        // Matched explicitly — NOT via a `_` wildcard.
-        SemanticQueryValue::RelationVerdict(_) => unreachable!(
-            "display: RelationVerdict is an engine-internal memo encoding — no execute output carries it"
-        ),
         SemanticQueryValue::BroadRuntime(classification) => DisplayString(
             classification
                 .kinds()
@@ -407,6 +400,7 @@ pub(crate) fn display_type_node(
         }
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
         SemanticNodeData::Infer { name } => format!("infer {name}"),
+        SemanticNodeData::InferRef { name } => name.to_string(),
         SemanticNodeData::Conditional {
             check,
             extends,
@@ -436,17 +430,22 @@ pub(crate) fn display_type_node(
             let f = display_type_node(store, *false_branch_ref, needs, child_depth, visited).0;
             format!("{check} extends {extends} ? {t} : {f}")
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params,
             return_type,
             type_parameters,
             signature_span: _,
             return_type_span: _,
         } => {
+            let new_prefix = match kind {
+                crate::semantic_query::SignatureKind::Call => "",
+                crate::semantic_query::SignatureKind::Construct => "new ",
+            };
             let tps = render_type_parameters(store, type_parameters, needs, child_depth, visited);
             let rendered_params = render_params(store, params, needs, child_depth, visited);
             let ret = display_type_node(store, *return_type, needs, child_depth, visited).0;
-            format!("{tps}({rendered_params}) => {ret}")
+            format!("{new_prefix}{tps}({rendered_params}) => {ret}")
         }
         // Lazy named references: render the NAME (§14.3 — a lazy ref carries no
         // materialised body, and display must not re-resolve, so `ExpandAliases`
@@ -511,13 +510,6 @@ pub(crate) fn display_type_node(
         }
         // Raw-fallback carrier renders its preserved text verbatim.
         SemanticNodeData::RawFallback { value } => value.raw().to_string(),
-        // Constructor-type carrier renders `new ` + its function signature.
-        SemanticNodeData::ConstructorType { signature } => {
-            format!(
-                "new {}",
-                display_type_node(store, *signature, needs, child_depth, visited).0
-            )
-        }
         // Synthetic-binding carrier renders the bound name.
         SemanticNodeData::SyntheticBinding { id, .. } => id.binding_name.to_string(),
     };
@@ -646,7 +638,7 @@ fn member_prefix(member: &ShallowSurfaceMember, needs: DisplayNeeds) -> String {
 }
 
 /// Render one overload signature (a graph node, typically a
-/// [`SemanticNodeData::Function`]).
+/// [`SemanticNodeData::Signature`]).
 fn display_signature(
     store: &SemanticGraphStore,
     sig: &SignatureRef,
@@ -877,7 +869,7 @@ fn render_params(
     rendered.join(", ")
 }
 
-/// Render a [`SemanticNodeData::Function`] signature node in object / type-
+/// Render a [`SemanticNodeData::Signature`] signature node in object / type-
 /// literal position, where the return type is introduced by a COLON
 /// (`(params): ret`) — distinct from the standalone arrow form. `prefix` is
 /// `""` for a call signature, `"new "` for a construct signature, or already
@@ -897,7 +889,7 @@ fn render_signature_colon(
     // defensive arm and renders the arrow form, an invalid `name(p) => r` hybrid.
     let resolved = follow_alias_chain(store, sig);
     match store.node_data(resolved).as_deref() {
-        Some(SemanticNodeData::Function {
+        Some(SemanticNodeData::Signature {
             params,
             return_type,
             type_parameters,
@@ -945,11 +937,12 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         SemanticNodeData::Conditional { .. } => Prec::Loose,
         // A constructor type renders `new (…) => R` — a loose binder like a
         // function type.
-        SemanticNodeData::Function { .. } | SemanticNodeData::ConstructorType { .. } => Prec::Loose,
+        SemanticNodeData::Signature { .. } => Prec::Loose,
         SemanticNodeData::Union(_) => Prec::Union,
         SemanticNodeData::Intersection(_) => Prec::Intersection,
         // Prefix operators (`keyof T`, `infer T`).
         SemanticNodeData::KeyOf { .. } | SemanticNodeData::Infer { .. } => Prec::Prefix,
+        SemanticNodeData::InferRef { .. } => Prec::Atom,
         SemanticNodeData::Array { .. } | SemanticNodeData::IndexedAccess { .. } => Prec::Postfix,
         // `Alias` is transparent (rendered as its target); its precedence is
         // resolved through the chain by `node_precedence`. Reaching it here
@@ -994,14 +987,20 @@ fn node_precedence(store: &SemanticGraphStore, id: SemanticNodeId) -> Prec {
 }
 
 /// Follow the transparent `Alias` chain (bounded by the display depth cap) and
-/// report whether the node ultimately renders as a [`SemanticNodeData::Function`]
+/// report whether the node ultimately renders as a [`SemanticNodeData::Signature`]
 /// — the only shape that may use object method-shorthand. After intersection
 /// merging a member's `is_method` flag can be ORed true over an `Intersection`
 /// of overloads; such a member must render property-style (with a colon).
 fn resolves_to_function(store: &SemanticGraphStore, id: SemanticNodeId) -> bool {
+    // CALL kind only: method shorthand (`name(p): r`) is a call-signature
+    // form — a construct-signature member renders property-style
+    // (`name: new (…) => R`).
     matches!(
         store.node_data(follow_alias_chain(store, id)).as_deref(),
-        Some(SemanticNodeData::Function { .. })
+        Some(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            ..
+        })
     )
 }
 

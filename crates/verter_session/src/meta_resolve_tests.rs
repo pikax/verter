@@ -8468,7 +8468,8 @@ mod node_predicates_tests {
             "Object body must be inline-materialisable"
         );
 
-        let function_body = graph.intern_node(SemanticNodeData::Function {
+        let function_body = graph.intern_node(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
             params: StdArc::from(Vec::new().into_boxed_slice()),
             return_type: object_body,
             type_parameters: StdArc::from(Vec::new().into_boxed_slice()),

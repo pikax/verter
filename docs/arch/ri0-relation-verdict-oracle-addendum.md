@@ -111,10 +111,11 @@ multiplication (no ON/OFF pairs).
 ## 5. Observation boundary + known-mismatch ledger (no RI-3)
 
 `ObservedRelationVerdict` is the ONE normalized boundary matching the oracle
-DTO. The test adapter calls `relate_nodes` ONLY for its actually-supported
-identity (assignable, default policy, regular source, no inference context) and
-REJECTS broader keys. Pre-cutover `execute(SemanticQueryKey::Relate)` stays an
-explicit `Miss` (guarded). Engine bindings are raised through the same
+DTO. The test adapter calls the SOLE relation authority
+(`execute(SemanticQueryKey::Relate)` via the full-key constructor
+`execute_relate_pair`) ONLY for its actually-supported identity (assignable,
+default policy, regular source, no inference context) and REJECTS broader
+keys. Engine bindings are raised through the same
 normalized projection before comparison. `Unknown` / `Miss` / `BudgetExceeded`
 are engine failures, NOT oracle verdicts. Parity enforcement is DISABLED for
 the mismatch-ledger rows (the engine's live answer is pinned as data, so a
@@ -139,10 +140,13 @@ registry as first-class data.
 - **Engine-observation fixture**: the adapter synthesizes
   `type __OracleSource = <source_text>; type __OracleTarget = <target_text>;`
   per spec (adapter-internal, not an identity axis), resolves both aliases
-  through the ONE shared resolver, and calls `relate_nodes`. A binder-carrying
+  through the ONE shared resolver, and calls `execute_relate_pair`. A binder-carrying
   spec is rejected as `UnsupportedKey` BEFORE touching the engine (a target
   pattern with `infer` is an inference context the engine's key does not
-  support this block). The ledger seats exactly 9 rows: 6 `UnsupportedKey`
-  (the infer rows) + 3 `MismatchedVerdict` (`relation_optional_to_required`:
-  engine `assignable`; `relation_readonly_to_mutable`: engine `not_assignable`;
-  `relation_fixed_to_first_rest`: engine `not_assignable`).
+  support this block). The ledger seats exactly 8 rows: 6 `UnsupportedKey`
+  (the infer rows) + 2 `MismatchedVerdict` (`relation_readonly_to_mutable`:
+  engine `not_assignable`; `relation_fixed_to_first_rest`: engine
+  `not_assignable`). The former third mismatch row
+  (`relation_optional_to_required`) was re-proven at relation activation —
+  the authority now rejects optional-to-required under `strictNullChecks`,
+  matching the capture — and is parity-enforced.

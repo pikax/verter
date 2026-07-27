@@ -417,7 +417,7 @@ fn dto_request(
 /// graph-native slot-binding walk (typed binding demand is host-raised — the
 /// flat payload vocabulary cannot address the nested positions). Raising the
 /// closed fact through the shared bridge interns the
-/// `SemanticNodeData::Function` carrier — node synthesis is demand-driven at
+/// `SemanticNodeData::Signature` carrier — node synthesis is demand-driven at
 /// the consuming dispatch, never eager here. No source-text reparse.
 pub(crate) fn slot_field_function_source(
     slot: &verter_semantic::analysis::AnalyzedSlotField,

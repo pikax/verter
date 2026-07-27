@@ -1126,9 +1126,14 @@ fn render_emit_payload_parameters(
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             render_tuple_parameters(ctx, elements, counters)
         }
-        Some(SemanticNodeData::Function { params, .. }) => {
-            render_function_parameters(ctx, params, counters)
-        }
+        // CALL kind only: an emit payload replays a callback's parameters;
+        // a construct signature is not a callback shape and degrades to the
+        // honest open rest below.
+        Some(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            params,
+            ..
+        }) => render_function_parameters(ctx, params, counters),
         _ => Ok(TscSpliceText::new("...args: unknown[]")),
     }
 }

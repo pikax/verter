@@ -895,7 +895,8 @@ fn key_is_published_any_mode(key: &SemanticQueryKey) -> bool {
 /// relation check is an internal transit consumer, never a
 /// publication route.
 ///
-/// The probe drives the oracle directly through `relate_nodes` with
+/// The probe drives the oracle directly through
+/// `execute(SemanticQueryKey::Relate)` with
 /// the app-config conditional's operands: the workspace-owned
 /// `AppConfig` declaration carrier as the check side and the
 /// substituted `Record<'ui', Record<'button', any>>` extends operand
@@ -962,7 +963,7 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
     });
 
     let guard = CaptureToken::start_for_query("relation_oracle_transit_probe");
-    let (verdict, _fence) = dispatch.relate_nodes(app_config, target);
+    let verdict = dispatch.execute_relate_pair_as_result_for_tests(app_config, target);
     let snapshot = guard.end();
 
     // Firing proof: Record-target recognition holds under the transit

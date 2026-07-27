@@ -264,7 +264,8 @@ fn func_node(
         .iter()
         .map(|(n, t)| FunctionParam::synthetic(Some(Arc::from(*n)), *t, false, false))
         .collect();
-    store.intern_node(SemanticNodeData::Function {
+    store.intern_node(SemanticNodeData::Signature {
+        kind: verter_session::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type: ret,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -610,7 +611,8 @@ fn function_type_parameters_render_constraint_and_default() {
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let void_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
 
-    let func = store.intern_node(SemanticNodeData::Function {
+    let func = store.intern_node(SemanticNodeData::Signature {
+        kind: verter_session::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: void_id,
         type_parameters: Arc::from([TypeParamDecl {

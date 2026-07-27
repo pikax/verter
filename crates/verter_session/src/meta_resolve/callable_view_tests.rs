@@ -58,7 +58,8 @@ fn function_with_return_span(
     return_type: SemanticNodeId,
     return_type_span: Option<verter_span::Span>,
 ) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Function {
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
@@ -1618,7 +1619,7 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         assert!(
             matches!(
                 node_data_for(dispatch.ctx, arm).as_deref(),
-                Some(SemanticNodeData::Function { .. })
+                Some(SemanticNodeData::Signature { .. })
             ),
             "`{name}`'s callable arm is a Function node"
         );
@@ -1646,7 +1647,10 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         "the view returns the stripped callable ARM, not the raw member value"
     );
     let arm_data = node_data_for(dispatch.ctx, arm).expect("arm node data");
-    let SemanticNodeData::Function { params, .. } = arm_data.as_ref() else {
+    let SemanticNodeData::Signature {
+        kind: _, params, ..
+    } = arm_data.as_ref()
+    else {
         panic!("the stripped arm is a Function node, got {arm_data:?}");
     };
     assert_eq!(
@@ -1946,7 +1950,7 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
     assert!(
         matches!(
             node_data_for(dispatch.ctx, arm).as_deref(),
-            Some(SemanticNodeData::Function { .. })
+            Some(SemanticNodeData::Signature { .. })
         ),
         "the resolved callable arm is a `Function` node"
     );
@@ -2956,15 +2960,16 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
 
 #[test]
 fn event_names_constructor_type_arm_is_skipped_not_failed() {
-    // [P2] CONTROL against over-failing on the `ConstructorType` sibling of
+    // [P2] CONTROL against over-failing on the construct-`Signature` sibling of
     // `Function`: a mixed first-param union `'a' | (new () => X)` — the
-    // `ConstructorType` arm (`new () => X`) is a CONCRETE callable shape that,
+    // construct-`Signature` arm (`new () => X`) is a CONCRETE callable shape that,
     // exactly like `Function`, can neither BE nor HIDE a string-literal event
     // name, so it is SKIPPED (complete-no-name), NOT fail-closed. `event_names`
     // surfaces `["a"]`.
     //
     // FLIP (the cycle-4 partition-completeness gap both codex legs caught):
-    // pre-fix `ConstructorType` fell into the `_ => false` fail-closed bucket
+    // a construct signature outside the concrete bucket would fall into the
+    // `_ => false` fail-closed bucket
     // (only its sibling `Function` was in the `true`/skip set), so the
     // `new () => X` arm returned `false`, the whole union fail-closed, and
     // `event_names` wrongly returned `None` instead of `Some(["a"])` — an
@@ -2981,9 +2986,7 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
     // collector (it can neither BE nor HIDE a string-literal event name).
     let x = prim(&graph, PrimitiveKind::Object);
     let ctor_signature = function(&graph, vec![], x);
-    let ctor = graph.intern_node(SemanticNodeData::ConstructorType {
-        signature: ctor_signature,
-    });
+    let ctor = graph.intern_construct_twin_for_tests(ctor_signature);
     let names_union = union(&graph, vec![a, ctor]);
     let f = function(
         &graph,
@@ -2993,7 +2996,7 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
     assert_eq!(
         CallableNodeView::new(&dispatch, f).event_names(navigate()),
         Some(vec![Arc::<str>::from("a")]),
-        "a `ConstructorType` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like `Function` — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
+        "a construct `Signature` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like a call signature — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
     );
 }
 

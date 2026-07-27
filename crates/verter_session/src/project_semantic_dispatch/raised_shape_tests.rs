@@ -1376,7 +1376,8 @@ fn parity_function_and_constructor_type() {
     // `(a: string) => number` — Function with one materialized param + return.
     // `contains_semantic_miss` recurses the return + params; all materialized ⇒
     // NOT a miss, AND a Function is an expanded surface.
-    let func = graph.intern_node(SemanticNodeData::Function {
+    let func = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
@@ -1406,7 +1407,8 @@ fn parity_function_and_constructor_type() {
     // the miss predicate) ⇒ semantic miss. The parity helper proves the raiser
     // and predicate agree on the recursion.
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let func_miss_param = graph.intern_node(SemanticNodeData::Function {
+    let func_miss_param = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("bad")),
@@ -1432,7 +1434,7 @@ fn parity_function_and_constructor_type() {
     // The raiser raises the signature Function then rewraps as ConstructorType;
     // the miss predicate treats ConstructorType identically to Function (recurses
     // the same FunctionExpr payload).
-    let ctor = graph.intern_node(SemanticNodeData::ConstructorType { signature: func });
+    let ctor = graph.intern_construct_twin_for_tests(func);
     assert_classifier_parity(&host, ctor, "constructor-type-materialized");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, ctor),
@@ -1441,9 +1443,7 @@ fn parity_function_and_constructor_type() {
 
     // A ConstructorType whose signature param misses ⇒ semantic miss (recursion
     // through the construct signature, mirroring Function).
-    let ctor_miss = graph.intern_node(SemanticNodeData::ConstructorType {
-        signature: func_miss_param,
-    });
+    let ctor_miss = graph.intern_construct_twin_for_tests(func_miss_param);
     assert_classifier_parity(&host, ctor_miss, "constructor-type-miss-param");
     assert!(
         node_contains_semantic_miss_or_unraisable(&host, ctor_miss),
@@ -1884,7 +1884,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // `FunctionParam::synthetic` → `has_ts_annotation: false`, so they never
     // exercised the mismatch — that gap is why the bug shipped.
     //
-    // NOTE: `SemanticNodeData::Function` uses the GRAPH param
+    // NOTE: `SemanticNodeData::Signature` uses the GRAPH param
     // (`semantic_query::FunctionParam`, already imported at the top); the input
     // `TypeExpr::Function` uses the IR param (`verter_type_expr::FunctionParam`).
     // They are distinct types — alias the IR ones to keep both in scope.
@@ -1901,7 +1901,8 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // `(a: string) => number` — the node side. Its param raises with
     // `has_ts_annotation: false` (synthetic param → false; materializer/algebra
     // both hardcode false).
-    let func_node = graph.intern_node(SemanticNodeData::Function {
+    let func_node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
@@ -2445,7 +2446,8 @@ fn publication_score_corpus(
     });
     let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
 
-    let function = graph.intern_node(SemanticNodeData::Function {
+    let function = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
@@ -2587,9 +2589,7 @@ fn publication_score_corpus(
         ),
         ("function", function),
         ("constructor_type", {
-            graph.intern_node(SemanticNodeData::ConstructorType {
-                signature: function,
-            })
+            graph.intern_construct_twin_for_tests(function)
         }),
         ("decl_ref", foo),
         (
@@ -2720,14 +2720,18 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::TypeOf(_) => "typeof",
             SemanticNodeData::TypeParam { .. } => "type_param",
             SemanticNodeData::Infer { .. } => "infer",
+            SemanticNodeData::InferRef { .. } => "infer-ref",
             SemanticNodeData::Opaque(_) => "opaque",
-            SemanticNodeData::Function { .. } => "function",
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            } => "constructor_type",
+            SemanticNodeData::Signature { .. } => "function",
             SemanticNodeData::DeclRef { .. } => "decl_ref",
             SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
             SemanticNodeData::BareRef(_) => "bare_ref",
             SemanticNodeData::ImportType(_) => "import_type",
             SemanticNodeData::RawFallback { .. } => "raw_fallback",
-            SemanticNodeData::ConstructorType { .. } => "constructor_type",
             SemanticNodeData::SyntheticBinding { .. } => "synthetic_binding",
         }
     }
@@ -2956,7 +2960,8 @@ fn template_literal_with_unraisable_expression_fails_whole() {
 fn function_with_unraisable_return_fails_whole() {
     let host = host();
     let graph = graph_of(&host);
-    let node = graph.intern_node(SemanticNodeData::Function {
+    let node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: SemanticNodeId(u64::MAX),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
@@ -2974,7 +2979,8 @@ fn function_with_unraisable_parameter_fails_whole() {
     let host = host();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let node = graph.intern_node(SemanticNodeData::Function {
+    let node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),

@@ -22,7 +22,9 @@ pub(crate) fn classify_node(
         Some(SemanticNodeData::Object(_)) if object_is_closed_node(dispatch, unwrapped) => {
             ExpansionExactness::ExactConcrete
         }
-        Some(SemanticNodeData::Function { .. }) => ExpansionExactness::ExactConcrete,
+        // Both kinds intentionally: a resolved call OR construct signature
+        // is a fully-materialised concrete shape.
+        Some(SemanticNodeData::Signature { .. }) => ExpansionExactness::ExactConcrete,
         _ => ExpansionExactness::ExactSymbolic,
     }
 }

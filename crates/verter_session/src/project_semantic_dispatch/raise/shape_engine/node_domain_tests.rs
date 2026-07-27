@@ -191,7 +191,8 @@ fn root_only_projection_root_kind_matches_full_fold() {
     // A single-call-signature object raises to the call signature's value (a
     // Function root), NOT an Object — the case the raised-root mirror parity test
     // does not cover and the root-only `Object` arm must reproduce.
-    let func = graph.intern_node(SemanticNodeData::Function {
+    let func = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
@@ -333,7 +334,8 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         has_index_signature: true,
         ..empty_surface()
     }));
-    let func = graph.intern_node(SemanticNodeData::Function {
+    let func = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
@@ -368,7 +370,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         false_branch_ref: dummy,
         distributive: false,
     });
-    let ctor = graph.intern_node(SemanticNodeData::ConstructorType { signature: func });
+    let ctor = graph.intern_construct_twin_for_tests(func);
     let alias = graph.intern_node(SemanticNodeData::Alias(open_obj));
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
         contributors: StdArc::from(vec![open_obj].into_boxed_slice()),
@@ -714,12 +716,6 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 },
             }),
         ),
-        (
-            "ctor.signature",
-            graph.intern_node(SemanticNodeData::ConstructorType {
-                signature: dangling,
-            }),
-        ),
     ];
 
     for (label, node) in malformed {
@@ -752,7 +748,8 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     // `full.is_none() && root_only.is_some()` so a future "fix" that silently
     // re-aligns either side FAILS.
     let fn_with = |return_type, params: Vec<crate::semantic_query::FunctionParam>| {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
             params: StdArc::from(params.into_boxed_slice()),
             return_type,
             type_parameters: StdArc::from(

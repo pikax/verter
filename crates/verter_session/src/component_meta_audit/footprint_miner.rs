@@ -456,11 +456,13 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::Mapped { .. } => SemanticNodeKind::Mapped,
         SemanticNodeData::TypeOf(_) => SemanticNodeKind::TypeOf,
         SemanticNodeData::TypeParam { .. } => SemanticNodeKind::TypeParam,
-        SemanticNodeData::Infer { .. } => SemanticNodeKind::Other {
-            name: Arc::from("Infer"),
-        },
+        SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
+            SemanticNodeKind::Other {
+                name: Arc::from("Infer"),
+            }
+        }
         SemanticNodeData::Conditional { .. } => SemanticNodeKind::Conditional,
-        SemanticNodeData::Function { .. } => SemanticNodeKind::Other {
+        SemanticNodeData::Signature { .. } => SemanticNodeKind::Other {
             name: Arc::from("Function"),
         },
         SemanticNodeData::DeclRef { .. } => SemanticNodeKind::Other {
@@ -480,9 +482,6 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         },
         SemanticNodeData::RawFallback { .. } => SemanticNodeKind::Other {
             name: Arc::from("RawFallback"),
-        },
-        SemanticNodeData::ConstructorType { .. } => SemanticNodeKind::Other {
-            name: Arc::from("ConstructorType"),
         },
         SemanticNodeData::SyntheticBinding { .. } => SemanticNodeKind::Other {
             name: Arc::from("SyntheticBinding"),
@@ -522,13 +521,15 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("typeof {}", value_root.name))
         }
         SemanticNodeData::TypeParam { display_name, .. } => Arc::clone(display_name),
-        SemanticNodeData::Infer { name } => Arc::from(format!("infer {name}")),
+        SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
+            Arc::from(format!("infer {name}"))
+        }
         SemanticNodeData::Conditional { distributive, .. } => Arc::from(if *distributive {
             "Conditional<distributive>"
         } else {
             "Conditional"
         }),
-        SemanticNodeData::Function { params, .. } => {
+        SemanticNodeData::Signature { params, .. } => {
             Arc::from(format!("Function[{} params]", params.len()))
         }
         SemanticNodeData::DeclRef { identity } => {
@@ -552,7 +553,6 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("import(\"{specifier}\")"))
         }
         SemanticNodeData::RawFallback { .. } => Arc::from("RawFallback"),
-        SemanticNodeData::ConstructorType { .. } => Arc::from("ConstructorType"),
         SemanticNodeData::SyntheticBinding { id, .. } => {
             Arc::from(format!("SyntheticBinding({})", id.binding_name))
         }
@@ -660,15 +660,15 @@ enum VariantTag {
     Conditional = 17,
     // Tag 18 is retired and stays unassigned so surviving variants keep
     // stable tag values.
-    Function = 19,
     DeclRef = 20,
     InstantiationRef = 21,
     MergedDecl = 22,
     BareRef = 23,
     ImportType = 24,
     RawFallback = 25,
-    ConstructorType = 26,
     SyntheticBinding = 27,
+    InferRef = 28,
+    Signature = 29,
 }
 
 /// Descent sentinel: a child id currently on the descent path (a graph cycle).
@@ -877,11 +877,6 @@ impl StructuralEncoder<'_> {
                 self.buf.push(VariantTag::KeyOf as u8);
                 self.encode_child(*base, depth);
             }
-            SemanticNodeData::ConstructorType { signature } => {
-                self.buf.push(VariantTag::ConstructorType as u8);
-                self.encode_child(*signature, depth);
-            }
-
             // ── Child-list variants. ──
             SemanticNodeData::Union(arms) => {
                 self.buf.push(VariantTag::Union as u8);
@@ -984,14 +979,19 @@ impl StructuralEncoder<'_> {
                 self.encode_child(*true_branch_ref, depth);
                 self.encode_child(*false_branch_ref, depth);
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
                 signature_span,
                 return_type_span,
             } => {
-                self.buf.push(VariantTag::Function as u8);
+                self.buf.push(VariantTag::Signature as u8);
+                self.buf.push(match kind {
+                    crate::semantic_query::SignatureKind::Call => 0,
+                    crate::semantic_query::SignatureKind::Construct => 1,
+                });
                 self.buf
                     .extend_from_slice(&(params.len() as u64).to_le_bytes());
                 for p in params.iter() {
@@ -1096,6 +1096,10 @@ impl StructuralEncoder<'_> {
             }
             SemanticNodeData::Infer { name } => {
                 self.buf.push(VariantTag::Infer as u8);
+                self.push_str(name);
+            }
+            SemanticNodeData::InferRef { name } => {
+                self.buf.push(VariantTag::InferRef as u8);
                 self.push_str(name);
             }
             SemanticNodeData::RawFallback { value } => {

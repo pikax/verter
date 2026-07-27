@@ -53,7 +53,6 @@ mod prepared;
 mod relation_memo;
 mod reverse_index;
 
-pub(crate) use relation_memo::RelationPublishDecision;
 mod stats;
 // `SemanticGraphStore`'s `#[doc(hidden)]` `*_for_tests` publish / probe
 // helpers live in a sibling continuation-impl file so the hot-path memo
@@ -125,19 +124,14 @@ pub fn family_variant_label_for_tests(
     family.variant_label()
 }
 
-/// Execute-invisibility fence for relation storage. The relation engine
-/// rides `relate_nodes` (its own `get_relation` /
-/// `compute_relation_and_admit` path); the `Relate` build arm owns no
-/// relation logic and is an explicit `Opaque(Miss)`. Because relation
-/// entries live in the same `FamilyKey::Relate` / `ModeSlot::Single`
-/// slot a [`SemanticQueryKey::Relate`] projects to, every execute
-/// warm-read surface must skip the relation family outright — otherwise
-/// a planted relation judgement would warm-serve `execute(Relate)` (or
-/// surface as a `ValueDomainMismatch` through `execute_type_node`),
-/// activating the family execute path before the relation-inference
-/// reducer owns it. Relation entries stay readable ONLY through
-/// `get_relation`.
-fn family_is_execute_invisible(family: &FamilyKey) -> bool {
+/// Whether the family's warm reads additionally hard-gate on
+/// `validated_at_generation` equality with the LIVE project generation.
+/// The `Relate` family carries this gate (the retired dedicated relation
+/// memo's contract): a `ProjectGeneration` reset (tsconfig / path-alias /
+/// SDK / workspace-folder change) bumps no file content, so the carrier
+/// alone would miss it — a stale relation judgement must not warm-serve
+/// across a project-shape boundary.
+fn family_requires_live_generation_gate(family: &FamilyKey) -> bool {
     matches!(family, FamilyKey::Relate { .. })
 }
 
@@ -237,20 +231,36 @@ pub struct SemanticGraphStore {
     /// target / relation kind / policy / source freshness / inference
     /// context / env+substitution+projection-reduction context — boxed, 1:1
     /// with the key the relation engine builds) in the [`ModeSlot::Single`]
-    /// slot. The stored candidate's value is the compute-side tri-state
-    /// verdict ([`SemanticQueryValue::RelationVerdict`] wrapping
-    /// [`RelationComputeResult`](crate::semantic_query::RelationComputeResult)
-    /// — the compute/public split; the `Undecided` arm keeps today's
-    /// `Unknown` admission byte-equivalent, future admission work deletes
-    /// it). Warm reads
-    /// (`get_relation`) validate the carrier strictly AND hard-miss on a
-    /// `validated_at_generation` mismatch, so a same-canonical content edit
-    /// to either the source's or the target's originating file — or a
-    /// `ProjectGeneration` bump — misses the warm relation judgement and
-    /// forces a recompute. Retention rides the family rails (per-family
-    /// cap, invalid-first / LRU eviction, the family `memo_budget` global
-    /// bound, reverse-index drains).
+    /// slot. The stored candidate's value is the PUBLIC
+    /// [`SemanticQueryValue::Relation`] payload — decided binary
+    /// `Assignable`/`NotAssignable` outcomes ONLY (an undecided judgement
+    /// has no value-domain form and is never admitted; a `BudgetExceeded`
+    /// payload is public but ReturnOnly). Warm reads validate the carrier
+    /// strictly AND hard-miss on a `validated_at_generation` mismatch, so a
+    /// same-canonical content edit to either the source's or the target's
+    /// originating file — or a `ProjectGeneration` bump — misses the warm
+    /// relation judgement and forces a recompute. Retention rides the
+    /// family rails (per-family cap, invalid-first / LRU eviction, the
+    /// family `memo_budget` global bound, reverse-index drains).
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
+    /// The payload-side relation-proof table backing (design Decision 4):
+    /// proofs a [`SemanticQueryValue::Relation`] payload references by
+    /// opaque [`crate::semantic_query::RelationProofId`], interned
+    /// append-only and deduplicated by value. The proof is a descriptive
+    /// witness, NEVER a validity oracle — it rides OFF the type-values
+    /// surface.
+    relation_proof_table: Mutex<(
+        Vec<crate::semantic_query::RelationProof>,
+        FxHashMap<crate::semantic_query::RelationProof, crate::semantic_query::RelationProofId>,
+    )>,
+    /// The co-discharged full `Relate` keys a `CoinductiveCycle` proof
+    /// references by opaque [`crate::semantic_query::RelateKeyId`],
+    /// interned append-only (content-free — never a session-bearing
+    /// identity).
+    relate_key_table: Mutex<(
+        Vec<crate::semantic_query::RelateMemoKey>,
+        FxHashMap<crate::semantic_query::RelateMemoKey, crate::semantic_query::RelateKeyId>,
+    )>,
     /// In-flight admission keyed by the prepared query token
     /// ([`PreparedKeyHandle`]) whose equality IS full
     /// [`SemanticQueryKey`] equality (bijection pinned by the
@@ -1929,17 +1939,15 @@ impl SemanticGraphStore {
         requested: &crate::semantic_query::demand::MaterializedPoint,
         ctx: &dyn crate::resolver_core::ResolverContext,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
-        // Execute-invisibility fence (same as the fast path): relation
-        // entries are readable ONLY through `get_relation`, so the slow
-        // path's warm re-read and `get_validated` miss the relation
-        // family by construction.
-        // Execute-invisibility fence (same as the fast path): relation
-        // entries are readable ONLY through `get_relation`, so the slow
-        // path's warm re-read and `get_validated` miss the relation
-        // family by construction.
-        if family_is_execute_invisible(family) {
-            return None;
-        }
+        // Relation warm-read generation gate (the retired dedicated
+        // relation memo's contract, carried onto the family path): a
+        // `ProjectGeneration` bump misses the warm read even when the
+        // carrier still validates on file-content terms.
+        let live_generation = if family_requires_live_generation_gate(family) {
+            Some(ctx.project_type_store().current_project_generation())
+        } else {
+            None
+        };
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -1954,7 +1962,9 @@ impl SemanticGraphStore {
         // Both must pass; see `try_warm_hit_fast_path` for the rationale.
         let validated = snapshot.and_then(|list| {
             list.into_iter().find(|entry| {
-                cached_satisfies(&entry.satisfied_projection, requested) && entry.validate(ctx)
+                live_generation.is_none_or(|generation| entry.validated_at_generation == generation)
+                    && cached_satisfies(&entry.satisfied_projection, requested)
+                    && entry.validate(ctx)
             })
         });
         if let Some(entry) = &validated {
@@ -2245,16 +2255,15 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
 
-        // Execute-invisibility fence: relation entries are readable ONLY
-        // through `get_relation` — never through the execute warm path
-        // (`execute(Relate)` stays an explicit `Miss`).
-
-        // Execute-invisibility fence: relation entries are readable ONLY
-        // through `get_relation` — never through the execute warm path
-        // (`execute(Relate)` stays an explicit `Miss`).
-        if family_is_execute_invisible(family) {
-            return None;
-        }
+        // Relation warm-read generation gate (the retired dedicated
+        // relation memo's contract, carried onto the fast path): a
+        // `ProjectGeneration` bump misses the warm read even when the
+        // carrier still validates on file-content terms.
+        let live_generation = if family_requires_live_generation_gate(family) {
+            Some(ctx.project_type_store().current_project_generation())
+        } else {
+            None
+        };
 
         // Snapshot the candidate list under the lock; validate OUTSIDE
         // the lock. With the multi-candidate substrate the
@@ -2274,9 +2283,11 @@ impl SemanticGraphStore {
         // the live view. BOTH must pass; a candidate failing either is
         // skipped without bubbling.
         let requested = prepared.requested_point();
-        let entry: MemoEntry = snapshot?
-            .into_iter()
-            .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
+        let entry: MemoEntry = snapshot?.into_iter().find(|e| {
+            live_generation.is_none_or(|generation| e.validated_at_generation == generation)
+                && cached_satisfies(&e.satisfied_projection, requested)
+                && e.validate(ctx)
+        })?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant

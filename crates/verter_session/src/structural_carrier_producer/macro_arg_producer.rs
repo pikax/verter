@@ -32,7 +32,8 @@
 //! ## The query-free structural lowering
 //!
 //! [`lower_type_expr_structural`] EMITS the unresolved carriers (`BareRef`,
-//! `ImportType`, `RawFallback`, `ConstructorType`, `SyntheticBinding`, and
+//! `ImportType`, `RawFallback`, `SyntheticBinding`, kind-preserving
+//! `Signature` nodes, and
 //! the tuple-element `rest` flag) alongside the structural shells (objects,
 //! functions, unions, intersections, tuples, operators) from the
 //! [`TypeExpr`] the OXC worker produces. It performs NO name / import / type
@@ -129,7 +130,8 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod,
     PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
-    SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SignatureKind, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl,
+    ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -465,8 +467,10 @@ fn lower_node(
             } else {
                 let mut infer_frame = BinderScope::default();
                 for name in &infer_names {
+                    // References bind to `InferRef`, never the `Infer`
+                    // declaration node (the shadow stop keys on declarations).
                     let infer_node = graph.intern_node_with_scope(
-                        SemanticNodeData::Infer {
+                        SemanticNodeData::InferRef {
                             name: Arc::clone(name),
                         },
                         scope.clone(),
@@ -520,19 +524,14 @@ fn lower_node(
             scope.clone(),
         )),
 
-        // -- Function / constructor signatures --
-        // A plain function lowers to the signature node directly; a
-        // constructor type wraps the SAME signature in a `ConstructorType`
-        // carrier so `new () => R` stays distinct from `() => R` (the eager
-        // path flattens both to `Function` — this is the intentional
-        // divergence the carrier exists for).
-        TypeExpr::Function(func) => lower_function_signature(graph, func, scope, ctx),
+        // -- Call / construct signatures — ONE `Signature` carrier whose
+        //    `kind` preserves the spelling (`new () => R` stays distinct
+        //    from `() => R`).
+        TypeExpr::Function(func) => {
+            lower_function_signature(graph, func, scope, ctx, SignatureKind::Call)
+        }
         TypeExpr::ConstructorType(func) => {
-            let signature = lower_function_signature(graph, func, scope, ctx)?;
-            Ok(graph.intern_node_with_scope(
-                SemanticNodeData::ConstructorType { signature },
-                scope.clone(),
-            ))
+            lower_function_signature(graph, func, scope, ctx, SignatureKind::Construct)
         }
 
         // -- First-class type-parameter reference --
@@ -717,7 +716,7 @@ fn lower_node(
                         call_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
                     }
                     ObjectMember::ConstructSignature(func) => {
-                        let function_expr = TypeExpr::Function(Arc::new(func.clone()));
+                        let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
                         construct_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
                     }
                     ObjectMember::IndexSignature(sig) => index_signatures.push(IndexSignature {
@@ -1030,6 +1029,7 @@ fn lower_function_signature(
     func: &FunctionExpr,
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
+    kind: SignatureKind,
 ) -> Result<SemanticNodeId, StructuralLowerError> {
     let mut own_frame = BinderScope::default();
     let mut type_parameters: Vec<TypeParamDecl> = Vec::with_capacity(func.type_parameters.len());
@@ -1107,7 +1107,8 @@ fn lower_function_signature(
         None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
     };
     Ok(graph.intern_node_with_scope(
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params: Arc::from(params.into_boxed_slice()),
             return_type,
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),

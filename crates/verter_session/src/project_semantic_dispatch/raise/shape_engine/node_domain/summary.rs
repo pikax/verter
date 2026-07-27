@@ -211,11 +211,11 @@ pub(super) fn function(materialized: bool) -> RaisedShapeSummary {
     summary(materialized, true, FactShapeTag::Function)
 }
 
-/// `ConstructorType`: carries the signature's folded `materialized` fact; an
-/// expanded surface; tagged `Other` (the rewrap reads the SIGNATURE child,
-/// never the constructor itself, so it must NOT tag `Function`).
+/// A CONSTRUCT `Signature`: carries the folded `materialized` fact; an
+/// expanded surface; tagged `Constructor` (distinct from `Function` so the
+/// kind-sensitive extractions never conflate the two).
 pub(super) fn constructor(materialized: bool) -> RaisedShapeSummary {
-    summary(materialized, true, FactShapeTag::Other)
+    summary(materialized, true, FactShapeTag::Constructor)
 }
 
 /// `Object` from surviving members: materialized is the AND over members; an

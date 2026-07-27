@@ -357,7 +357,7 @@ fn expanded_call_signature_from_node(
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
     let data = node_data_for(dispatch.ctx, node)?;
-    let SemanticNodeData::Function {
+    let SemanticNodeData::Signature {
         params,
         return_type,
         type_parameters,

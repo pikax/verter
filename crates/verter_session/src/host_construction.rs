@@ -26,6 +26,30 @@ use crate::types::HostConfig;
 use crate::types::HostMetrics;
 use crate::{host_executor, VerterHost};
 
+/// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
+///
+/// - `force_overflow_observations`: test-injection for the cold relation
+///   judgement path — when `N > 0`, the cold compute observes `N` synthetic
+///   `FileWholeHash` facts onto the active tracer, forcing the relation
+///   memo's `FactReadSetFinalise::Overflow` non-admission (the judgement is
+///   returned to the caller but refused memo admission).
+/// - `force_budget_exhaustion`: trips the relation reducer's work budget on
+///   its first driver pass — the deterministic trigger for the typed
+///   `BudgetExceeded` public outcome and its three-layer non-admission (no
+///   warm memo entry, no fact signature, no reverse-index registration).
+/// - `strict_family_relax_bits` (RI-10): bit 0 relaxes `strictNullChecks`
+///   (null/undefined assignable to any non-`never` target); bit 1 relaxes
+///   `strictFunctionTypes` (bivariant function parameters). Zero — the
+///   production default — is the TS-strict regime. The relaxed
+///   configuration folds into the relation key's `type_env_hash`, so a
+///   relaxed judgement never warm-hits a strict request.
+#[derive(Debug, Default)]
+pub(crate) struct RelationHostKnobs {
+    pub(crate) force_overflow_observations: std::sync::atomic::AtomicUsize,
+    pub(crate) force_budget_exhaustion: std::sync::atomic::AtomicBool,
+    pub(crate) strict_family_relax_bits: std::sync::atomic::AtomicU8,
+}
+
 pub(crate) fn next_host_instance_id() -> u64 {
     static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
@@ -380,7 +404,7 @@ impl VerterHost {
             materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool::new(
                 false,
             ),
-            relation_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
+            relation_knobs: RelationHostKnobs::default(),
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]

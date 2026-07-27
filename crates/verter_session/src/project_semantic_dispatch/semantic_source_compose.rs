@@ -533,8 +533,8 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
-    /// Compose a function-signature fact into a `Function` carrier node
-    /// (wrapped in `ConstructorType` for a construct signature). Parameter /
+    /// Compose a function-signature fact into a `Signature` carrier node
+    /// (`kind: Construct` for a construct signature). Parameter /
     /// return positions with authored slots lower through the memoized locator
     /// query; slot-less positions (unannotated / rest parameters, inferred
     /// returns) intern the typed miss the whole-signature demand re-derives.
@@ -628,26 +628,22 @@ impl ProjectSemanticDispatch<'_> {
                     }),
                 })
                 .collect();
-        let function = self.graph().intern_node_with_scope(
-            SemanticNodeData::Function {
+        let kind = if construct {
+            crate::semantic_query::SignatureKind::Construct
+        } else {
+            crate::semantic_query::SignatureKind::Call
+        };
+        HotTypeRef::new(self.graph().intern_node_with_scope(
+            SemanticNodeData::Signature {
+                kind,
                 params: Arc::from(params.into_boxed_slice()),
                 return_type,
                 type_parameters: Arc::from(type_parameters.into_boxed_slice()),
                 signature_span: None,
                 return_type_span: None,
             },
-            scope.clone(),
-        );
-        if construct {
-            HotTypeRef::new(self.graph().intern_node_with_scope(
-                SemanticNodeData::ConstructorType {
-                    signature: function,
-                },
-                scope,
-            ))
-        } else {
-            HotTypeRef::new(function)
-        }
+            scope,
+        ))
     }
 
     /// Compose a tuple payload fact into a `Tuple` carrier node.

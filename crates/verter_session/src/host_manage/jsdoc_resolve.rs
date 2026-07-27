@@ -703,7 +703,7 @@ fn node_has_direct_macro_reference(
                 worklist.push(*false_branch_ref);
             }
             SemanticNodeData::Mapped { source, .. } => worklist.push(*source),
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -716,7 +716,6 @@ fn node_has_direct_macro_reference(
                     worklist.extend(param.default);
                 }
             }
-            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
             // Object MEMBERS encode "nested" deps — never walked.
             _ => {}
         }

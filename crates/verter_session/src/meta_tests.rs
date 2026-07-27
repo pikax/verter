@@ -3124,6 +3124,57 @@ defineSlots<Slots>()
     );
 }
 
+/// A construct-signature slot value (`new (p) => object`) is NOT a
+/// callable slot shape: TS cannot invoke it as a render callback, so
+/// slot-binding synthesis must refuse it (no bindings), exactly as a
+/// non-callable value. The sibling call-signature slot is the positive
+/// control proving the binding pipeline is live in the same fixture.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn construct_signature_slot_value_publishes_no_callable_bindings() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+defineSlots<{
+  default: new (p: { x: string }) => object
+  named: (p: { y: string }) => any
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let meta = get_meta(&project, "/src/Comp.vue");
+
+    // Positive control: the CALL-signature slot binds its first-param
+    // member.
+    let named = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "named")
+        .expect("the call-signature slot `named` must publish");
+    let named_bindings: Vec<&str> = named.bindings.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        named_bindings,
+        vec!["y"],
+        "the call-signature slot must bind `y`, got {named_bindings:?}"
+    );
+
+    // The construct-signature slot is NOT callable: no bindings may be
+    // synthesized from its first parameter.
+    let default_slot = meta.slots.iter().find(|slot| slot.name == "default");
+    if let Some(slot) = default_slot {
+        let bindings: Vec<&str> = slot.bindings.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            bindings.is_empty(),
+            "a construct-signature slot value is not a callable slot shape — \
+             no bindings may be synthesized from `new (p: {{ x: string }}) => object`, \
+             got {bindings:?}"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {
@@ -31552,4 +31603,56 @@ fn template_slots_carry_declared_in_macro_type_arg() {
         anchor.declared_in_macro_type_arg,
         "an authored template `<slot>` element declares the name"
     );
+}
+
+/// Public macro regression: the signature utilities are KIND-aware
+/// over a retained direct constructor type in a `defineProps` payload —
+/// `ConstructorParameters<new (x: string) => object>` materialises the
+/// `[x: string]` tuple and `InstanceType<new () => { made: string }>` the
+/// instance type (never `Opaque(Miss)`).
+#[test]
+fn define_props_constructor_parameters_and_instance_type_over_direct_constructor() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{
+  args: ConstructorParameters<new (x: string) => object>,
+  inst: InstanceType<new () => { made: string }>,
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    // `args` = [x: string].
+    match &evaluated_define_props_type(&project, "/App.vue", &evaluated, "args") {
+        TypeExpr::Tuple { elements, .. } => {
+            assert_eq!(elements.len(), 1, "ConstructorParameters tuple arity");
+            assert_eq!(
+                elements[0].ty,
+                TypeExpr::Primitive(PrimitiveName::String),
+                "the constructor's parameter type flows into the tuple"
+            );
+        }
+        other => panic!(
+            "ConstructorParameters<new (x: string) => object> must evaluate to \
+             a tuple, got {other:?}"
+        ),
+    }
+
+    // `inst` = { made: string }.
+    match &evaluated_define_props_type(&project, "/App.vue", &evaluated, "inst") {
+        TypeExpr::Object(obj) => {
+            assert_eq!(obj.properties.len(), 1, "InstanceType instance surface");
+        }
+        other => panic!(
+            "InstanceType<new () => {{ made: string }}> must evaluate to the \
+             instance object, got {other:?}"
+        ),
+    }
 }

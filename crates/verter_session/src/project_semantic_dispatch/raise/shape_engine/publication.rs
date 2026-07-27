@@ -602,6 +602,13 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
         })
     }
 
+    fn out_as_constructor(&self, out: &ScoredOut) -> Option<FnScore> {
+        (out.tag == FactShapeTag::Constructor).then_some(FnScore {
+            symbolic_carriers: out.score.symbolic_carriers,
+            generic_detail: out.score.generic_detail,
+        })
+    }
+
     fn member_property(
         &mut self,
         _name: String,

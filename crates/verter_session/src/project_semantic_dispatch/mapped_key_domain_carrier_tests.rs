@@ -861,7 +861,8 @@ fn nullary_function(
     dispatch: &ProjectSemanticDispatch<'_>,
     return_type: SemanticNodeId,
 ) -> SemanticNodeId {
-    dispatch.graph().intern_node(SemanticNodeData::Function {
+    dispatch.graph().intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),

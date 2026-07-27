@@ -561,7 +561,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                 })
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -580,13 +580,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     depth + 1,
                 )
             }
-            SemanticNodeData::ConstructorType { signature } => self
-                .node_contains_imported_utility_route(
-                    scope_canonical_id,
-                    scope_owner,
-                    *signature,
-                    depth + 1,
-                ),
             SemanticNodeData::Alias(inner) => self.node_contains_imported_utility_route(
                 scope_canonical_id,
                 scope_owner,
@@ -959,12 +952,11 @@ fn node_references_type_param_names(
                 || surface.call_signatures.iter().any(|&c| recur(c))
                 || surface.construct_signatures.iter().any(|&c| recur(c))
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
         } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
-        SemanticNodeData::ConstructorType { signature } => recur(*signature),
         SemanticNodeData::Conditional {
             check,
             extends,

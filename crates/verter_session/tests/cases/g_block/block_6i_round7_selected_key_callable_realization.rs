@@ -3,7 +3,7 @@
 //! Drives the substrate's per-key Mapped materialization through the
 //! `Published(Shallow)` boundary on a `defineSlots`-shaped fixture
 //! whose mapper body is a Conditional (`ExtendSlotWithPlan<TPlan, K>`).
-//! The terminal slot value must close to a `SemanticNodeData::Function`
+//! The terminal slot value must close to a `SemanticNodeData::Signature`
 //! so the graph-native slot binding consumer's `Function`-arm match
 //! produces the `badge.plan` / `title.plan` binding rows.
 //!
@@ -166,13 +166,16 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         .node_data(badge.value)
         .expect("badge member's value node must have semantic data");
 
-    let is_function = matches!(badge_value_data.as_ref(), SemanticNodeData::Function { .. });
+    let is_function = matches!(
+        badge_value_data.as_ref(),
+        SemanticNodeData::Signature { .. }
+    );
 
     assert!(
         is_function,
         "selected-key callable realization MUST close \
          `ExtendSlotWithPlan<PricingPlan, \"badge\">`'s Conditional body to a \
-         `SemanticNodeData::Function` under `Published(Shallow)` on a \
+         `SemanticNodeData::Signature` under `Published(Shallow)` on a \
          `StructuralTransit(Navigate)` carrier. Without the \
          `materialize_selected_key_mapped_value` helper, the per-key materializer \
          leaves the Conditional shell carrier-shaped and the slot-binding consumer's \
@@ -190,7 +193,10 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         .node_data(title.value)
         .expect("title member's value node must have semantic data");
     assert!(
-        matches!(title_value_data.as_ref(), SemanticNodeData::Function { .. }),
+        matches!(
+            title_value_data.as_ref(),
+            SemanticNodeData::Signature { .. }
+        ),
         "selected-key callable realization MUST fire for \
          every enumerated key. `title` value: {title_value_data:?}",
     );

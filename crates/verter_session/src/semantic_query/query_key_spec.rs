@@ -38,14 +38,13 @@
 //!   `ProjectSemanticDispatch::execute` wraps the
 //!   `TypeNode` keys' results as `SemanticQueryValue::TypeNode(node)`.
 //!   `Relate` records its value domain as
-//!   [`SemanticQueryValueTag::Relation`] — the tri-state assignability
-//!   classification. Its formal `execute` arm is non-producing: it returns
-//!   `QueryError::Miss` (`Opaque(Miss)`). The current PRODUCTION authority is
-//!   `ProjectSemanticDispatch::relate_nodes(source, target) ->
-//!   (RelationResult, DepSignature)`, which produces and dep-signature-fences
-//!   every judgement in the family memo's `Relate` family (the rehomed
-//!   relation memo) — NOT the family singleflight. That is why this row's
-//!   `admission` is [`RelationMemo`](AdmissionSpec::RelationMemo). `ResolveOverloadSet`
+//!   [`SemanticQueryValueTag::Relation`] — the public relation outcome
+//!   (`Assignable` / `NotAssignable` / `BudgetExceeded`, no public `Unknown`).
+//!   Its `execute` arm is the LIVE producer (`build_relate`) and the SOLE
+//!   relation authority: decided binary judgements admit through the family
+//!   singleflight, `BudgetExceeded` is ReturnOnly-but-public, undecided
+//!   judgements surface `Miss` and never admit. That is why this row's
+//!   `admission` is [`Singleflight`](AdmissionSpec::Singleflight). `ResolveOverloadSet`
 //!   set. `ClassifyBroadRuntime` records the live terminal
 //!   [`SemanticQueryValueTag::BroadRuntime`] domain. `FlowNarrowingAt`
 //!   and `ContextualTypeAt` both record
@@ -346,14 +345,6 @@ pub enum AdmissionSpec {
     /// / incomplete self-rooting) route through `ReturnOnly` without
     /// publishing.
     Singleflight,
-    /// Dedicated relation-memo path: the judgement is produced and cached by
-    /// `ProjectSemanticDispatch::relate_nodes`, which memoises every outcome in
-    /// the family memo's `Relate` family (the rehomed relation memo) under
-    /// dep-signature fencing. The family `execute` path for `Relate` is intentionally
-    /// non-producing — it returns `QueryResult::Error(QueryError::Miss)`
-    /// (`Opaque(Miss)`) — so this key never flows through the `Singleflight`
-    /// family materialiser. Used by `Relate`.
-    RelationMemo,
     /// Honest non-producing arm: this key has NO `execute`-side producer.
     /// The `execute` build arm returns
     /// `QueryResult::Error(QueryError::Miss)` (`Opaque(Miss)`) verbatim —
@@ -363,10 +354,8 @@ pub enum AdmissionSpec {
     /// - `ResolveAmbientNamespace` → the namespace-analysis reducer.
     /// - `ResolveEnum` → the enum value/type-duality reducer.
     ///
-    /// Distinct from [`RelationMemo`](Self::RelationMemo) (implies a
-    /// dedicated relation-memo producer) and
-    /// [`Singleflight`](Self::Singleflight) (implies a real materialiser).
-    /// This variant implies NO writer at all.
+    /// Distinct from [`Singleflight`](Self::Singleflight) (implies a real
+    /// materialiser). This variant implies NO writer at all.
     NonProducingPendingReducer,
 }
 
@@ -374,7 +363,6 @@ impl AdmissionSpec {
     fn render(self) -> &'static str {
         match self {
             AdmissionSpec::Singleflight => "Singleflight",
-            AdmissionSpec::RelationMemo => "RelationMemo",
             AdmissionSpec::NonProducingPendingReducer => "NonProducingPendingReducer",
         }
     }
@@ -700,12 +688,10 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // inference_context, context } — full-identity relation judgement over
         // already-resolved nodes. Resolves to the `Relation` value domain
         // (`SemanticQueryValue::Relation(RelationPayload)`), NOT `TypeNode`.
-        // The family `execute` path is intentionally non-producing (returns
-        // `Opaque(Miss)`); the authoritative judgement is produced + cached by
-        // `relate_nodes` in the family memo's `Relate` family (the rehomed
-        // relation memo, keyed on the full `RelateMemoKey` identity; the
-        // stored value is the compute-side `RelationVerdict` encoding) —
-        // admission `RelationMemo`, not the family singleflight. `env_dims` is
+        // LIVE producer (`build_relate`): the sole relation authority rides the
+        // family singleflight — decided binary judgements admit into the
+        // `Relate` family slot, `BudgetExceeded` returns-but-never-admits,
+        // undecided judgements surface `Miss` and never admit. `env_dims` is
         // `R T L J`:
         // the `RelationContext` carries the `R T L J` env the relation outcome
         // depends on (relating imported surfaces resolves their references on
@@ -723,7 +709,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
-            admission: AdmissionSpec::RelationMemo,
+            admission: AdmissionSpec::Singleflight,
         },
         // ResolveMacroPayload { owner, macro_index, macro_kind, type_args,
         // context: MacroPayloadContext { resolve_env_hash, mode } } — resolves
@@ -978,9 +964,6 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::DeclarationAnalysis => "DeclarationAnalysis",
         SemanticQueryValueTag::OverloadSet => "OverloadSet",
         SemanticQueryValueTag::Relation => "Relation",
-        // Engine-internal memo encoding (the `Relate` family memo) — no key
-        // spec row maps to it, so the rendered table never carries it.
-        SemanticQueryValueTag::RelationVerdict => "RelationVerdict",
         SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }

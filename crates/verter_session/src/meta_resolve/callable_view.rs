@@ -30,7 +30,7 @@ use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     FunctionParam, LiteralValue, PathSegment, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId,
+    ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId, SignatureKind,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 
@@ -131,10 +131,10 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. }
         | SemanticNodeData::Conditional { .. }
-        | SemanticNodeData::Function { .. }
-        | SemanticNodeData::MergedDecl { .. }
-        | SemanticNodeData::ConstructorType { .. } => SnippetParamsArg::ResolvedNonTuple,
+        | SemanticNodeData::Signature { .. }
+        | SemanticNodeData::MergedDecl { .. } => SnippetParamsArg::ResolvedNonTuple,
         // FAIL-CLOSED — an unresolved residual carrier or a non-type artifact the
         // demand primitive could not resolve to a concrete `Params`. A `Params`
         // we cannot resolve to a tuple must fail closed, never presenting a
@@ -158,10 +158,10 @@ pub(crate) struct CallableNodeView<'a, 'ctx> {
 }
 
 /// A lightweight borrowed view over a node guaranteed to be a
-/// [`SemanticNodeData::Function`] (the realized signature of a callable).
+/// [`SemanticNodeData::Signature`] (the realized signature of a callable).
 pub(crate) struct SignatureNodeView<'a, 'ctx> {
     dispatch: &'a ProjectSemanticDispatch<'ctx>,
-    /// A node guaranteed to intern as `SemanticNodeData::Function` by
+    /// A node guaranteed to intern as `SemanticNodeData::Signature` by
     /// construction ([`CallableNodeView::signature`] only mints this view when
     /// the realized root is a `Function`).
     function: SemanticNodeId,
@@ -251,8 +251,13 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         let normalized = self.normalized_fact_node(node, context)?;
         let data = self.data(normalized)?;
         match data.as_ref() {
-            // A realized callable — return verbatim.
-            SemanticNodeData::Function { .. } => Some(normalized),
+            // A realized callable — return verbatim. CALL kind only: a
+            // construct signature (`new (...) => R`) is not invocable as a
+            // callback and is not a callable arm.
+            SemanticNodeData::Signature {
+                kind: SignatureKind::Call,
+                ..
+            } => Some(normalized),
 
             // The view OWNS the arm recursion. RECURSE per surviving arm (so a
             // nested nullish composite — `Union([Union([f, undefined]), …])` —
@@ -355,7 +360,13 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     ) -> Option<SignatureNodeView<'a, 'ctx>> {
         let realized = self.single_callable_arm(context)?;
         match self.data(realized).as_deref() {
-            Some(SemanticNodeData::Function { .. }) => Some(SignatureNodeView {
+            // Call-kind by construction (`single_callable_arm` only realizes
+            // call signatures); matched explicitly so the view's invariant is
+            // the pattern, not a comment.
+            Some(SemanticNodeData::Signature {
+                kind: SignatureKind::Call,
+                ..
+            }) => Some(SignatureNodeView {
                 dispatch: self.dispatch,
                 function: realized,
             }),
@@ -486,16 +497,15 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 //   - `Literal` (non-String) — a number / bool / bigint literal
                 //                              (the String case is pushed above)
                 //   - `Array` / `Tuple`      — concrete element / tuple shapes
-                //   - `Function`             — a callable signature
-                //   - `ConstructorType`      — `new () => X`, architecture-
-                //                              equivalent to `Function` here
+                //   - `Signature`            — a call or construct
+                //                              signature (both kinds are
+                //                              concrete callable shapes here)
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Function { .. }
-                | SemanticNodeData::ConstructorType { .. } => true,
+                | SemanticNodeData::Signature { .. } => true,
                 // ── TRUE / CARVE-OUT ── the shared resolver's DIRECT
                 // self-reference carrier-stop (`type S = 'x' | S` resolves to
                 // `Union(Literal('x'), Opaque(RecursiveRef))`). A CLOSED back-edge
@@ -534,6 +544,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 | SemanticNodeData::TypeOf(_)
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::Conditional { .. }
                 | SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::InstantiationRef { .. }
@@ -757,8 +768,13 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             }
             // A snippet whose call signature realized to a `Function`
             // (`(this, ...args: Params)`): reuse the shared positional reader
-            // (leading `this` skipped, rest-tuple expanded) on the realized node.
-            SemanticNodeData::Function { .. } => {
+            // (leading `this` skipped, rest-tuple expanded) on the realized
+            // node. CALL kind only — a construct signature is not a snippet
+            // shape and falls to the fail-closed arm below.
+            SemanticNodeData::Signature {
+                kind: SignatureKind::Call,
+                ..
+            } => {
                 drop(data);
                 CallableNodeView::new(self.dispatch, peeled).positional_params(context)
             }
@@ -839,7 +855,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     }
 
     /// Recursively collect every non-nullish callable arm of `node` as a
-    /// realized [`SemanticNodeData::Function`] node into `out`, normalizing
+    /// realized [`SemanticNodeData::Signature`] node into `out`, normalizing
     /// carrier shells at each hop. Returns `None` (FAIL CLOSED) on a
     /// non-callable non-nullish arm, missing data, or fuse exhaustion.
     fn collect_callable_arms(
@@ -856,7 +872,12 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         let normalized = self.normalized_fact_node(node, context)?;
         let data = self.data(normalized)?;
         match data.as_ref() {
-            SemanticNodeData::Function { .. } => {
+            // CALL kind only: a construct signature is not slot-callable and
+            // falls to the fail-closed realize arm below.
+            SemanticNodeData::Signature {
+                kind: SignatureKind::Call,
+                ..
+            } => {
                 out.push(normalized);
                 Some(())
             }
@@ -912,9 +933,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         let mut single_return_type_span: Option<Span> = None;
         for arm in arms {
             let arm_data = self.data(*arm)?;
-            // FAIL CLOSED: a non-`Function` arm means the member is not purely
-            // slot-callable.
-            let SemanticNodeData::Function {
+            // FAIL CLOSED: a non-CALL-signature arm (incl. a construct
+            // signature) means the member is not purely slot-callable.
+            let SemanticNodeData::Signature {
+                kind: SignatureKind::Call,
                 params,
                 return_type,
                 return_type_span,
@@ -979,7 +1001,7 @@ impl SignatureNodeView<'_, '_> {
     /// The signature's first-parameter node, if any.
     pub(crate) fn first_param(&self) -> Option<SemanticNodeId> {
         let data = self.data(self.function)?;
-        let SemanticNodeData::Function { params, .. } = data.as_ref() else {
+        let SemanticNodeData::Signature { params, .. } = data.as_ref() else {
             return None;
         };
         params.first().map(|p| p.ty)
@@ -994,7 +1016,7 @@ impl SignatureNodeView<'_, '_> {
     #[allow(dead_code)]
     pub(crate) fn return_type(&self) -> Option<SemanticNodeId> {
         match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Function { return_type, .. }) => Some(*return_type),
+            Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
             _ => {
                 debug_assert!(false, "SignatureNodeView function is not a Function node");
                 None
@@ -1008,7 +1030,7 @@ impl SignatureNodeView<'_, '_> {
     #[allow(dead_code)]
     pub(crate) fn return_type_span(&self) -> Option<Span> {
         match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Function {
+            Some(SemanticNodeData::Signature {
                 return_type_span, ..
             }) => *return_type_span,
             _ => None,
@@ -1028,7 +1050,7 @@ impl SignatureNodeView<'_, '_> {
     /// unreachable and fails closed to an empty slice (never a fabricated param).
     pub(crate) fn raw_params(&self) -> Arc<[FunctionParam]> {
         match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Function { params, .. }) => Arc::clone(params),
+            Some(SemanticNodeData::Signature { params, .. }) => Arc::clone(params),
             _ => Arc::from(Vec::new().into_boxed_slice()),
         }
     }
@@ -1053,7 +1075,7 @@ impl SignatureNodeView<'_, '_> {
         context: ProjectionReductionContext,
     ) -> Option<Vec<PositionalParamNode>> {
         let params = match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Function { params, .. }) => Arc::clone(params),
+            Some(SemanticNodeData::Signature { params, .. }) => Arc::clone(params),
             _ => return Some(Vec::new()),
         };
         let mut out = Vec::new();

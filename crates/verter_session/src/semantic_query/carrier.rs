@@ -281,13 +281,13 @@ impl SemanticNodeData {
             | Self::Mapped { .. }
             | Self::TypeParam { .. }
             | Self::Infer { .. }
+            | Self::InferRef { .. }
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
-            | Self::Function { .. }
+            | Self::Signature { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::RawFallback { .. }
-            | Self::ConstructorType { .. }
             | Self::SyntheticBinding { .. } => &[],
         }
     }
@@ -402,13 +402,13 @@ impl SemanticNodeData {
             | Self::Mapped { .. }
             | Self::TypeParam { .. }
             | Self::Infer { .. }
+            | Self::InferRef { .. }
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
-            | Self::Function { .. }
+            | Self::Signature { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::RawFallback { .. }
-            | Self::ConstructorType { .. }
             | Self::SyntheticBinding { .. } => None,
         }
     }

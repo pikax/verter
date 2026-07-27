@@ -188,7 +188,6 @@ fn relation_required_property_assignable_to_optional() {
 }
 
 #[test]
-#[ignore = "typeinfo currently treats `{ a?: string } extends { a: string }` as assignable (returning `\"yes\"`); the relation engine must reject optional-to-required because the producer slot may be absent"]
 fn relation_optional_property_not_assignable_to_required() {
     // TS7 contract: `{ a?: string } extends { a: string } ? "yes" : "no"`
     // reduces to `"no"`. An optional property may be absent, so the

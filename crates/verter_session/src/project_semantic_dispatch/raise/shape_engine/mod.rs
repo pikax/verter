@@ -441,10 +441,10 @@ impl RaisedNodeShapeFacts {
 /// discriminating (see the per-arm tag-placement rules in [`node_domain`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::project_semantic_dispatch) enum FactShapeTag {
-    /// The folded value is a `Function` shape (NOT `ConstructorType`: the
-    /// constructor rewrap reads the SIGNATURE child, never the constructor
-    /// itself, so a constructor tags `Other`).
+    /// The folded value is a CALL `Signature` shape.
     Function,
+    /// The folded value is a CONSTRUCT `Signature` shape.
+    Constructor,
     /// The typed `QueryError::UnrepresentableSurface` degradation arm
     /// (dropped from an intersection).
     ObjectSurfaceSentinel,
@@ -741,6 +741,11 @@ trait RaisedShapeAlgebra {
     /// other shape — used by the `ConstructorType` rewrap and the Object surface
     /// signature members.
     fn out_as_function(&self, out: &Self::Out) -> Option<Self::Fn>;
+    /// Extract the folded CONSTRUCT-signature payload back out of an `Out`
+    /// — the construct twin of [`Self::out_as_function`] (only
+    /// `constructor_to_out` produces it). Used by the Object
+    /// construct-signature member assembly.
+    fn out_as_constructor(&self, out: &Self::Out) -> Option<Self::Fn>;
 
     // -- Object surface members --
     fn member_property(

@@ -138,7 +138,7 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
                     worklist.push(signature.value_type);
                 }
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -146,7 +146,6 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
                 worklist.extend(params.iter().map(|param| param.ty));
                 worklist.push(*return_type);
             }
-            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
             SemanticNodeData::Conditional {
                 check,
                 extends,

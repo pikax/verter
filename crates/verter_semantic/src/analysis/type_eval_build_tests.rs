@@ -2355,9 +2355,11 @@ fn var_widens_string_literal_initializer() {
 ///
 /// `widen_literal_type` runs on analyzer-side lowered IR (the `as`
 /// expression lowers via `lower_ts_type`), BEFORE the dispatch lower
-/// collapses `Function`/`ConstructorType` to `SemanticNodeData::Function`.
-/// A catch-all `_ => expr` arm would forward the whole `ConstructorType`
-/// untouched, so the inner `kind: "x"` literal would silently NOT widen.
+/// interns the kind-preserving `SemanticNodeData::Signature` carrier
+/// (`TypeExpr::Function` ⇒ `Call`, `TypeExpr::ConstructorType` ⇒
+/// `Construct`). A catch-all `_ => expr` arm would forward the whole
+/// `ConstructorType` untouched, so the inner `kind: "x"` literal would
+/// silently NOT widen.
 /// Discriminator: the inner `kind` member must be `string`, never the `"x"`
 /// literal — and the outer node must remain a `ConstructorType`.
 #[test]

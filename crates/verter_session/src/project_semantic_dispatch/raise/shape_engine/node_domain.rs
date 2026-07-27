@@ -418,6 +418,20 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
         }
     }
 
+    fn out_as_constructor(&self, out: &RaisedShapeResult) -> Option<(RaisedFunction, bool)> {
+        match self
+            .interner
+            .terms
+            .get(out.key.0 as usize)
+            .map(|t| t.as_ref())
+        {
+            Some(RaisedTerm::ConstructorType(function)) => {
+                Some((function.clone(), out.summary.facts.materialized))
+            }
+            _ => None,
+        }
+    }
+
     fn member_property(
         &mut self,
         name: String,
@@ -698,6 +712,12 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
         // Read the SHARED tag — the same class the full algebra's interner
         // readback checks (only `function_to_out` tags `Function`).
         (out.tag == FactShapeTag::Function).then_some(FactsFunction {
+            materialized: out.facts.materialized,
+        })
+    }
+    fn out_as_constructor(&self, out: &RaisedShapeSummary) -> Option<FactsFunction> {
+        // Read the shared tag (only `constructor_to_out` tags `Constructor`).
+        (out.tag == FactShapeTag::Constructor).then_some(FactsFunction {
             materialized: out.facts.materialized,
         })
     }
@@ -1101,6 +1121,7 @@ pub(super) fn project_root_summary(
         SemanticNodeData::Primitive(_)
         | SemanticNodeData::Literal(_)
         | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::ImportType(_)
@@ -1172,7 +1193,14 @@ pub(super) fn project_root_summary(
         // function params/return/type-param slots and tuple/union members are
         // NOT probed — the full fold fails those malformed composites while
         // this projection still answers the root class.
-        SemanticNodeData::Function { .. } => RootOnlySummary::from_summary(summary::function(true)),
+        SemanticNodeData::Signature { kind, .. } => match kind {
+            crate::semantic_query::SignatureKind::Call => {
+                RootOnlySummary::from_summary(summary::function(true))
+            }
+            crate::semantic_query::SignatureKind::Construct => {
+                RootOnlySummary::from_summary(summary::constructor(true))
+            }
+        },
         SemanticNodeData::Array { element, .. } => {
             project_root_summary(dispatch, *element, active)?;
             RootOnlySummary::from_summary(summary::array(root_only_placeholder_facts()))
@@ -1247,18 +1275,6 @@ pub(super) fn project_root_summary(
                 None,
                 value.root_semantic_miss_sentinel,
             ))
-        }
-        SemanticNodeData::ConstructorType { signature } => {
-            // The rewrap reads the SIGNATURE child: a `Function` signature
-            // rewraps to a `ConstructorType` (root Other); any other signature
-            // shape passes through unchanged (its own root class). Mirror
-            // `fold_node`'s `?` on the signature.
-            let signature = project_root_summary(dispatch, *signature, active)?;
-            if signature.tag == FactShapeTag::Function {
-                RootOnlySummary::from_summary(summary::constructor(true))
-            } else {
-                signature
-            }
         }
         SemanticNodeData::Object(surface) => {
             if surface.members.is_empty()

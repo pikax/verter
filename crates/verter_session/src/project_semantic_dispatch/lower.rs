@@ -699,7 +699,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             call_signatures.push(fn_id);
                         }
                         ObjectMember::ConstructSignature(func) => {
-                            let function_expr = TypeExpr::Function(Arc::new(func.clone()));
+                            let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
                             let fn_id = self.shallow_lower_type_expr_with_context(
                                 &function_expr,
                                 env,
@@ -1616,22 +1616,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 result
             }
             // Function-type lowering. Produces a
-            // canonical `SemanticNodeData::Function` carrier with
+            // canonical `SemanticNodeData::Signature` carrier with
             // lowered parameters and return type. Type parameters
             // lower to `TypeParamDecl` — constraints/defaults lower
             // recursively. `RecursiveRef`, `Infer`, `Rest`, and
             // `Unknown` remain scratch-only per §7.14.
             //
-            // `ConstructorType` (a bare `new (...) => R`) lowers through the
-            // SAME `SemanticNodeData::Function` path: it carries an identical
-            // `FunctionExpr` payload, and the constructor-vs-function
-            // distinction is consumed BEFORE this query-time dispatch (by the
-            // Vue runtime-constructor reducer and the wire-graph builder). At
-            // query time a bare constructor type is treated function-like, so
-            // it shares the canonical Function carrier and raises back as
-            // `TypeExpr::Function`. Without this explicit arm the wildcard
-            // `_ => opaque(QueryError::Miss)` below would regress constructor-
-            // type props to `Unknown("semanticMiss")`.
+            // `ConstructorType` (a bare `new (...) => R`) lowers through
+            // the SAME `SemanticNodeData::Signature` path with
+            // `kind: Construct` — the call/construct distinction is
+            // SEMANTIC and must survive lowering (`Construct` raises back
+            // to `TypeExpr::ConstructorType`). Without this explicit arm
+            // the wildcard `_ => opaque(QueryError::Miss)` below would
+            // regress constructor-type props to `Unknown("semanticMiss")`.
             TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
                 use crate::semantic_query::{FunctionParam, TypeParamDecl};
                 // Function generic shadowing + binder binding: a function
@@ -1769,8 +1766,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }),
                     })
                     .collect();
+                let kind = match expr {
+                    TypeExpr::ConstructorType(_) => crate::semantic_query::SignatureKind::Construct,
+                    _ => crate::semantic_query::SignatureKind::Call,
+                };
                 graph.intern_node_with_scope(
-                    SemanticNodeData::Function {
+                    SemanticNodeData::Signature {
+                        kind,
                         params: Arc::from(params.into_boxed_slice()),
                         return_type,
                         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
@@ -1900,9 +1902,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         match data.as_ref() {
             SemanticNodeData::Infer { name } => {
-                env.insert(name.as_ref().to_string(), node);
+                // Bind the name to an `InferRef` REFERENCE node, NOT the
+                // `Infer` declaration node itself. True-branch
+                // `Ref { name }` occurrences then lower as the reference
+                // — the substitution name-bridge rewrites `InferRef`
+                // occurrences exactly like `Infer` — while a literal
+                // `infer name` DECLARATION stays the only producer of an
+                // `Infer` node. The distinction is load-bearing: the
+                // Conditional substitution arm's shadow stop keys on a
+                // literal `Infer` DECLARATION in a nested conditional's
+                // own extends pattern; binding references to the
+                // declaration node would erase reference-vs-declaration
+                // and either capture a genuine rebind or drop a
+                // legitimate outer substitution.
+                let reference = self.graph().intern_node(SemanticNodeData::InferRef {
+                    name: Arc::clone(name),
+                });
+                env.insert(name.as_ref().to_string(), reference);
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..

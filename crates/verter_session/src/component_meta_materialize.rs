@@ -1045,7 +1045,7 @@ pub(crate) fn materialize_component_meta_structure(
         if let Some(data) = graph.node_data(key.base) {
             if matches!(
                 data.as_ref(),
-                crate::semantic_query::SemanticNodeData::Function { .. }
+                crate::semantic_query::SemanticNodeData::Signature { .. }
             ) {
                 crate::host_manage::emit_policy_skip(
                     key.base,

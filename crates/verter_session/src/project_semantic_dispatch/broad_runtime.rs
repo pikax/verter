@@ -149,9 +149,7 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
                     kinds.push(BroadRuntimeKind::Array)
                 }
-                SemanticNodeData::Function { .. } | SemanticNodeData::ConstructorType { .. } => {
-                    kinds.push(BroadRuntimeKind::Function)
-                }
+                SemanticNodeData::Signature { .. } => kinds.push(BroadRuntimeKind::Function),
                 SemanticNodeData::Object(surface) => {
                     let callable = !surface.call_signatures.is_empty()
                         || !surface.construct_signatures.is_empty();
@@ -262,6 +260,7 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::RawFallback { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => push_unknown(&mut kinds),
                 SemanticNodeData::Opaque(error) => {

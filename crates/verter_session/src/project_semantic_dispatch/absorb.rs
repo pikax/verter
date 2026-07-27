@@ -506,7 +506,7 @@ impl ProjectSemanticDispatch<'_> {
     /// [`Mapped`](SemanticNodeData::Mapped) source + mapper node ids, a
     /// [`TypeParam`](SemanticNodeData::TypeParam) constraint/default, a
     /// [`MergedDecl`](SemanticNodeData::MergedDecl)'s contributors, and a
-    /// [`Function`](SemanticNodeData::Function)'s param / return / type-param
+    /// [`Function`](SemanticNodeData::Signature)'s param / return / type-param
     /// node ids, and the three unresolved carriers that apply type arguments
     /// ([`BareRef`](SemanticNodeData::BareRef) `Foo<infer U>`,
     /// [`TypeOf`](SemanticNodeData::TypeOf) `typeof make<infer U>`,
@@ -543,7 +543,9 @@ impl ProjectSemanticDispatch<'_> {
             };
             match &*data {
                 // The target: an `infer X` placeholder anywhere in the subtree.
-                SemanticNodeData::Infer { .. } => return true,
+                SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
+                    return true
+                }
 
                 // ── Composite carriers: recurse into EVERY child node id. ──
                 SemanticNodeData::Alias(inner) => stack.push(*inner),
@@ -604,7 +606,7 @@ impl ProjectSemanticDispatch<'_> {
                     stack.push(*true_branch_ref);
                     stack.push(*false_branch_ref);
                 }
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
                     params,
                     return_type,
                     type_parameters,
@@ -632,7 +634,6 @@ impl ProjectSemanticDispatch<'_> {
                 | SemanticNodeData::BareRef(_) => {
                     stack.extend(data.carrier_type_args().iter().copied());
                 }
-                SemanticNodeData::ConstructorType { signature } => stack.push(*signature),
 
                 // ── Leaf carriers: no child node id can hold a nested `infer`
                 //    (TS rejects `infer` outside conditional `extends`, and

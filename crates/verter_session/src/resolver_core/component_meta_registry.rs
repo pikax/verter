@@ -1679,7 +1679,7 @@ fn collect_registry_refs_node_inner(
                 }
             }
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
@@ -1704,19 +1704,6 @@ fn collect_registry_refs_node_inner(
                 output,
                 producer_scope,
                 RegistryMemberRefPolicy::PublicationBoundary,
-                visited,
-            );
-        }
-        SemanticNodeData::ConstructorType { signature } => {
-            collect_registry_refs_node_inner(
-                ctx,
-                *signature,
-                published_names,
-                queued_names,
-                output,
-                producer_scope,
-                member_ref_policy,
-                cursor,
                 visited,
             );
         }
@@ -1955,7 +1942,7 @@ fn collect_registry_member_surface_refs_node(
                 visited,
             );
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
@@ -1976,16 +1963,6 @@ fn collect_registry_member_surface_refs_node(
                 queued_names,
                 output,
                 RegistryMemberRefPolicy::PublicationBoundary,
-                visited,
-            );
-        }
-        SemanticNodeData::ConstructorType { signature } => {
-            recurse(
-                ctx,
-                *signature,
-                queued_names,
-                output,
-                member_ref_policy,
                 visited,
             );
         }
@@ -2082,7 +2059,7 @@ pub(crate) fn collect_node_ref_names(
                     worklist.push(signature.value_type);
                 }
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -2090,7 +2067,6 @@ pub(crate) fn collect_node_ref_names(
                 worklist.extend(params.iter().map(|param| param.ty));
                 worklist.push(*return_type);
             }
-            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
             SemanticNodeData::IndexedAccess { object, index } => {
                 worklist.push(*object);
                 if let IndexKey::TypeNode(index_node) = index {

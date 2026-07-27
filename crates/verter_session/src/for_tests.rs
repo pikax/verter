@@ -295,7 +295,7 @@ pub fn relation_force_overflow_observations_for_tests(
 
 /// Host-scoped RAII guard that arms and clears the per-host relation-memo
 /// fact-injection knob
-/// [`crate::VerterHost::relation_force_overflow_observations`].
+/// the host's `relation_knobs.force_overflow_observations` knob.
 ///
 /// When the knob is set to `N > 0`, the relation engine's cold-compute path
 /// observes `N` synthetic `FileWholeHash` facts before finalising the
@@ -310,7 +310,8 @@ pub struct RelationForceOverflowGuard<'h> {
 impl<'h> RelationForceOverflowGuard<'h> {
     /// Set `host`'s forced observation count to `n` and return the guard.
     fn arm(host: &'h crate::VerterHost, n: usize) -> Self {
-        host.relation_force_overflow_observations
+        host.relation_knobs
+            .force_overflow_observations
             .store(n, std::sync::atomic::Ordering::Relaxed);
         Self { host }
     }
@@ -319,7 +320,8 @@ impl<'h> RelationForceOverflowGuard<'h> {
 impl Drop for RelationForceOverflowGuard<'_> {
     fn drop(&mut self) {
         self.host
-            .relation_force_overflow_observations
+            .relation_knobs
+            .force_overflow_observations
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }

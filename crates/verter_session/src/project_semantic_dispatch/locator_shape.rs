@@ -547,15 +547,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
 
-            // -- Function / constructor signatures --
-            TypeExpr::Function(func) => self.lower_locator_shape_function(func, ctx),
-            TypeExpr::ConstructorType(func) => {
-                let signature = self.lower_locator_shape_function(func, ctx);
-                graph.intern_node_with_scope(
-                    SemanticNodeData::ConstructorType { signature },
-                    scope.clone(),
-                )
-            }
+            // -- Call / construct signatures — one `Signature` carrier
+            //    whose `kind` preserves the spelling. --
+            TypeExpr::Function(func) => self.lower_locator_shape_function(
+                func,
+                ctx,
+                crate::semantic_query::SignatureKind::Call,
+            ),
+            TypeExpr::ConstructorType(func) => self.lower_locator_shape_function(
+                func,
+                ctx,
+                crate::semantic_query::SignatureKind::Construct,
+            ),
 
             // -- Declared type parameters stay SHELLS --
             TypeExpr::TypeParameter(param) => {
@@ -730,7 +733,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 .push(self.lower_locator_shape_node(&function_expr, ctx));
                         }
                         ObjectMember::ConstructSignature(func) => {
-                            let function_expr = TypeExpr::Function(Arc::new(func.clone()));
+                            let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
                             construct_signatures
                                 .push(self.lower_locator_shape_node(&function_expr, ctx));
                         }
@@ -784,6 +787,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         func: &FunctionExpr,
         ctx: &ShapeLowerCtx<'_>,
+        kind: crate::semantic_query::SignatureKind,
     ) -> SemanticNodeId {
         let graph = self.graph();
         let scope = ctx.scope;
@@ -846,7 +850,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         };
         graph.intern_node_with_scope(
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params: Arc::from(params.into_boxed_slice()),
                 return_type,
                 type_parameters: Arc::from(type_parameters.into_boxed_slice()),

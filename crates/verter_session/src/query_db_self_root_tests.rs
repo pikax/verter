@@ -5222,16 +5222,16 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     );
 }
 
-/// `SemanticGraphStore::get_relation` rejects an entry whose
+/// `SemanticGraphStore::get_relation_payload` rejects an entry whose
 /// `validated_at_generation` no longer equals the live project
 /// generation — a `ProjectGeneration` reset bumps no file content, so
 /// the relation carrier's `FileWholeHash`-only fact rail cannot
 /// detect a project-shape change. Mirror of the `ComponentMetaResultDb`
 /// test for the relation memo carrier.
 #[test]
-fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
+fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation() {
     use crate::semantic_query::{
-        PrimitiveKind, RelateMemoKey, RelationContext, RelationResult, SemanticNodeData,
+        PrimitiveKind, RelateMemoKey, RelationContext, RelationOutcome, SemanticNodeData,
         SemanticNodeId,
     };
     use crate::semantic_query_memo::SemanticGraphStore;
@@ -5248,18 +5248,18 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
     // Plant a relation judgement with a valid (empty + empty
     // self-roots) carrier tagged at the CURRENT project generation.
     let gen0 = host.project_type_store().current_project_generation();
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         key.clone(),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        RelationResult::NotAssignable,
+        store.relation_payload_for_tests(RelationOutcome::NotAssignable),
         gen0,
     );
 
     // Same generation — the carrier validates vacuously and the
-    // generation matches, so `get_relation` HITs.
+    // generation matches, so `get_relation_payload` HITs.
     assert!(
-        store.get_relation(ctx, &key).is_some(),
+        store.get_relation_payload(ctx, &key).is_some(),
         "a relation memo entry with a valid carrier and a matching \
          project generation must warm-hit",
     );
@@ -5276,18 +5276,18 @@ fn relation_memo_get_relation_rejects_entry_from_superseded_generation() {
          the generation stamp alone",
     );
 
-    // DISCRIMINATOR: `get_relation` must now MISS — the entry's
+    // DISCRIMINATOR: `get_relation_payload` must now MISS — the entry's
     // `validated_at_generation` no longer equals the live generation.
-    // Without the generation gate `get_relation`'s carrier check
+    // Without the generation gate `get_relation_payload`'s carrier check
     // alone still passes (no file content changed) and the stale
     // relation judgement is served.
     assert!(
-        store.get_relation(ctx, &key).is_none(),
-        "STALE-GENERATION READ: `SemanticGraphStore::get_relation` \
+        store.get_relation_payload(ctx, &key).is_none(),
+        "STALE-GENERATION READ: `SemanticGraphStore::get_relation_payload` \
          served a relation memo entry whose `validated_at_generation` \
          is superseded — a `ProjectGeneration` reset bumps no file \
          content, so the carrier's `FileWholeHash`-only rail cannot \
-         detect it. `get_relation` must reject an entry whose \
+         detect it. `get_relation_payload` must reject an entry whose \
          generation stamp no longer matches.",
     );
 }

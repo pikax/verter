@@ -3393,21 +3393,14 @@ pub enum SemanticQueryValue {
     /// trailing implementation signatures). The last element is the last
     /// visible overload.
     OverloadSet(Arc<[SignatureRef]>),
-    /// The tri-state outcome of a relation query. No live producer; the
-    /// live relation path is the `Relate` family of the family memo (the
-    /// rehomed relation memo), which stores the compute-side
-    /// [`RelationVerdict`](Self::RelationVerdict) encoding instead.
+    /// The public outcome of a relation query — the LIVE value domain of
+    /// [`SemanticQueryKey::Relate`]. `execute(Relate)` produces and admits
+    /// decided binary judgements (`Assignable` / `NotAssignable`); a
+    /// `BudgetExceeded` outcome is expressible and rendered but
+    /// `ReturnOnly` at the admission gate (never warm). There is NO public
+    /// `Unknown`: an undecided relation has no value-domain form and
+    /// surfaces as `Error(Miss)` from the cold compute.
     Relation(RelationPayload),
-    /// ENGINE-INTERNAL compute-side relation verdict — the value encoding
-    /// the `Relate` family memo stores (the compute/public split).
-    /// NOT the public [`Relation`](Self::Relation) domain: it carries the
-    /// compute tri-state [`RelationComputeResult`], including the
-    /// no-public-form `Undecided` arm, so the current `Unknown` admission
-    /// is preserved honestly rather than stuffed into a fake
-    /// [`RelationPayload`]. Never produced by `execute` (the `Relate`
-    /// execute arm is `Miss`), never narrowed to a type node, never on the
-    /// wire. Future admission work deletes the `Undecided` admission.
-    RelationVerdict(RelationComputeResult),
     /// Ordered, terminal broad runtime classification used by Vue macro
     /// runtime lowering. The classifier is a semantic query, not a consumer-
     /// local graph walk.
@@ -3428,7 +3421,6 @@ pub enum SemanticQueryValueTag {
     DeclarationAnalysis,
     OverloadSet,
     Relation,
-    RelationVerdict,
     BroadRuntime,
     DiagnosticAnalysis,
 }
@@ -3443,7 +3435,6 @@ impl SemanticQueryValue {
             Self::DeclarationAnalysis(_) => SemanticQueryValueTag::DeclarationAnalysis,
             Self::OverloadSet(_) => SemanticQueryValueTag::OverloadSet,
             Self::Relation(_) => SemanticQueryValueTag::Relation,
-            Self::RelationVerdict(_) => SemanticQueryValueTag::RelationVerdict,
             Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
@@ -3513,7 +3504,7 @@ impl BroadRuntimeClassification {
 }
 
 /// A single call/construct signature, identified by its graph node
-/// (a `SemanticNodeData::Function`). Carried by the overload-set domain.
+/// (a `SemanticNodeData::Signature`). Carried by the overload-set domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureRef {
     pub node: SemanticNodeId,
@@ -3558,13 +3549,13 @@ pub struct DeclarationAnalysisValue {
 /// `SemanticQueryValue::Relation` form and routes through `ReturnOnly` in the
 /// cold compute.
 ///
-/// SHAPE only: no live `execute` producer fills it yet —
-/// `ProjectSemanticDispatch::execute` returns `Miss` for `Relate`, and the
-/// production authority `relate_nodes` stores the compute-side
-/// [`RelationComputeResult`] verdict in the family memo's `Relate` family
-/// (the rehomed relation memo). The relation-inference
-/// reducer (not yet implemented) populates this payload and its proof table
-/// once it lands.
+/// LIVE: the relation authority (`ProjectSemanticDispatch::execute_relate`
+/// → `execute(SemanticQueryKey::Relate)` → `build_relate`) populates this
+/// payload and interns its proof into the store's payload-side
+/// [`RelationProofTable`]-backing interner. Only a binary
+/// `Assignable`/`NotAssignable` outcome is warm-admitted; a
+/// `BudgetExceeded` payload is returned to the caller with admission
+/// suppressed (ReturnOnly-but-public).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationPayload {
     /// The public relation outcome — `Assignable`, `NotAssignable`, or
@@ -3682,10 +3673,9 @@ pub struct RelationProofId(pub u32);
 pub struct RelateKeyId(pub u32);
 
 /// One entry of a payload-side [`RelationProofTable`], addressed by an opaque
-/// [`RelationProofId`]. FOUR shapes (design "Decision 4"). SHAPE only: the
-/// proof-search substrate is the relation-inference reducer (not yet
-/// implemented).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`RelationProofId`]. FOUR shapes (design "Decision 4"). Populated LIVE by
+/// the relation authority at admission time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelationProof {
     /// Positive structural derivation: which sub-relations held, member by
     /// member and across variance arms.
@@ -3718,9 +3708,8 @@ pub struct RelationProofTable {
 }
 
 /// Positive-derivation witness: the structural sub-relations that held to
-/// discharge a relation, in structural order. SHAPE only: the
-/// relation-inference reducer (not yet implemented) fills it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// discharge a relation, in structural order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DerivationTree {
     pub sub_derivations: Arc<[SubRelationRef]>,
 }
@@ -4726,10 +4715,9 @@ impl RelateMemoKey {
     /// [`RelationKind::Assignable`], default [`RelationPolicy`], regular
     /// (widened) [`FreshnessKey`], NO inference context, under `context`.
     ///
-    /// This is the identity `relate_nodes` keys the memo under today — the
-    /// relation engine computes assignability; the kind / policy / freshness /
-    /// inference axes become live discriminators with the relation-inference
-    /// reducer (not yet implemented).
+    /// This is the identity the relation authority's ergonomic
+    /// pair-constructor (`execute_relate_pair`) keys the memo under for a
+    /// plain assignability judgement.
     #[must_use]
     pub fn assignable(
         source: SemanticNodeId,
@@ -4744,6 +4732,51 @@ impl RelateMemoKey {
             source_freshness: FreshnessKey::default(),
             inference_context: None,
             context,
+        }
+    }
+
+    /// Project the key onto its canonical [`SemanticQueryKey::Relate`]
+    /// form (the family-dispatch identity). Field-for-field: the two
+    /// surfaces mirror each other exactly.
+    #[must_use]
+    pub fn to_query_key(&self) -> SemanticQueryKey {
+        SemanticQueryKey::Relate {
+            source: self.source,
+            target: self.target,
+            relation: self.relation,
+            policy: self.policy,
+            source_freshness: self.source_freshness,
+            inference_context: self.inference_context.clone(),
+            context: self.context,
+        }
+    }
+
+    /// The inverse of [`Self::to_query_key`]: lift a
+    /// [`SemanticQueryKey::Relate`] into the memo-key surface. Panics on
+    /// any other variant — callers match first.
+    #[must_use]
+    pub fn from_query_key(key: &SemanticQueryKey) -> Self {
+        match key {
+            SemanticQueryKey::Relate {
+                source,
+                target,
+                relation,
+                policy,
+                source_freshness,
+                inference_context,
+                context,
+            } => Self {
+                source: *source,
+                target: *target,
+                relation: *relation,
+                policy: *policy,
+                source_freshness: *source_freshness,
+                inference_context: inference_context.clone(),
+                context: *context,
+            },
+            other => panic!(
+                "RelateMemoKey::from_query_key expects SemanticQueryKey::Relate, got {other:?}"
+            ),
         }
     }
 }
@@ -4887,22 +4920,18 @@ pub enum SemanticQueryKey {
     /// `policy`, the `source_freshness` discriminator, an optional
     /// `inference_context` (the inference session the relation runs within), and
     /// the `R T L J` env `context`. Two judgements over the same nodes that
-    /// differ in any of these are DISTINCT and occupy distinct memo slots —
-    /// `relate_nodes` keys the relation memo (the `Relate` family inside
-    /// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore))
-    /// by the full [`RelateMemoKey`], dep-signature fenced.
+    /// differ in any of these are DISTINCT and occupy distinct memo slots.
     ///
-    /// **Forward-declared value domain.** The spec row records value domain
-    /// [`SemanticQueryValueTag::Relation`]
-    /// (`SemanticQueryValue::Relation(RelationPayload)`). The `execute` arm is
-    /// non-producing (returns `Miss`): the current production authority is
-    /// `relate_nodes`, which emits the engine's [`RelationResult`] into the
-    /// relation memo. The per-kind / per-policy / inference-aware relation
-    /// algorithm — and the reducer that fills the `RelationPayload` outcome /
-    /// proof / budget carrier — is the relation-inference reducer (not yet
-    /// implemented). Until then the engine
-    /// computes [`RelationKind::Assignable`] and the kind / policy / freshness /
-    /// inference axes are identity discriminators with a fixed default value.
+    /// **LIVE producer** — the SOLE relation authority. The `execute` arm
+    /// (`build_relate`) runs the relation reducer on the cold-compute frame
+    /// of the one resolver, producing
+    /// [`SemanticQueryValue::Relation(RelationPayload)`] for determinate
+    /// judgements: decided binary outcomes (`Assignable` / `NotAssignable`)
+    /// are admitted into the `Relate` family slot (singleflight);
+    /// `BudgetExceeded` is returned to the caller but never admitted; an
+    /// undecided judgement (deferred / opaque / undischargeable SCC) has no
+    /// value-domain form and surfaces `Error(Miss)`, never admitted. Every
+    /// recursive sub-relation re-enters this same full-key authority.
     ///
     /// All identity fields are content-free (R6): node ids, content-free kind /
     /// policy / freshness enums, content-free inference targets, and env hashes
@@ -5538,19 +5567,16 @@ pub struct InferBinding {
     pub bound: SemanticNodeId,
 }
 
-/// Tri-state result of a `Relate` judgement.
-///
-/// All three variants memoise with dep-signature fencing — `Unknown` is
-/// included so repeated cyclic re-entry short-circuits without recomputing
-/// the undecidable judgement.
-///
-/// This is the relation ENGINE's transient return type (`relate_nodes` /
-/// `decide_relation`). The compute/public split (design "Decision 4") keeps
-/// it DISTINCT from the memo-stored compute verdict
-/// [`RelationComputeResult`] and from the public value-domain
-/// [`RelationPayload`] / [`RelationOutcome`] (no public `Unknown`); the
-/// conversion into the stored compute verdict happens at the relation-memo
-/// publish path (`SemanticGraphStore::insert_relation_owned`).
+/// Tri-state lattice of the relation REDUCER — the engine-internal
+/// combination type the structural worklist (`decide_relation` /
+/// `expand_pair` / the object-function predicates) folds sub-judgements
+/// with. NEVER admitted, NEVER stored: the relation authority maps it onto
+/// the transient [`RelationComputeResult`] at the cold-compute boundary,
+/// and only a decided binary verdict reaches a public
+/// [`RelationPayload`]. `Unknown` covers genuinely undecidable judgements
+/// — deferred shells (`KeyOf`, `IndexedAccess`, `Mapped`, `Conditional`,
+/// `TypeOf`, `TemplateLiteral`), undischargeable SCC edges, and opaque
+/// carriers — and is `ReturnOnly`-only (never warm-admitted).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelationResult {
     Assignable { bindings: Arc<[InferBinding]> },
@@ -5558,99 +5584,49 @@ pub enum RelationResult {
     Unknown,
 }
 
-/// Compute-side relation verdict — the type the `Relate` family memo
-/// STORES (the compute/public split).
+/// Compute-side relation result — the TRANSIENT return of the relation
+/// cold compute (design "Decision 4"). NEVER cached as-is: the dispatch
+/// boundary maps it onto the public [`SemanticQueryValue::Relation`] and
+/// the admission table. Only the [`RelationComputeResult::Decided`] arm
+/// carries a value-domain [`RelationPayload`]; the
+/// [`RelationComputeResult::Undecided`] arm carries exactly the states
+/// that have NO public value-domain form (a deferred shell / opaque
+/// carrier, or a verdict decided under a coinductive assumption that has
+/// not yet discharged) and routes through `ReturnOnly` by construction.
 ///
-/// DISTINCT from the public value-domain [`RelationPayload`] /
-/// [`RelationOutcome`] (two-state plus `BudgetExceeded`, NO `Unknown`): the
-/// public payload is what `SemanticQueryValue::Relation` surfaces once the
-/// relation-inference reducer (not yet implemented) produces it, and it has
-/// no form for an undecided judgement. The compute side keeps the tri-state
-/// honestly: a decided verdict rides [`RelationComputeResult::Decided`]
-/// (the publicly-representable subset — it maps 1:1 onto
-/// [`RelationOutcome::Assignable`] / [`RelationOutcome::NotAssignable`]),
-/// while an undecidable judgement rides
-/// [`RelationComputeResult::Undecided`] and has NO public value-domain
-/// form. The decided arm does NOT embed a [`RelationPayload`] — no proof
-/// table is populated yet, so fabricating a `relation_proof` id would be a
-/// lie; the reducer owns that conversion when it lands.
-///
-/// The conversion layer: the engine's transient [`RelationResult`] converts
-/// into this type at the publish path
-/// (`SemanticGraphStore::insert_relation_owned`), and back on the warm read
-/// (`SemanticGraphStore::get_relation`) — both conversions are total and
-/// lossless, so the current admission semantics are preserved exactly
-/// (a clean `Unknown` judgement is still admitted today; future admission
-/// work deletes that admission in favour of `ReturnOnly` — not the current
-/// contract).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// The warm-admission gate — not this type — decides warmth: only a
+/// `Decided` payload with a binary `Assignable`/`NotAssignable` outcome
+/// admits; a `BudgetExceeded` outcome is `ReturnOnly`-but-public (never
+/// warm). `Unknown` has no public form at all and is never admitted
+/// anywhere (memo / fact / reverse index).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationComputeResult {
-    /// A decided judgement — the publicly-representable subset.
-    Decided(DecidedRelationVerdict),
+    /// A decided judgement — the publicly-representable payload
+    /// (`Assignable` | `NotAssignable` | `BudgetExceeded`).
+    Decided(RelationPayload),
     /// An undecidable judgement — no public value-domain form.
     Undecided(UndecidedReason),
 }
 
-/// The decided (publicly-representable) relation verdict. Maps 1:1 onto the
-/// public [`RelationOutcome::Assignable`] / [`RelationOutcome::NotAssignable`]
-/// arms; `BudgetExceeded` is the reducer's outcome, never produced by
-/// the current engine.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DecidedRelationVerdict {
-    /// The source relates to the target (with the inference bindings a
-    /// binding-producing judgement deposited).
-    Assignable { bindings: Arc<[InferBinding]> },
-    /// The source provably does NOT relate to the target.
-    NotAssignable,
-}
-
 /// Why a relation judgement could not be decided — the compute-side states
-/// with no `SemanticQueryValue::Relation` surfacing.
+/// with no `SemanticQueryValue::Relation` surfacing (design "Decision 4").
 ///
-/// Today's engine produces a bare [`RelationResult::Unknown`] from every
-/// undecided site — deferred shells (`KeyOf` / `IndexedAccess` / `Mapped` /
-/// `Conditional` / `TypeOf` / `TemplateLiteral`), opaque carriers, cyclic
-/// re-entry via the relation guard, unresolvable identity carriers, and
-/// work-budget exhaustion — so the honest taxonomy is the single
-/// [`UndecidedReason::Unknown`] arm covering exactly those sites. The
-/// fine-grained split (deferred-vs-cycle-vs-budget) and the
-/// `OpenAssumption` arm are the future activation/admission work, when the
-/// engine threads reasons through `decide_relation`.
+/// Both arms are `ReturnOnly`-ONLY: never admitted, never published, never
+/// a fact signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UndecidedReason {
-    /// The judgement could not be decided (any of the sites above). No
-    /// public value-domain form; admitted to the relation memo today
-    /// exactly as `RelationResult::Unknown` was (future admission work
-    /// deletes that admission).
+    /// The judgement could not be decided — a deferred shell (`KeyOf` /
+    /// `IndexedAccess` / `Mapped` / `Conditional` / `TypeOf` /
+    /// `TemplateLiteral`), an opaque carrier, or an unresolvable identity
+    /// carrier. No public value-domain form; NEVER warm-admitted (the
+    /// deleted memoized-`Unknown` arm must not re-enter).
     Unknown,
-}
-
-impl From<RelationResult> for RelationComputeResult {
-    fn from(result: RelationResult) -> Self {
-        match result {
-            RelationResult::Assignable { bindings } => {
-                RelationComputeResult::Decided(DecidedRelationVerdict::Assignable { bindings })
-            }
-            RelationResult::NotAssignable => {
-                RelationComputeResult::Decided(DecidedRelationVerdict::NotAssignable)
-            }
-            RelationResult::Unknown => RelationComputeResult::Undecided(UndecidedReason::Unknown),
-        }
-    }
-}
-
-impl From<RelationComputeResult> for RelationResult {
-    fn from(verdict: RelationComputeResult) -> Self {
-        match verdict {
-            RelationComputeResult::Decided(DecidedRelationVerdict::Assignable { bindings }) => {
-                RelationResult::Assignable { bindings }
-            }
-            RelationComputeResult::Decided(DecidedRelationVerdict::NotAssignable) => {
-                RelationResult::NotAssignable
-            }
-            RelationComputeResult::Undecided(UndecidedReason::Unknown) => RelationResult::Unknown,
-        }
-    }
+    /// The judgement was decided under an open coinductive assumption
+    /// whose SCC has not yet discharged — the scoped-assumption sentinel
+    /// state. NEVER warm-admitted, NEVER the published proof: admission
+    /// happens only at SCC-close (pure non-binding SCC / closure-clean
+    /// negative) or at the relevant session-close (deferred members).
+    OpenAssumption(RelateKeyId),
 }
 
 /// One element of a [`SemanticNodeData::Tuple`] shell.
@@ -5810,6 +5786,20 @@ pub enum SemanticNodeData {
     Infer {
         name: Arc<str>,
     },
+    /// A true-branch REFERENCE to an in-scope `infer` binder — the node
+    /// a `Ref { name }` occurrence resolves to through the conditional's
+    /// true-branch env. DISTINCT from [`Self::Infer`] (the declaration
+    /// at the extends pattern) so reference-vs-declaration survives
+    /// interning: the substitution name-bridge rewrites `InferRef`
+    /// occurrences exactly like `Infer` occurrences, but a nested
+    /// conditional whose extends holds only `InferRef`s does NOT
+    /// re-declare the name (no shadow), and an `InferRef` is never an
+    /// inference-pattern site (never a deposit target). Raises to the
+    /// same `TypeExpr::Infer { name }` as a declaration, so
+    /// TypeExpr-level consumers are unaffected.
+    InferRef {
+        name: Arc<str>,
+    },
     // Declaration identity is carried as the env-bearing, content-free
     // `ResolvedDeclSlotIdentity` slot in `SemanticQueryKey::Instantiate.base`
     // instead of being interned as a node in the arena.
@@ -5843,13 +5833,25 @@ pub enum SemanticNodeData {
         false_branch_ref: SemanticNodeId,
         distributive: bool,
     },
-    // §5.6 Function shape.
+    // §5.6 Signature shape — ONE variant for call AND construct signatures.
     ///
     /// Classes / interfaces lower to `SemanticNodeData::Object` with heritage
-    /// merged; only function signatures have distinct semantics (call
-    /// signatures, parameter variance, return covariance) that Object cannot
-    /// represent.
-    Function {
+    /// merged; only signatures have distinct semantics (call/construct
+    /// signature kinds, parameter variance, return covariance) that Object
+    /// cannot represent. The call/construct distinction is carried by
+    /// [`SignatureKind`] — a single variant so every consumer's `Signature`
+    /// handling covers both kinds by construction, and kind-sensitive sites
+    /// match `kind` EXHAUSTIVELY (the compiler carries the obligation).
+    ///
+    /// A bare `new (…) => R` is a root `Signature` with
+    /// `kind: SignatureKind::Construct`; `{ new(): R }` is an [`Object`]
+    /// whose `construct_signatures` reference `Signature(Construct)` nodes —
+    /// the two spellings stay distinguishable. `Call` raises to
+    /// [`TypeExpr::Function`](verter_type_expr::TypeExpr::Function),
+    /// `Construct` to
+    /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType).
+    Signature {
+        kind: SignatureKind,
         params: Arc<[FunctionParam]>,
         return_type: SemanticNodeId,
         type_parameters: Arc<[TypeParamDecl]>,
@@ -5966,21 +5968,6 @@ pub enum SemanticNodeData {
         value: verter_type_expr::UnknownValue,
     },
 
-    /// Constructor-type carrier — `new (…) => R` (TS `TSConstructorType`).
-    ///
-    /// Preserves the distinction
-    /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType)
-    /// draws between a bare constructor *type* and a type-literal carrying
-    /// a construct signature (which lowers to [`Object`](Self::Object)).
-    /// `signature` interns a [`Function`](Self::Function) node carrying the
-    /// same parameters / return / type-parameters / spans as the construct
-    /// signature; the reverse boundary rewraps the raised function as
-    /// `TypeExpr::ConstructorType`.
-    ConstructorType {
-        /// The constructor signature — a [`Function`](Self::Function) node.
-        signature: SemanticNodeId,
-    },
-
     /// Synthetic slot-binding / `defineSlots` binding carrier.
     ///
     /// The typed-IR mirror of
@@ -6027,11 +6014,13 @@ impl SemanticNodeData {
             Self::TypeOf(_) => 13,
             Self::TypeParam { .. } => 14,
             Self::Infer { .. } => 15,
+            Self::InferRef { .. } => 28,
             Self::MergedDecl { .. } => 16,
             Self::Conditional { .. } => 17,
-            // Index 18 is intentionally unused so the surviving variants
-            // keep stable bucket indices independent of declaration order.
-            Self::Function { .. } => 19,
+            // Indices 18, 19, and 26 are intentionally unused so the
+            // surviving variants keep stable bucket indices independent of
+            // declaration order.
+            Self::Signature { .. } => 29,
             Self::DeclRef { .. } => 20,
             Self::InstantiationRef { .. } => 21,
             Self::BareRef(_) => 22,
@@ -6039,7 +6028,6 @@ impl SemanticNodeData {
             Self::RawFallback { .. } => 24,
             // Index 25 is intentionally unused so the surviving variants
             // keep stable bucket indices independent of declaration order.
-            Self::ConstructorType { .. } => 26,
             Self::SyntheticBinding { .. } => 27,
         }
     }
@@ -6146,6 +6134,7 @@ impl PartialEq for SemanticNodeData {
                 },
             ) => ad == bd && ai == bi && ac == bc && adf == bdf,
             (Self::Infer { name: a }, Self::Infer { name: b }) => a == b,
+            (Self::InferRef { name: a }, Self::InferRef { name: b }) => a == b,
             (
                 Self::Conditional {
                     check: ack,
@@ -6163,14 +6152,16 @@ impl PartialEq for SemanticNodeData {
                 },
             ) => ack == bck && aex == bex && atr == btr && afr == bfr && ad == bd,
             (
-                Self::Function {
+                Self::Signature {
+                    kind: ak,
                     params: ap,
                     return_type: ar,
                     type_parameters: atp,
                     signature_span: asig,
                     return_type_span: aret,
                 },
-                Self::Function {
+                Self::Signature {
+                    kind: bk,
                     params: bp,
                     return_type: br,
                     type_parameters: btp,
@@ -6180,7 +6171,7 @@ impl PartialEq for SemanticNodeData {
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
                 // location does not alias another node's spans.
-            ) => ap == bp && ar == br && atp == btp && asig == bsig && aret == bret,
+            ) => ak == bk && ap == bp && ar == br && atp == btp && asig == bsig && aret == bret,
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
                 Self::InstantiationRef { base: ab, args: aa },
@@ -6190,9 +6181,6 @@ impl PartialEq for SemanticNodeData {
             (Self::BareRef(a), Self::BareRef(b)) => a == b,
             (Self::ImportType(a), Self::ImportType(b)) => a == b,
             (Self::RawFallback { value: a }, Self::RawFallback { value: b }) => a == b,
-            (Self::ConstructorType { signature: a }, Self::ConstructorType { signature: b }) => {
-                a == b
-            }
             (
                 Self::SyntheticBinding {
                     id: aid,
@@ -6284,6 +6272,9 @@ impl std::hash::Hash for SemanticNodeData {
             Self::Infer { name } => {
                 name.hash(state);
             }
+            Self::InferRef { name } => {
+                name.hash(state);
+            }
             Self::Conditional {
                 check,
                 extends,
@@ -6297,13 +6288,15 @@ impl std::hash::Hash for SemanticNodeData {
                 false_branch_ref.hash(state);
                 distributive.hash(state);
             }
-            Self::Function {
+            Self::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
                 signature_span,
                 return_type_span,
             } => {
+                kind.hash(state);
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);
@@ -6326,9 +6319,6 @@ impl std::hash::Hash for SemanticNodeData {
             Self::RawFallback { value } => {
                 value.hash(state);
             }
-            Self::ConstructorType { signature } => {
-                signature.hash(state);
-            }
             Self::SyntheticBinding { id, value_node } => {
                 id.hash(state);
                 value_node.hash(state);
@@ -6337,7 +6327,18 @@ impl std::hash::Hash for SemanticNodeData {
     }
 }
 
-/// Parameter of a [`SemanticNodeData::Function`].
+/// The kind of a [`SemanticNodeData::Signature`] — a CALL signature
+/// (`(…) => R`) or a CONSTRUCT signature (`new (…) => R`). Closed enum;
+/// kind-sensitive consumers match it EXHAUSTIVELY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignatureKind {
+    /// `(…) => R` — callable.
+    Call,
+    /// `new (…) => R` — constructable.
+    Construct,
+}
+
+/// Parameter of a [`SemanticNodeData::Signature`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: Option<Arc<str>>,
@@ -6372,7 +6373,7 @@ impl FunctionParam {
     }
 }
 
-/// Type-parameter declaration on a [`SemanticNodeData::Function`].
+/// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
     pub name: Arc<str>,
@@ -6965,12 +6966,6 @@ mod tests {
                 SemanticQueryValueTag::Relation,
             ),
             (
-                SemanticQueryValue::RelationVerdict(RelationComputeResult::Undecided(
-                    UndecidedReason::Unknown,
-                )),
-                SemanticQueryValueTag::RelationVerdict,
-            ),
-            (
                 SemanticQueryValue::BroadRuntime(BroadRuntimeClassification::new([
                     BroadRuntimeKind::Object,
                 ])),
@@ -6984,13 +6979,13 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: eight cases, eight unique tags. Sort before dedup so
+        // Distinctness: seven cases, seven unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
         tags.sort_by_key(|t| *t as u8);
         tags.dedup();
-        assert_eq!(tags.len(), 8, "every value domain must have a distinct tag");
+        assert_eq!(tags.len(), 7, "every value domain must have a distinct tag");
     }
 
     /// Taint shape: every `ResultTaint` / `BrokenInputClass` variant is

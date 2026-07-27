@@ -10,25 +10,37 @@ fn production_relation_admission_is_semantic_store_owned() {
     let store_source = include_str!("relation_memo.rs");
     let producer_source = include_str!("../project_semantic_dispatch/relation.rs");
 
+    // Post-activation ownership: the family singleflight publishes the
+    // relation ROOT's entry (its cold-build output IS the payload), and
+    // `SemanticGraphStore::publish_relation_member` is the ONLY raw
+    // relation write shape — the SCC batched-member publish the
+    // authority's drain rides. The store owns the write; the engine
+    // supplies only the computed payload + the SCC-union carrier.
     let owner_start = store_source
-        .find("\n    pub(crate) fn compute_relation_and_admit")
-        .expect("SemanticGraphStore must own relation tracing and admission");
-    let owner_end = store_source[owner_start..]
-        .find("\n    /// Publish a relation judgement")
-        .map(|offset| owner_start + offset)
-        .expect("the owner-controlled relation funnel must precede the test seed seam");
-    let owner_body = &store_source[owner_start..owner_end];
-    assert!(owner_body.contains("host.with_fact_tracer"));
-    assert!(owner_body.contains("self.insert_relation_owned("));
+        .find("\n    pub(crate) fn publish_relation_member")
+        .expect("SemanticGraphStore must own the relation member publish");
+    let owner_body = &store_source[owner_start..];
     assert!(
-        !producer_source.contains("graph.insert_relation("),
-        "the relation engine must supply computation and roots, never reach the raw write"
+        owner_body.contains("reverse_index::register_reverse_index("),
+        "the member publish must land the (entries, memo_budget, reverse-index) consistency cluster"
     );
     assert!(
-        store_source
-            .lines()
-            .any(|line| line.trim_start().starts_with("fn insert_relation_owned(")),
-        "the production relation write must be private"
+        owner_body.contains("SemanticQueryValue::Relation(payload)"),
+        "the member publish must store the PUBLIC Relation payload — never a compute-side verdict"
+    );
+    assert!(
+        !producer_source.contains("graph.insert_relation("),
+        "the relation engine must supply computation and roots, never reach a raw seed write"
+    );
+    assert!(
+        producer_source.contains("graph.publish_relation_member("),
+        "the authority's SCC drain must ride the store-owned member publish"
+    );
+    assert!(
+        store_source.lines().any(|line| line
+            .trim_start()
+            .starts_with("pub(crate) fn publish_relation_member(")),
+        "the production relation write must be crate-private"
     );
 }
 use crate::semantic_query::{
@@ -327,7 +339,8 @@ fn intern_identity_invariant_holds_across_threads() {
 fn intern_span_participates_in_identity() {
     let store = SemanticGraphStore::new();
     let ret = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-    let mk = |end: u32| SemanticNodeData::Function {
+    let mk = |end: u32| SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
         return_type: ret,
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
@@ -2185,7 +2198,7 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         crate::semantic_query::OriginMeta::None,
         dep_sig_for("/w/a.ts", 1),
     );
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         crate::semantic_query::RelateMemoKey::assignable(
             result,
             result,
@@ -2193,7 +2206,7 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
         ),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        crate::semantic_query::RelationResult::NotAssignable,
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         0,
     );
     // Sanity-check the pre-bump state is actually populated, else the
@@ -2238,9 +2251,10 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
 // memo's `Relate` family. These guards pin the family-rail behaviors the
 // retired dedicated `BudgetedRelationMemo` did NOT have (per-family
 // multi-candidate retention with invalid-first / LRU eviction, reverse-index
-// drains) AND the behaviors that must stay byte-equivalent across the rehome
-// (full-identity dedup, strict self-root warm reads, the `Unknown`
-// admission). Each guard names the discrimination it makes.
+// drains) AND the behaviors that must hold across the relation-engine
+// activation (full-identity dedup, strict self-root warm reads, decided-only
+// admission — `Unknown` is NEVER admitted anywhere). Each guard names the
+// discrimination it makes.
 // ---------------------------------------------------------------------------
 
 /// RELATION FAMILY DEDUP — a cold insert of a full relation identity is
@@ -2265,11 +2279,11 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     let gen0 = host.project_type_store().current_project_generation();
 
     // Cold insert → warm hit on the SAME full identity (no recompute).
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         key.clone(),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        crate::semantic_query::RelationResult::NotAssignable,
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
     );
     assert_eq!(
@@ -2279,19 +2293,19 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
     assert!(
         matches!(
-            store.get_relation(ctx, &key),
-            Some((_, crate::semantic_query::RelationResult::NotAssignable))
+            store.get_relation_payload(ctx, &key).map(|p| p.outcome),
+            Some(crate::semantic_query::RelationOutcome::NotAssignable)
         ),
         "the same full identity must warm-hit after the cold insert",
     );
 
     // Same key + same generation + same carrier facts ⇒ same
     // discriminant ⇒ in-place replace, never a second candidate.
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         key.clone(),
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        crate::semantic_query::RelationResult::NotAssignable,
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
     );
     assert_eq!(
@@ -2330,11 +2344,11 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
         target,
         crate::semantic_query::RelationContext::default(),
     );
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         touched_key,
         touched_carrier,
         Arc::from(vec![Arc::<str>::from(touched)]),
-        crate::semantic_query::RelationResult::NotAssignable,
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
     );
     // An unrelated relation entry (empty carrier — references no
@@ -2344,11 +2358,11 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
         source,
         crate::semantic_query::RelationContext::default(),
     );
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         untouched_key,
         crate::fact_signature_helpers::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        crate::semantic_query::RelationResult::NotAssignable,
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
     );
     assert_eq!(
@@ -2420,7 +2434,7 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
     // Distinct generations ⇒ distinct candidates in ONE family (the
     // multi-candidate substrate the retired memo lacked).
     let publish = |generation: u64, invalid: bool| {
-        store.insert_relation_with_view_for_tests(
+        store.insert_relation_payload_with_view_for_tests(
             &host,
             key.clone(),
             if invalid {
@@ -2433,7 +2447,7 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
             } else {
                 Arc::clone(&valid_roots)
             },
-            crate::semantic_query::RelationResult::NotAssignable,
+            store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
             generation,
         );
     };
@@ -2460,21 +2474,17 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
     assert_eq!(store.relation_memo_count(), 4);
 }
 
-/// UNKNOWN-ADMISSION BYTE-EQUIVALENCE across the rehome — both
-/// directions: a publish that WAS admitted under the dedicated memo (a
-/// clean `Unknown` judgement) stays admitted AND warm-served as
-/// `RelationResult::Unknown`; a publish that was REFUSED (a `ReturnOnly`
-/// row — here `PartialResult`) stays refused. The `Unknown` rides the
-/// compute-side `RelationComputeResult::Undecided` encoding honestly —
-/// never a fabricated public payload.
+/// DECIDED-ONLY ADMISSION (the relation-engine activation contract) —
+/// both directions: a DECIDED payload publish admits AND warm-serves its
+/// binary outcome; `Unknown` / `BudgetExceeded` NEVER enter the memo
+/// through any path (the retired memoized-`Unknown` arm is deleted —
+/// admission rows 3–4 of `docs/arch/u2-relation-infer-design.md`).
 ///
-/// DISCRIMINATES against an admission-semantics change smuggled in with
-/// the rehome: dropping the `Unknown` admission (the future admission
-/// work's `ReturnOnly` transition, not the current contract) fails the
-/// admit assertions; admitting a `ReturnOnly` row fails the refuse
-/// assertions.
+/// DISCRIMINATES against an admission-semantics regression: re-admitting
+/// `Unknown` fails the refuse assertions (a warm entry appears); a store
+/// that stopped admitting decided payloads fails the admit assertions.
 #[test]
-fn relation_unknown_admission_is_byte_equivalent_across_the_rehome() {
+fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let host = ctx_host();
     let ctx: &dyn crate::resolver_core::ResolverContext = &host;
     let store = SemanticGraphStore::new();
@@ -2482,73 +2492,70 @@ fn relation_unknown_admission_is_byte_equivalent_across_the_rehome() {
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let gen0 = host.project_type_store().current_project_generation();
 
-    // ADMIT direction — a clean `Unknown` publish (the same row the
-    // dedicated memo admitted at relation.rs's decide closure).
+    // ADMIT direction — a decided binary payload admits and warm-serves.
     let admit_key = crate::semantic_query::RelateMemoKey::assignable(
         source,
         target,
         crate::semantic_query::RelationContext::default(),
     );
-    let admitted = store.compute_relation_and_admit(
-        ctx,
+    store.insert_relation_payload_for_tests(
         admit_key.clone(),
-        || crate::semantic_query::RelationResult::Unknown,
-        |result| {
-            crate::semantic_query_memo::RelationPublishDecision::publish(
-                Vec::<ObservedGraphSelfRoot>::new(),
-                result.clone(),
-                gen0,
-            )
-        },
-    );
-    assert_eq!(
-        admitted,
-        crate::semantic_query::RelationResult::Unknown,
-        "the computed value returns regardless of admission",
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
+        gen0,
     );
     assert_eq!(
         store.relation_memo_count(),
         1,
-        "ADMIT: a clean Unknown judgement stays admitted across the rehome",
+        "ADMIT: a decided binary payload stays admitted",
     );
     assert!(
         matches!(
-            store.get_relation(ctx, &admit_key),
-            Some((_, crate::semantic_query::RelationResult::Unknown))
+            store
+                .get_relation_payload(ctx, &admit_key)
+                .map(|p| p.outcome),
+            Some(crate::semantic_query::RelationOutcome::NotAssignable)
         ),
-        "ADMIT: the admitted Unknown warm-serves as `RelationResult::Unknown` \
-         (the compute-side verdict round-trips losslessly)",
+        "ADMIT: the admitted payload warm-serves its decided outcome",
     );
 
-    // REFUSE direction — a `ReturnOnly(PartialResult)` row never enters
-    // the memo (a distinct key so the count is attributable).
+    // REFUSE direction — the store's production publish path
+    // (`publish_relation_member`) only ever carries decided binary
+    // payloads (debug-asserted); the authority maps `Unknown` /
+    // `BudgetExceeded` onto ReturnOnly BEFORE any write. Prove the
+    // contract at the store surface: a `BudgetExceeded` payload must be
+    // rejected by the publish path's own gate.
     let refuse_key = crate::semantic_query::RelateMemoKey::assignable(
         source,
         source,
         crate::semantic_query::RelationContext::default(),
     );
-    let refused = store.compute_relation_and_admit(
-        ctx,
-        refuse_key.clone(),
-        || crate::semantic_query::RelationResult::Unknown,
-        |_result| {
-            crate::semantic_query_memo::RelationPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::PartialResult,
-            )
-        },
-    );
-    assert_eq!(
-        refused,
-        crate::semantic_query::RelationResult::Unknown,
-        "a ReturnOnly row still returns the computed value to the caller",
+    let budget_payload =
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::BudgetExceeded(
+            crate::semantic_query::BudgetExceededKind::RelationBudget,
+        ));
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.publish_relation_member(
+            None,
+            refuse_key.clone(),
+            budget_payload,
+            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            Arc::from(Vec::<Arc<str>>::new()),
+            gen0,
+        );
+    }));
+    assert!(
+        refused.is_err(),
+        "REFUSE: a BudgetExceeded payload must be rejected by the publish gate (row 4)",
     );
     assert_eq!(
         store.relation_memo_count(),
         1,
-        "REFUSE: a ReturnOnly row must NOT enter the relation memo",
+        "REFUSE: no BudgetExceeded entry may enter the relation memo",
     );
     assert!(
-        store.get_relation(ctx, &refuse_key).is_none(),
+        store.get_relation_payload(ctx, &refuse_key).is_none(),
         "REFUSE: the refused key has no warm entry to serve",
     );
 }

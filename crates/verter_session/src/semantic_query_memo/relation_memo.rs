@@ -1,58 +1,39 @@
-//! Relation memo — the relation engine's read/write path over the family memo's
-//! `Relate` family. Extracted from `mod.rs` as a continuation
-//! `impl SemanticGraphStore` block (same module tree, sibling file),
-//! mirroring `store_test_support.rs`: the store's private admission
-//! internals are reached through the parent module (`use super::*`).
+//! Relation storage — the payload read/write path over the family memo's
+//! `Relate` family, plus the payload-side relation-proof interners
+//! (design `docs/arch/u2-relation-infer-design.md` Decision 4).
 //!
 //! Storage is the family memo's [`FamilyKey::Relate`] family in the
-//! [`ModeSlot::Single`] slot (the rehomed relation memo — the retired
-//! dedicated `BudgetedRelationMemo` folded into the family substrate).
-//! The stored value is the compute-side tri-state verdict
-//! ([`SemanticQueryValue::RelationVerdict`] wrapping
-//! [`crate::semantic_query::RelationComputeResult`] — the compute/public
-//! split); warm reads validate the self-version-rooted carrier strictly
-//! AND hard-miss on a `validated_at_generation` mismatch. Retention rides
-//! the family rails (per-family cap, invalid-first / LRU eviction, the
-//! family `memo_budget` global bound, reverse-index drains).
+//! [`ModeSlot::Single`] slot. The stored value is the PUBLIC
+//! [`SemanticQueryValue::Relation`] payload — decided binary
+//! `Assignable`/`NotAssignable` outcomes ONLY: `Unknown` has no
+//! value-domain form and is never admitted anywhere (memo / fact /
+//! reverse index), and a `BudgetExceeded` payload is public but
+//! ReturnOnly (never written here). Warm reads validate the
+//! self-version-rooted carrier strictly AND hard-miss on a
+//! `validated_at_generation` mismatch. Retention rides the family rails
+//! (per-family cap, invalid-first / LRU eviction, the family
+//! `memo_budget` global bound, reverse-index drains).
+//!
+//! The proofs a payload references by [`crate::semantic_query::RelationProofId`]
+//! / [`crate::semantic_query::RelateKeyId`] live in the two store-owned
+//! append-only interners here — the payload-side `relation_proofs` table
+//! backing, OFF the type-values surface.
 
 use super::*;
 
-/// Value-side relation admission decision. The relation engine supplies only
-/// the observed self-roots and judgement; [`SemanticGraphStore`] owns the
-/// tracer, finalization, carrier construction, and storage write.
-pub(crate) enum RelationPublishDecision {
-    Publish {
-        observed_self_roots: Vec<ObservedGraphSelfRoot>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    },
-    ReturnOnly(crate::cache_runtime::NonAdmissionReason),
+/// The `satisfied_projection` every relation entry carries: the modeless
+/// [`ModeSlot::Single`] identity point at the empty path, so the family
+/// materialisation gates treat relation entries exactly like any other
+/// modeless family's (the gate never blocks a modeless hit).
+/// The SCC-union publish carrier of the relation ROOT's just-published
+/// family entry (see [`SemanticGraphStore::relation_published_carrier`]).
+#[derive(Debug, Clone)]
+pub(crate) struct RelationPublishedCarrier {
+    pub(crate) read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub(crate) self_root_canonicals: Arc<[Arc<str>]>,
+    pub(crate) validated_at_generation: u64,
 }
 
-impl RelationPublishDecision {
-    #[inline]
-    pub(crate) fn publish(
-        observed_self_roots: Vec<ObservedGraphSelfRoot>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    ) -> Self {
-        Self::Publish {
-            observed_self_roots,
-            result,
-            validated_at_generation,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn return_only(reason: crate::cache_runtime::NonAdmissionReason) -> Self {
-        Self::ReturnOnly(reason)
-    }
-}
-
-/// The `satisfied_projection` every relation-memo entry carries: the
-/// modeless [`ModeSlot::Single`] identity point at the empty path, so the
-/// family materialisation gates treat relation entries exactly like any
-/// other modeless family's (the gate never blocks a modeless hit).
 fn relation_satisfied_projection() -> MaterializedSet {
     MaterializedSet::single(MaterializedPoint::new(family::point_for_slot(
         ModeSlot::Single,
@@ -61,66 +42,101 @@ fn relation_satisfied_projection() -> MaterializedSet {
 }
 
 impl SemanticGraphStore {
-    /// Strict warm-hit read of a cached relation judgement for the full
+    /// Intern a relation proof, returning its opaque
+    /// [`crate::semantic_query::RelationProofId`] (deduplicated by value).
+    /// The proof rides the payload-side table — it is NOT a
+    /// validity oracle (warm-hit validity is decided SOLELY by the
+    /// `ReadSetSignature` rail).
+    pub(crate) fn intern_relation_proof(
+        &self,
+        proof: crate::semantic_query::RelationProof,
+    ) -> crate::semantic_query::RelationProofId {
+        let mut table = self.relation_proof_table.lock();
+        if let Some(id) = table.1.get(&proof) {
+            return *id;
+        }
+        let id = crate::semantic_query::RelationProofId(table.0.len() as u32);
+        table.0.push(proof.clone());
+        table.1.insert(proof, id);
+        id
+    }
+
+    /// Intern a COMPLETED full `Relate` key for a `CoinductiveCycle`
+    /// proof, returning its opaque [`crate::semantic_query::RelateKeyId`].
+    pub(crate) fn intern_relate_key(
+        &self,
+        key: crate::semantic_query::RelateMemoKey,
+    ) -> crate::semantic_query::RelateKeyId {
+        let mut table = self.relate_key_table.lock();
+        if let Some(id) = table.1.get(&key) {
+            return *id;
+        }
+        let id = crate::semantic_query::RelateKeyId(table.0.len() as u32);
+        table.0.push(key.clone());
+        table.1.insert(key, id);
+        id
+    }
+
+    /// Read back a proof by id (test + future display surface).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn relation_proof_for(
+        &self,
+        id: crate::semantic_query::RelationProofId,
+    ) -> Option<crate::semantic_query::RelationProof> {
+        self.relation_proof_table
+            .lock()
+            .0
+            .get(id.0 as usize)
+            .cloned()
+    }
+
+    /// Read back a co-discharged key by id (test surface).
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn relate_key_for_id(
+        &self,
+        id: crate::semantic_query::RelateKeyId,
+    ) -> Option<crate::semantic_query::RelateMemoKey> {
+        self.relate_key_table.lock().0.get(id.0 as usize).cloned()
+    }
+
+    /// Strict warm-hit read of a published relation payload for the full
     /// relation identity `key`.
     ///
-    /// Returns the tri-state
-    /// [`RelationResult`](crate::semantic_query::RelationResult) plus
-    /// a dispatch-plumbing [`empty_signature`] (the relation carrier
-    /// is the sole fact rail; the tuple shape is preserved for
-    /// `relate_nodes` call-site compatibility) **only when** the
-    /// stored entry's self-version-rooted carrier validates against
-    /// the live store view — every self-root canonical's
-    /// `FileWholeHash` is validated strictly AND the entry's
-    /// `validated_at_generation` still equals the live project
-    /// generation. A stale entry (same-canonical content edit,
-    /// untracked self-root, or `ProjectGeneration` bump) returns
-    /// `None`. Validation failure does NOT bubble the carrier.
-    ///
-    /// A `key` differing only in relation kind / policy / source freshness /
-    /// inference context / env from a cached one is a DISTINCT slot and misses
-    /// — the warm hit is on the FULL identity, not the bare `(source, target)`
-    /// pair.
-    ///
-    /// Storage is the family memo's [`FamilyKey::Relate`] family in the
-    /// [`ModeSlot::Single`] slot. The generation hard-miss is re-expressed
-    /// on the read side: the family substrate treats
-    /// `validated_at_generation` as recency / admission-discriminant
-    /// metadata only (`family.rs`), so the gate lives HERE — a candidate
-    /// serves warm only when its generation stamp still equals the live
-    /// project generation AND its carrier validates, exactly the
-    /// observable behavior the dedicated memo had.
+    /// Returns the PUBLIC [`crate::semantic_query::RelationPayload`] **only
+    /// when** the stored entry's self-version-rooted carrier validates
+    /// against the live store view AND the entry's
+    /// `validated_at_generation` still equals the live project generation
+    /// — the same gate the retired `get_relation` enforced. A stale entry
+    /// (same-canonical content edit, untracked self-root, or
+    /// `ProjectGeneration` bump) returns `None`. Only decided binary
+    /// payloads are ever stored, so a hit is always a determinate
+    /// judgement.
     #[must_use]
-    pub(crate) fn get_relation(
+    pub(crate) fn get_relation_payload(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<(DepSignature, crate::semantic_query::RelationResult)> {
+    ) -> Option<crate::semantic_query::RelationPayload> {
         let family = FamilyKey::Relate {
             key: Box::new(key.clone()),
         };
         // Snapshot the candidate list under the `entries` lock, then
-        // validate OUTSIDE the lock — the same discipline as the family
-        // warm read (`get_validated_value_impl`): `validate` / `bubble`
-        // consult the resolver store view and fan into TLS tracers, which
-        // may re-enter the memo; holding `entries` across that re-entry
-        // would serialise — or, on a re-entrant read, deadlock — against
-        // the single global memo mutex.
+        // validate OUTSIDE the lock (the family warm-read discipline:
+        // validation may re-enter the memo through the resolver view).
         let snapshot: CandidateList = {
             let entries = self.entries_lock_diagnosed();
             entries
                 .get(&family)
                 .map(|slots| slots.snapshot_slot(ModeSlot::Single))?
         };
-        // Project-generation gate — the carrier alone misses a reset.
         let live_generation = ctx.project_type_store().current_project_generation();
         let hit = snapshot.into_iter().find(|entry| {
             entry.validated_at_generation == live_generation && entry.validate(ctx)
         })?;
-        // Brief LRU bookkeeping — reacquire only to promote the hit
-        // candidate in the slot's recency order (the family bounded-
-        // retention treatment); a concurrent invalidation that drained it
-        // in between makes this a no-op.
+        // Brief LRU bookkeeping — promote the hit candidate in the slot's
+        // recency order (a concurrent invalidation makes this a no-op).
         {
             let mut entries = self.entries_lock_diagnosed();
             if let Some(slots) = entries.get_mut(&family) {
@@ -128,143 +144,73 @@ impl SemanticGraphStore {
             }
         }
         hit.read_set_signature.bubble(ctx);
-        // Dispatch-plumbing payload; every `relate_nodes` caller
-        // discards it. The carrier is the cache-validity oracle
-        // (validated above); there is no second rail to return. The
-        // stored compute verdict converts back to the engine's transient
-        // tri-state — the inverse of the publish-path conversion (the
-        // compute/public split); both directions are total and lossless.
-        let verdict = match hit.result {
-            QueryResult::Value(SemanticQueryValue::RelationVerdict(verdict)) => verdict,
-            // Structural invariant: `insert_relation_owned` is the sole
-            // writer of `Relate` family entries and only ever stores
-            // `RelationVerdict` values.
-            other => unreachable!(
-                "Relate family entries store RelationVerdict values only; found {other:?}"
-            ),
-        };
-        Some((empty_signature(), verdict.into()))
-    }
-
-    /// Run the complete cold relation computation inside a store-owned fact
-    /// tracer, finalize the dependency evidence, build the self-rooted carrier,
-    /// and perform the sole production relation-memo write.
-    pub(crate) fn compute_relation_and_admit<R, Compute, Decide>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        key: crate::semantic_query::RelateMemoKey,
-        compute: Compute,
-        decide: Decide,
-    ) -> R
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> RelationPublishDecision,
-    {
-        let host = ctx.host_for_fact_tracer_install();
-        let (value, read_set) = host.with_fact_tracer(compute);
-        match read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
-                RelationPublishDecision::Publish {
-                    observed_self_roots,
-                    result,
-                    validated_at_generation,
-                } => {
-                    let mut self_root_canonicals: Vec<Arc<str>> =
-                        Vec::with_capacity(observed_self_roots.len());
-                    for (canonical, _) in &observed_self_roots {
-                        if !self_root_canonicals.iter().any(|root| root == canonical) {
-                            self_root_canonicals.push(Arc::clone(canonical));
-                        }
-                    }
-                    match semantic_graph_read_set_signature(&observed_self_roots, &facts) {
-                        Some(carrier) => self.insert_relation_owned(
-                            Some(ctx),
-                            key,
-                            carrier,
-                            Arc::from(self_root_canonicals),
-                            result,
-                            validated_at_generation,
-                        ),
-                        None => crate::cache_runtime::admission::propagate_non_admission(
-                            crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-                        ),
-                    }
-                }
-                RelationPublishDecision::ReturnOnly(reason) => {
-                    crate::cache_runtime::admission::propagate_non_admission(reason);
-                }
-            },
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-                );
-            }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
-                );
+        match hit.result {
+            QueryResult::Value(SemanticQueryValue::Relation(payload)) => Some(payload),
+            // Structural invariant: the relation authority only ever
+            // stores `Relation` payloads in `Relate` family entries.
+            other => {
+                unreachable!("Relate family entries store Relation payloads only; found {other:?}")
             }
         }
-        value
     }
 
-    /// Publish a relation judgement for the full relation identity `key`
-    /// into the family memo's [`FamilyKey::Relate`] family
-    /// ([`ModeSlot::Single`] slot) — the sole relation-memo write shape,
-    /// shared by the production path ([`Self::compute_relation_and_admit`])
-    /// and the test seed seams.
+    /// Read back the just-published carrier (read-set signature,
+    /// self-root canonicals, generation stamp) of the relation ROOT's
+    /// family entry — the SCC-union carrier the batched member publish
+    /// rides (design §2.3: the published fact set is the UNION of all SCC
+    /// members' observed facts, never the bare per-member set).
+    #[must_use]
+    pub(crate) fn relation_published_carrier(
+        &self,
+        key: &crate::semantic_query::RelateMemoKey,
+    ) -> Option<RelationPublishedCarrier> {
+        let family = FamilyKey::Relate {
+            key: Box::new(key.clone()),
+        };
+        let entries = self.entries_lock_diagnosed();
+        let slots = entries.get(&family)?;
+        let snapshot = slots.snapshot_slot(ModeSlot::Single);
+        let entry = snapshot.into_iter().next_back()?;
+        Some(RelationPublishedCarrier {
+            read_set_signature: entry.read_set_signature.clone(),
+            self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
+            validated_at_generation: entry.validated_at_generation,
+        })
+    }
+
+    /// Publish a DECIDED SCC member's payload under the SCC-union carrier
+    /// (design §2.3 step 4 batched admission). Only ever called with a
+    /// binary `Assignable`/`NotAssignable` payload by the relation
+    /// authority's drain — `Unknown` / `BudgetExceeded` never reach here.
     ///
-    /// **The compute/public conversion happens HERE, at the publish
-    /// path.** The engine's transient tri-state
-    /// [`RelationResult`](crate::semantic_query::RelationResult) converts
-    /// into the stored compute-side verdict
-    /// ([`SemanticQueryValue::RelationVerdict`] wrapping
-    /// [`RelationComputeResult`](crate::semantic_query::RelationComputeResult)):
-    /// decided judgements ride the `Decided` arm (the publicly-representable
-    /// subset), a clean `Unknown` rides `Undecided(UndecidedReason::Unknown)`
-    /// and stays admitted EXACTLY as the dedicated memo admitted it
-    /// (future admission work deletes that admission — the current contract
-    /// preserves it byte-equivalent). The public `RelationPayload` is never
-    /// fabricated:
-    /// no proof table exists, so a `relation_proof` id would be a lie.
-    ///
-    /// The entry is self-version-rooted: `carrier` is built by
-    /// [`semantic_graph_read_set_signature`] from the relation build's
-    /// observed self-roots; `self_root_canonicals` is checked strictly,
-    /// and `validated_at_generation` joins the candidate discriminant
-    /// (same generation + same facts ⇒ in-place replace) and gates the
-    /// warm read on a project-shape bump.
-    ///
-    /// Retention rides the family rails: the per-family
-    /// [`FamilyKey::candidate_cap`] with invalid-first / LRU eviction
-    /// (`ctx = Some` plans the victim against the publisher's stable view;
-    /// `None` — the legacy test seam — falls back to the LRU front, the
-    /// same convention as the family `*_for_tests` publishes), the family
-    /// `memo_budget` provides the global bound, and the reverse-index
-    /// registration makes per-canonical drains see relation entries. The
-    /// `(entries slot, memo_budget record, reverse-index register)`
-    /// triple lands under the ONE `entries` lock, atomic against a
-    /// concurrent `invalidate_all` — the family consistency-cluster
+    /// Retention rides the family rails (per-family cap with invalid-first
+    /// / LRU eviction, `memo_budget`, reverse-index registration), and the
+    /// `(entries slot, memo_budget record, reverse-index register)` triple
+    /// lands under the ONE `entries` lock — the family consistency-cluster
     /// discipline.
-    fn insert_relation_owned(
+    pub(crate) fn publish_relation_member(
         &self,
         ctx: Option<&dyn crate::resolver_core::ResolverContext>,
         key: crate::semantic_query::RelateMemoKey,
+        payload: crate::semantic_query::RelationPayload,
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
-        result: crate::semantic_query::RelationResult,
         validated_at_generation: u64,
     ) {
+        debug_assert!(
+            matches!(
+                payload.outcome,
+                crate::semantic_query::RelationOutcome::Assignable
+                    | crate::semantic_query::RelationOutcome::NotAssignable
+            ),
+            "only decided binary relation payloads publish; {payload:?} must route ReturnOnly"
+        );
         let family = FamilyKey::Relate { key: Box::new(key) };
         let slot = ModeSlot::Single;
         let admission_seq = self.alloc_candidate_admission_seq();
-        // The relation carrier is the sole fact rail; the dispatch-fence
-        // slot carries the interned empty signature so the entry's shape
-        // matches every other family's (the warm read returns
-        // `empty_signature()` for the same reason).
         let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
         let entry = MemoEntry {
-            result: QueryResult::Value(SemanticQueryValue::RelationVerdict(result.into())),
+            result: QueryResult::Value(SemanticQueryValue::Relation(payload)),
             read_set_signature: carrier.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,
@@ -273,9 +219,6 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
         };
-        // Per-family bounded retention: plan the cap eviction BEFORE the
-        // publish lock (the plan releases `entries` before validating fact
-        // rails — never validate under the global memo mutex).
         let cap = family.candidate_cap();
         let eviction = match ctx {
             Some(ctx) => {
@@ -284,8 +227,6 @@ impl SemanticGraphStore {
             None => family::EvictionVictim::LruFront,
         };
         let mut entries = self.entries_lock_diagnosed();
-        // Record whether this relation identity is newly entering the memo
-        // so the retention budget tracks one ledger record per family.
         let family_was_new = !entries.contains_key(&family);
         let outcome = entries.entry(family.clone()).or_default().publish(
             slot,
@@ -295,9 +236,6 @@ impl SemanticGraphStore {
             eviction,
         );
         let populated_slots = outcome.populated;
-        // Drain the displaced candidates' reverse-index registrations by
-        // per-candidate `admission_seq` (same-discriminant replacements +
-        // cap-eviction victims), under the held `entries` lock.
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
@@ -320,53 +258,70 @@ impl SemanticGraphStore {
         drop(entries);
     }
 
-    /// Test-support seed seam for relation-memo fixtures. Production writes
-    /// route through [`Self::compute_relation_and_admit`]. Publishes with
-    /// the legacy no-view eviction policy (LRU front), mirroring the family
-    /// `publish_with_carrier_for_tests` convention.
+    /// Test-support enumeration of every published `Relate` family entry as
+    /// `(key, outcome)` (freshest candidate per slot). Lets relation tests
+    /// assert over the ACTUAL published set instead of probing guessed keys.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn insert_relation(
+    #[must_use]
+    pub fn relation_entries_for_tests(
         &self,
-        key: crate::semantic_query::RelateMemoKey,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    ) {
-        self.insert_relation_owned(
-            None,
-            key,
-            carrier,
-            self_root_canonicals,
-            result,
-            validated_at_generation,
-        );
+    ) -> Vec<(
+        crate::semantic_query::RelateMemoKey,
+        crate::semantic_query::RelationOutcome,
+    )> {
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .iter()
+            .filter_map(|(family, slots)| {
+                let FamilyKey::Relate { key } = family else {
+                    return None;
+                };
+                let snapshot = slots.snapshot_slot(ModeSlot::Single);
+                snapshot.into_iter().next_back().map(|entry| {
+                    let outcome = match &entry.result {
+                        QueryResult::Value(SemanticQueryValue::Relation(payload)) => {
+                            payload.outcome.clone()
+                        }
+                        other => unreachable!(
+                            "Relate family entries store Relation payloads only; found {other:?}"
+                        ),
+                    };
+                    ((**key).clone(), outcome)
+                })
+            })
+            .collect()
     }
 
-    /// Host-view-aware variant of [`Self::insert_relation`]: the publish
-    /// plans its per-family bounded-retention eviction against the
-    /// publishing caller's stable store view (invalid-first victim
-    /// selection), mirroring the family `publish_with_view_for_tests`
-    /// convention. Backs the per-family bounded-retention relation guards.
-    #[doc(hidden)]
+    /// Test-support: intern the CONSTRUCT twin of a call `Signature` node
+    /// (same params/return/type-params/spans, `kind: Construct`).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn insert_relation_with_view_for_tests(
+    #[must_use]
+    pub fn intern_construct_twin_for_tests(
         &self,
-        host: &crate::VerterHost,
-        key: crate::semantic_query::RelateMemoKey,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        result: crate::semantic_query::RelationResult,
-        validated_at_generation: u64,
-    ) {
-        self.insert_relation_owned(
-            Some(host),
-            key,
-            carrier,
-            self_root_canonicals,
-            result,
-            validated_at_generation,
-        );
+        call: crate::semantic_query::SemanticNodeId,
+    ) -> crate::semantic_query::SemanticNodeId {
+        let data = self
+            .node_data(call)
+            .expect("construct twin source must be interned");
+        let crate::semantic_query::SemanticNodeData::Signature {
+            kind: _,
+            params,
+            return_type,
+            type_parameters,
+            signature_span,
+            return_type_span,
+        } = data.as_ref()
+        else {
+            panic!("construct twin source must be a Signature node");
+        };
+        self.intern_node(crate::semantic_query::SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Construct,
+            params: Arc::clone(params),
+            return_type: *return_type,
+            type_parameters: Arc::clone(type_parameters),
+            signature_span: *signature_span,
+            return_type_span: *return_type_span,
+        })
     }
 
     /// Count of relation memo entries (the summed candidate count of every
@@ -382,33 +337,96 @@ impl SemanticGraphStore {
             .sum()
     }
 
-    /// Drop every relation memo entry. Invoked on project-generation bumps
-    /// so warm relation judgements cannot leak across a version boundary.
-    /// Removes every [`FamilyKey::Relate`] family from the family memo and
-    /// drains each candidate's reverse-index registrations and the family's
-    /// `memo_budget` ledger record — the three-member consistency cluster
-    /// mutated under the ONE `entries` lock, exclusive against concurrent
-    /// publishers (which mutate the same cluster under the same lock).
-    pub fn clear_relation_memo(&self) {
-        let mut entries = self.entries_lock_diagnosed();
-        let relate_families: Vec<FamilyKey> = entries
-            .keys()
-            .filter(|family| matches!(family, FamilyKey::Relate { .. }))
-            .cloned()
-            .collect();
-        for family in relate_families {
-            let Some(slots) = entries.remove(&family) else {
-                continue;
-            };
-            for (slot, entry) in slots.iter_populated_slots_all() {
-                reverse_index::drain_candidate_reverse_index_registrations(
-                    &self.canonical_to_entries,
-                    &family,
-                    slot,
-                    entry,
-                );
+    /// Test-support seed seam for relation fixtures (mirrors the retired
+    /// `insert_relation` shape): publishes a DECIDED payload with the
+    /// legacy no-view eviction policy (LRU front). Production writes route
+    /// through the relation authority's batched publish
+    /// ([`Self::publish_relation_member`]) or the family singleflight.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_relation_payload_for_tests(
+        &self,
+        key: crate::semantic_query::RelateMemoKey,
+        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        payload: crate::semantic_query::RelationPayload,
+        validated_at_generation: u64,
+    ) {
+        self.publish_relation_member(
+            None,
+            key,
+            payload,
+            carrier,
+            self_root_canonicals,
+            validated_at_generation,
+        );
+    }
+
+    /// Host-view-aware variant of [`Self::insert_relation_payload_for_tests`]:
+    /// the publish plans its per-family bounded-retention eviction against
+    /// the publishing caller's stable store view (invalid-first victim
+    /// selection), backing the per-family bounded-retention relation guards.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn insert_relation_payload_with_view_for_tests(
+        &self,
+        host: &crate::VerterHost,
+        key: crate::semantic_query::RelateMemoKey,
+        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        payload: crate::semantic_query::RelationPayload,
+        validated_at_generation: u64,
+    ) {
+        self.publish_relation_member(
+            Some(host),
+            key,
+            payload,
+            carrier,
+            self_root_canonicals,
+            validated_at_generation,
+        );
+    }
+
+    /// Test-support payload constructor: a decided outcome with a default
+    /// root-witness proof interned (fixtures that need a publishable
+    /// payload without driving the reducer).
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn relation_payload_for_tests(
+        &self,
+        outcome: crate::semantic_query::RelationOutcome,
+    ) -> crate::semantic_query::RelationPayload {
+        let proof = match &outcome {
+            crate::semantic_query::RelationOutcome::Assignable => {
+                crate::semantic_query::RelationProof::Assignable {
+                    witness: crate::semantic_query::DerivationTree {
+                        sub_derivations: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                }
             }
-            self.memo_budget.forget_key_under_exclusive_lock(&family);
+            crate::semantic_query::RelationOutcome::NotAssignable => {
+                crate::semantic_query::RelationProof::NotAssignable {
+                    reason: crate::semantic_query::RelationFailureCode::Structural,
+                    failing_sub: crate::semantic_query::SubRelationRef {
+                        source: crate::semantic_query::SemanticNodeId(u64::MAX),
+                        target: crate::semantic_query::SemanticNodeId(u64::MAX),
+                        position: crate::semantic_query::SubRelationPosition::Root,
+                    },
+                }
+            }
+            crate::semantic_query::RelationOutcome::BudgetExceeded(kind) => {
+                crate::semantic_query::RelationProof::BudgetExceeded {
+                    cap: crate::semantic_query::RecursionOrBudgetCap {
+                        kind: *kind,
+                        limit: 0,
+                    },
+                }
+            }
+        };
+        let relation_proof = self.intern_relation_proof(proof);
+        crate::semantic_query::RelationPayload {
+            outcome,
+            bindings: Arc::from(Vec::new().into_boxed_slice()),
+            relation_proof,
         }
     }
 }

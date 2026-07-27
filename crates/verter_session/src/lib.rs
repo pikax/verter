@@ -785,15 +785,10 @@ pub struct VerterHost {
     /// the exact production admission-refusal path, with a
     /// deterministic trigger. Self-disarms after one fire.
     pub(crate) materialize_force_mid_compute_generation_bump: std::sync::atomic::AtomicBool,
-    /// Per-host test-injection knob for the relation engine's cold
-    /// judgement path — the relation-memo analogue of
-    /// [`Self::materialize_force_overflow_observations`]. When set to `N >
-    /// 0`, the cold relation compute observes `N` synthetic `FileWholeHash`
-    /// facts onto the active tracer, forcing the relation memo's
-    /// `FactReadSetFinalise::Overflow` non-admission path (the judgement is
-    /// returned to the caller but refused memo admission). Set directly in
-    /// the inline relation tests.
-    pub(crate) relation_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host relation-engine knobs: the overflow / budget test-injection
+    /// triggers plus the strict-family relax bits — see
+    /// [`crate::host_construction::RelationHostKnobs`].
+    pub(crate) relation_knobs: host_construction::RelationHostKnobs,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
     /// folder ([`crate::project_semantic_dispatch`]'s
     /// `collect_augmentation_contributions`). When `true`, EVERY augmenter in

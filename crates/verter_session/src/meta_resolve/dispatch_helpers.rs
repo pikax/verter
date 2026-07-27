@@ -39,7 +39,7 @@ use std::sync::Arc;
 // ─────────────────────────────────────────────────────────────────────
 
 /// Realize a slot/macro member value to its underlying callable
-/// [`crate::semantic_query::SemanticNodeData::Function`] node, if one
+/// [`crate::semantic_query::SemanticNodeData::Signature`] node, if one
 /// exists, by normalizing through the carrier shells the
 /// `StructuralTransit(Navigate)` macro-publication path produces.
 ///
@@ -119,8 +119,13 @@ fn realize_callable_member_inner(
     }
     let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node)?;
     match data.as_ref() {
-        // (1) Function — the realized callable. Return verbatim.
-        SemanticNodeData::Function { .. } => Some(node),
+        // (1) A CALL signature — the realized callable. Return verbatim.
+        // A CONSTRUCT signature (`new (...) => R`) is not invocable as a
+        // callback and falls through to the non-callable arm below.
+        SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            ..
+        } => Some(node),
 
         // (2) Alias → recurse on inner.
         SemanticNodeData::Alias(inner) => {

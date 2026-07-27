@@ -758,6 +758,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::TypeOf(_)
             | SemanticNodeData::DeclRef { .. }
@@ -815,7 +816,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -912,13 +913,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     for contributor in contributors.iter() {
                         stack.push(ReduceFrame::descend(*contributor, parent_context));
                     }
-                }
-            }
-            // The constructor signature descends like the function
-            // signature under whole-surface publication.
-            SemanticNodeData::ConstructorType { signature } => {
-                if is_whole_surface_published(parent_context) {
-                    stack.push(ReduceFrame::descend(*signature, parent_context));
                 }
             }
         }
@@ -1081,7 +1075,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::TemplateLiteral { .. } => {
                 self.opaque_unknown_with(node, "<unresolved template literal type>")
             }
-            SemanticNodeData::Infer { .. } => {
+            SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. } => {
                 self.opaque_unknown_with(node, "<unresolved infer type>")
             }
 
@@ -1508,7 +1502,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
                     .unwrap_or(node)
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
@@ -1517,6 +1512,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } => rebuild_function(
                 self,
                 node,
+                *kind,
                 params,
                 *return_type,
                 type_parameters,
@@ -1534,27 +1530,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     already
                 } else {
                     self.reduce_subtree(merged, context, state)
-                }
-            }
-            // Structural fidelity carriers rebuild from their reduced single
-            // child (like `Array` / `Function`): if the child is unchanged
-            // the shell is preserved, else a scope-preserving shell is
-            // re-interned.
-            SemanticNodeData::ConstructorType { signature } => {
-                let new_sig = state
-                    .mapping
-                    .get(&(*signature, context))
-                    .copied()
-                    .unwrap_or(*signature);
-                if new_sig == *signature {
-                    node
-                } else {
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::ConstructorType {
-                            signature: new_sig,
-                        },
-                    )
                 }
             }
         }
@@ -1919,6 +1894,7 @@ fn rebuild_tuple(
 fn rebuild_function(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
+    kind: crate::semantic_query::SignatureKind,
     params: &Arc<[crate::semantic_query::FunctionParam]>,
     return_type: SemanticNodeId,
     type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
@@ -1972,7 +1948,8 @@ fn rebuild_function(
     }
     Some(dispatch.graph().intern_preserving_scope(
         node,
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params: Arc::from(new_params.into_boxed_slice()),
             return_type: new_return,
             type_parameters: Arc::from(new_type_params.into_boxed_slice()),
@@ -3700,7 +3677,7 @@ impl<'a> OpenWalk<'a> {
             // conditional (`X := check`) classifies as its bound node —
             // the same binding the build-side substitution applies; an
             // unbound placeholder stays closed.
-            SemanticNodeData::Infer { name } => {
+            SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
                 match self.bound_infers.get(name.as_ref()).copied() {
                     Some(bound) => self.node_is_open(ctx, bound),
                     None => false,
@@ -3709,8 +3686,8 @@ impl<'a> OpenWalk<'a> {
 
             // --- operator shapes ---
             // TRI-STATE conditional through the SHARED branch-selection
-            // oracle (the pre-relation infer-pattern cases, then the same
-            // `shallow_relation_check` → `relate_nodes` path
+            // oracle (the infer routing, then the same sole
+            // `execute(SemanticQueryKey::Relate)` authority
             // `build_conditional` selects branches with; `any` / `error`
             // checks defer): a SELECTED branch IS the conditional's
             // surface — classify only it (an open losing branch is dead
@@ -3745,10 +3722,24 @@ impl<'a> OpenWalk<'a> {
                     self.dispatch.conditional_branch_selection(check, extends);
                 let mut bare_infer_binding: Option<(Arc<str>, SemanticNodeId)> = None;
                 match infer {
-                    Some(super::InferPatternSelection::BareInfer { name }) => {
-                        bare_infer_binding = Some((name, check));
+                    Some(super::relation::RelationInferBindings {
+                        shape: super::relation::InferPatternShape::Bare,
+                        bindings,
+                    }) => {
+                        // The bare-infer binding the relation fixed at
+                        // session close (`X := check`) — the SAME binding
+                        // the build-side substitution applies.
+                        if let Some(binding) = bindings.first() {
+                            bare_infer_binding = Some((Arc::clone(&binding.name), binding.bound));
+                        }
                     }
-                    Some(super::InferPatternSelection::FunctionInfer { .. }) => {
+                    Some(super::relation::RelationInferBindings { .. }) => {
+                        // A non-bare infer selection (object / tuple /
+                        // function pattern) binds check-SIGNATURE
+                        // components — widened to the Deferred treatment
+                        // here (a superset of the selected branch;
+                        // classifying the raw branch with unbound-closed
+                        // infer placeholders would risk a false-CLOSED).
                         selection = super::ConditionalBranchSelection::Deferred;
                     }
                     None => {}
@@ -4022,7 +4013,7 @@ impl<'a> OpenWalk<'a> {
                             .iter()
                             .any(|s| self.node_is_open(ctx, s.value_type)))
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -4067,9 +4058,6 @@ impl<'a> OpenWalk<'a> {
             }
 
             // --- unresolved / fidelity carriers ---
-            // A constructor type delegates to its inner function signature
-            // (which carries the value-surface descent rule).
-            SemanticNodeData::ConstructorType { signature } => self.node_is_open(ctx, *signature),
             // A `typeof X` value-rooted lookup is NOT a resolvable
             // type-position declaration head for this purpose (its root is a
             // VALUE namespace, not a type declaration whose key domain we can

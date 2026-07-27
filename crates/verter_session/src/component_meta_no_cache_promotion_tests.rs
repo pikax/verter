@@ -1659,8 +1659,9 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 ///
 /// A `Conditional` whose `check` / `extends` are identity carriers
 /// (`InstantiationRef` over the builtin `Partial`) forces
-/// `build_conditional` to fall through to the full `relate_nodes`
-/// authority. The relation's identity-carrier `Instantiate` unwrap
+/// `build_conditional` to fall through to the full
+/// `execute(SemanticQueryKey::Relate)` authority. The relation's
+/// identity-carrier `Instantiate` unwrap
 /// (`relation.rs:342`/`:433`) trips the projection-op budget; the
 /// chokepoint `execute_type_node` folds the partiality into the relation's
 /// cold-build-local frame, so the relation `Unknown` is refused admission
@@ -1669,7 +1670,8 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 ///
 /// Asserts: the `Conditional` dispatch read carries `result_is_partial =
 /// true` (does NOT warm component-meta) AND the relation judgement is
-/// refused relation-memo admission (a fresh `relate_nodes` cold-recomputes).
+/// refused relation-memo admission (a fresh `execute(SemanticQueryKey::Relate)`
+/// cold-recomputes).
 ///
 /// DISCRIMINATION: reverting the chokepoint fold (or the relation-memo
 /// partial-skip) makes the conditional a complete non-partial Value and/or
@@ -1760,13 +1762,13 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
         "the relation-derived conditional partial MUST raise the component-meta warm-gate suppress flag"
     );
 
-    // Relation-memo non-admission: a fresh `relate_nodes(check, extends)`
-    // must cold-recompute (no warm relation hit on the partial-derived
-    // judgement). `get_relation` returning `None` proves the partial-derived
-    // judgement was never admitted.
+    // Relation-memo non-admission: a fresh `execute(SemanticQueryKey::Relate)`
+    // over `(check, extends)` must cold-recompute (no warm relation hit on the
+    // partial-derived judgement). `get_relation_payload` returning `None`
+    // proves the partial-derived judgement was never admitted.
     assert!(
         graph
-            .get_relation(host.as_ref(), &dispatch.relate_memo_key(check, extends))
+            .get_relation_payload(host.as_ref(), &dispatch.relate_key_for(check, extends),)
             .is_none(),
         "a relation Unknown that arose from a PARTIAL nested read MUST NOT be admitted to the \
          relation memo (reverting the relation-memo partial-skip admits it here)"

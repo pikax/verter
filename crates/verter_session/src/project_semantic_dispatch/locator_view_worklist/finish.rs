@@ -285,7 +285,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }),
                 )
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
@@ -316,7 +317,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .collect();
                 graph.intern_preserving_scope(
                     node,
-                    SemanticNodeData::Function {
+                    SemanticNodeData::Signature {
+                        kind: *kind,
                         params: Arc::from(params.into_boxed_slice()),
                         return_type: projected(memo, *return_type, context),
                         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
@@ -325,7 +327,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                 )
             }
-            SemanticNodeData::ConstructorType { signature } => projected(memo, *signature, context),
             SemanticNodeData::KeyOf { base } => {
                 let base_id = projected(memo, *base, context);
                 if may_reduce_operator(context) {
@@ -476,6 +477,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. }
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }

@@ -426,9 +426,9 @@ fn lowers_tuple_preserving_rest_element() {
 
 #[test]
 fn lowers_constructor_type_wrapping_a_function_signature() {
-    // `new (x: number) => Foo` → `ConstructorType(Function(...))`, keeping
-    // constructor-ness distinct from a plain function (the eager path
-    // flattens both to `Function`).
+    // `new (x: number) => Foo` → a root `Signature(Construct)`, keeping
+    // constructor-ness distinct from a plain function (every producer,
+    // eager included, preserves the kind).
     let host = VerterHost::new_standalone(Default::default());
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
@@ -445,16 +445,21 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
     );
     let expr = TypeExpr::ConstructorType(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
-    let signature = match &*node(&graph, root) {
-        SemanticNodeData::ConstructorType { signature } => *signature,
-        other => panic!("expected ConstructorType, got {other:?}"),
-    };
     assert!(
-        !matches!(&*node(&graph, root), SemanticNodeData::Function { .. }),
-        "constructor-ness must NOT collapse to a plain Function"
+        matches!(
+            &*node(&graph, root),
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            }
+        ),
+        "a bare `new (…) => R` lowers to a root construct Signature, got {:?}",
+        &*node(&graph, root)
     );
+    let signature = root;
     match &*node(&graph, signature) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             return_type,
             ..
@@ -479,10 +484,11 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
 #[test]
 fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     // `{ new(): T }` is an Object carrying a construct signature — NOT a
-    // `ConstructorType` (that is the bare `new () => T` form). The two must stay
-    // distinct (Vue treats a ctor-type as Function, a type-literal with a
-    // construct signature as Object). Discriminates against a lowerer that
-    // flattens the type literal to ConstructorType.
+    // root `Signature(Construct)` (that is the bare `new () => T` form). The
+    // two spellings must stay distinct (a root construct signature vs an
+    // Object whose `construct_signatures` hold `Signature(Construct)`
+    // nodes). Discriminates against a lowerer that collapses the type
+    // literal to a root construct signature.
     let host = VerterHost::new_standalone(Default::default());
     let func = FunctionExpr::synthetic(
         vec![],
@@ -507,7 +513,7 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
             assert!(
                 matches!(
                     &*node(&graph, view.construct_signatures[0]),
-                    SemanticNodeData::Function { .. }
+                    SemanticNodeData::Signature { .. }
                 ),
                 "the construct signature lowers to a Function node"
             );
@@ -517,9 +523,12 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     assert!(
         !matches!(
             &*node(&graph, root),
-            SemanticNodeData::ConstructorType { .. }
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            }
         ),
-        "a type-literal `{{ new(): T }}` must NOT flatten to ConstructorType"
+        "a type-literal `{{ new(): T }}` must NOT collapse to a root construct Signature"
     );
 }
 
@@ -552,7 +561,8 @@ fn generic_function_binds_own_type_param_in_params_and_return() {
     let expr = TypeExpr::Function(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             return_type,
             type_parameters,
@@ -612,7 +622,8 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
     let expr = TypeExpr::Function(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             type_parameters,
             ..
@@ -681,7 +692,8 @@ fn generic_function_default_sees_prior_type_param_binder() {
     let expr = TypeExpr::Function(Arc::new(func));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             type_parameters,
             ..
@@ -848,9 +860,12 @@ fn conditional_binds_bare_infer_in_true_branch() {
                 matches!(&*node(&graph, *extends), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
                 "extends lowers `infer P` to an Infer carrier"
             );
-            assert_eq!(
-                *true_branch_ref, *extends,
-                "the true-branch `P` binds to the `infer P` carrier introduced by `extends`"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "P"),
+                "the true-branch `P` binds as an `InferRef` REFERENCE to the `infer P` \
+                 declaration introduced by `extends` (reference-vs-declaration survives \
+                 interning), got {:?}",
+                &*node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -906,9 +921,11 @@ fn conditional_binds_nested_infer_in_true_branch() {
                 matches!(&*node(&graph, nested_infer), SemanticNodeData::Infer { name } if name.as_ref() == "E"),
                 "the Array element is the `infer E` carrier"
             );
-            assert_eq!(
-                *true_branch_ref, nested_infer,
-                "the true-branch `E` binds to the nested `infer E` carrier"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "E"),
+                "the true-branch `E` binds as an `InferRef` REFERENCE to the nested \
+                 `infer E` declaration, got {:?}",
+                &*node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -975,9 +992,11 @@ fn conditional_binds_object_member_infer_in_true_branch() {
                 matches!(&*node(&graph, member_infer), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
                 "the object member `a` is the `infer P` carrier"
             );
-            assert_eq!(
-                *true_branch_ref, member_infer,
-                "the true-branch `P` binds to the object-member `infer P` carrier"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "P"),
+                "the true-branch `P` binds as an `InferRef` REFERENCE to the \
+                 object-member `infer P` declaration, got {:?}",
+                &*node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1036,7 +1055,9 @@ fn conditional_binds_function_param_infer_in_true_branch() {
             ..
         } => {
             let param_infer = match &*node(&graph, *extends) {
-                SemanticNodeData::Function { params, .. } => {
+                SemanticNodeData::Signature {
+                    kind: _, params, ..
+                } => {
                     assert_eq!(params.len(), 1);
                     params[0].ty
                 }
@@ -1046,9 +1067,11 @@ fn conditional_binds_function_param_infer_in_true_branch() {
                 matches!(&*node(&graph, param_infer), SemanticNodeData::Infer { name } if name.as_ref() == "P"),
                 "the function parameter `x` is the `infer P` carrier"
             );
-            assert_eq!(
-                *true_branch_ref, param_infer,
-                "the true-branch `P` binds to the function-param `infer P` carrier"
+            assert!(
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "P"),
+                "the true-branch `P` binds as an `InferRef` REFERENCE to the \
+                 function-param `infer P` declaration, got {:?}",
+                &*node(&graph, *true_branch_ref)
             );
             assert!(
                 !matches!(
@@ -1109,8 +1132,9 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
             true_branch_ref, ..
         } => {
             assert!(
-                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::Infer { name } if name.as_ref() == "R"),
-                "the true-branch `R` binds to the mapped `as infer R` carrier, got {:?}",
+                matches!(&*node(&graph, *true_branch_ref), SemanticNodeData::InferRef { name } if name.as_ref() == "R"),
+                "the true-branch `R` binds as an `InferRef` REFERENCE to the mapped \
+                 `as infer R` declaration, got {:?}",
                 &*node(&graph, *true_branch_ref)
             );
             assert!(
@@ -1497,7 +1521,7 @@ fn structural_equivalence_for_function() {
     let (graph, root) = assert_paths_agree(&host, &expr);
     assert!(matches!(
         &*node(&graph, root),
-        SemanticNodeData::Function { params, .. } if params.len() == 1
+        SemanticNodeData::Signature { kind: _, params, .. } if params.len() == 1
     ));
 }
 
@@ -1643,5 +1667,145 @@ fn structural_equivalence_assertion_is_discriminating() {
     assert_eq!(
         eager, structural_same,
         "the SAME shape still agrees across paths"
+    );
+}
+
+#[test]
+fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
+    // The macro-argument producer's reference binding must be
+    // declaration-distinct: in
+    // `string extends infer U ? (number extends U ? U : "no") : never`
+    // the inner `extends U` / true-branch `U` are REFERENCES to the outer
+    // binder (`InferRef`), so the outer substitution reaches them and the
+    // whole payload evaluates to `"no"`. A producer that binds references
+    // to the `Infer` declaration node makes the inner conditional
+    // indistinguishable from a rebind — the shadow stop fires and the
+    // surviving `U` is reinterpreted as a fresh bare infer, yielding the
+    // wrong `number`.
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let binders: [BinderScope; 0] = [];
+    let ctx = StructuralLowerContext::new(&binders);
+    let expr = TypeExpr::Conditional {
+        check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+        extends: Arc::new(TypeExpr::Infer {
+            name: "U".to_string(),
+        }),
+        true_type: Arc::new(TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            extends: Arc::new(TypeExpr::Ref {
+                name: Arc::from("U"),
+                type_arguments: verter_type_expr::empty_type_args(),
+            }),
+            true_type: Arc::new(TypeExpr::Ref {
+                name: Arc::from("U"),
+                type_arguments: verter_type_expr::empty_type_args(),
+            }),
+            false_type: Arc::new(TypeExpr::Literal(LiteralValue::String("no".to_string()))),
+        }),
+        false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+    };
+    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+        .expect("structural lowering should succeed");
+
+    // Producer-level contract: the inner conditional's extends/true are
+    // `InferRef` REFERENCES, never the `Infer` declaration node.
+    let (inner_extends, inner_true) = match &*node(&graph, handle.node()) {
+        SemanticNodeData::Conditional {
+            true_branch_ref, ..
+        } => match &*node(&graph, *true_branch_ref) {
+            SemanticNodeData::Conditional {
+                extends,
+                true_branch_ref: inner_true,
+                ..
+            } => (*extends, *inner_true),
+            other => panic!("inner conditional expected, got {other:?}"),
+        },
+        other => panic!("outer conditional expected, got {other:?}"),
+    };
+    assert!(
+        matches!(&*node(&graph, inner_extends), SemanticNodeData::InferRef { name } if name.as_ref() == "U"),
+        "the inner `extends U` is a REFERENCE to the outer binder, got {:?}",
+        &*node(&graph, inner_extends)
+    );
+    assert!(
+        matches!(&*node(&graph, inner_true), SemanticNodeData::InferRef { name } if name.as_ref() == "U"),
+        "the inner true-branch `U` is a REFERENCE to the outer binder, got {:?}",
+        &*node(&graph, inner_true)
+    );
+
+    // Behavioral contract: the payload evaluates to `"no"`.
+    let (check, extends, true_branch, false_branch, distributive) =
+        match &*node(&graph, handle.node()) {
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+            } => (
+                *check,
+                *extends,
+                *true_branch_ref,
+                *false_branch_ref,
+                *distributive,
+            ),
+            other => panic!("outer conditional expected, got {other:?}"),
+        };
+    use crate::semantic_query::SemanticQueryApi as _;
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let result =
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+        }) {
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryOutput { value: id, .. },
+            ) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+    assert!(
+        matches!(
+            &*node(&graph, result),
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) if s == "no"
+        ),
+        "`string extends infer U ? (number extends U ? U : \"no\") : never` must \
+         resolve \"no\" on the macro producer path, got {:?}",
+        &*node(&graph, result)
+    );
+}
+
+#[test]
+fn structural_equivalence_for_constructor_signature() {
+    // Producer parity: the eager path and the structural producer
+    // intern the SAME root `Signature(Construct)` node for the same
+    // `new (x: number) => number` (the eager path no longer flattens the
+    // construct kind away).
+    let host = VerterHost::new_standalone(Default::default());
+    let func = FunctionExpr::synthetic(
+        vec![FunctionParam::synthetic(
+            Some("x".to_string()),
+            TypeExpr::Primitive(PrimitiveName::Number),
+            false,
+            false,
+        )],
+        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        vec![],
+    );
+    let expr = TypeExpr::ConstructorType(Arc::new(func));
+    let (graph, root) = assert_paths_agree(&host, &expr);
+    assert!(
+        matches!(
+            &*node(&graph, root),
+            SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Construct,
+                ..
+            }
+        ),
+        "both producers mint a root Signature(Construct), got {:?}",
+        &*node(&graph, root)
     );
 }

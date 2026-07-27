@@ -302,14 +302,15 @@ fn materialize_constructor_type_preserves_ctor_ness() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
-    let signature = graph.intern_node(SemanticNodeData::Function {
+    let signature = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: ret,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
     });
-    let node = graph.intern_node(SemanticNodeData::ConstructorType { signature });
+    let node = graph.intern_construct_twin_for_tests(signature);
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch
         .materialize_output_type_expr_for_test(node)

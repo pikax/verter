@@ -154,7 +154,9 @@ pub(crate) fn relation_probe_source(
 }
 
 /// The check-probe alias name for a constrained binder's generation-time
-/// bound⊢constraint verification (`__oracle_probe_check__N`).
+/// bound⊢constraint verification (`__oracle_probe_check__N`). Generator-only
+/// (driven by the `oracle-gen` snapshot generator, never the consumption path).
+#[cfg(feature = "oracle-gen")]
 pub(crate) fn relation_check_probe_name(ordinal: u16) -> String {
     format!("__oracle_probe_check__{ordinal}")
 }
@@ -164,7 +166,8 @@ pub(crate) fn relation_check_probe_name(ordinal: u16) -> String {
 /// constraint text, through the SAME anti-distribution tuple wire. Driven by
 /// the generator ONLY (a SECOND probe file synthesized after the main wire is
 /// decoded); a `not_assignable` check verdict is a generation error — a bound
-/// violating a present constraint never escapes silently.
+/// violating a present constraint never escapes silently. Generator-only.
+#[cfg(feature = "oracle-gen")]
 pub(crate) fn relation_check_probe_header(
     ordinal: u16,
     bound_text: &str,
@@ -181,7 +184,8 @@ pub(crate) fn relation_check_probe_header(
 /// The full synthesized CHECK-probe file source for a constrained row's
 /// bound⊢constraint verification (one check probe per constrained binding, in
 /// binder preorder). Deterministic — a pure function of the captured bound
-/// texts + the declared constraint texts.
+/// texts + the declared constraint texts. Generator-only.
+#[cfg(feature = "oracle-gen")]
 pub(crate) fn relation_check_probe_source(
     row_function: &str,
     checks: &[(u16, String, String)],

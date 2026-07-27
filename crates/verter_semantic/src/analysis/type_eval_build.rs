@@ -4316,7 +4316,8 @@ fn widen_literal_type_with_budget(
         // widen identically. Reconstruct as a `ConstructorType` so the
         // constructor-ness survives — never flatten it to a plain `Function`.
         // This runs on analyzer-side lowered IR (e.g. `value as new () => T`),
-        // BEFORE the dispatch lower collapses `Function`/`ConstructorType`.
+        // BEFORE the dispatch lower interns the kind-preserving
+        // `SemanticNodeData::Signature` carrier.
         TypeExpr::ConstructorType(function) => Ok(TypeExpr::ConstructorType(Arc::new(
             FunctionExpr::with_spans(
                 function.parameters.clone(),

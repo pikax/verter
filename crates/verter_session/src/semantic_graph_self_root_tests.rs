@@ -585,7 +585,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
 // Relation memo strict warm-read validation.
 // ---------------------------------------------------------------------------
 
-/// The relation memo's warm read (`get_relation`) validates the stored
+/// The relation memo's warm read (`get_relation_payload`) validates the stored
 /// entry's self-version-rooted carrier strictly: an entry whose
 /// self-root names an untracked canonical is NOT served warm.
 #[test]
@@ -614,18 +614,16 @@ fn relation_memo_warm_read_validates_self_root() {
         target,
         crate::semantic_query::RelationContext::default(),
     );
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         key.clone(),
         carrier,
         self_roots,
-        crate::semantic_query::RelationResult::Assignable {
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         host.project_type_store().current_project_generation(),
     );
 
     assert!(
-        store.get_relation(ctx, &key).is_none(),
+        store.get_relation_payload(ctx, &key).is_none(),
         "the relation memo's warm read MUST validate the stored entry's self-version-rooted \
          carrier strictly — an entry self-rooted on an untracked canonical must miss",
     );
@@ -651,21 +649,19 @@ fn relation_memo_warm_read_serves_validated_entry() {
         target,
         crate::semantic_query::RelationContext::default(),
     );
-    store.insert_relation(
+    store.insert_relation_payload_for_tests(
         key.clone(),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        crate::semantic_query::RelationResult::Assignable {
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         host.project_type_store().current_project_generation(),
     );
 
-    let cached = store.get_relation(ctx, &key);
+    let cached = store.get_relation_payload(ctx, &key);
     assert!(
         matches!(
-            cached,
-            Some((_, crate::semantic_query::RelationResult::Assignable { .. }))
+            cached.as_ref().map(|payload| &payload.outcome),
+            Some(crate::semantic_query::RelationOutcome::Assignable)
         ),
         "the relation memo must serve a warm judgement whose carrier validates \
          (got {cached:?})",

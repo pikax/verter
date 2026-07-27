@@ -268,7 +268,9 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             let default_out = default_out?;
             alg.type_parameter(Arc::clone(display_name), constraint_out, default_out)
         }
-        SemanticNodeData::Infer { name } => alg.infer(Arc::clone(name)),
+        SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
+            alg.infer(Arc::clone(name))
+        }
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name } => alg.recursive_ref(Arc::clone(name)),
             // The input is a typed `QueryError`, not a raw carrier — route it
@@ -280,7 +282,8 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             // variant — the ONLY classification surface.
             _ => alg.opaque_sentinel(err),
         },
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params,
             return_type,
             type_parameters,
@@ -298,7 +301,10 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
                 active,
             )?;
             let function = alg.build_function(folded);
-            alg.function_to_out(function)
+            match kind {
+                crate::semantic_query::SignatureKind::Call => alg.function_to_out(function),
+                crate::semantic_query::SignatureKind::Construct => alg.constructor_to_out(function),
+            }
         }
         SemanticNodeData::DeclRef { identity } => {
             alg.reference(Arc::clone(&identity.decl_name), Vec::new())
@@ -347,13 +353,6 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             )
         }
         SemanticNodeData::RawFallback { value } => alg.unknown(value.clone()),
-        SemanticNodeData::ConstructorType { signature } => {
-            let raised = fold_node(alg, dispatch, *signature, active)?;
-            match alg.out_as_function(&raised) {
-                Some(function) => alg.constructor_to_out(function),
-                None => raised,
-            }
-        }
         SemanticNodeData::SyntheticBinding { id, value_node } => {
             alg.synthetic_slot_binding(Arc::new(id.to_carrier_key(*value_node)))
         }
@@ -375,7 +374,7 @@ fn fold_index_key<A: RaisedShapeAlgebra>(
     })
 }
 
-/// Fold a [`SemanticNodeData::Function`] payload into a [`FoldedFunction`].
+/// Fold a [`SemanticNodeData::Signature`] payload into a [`FoldedFunction`].
 /// `None` when any parameter, the required return, or a present-but-unraisable
 /// type-param slot fails (presence-aware whole-composite failure).
 #[allow(clippy::too_many_arguments)]
@@ -511,7 +510,11 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
 
     for signature in surface.construct_signatures.iter() {
         let raised = fold_member(alg, dispatch, *signature);
-        if let Some(function) = alg.out_as_function(&raised) {
+        if let Some(function) = alg.out_as_constructor(&raised) {
+            members.push(alg.member_construct_signature(function));
+        } else if let Some(function) = alg.out_as_function(&raised) {
+            // Legacy call-kind entry in a construct bucket (surface
+            // position defines construct-ness) — still publishes.
             members.push(alg.member_construct_signature(function));
         } else {
             dropped.push(raised);

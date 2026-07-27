@@ -12,7 +12,7 @@ TypeOf | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,Normali
 NormalizeUnion | Live | TypeNode | T L J | — | (members) | — | Singleflight
 NormalizeIntersection | Live | TypeNode | T L J | — | (members) | — | Singleflight
 ProjectPath | Live | TypeNode | T L J | Path,Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | vue_heritage_policy_is_family_identity_for_every_projection_reduction_family | Singleflight
-Relate | Live | Relation | R T L J | — | (source,target,relation,policy,source_freshness,inference_context,context) | — | RelationMemo
+Relate | Live | Relation | R T L J | — | (source,target,relation,policy,source_freshness,inference_context,context) | — | Singleflight
 ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | MacroPayloadContext | resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit | Singleflight
 ResolveClassSurface | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight
 ResolveAmbientNamespace | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | AmbientNamespaceContext | resolve_ambient_namespace_do_not_warm_hit | NonProducingPendingReducer

@@ -541,6 +541,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
         | Some(SemanticNodeData::RawFallback { .. })
         | Some(SemanticNodeData::TypeParam { .. })
         | Some(SemanticNodeData::Infer { .. })
+        | Some(SemanticNodeData::InferRef { .. })
         | Some(SemanticNodeData::SyntheticBinding { .. })
         | None => false,
         Some(
@@ -556,8 +557,7 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
             | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::Function { .. }
-            | SemanticNodeData::ConstructorType { .. }
+            | SemanticNodeData::Signature { .. }
             | SemanticNodeData::MergedDecl { .. },
         ) => true,
         // Reference carriers are rejected by the head check above.

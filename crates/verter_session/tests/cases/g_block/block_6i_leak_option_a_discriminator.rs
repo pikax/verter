@@ -303,7 +303,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let badge_in_args = instantiation_ref_args_contain_string_literal(graph, value_node, "badge");
     let badge_in_conditional = matches!(
         value_data.as_ref(),
-        SemanticNodeData::Conditional { .. } | SemanticNodeData::Function { .. }
+        SemanticNodeData::Conditional { .. } | SemanticNodeData::Signature { .. }
     );
     assert!(
         badge_in_args || badge_in_conditional,
@@ -338,7 +338,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let title_in_args = instantiation_ref_args_contain_string_literal(graph, title_value, "title");
     let title_in_conditional = matches!(
         title_data.as_ref(),
-        SemanticNodeData::Conditional { .. } | SemanticNodeData::Function { .. }
+        SemanticNodeData::Conditional { .. } | SemanticNodeData::Signature { .. }
     );
     assert!(
         title_in_args || title_in_conditional,

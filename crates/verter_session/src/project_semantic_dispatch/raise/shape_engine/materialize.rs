@@ -689,6 +689,16 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         }
     }
 
+    fn out_as_constructor(&self, out: &MaterializedTypeExpr) -> Option<MaterializedFunction> {
+        match out.expr() {
+            TypeExpr::ConstructorType(function) => Some(MaterializedFunction {
+                function: Arc::clone(function),
+                degraded_leaves: out.degraded_leaves.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     fn member_property(
         &mut self,
         name: String,

@@ -3390,7 +3390,7 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
 
     // Sanity: the memo stores the NotAssignable judgement so repeat
     // calls warm-hit instead of recomputing.
-    let (relation, _fence) = dispatch.relate_nodes(union_check, string_node);
+    let relation = dispatch.execute_relate_pair_as_result_for_tests(union_check, string_node);
     assert_eq!(
         relation,
         crate::semantic_query::RelationResult::NotAssignable,
@@ -7029,7 +7029,8 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
     let string_node = primitive(&graph, PrimitiveKind::String);
     let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
     let void_node = primitive(&graph, PrimitiveKind::Void);
-    let function = graph.intern_node(SemanticNodeData::Function {
+    let function = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![
                 FunctionParam {
@@ -7670,7 +7671,7 @@ fn non_nullable_reduces_settled_operands() {
 /// `ReturnType<typeof fn>` routes purely through dispatch.
 /// `build_typeof` lowers the value to a
 /// [`SemanticNodeData::Object`] whose `call_signatures[0]` is a
-/// canonical [`SemanticNodeData::Function`]. `build_builtin_utility`
+/// canonical [`SemanticNodeData::Signature`]. `build_builtin_utility`
 /// unwraps the call signature and returns the function's return-type
 /// node, with an `Instantiate` edge on the result. This guards the
 /// dispatch gap that previously needed the retired `SessionSolverHost`
@@ -7718,7 +7719,7 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
             );
             let sig_id = surface.call_signatures[0];
             match &*graph.node_data(sig_id).expect("call sig data") {
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
                     params,
                     return_type,
                     ..
@@ -8742,7 +8743,7 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
         "distinct base primitives must not alias under structural interning"
     );
 
-    let (result, _fence) = dispatch.relate_nodes(source, target);
+    let result = dispatch.execute_relate_pair_as_result_for_tests(source, target);
     assert!(
         matches!(result, RelationResult::NotAssignable),
         "iterative relate must walk a 500-deep readonly Array \
@@ -8777,7 +8778,8 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
     });
-    let extends = graph.intern_node(SemanticNodeData::Function {
+    let extends = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
@@ -8793,7 +8795,8 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         return_type_span: None,
     });
     // check = `(x: string) => any` — concrete Function.
-    let check = graph.intern_node(SemanticNodeData::Function {
+    let check = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
@@ -8829,6 +8832,87 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     );
 }
 
+/// A LOSING overload alternative must not contribute inference
+/// candidates: for
+/// `{ (a: number, b: number): void; (a: string, b: string): void }
+///  extends (a: infer U, b: string) => void ? U : never`
+/// the first overload deposits `U := number` and then FAILS on
+/// `b: number ⊬ string`; only the second (succeeding) overload's
+/// deposit `U := string` may reach fixation. Without per-alternative
+/// rollback the two contravariant candidates intersect and `U`
+/// collapses to `never`.
+#[test]
+fn losing_overload_alternative_deposits_do_not_reach_fixation() {
+    use crate::semantic_query::{FunctionParam, SignatureKind, TypeParamDecl};
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let void_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
+    let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+
+    let call_sig = |a: SemanticNodeId, b: SemanticNodeId| {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: SignatureKind::Call,
+            params: Arc::from(
+                vec![
+                    FunctionParam::synthetic(Some(Arc::from("a")), a, false, false),
+                    FunctionParam::synthetic(Some(Arc::from("b")), b, false, false),
+                ]
+                .into_boxed_slice(),
+            ),
+            return_type: void_node,
+            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+
+    // check = the overloaded callable object:
+    // `{ (a: number, b: number): void; (a: string, b: string): void }`.
+    let check = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: Arc::from(Vec::new().into_boxed_slice()),
+        call_signatures: Arc::from(
+            vec![
+                call_sig(number_node, number_node),
+                call_sig(string_node, string_node),
+            ]
+            .into_boxed_slice(),
+        ),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
+
+    // extends = `(a: infer U, b: string) => void`.
+    let infer_u = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("U"),
+    });
+    let extends = call_sig(infer_u, string_node);
+
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
+        check,
+        extends,
+        true_branch: infer_u,
+        false_branch: never_node,
+        distributive: false,
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+
+    assert_eq!(
+        result,
+        string_node,
+        "only the SUCCEEDING overload's deposit fixes: `U` must be `string`, \
+         never the losing alternative's intersection; got {:?}",
+        graph.node_data(result)
+    );
+}
+
 /// `substitute_semantic_type_param`'s `Function` arm must recurse
 /// into `params` and `return_type` and rebuild the shell with
 /// substituted member types. A catch-all `_ => node` would leave
@@ -8850,7 +8934,8 @@ fn substitute_recurses_into_function_params_and_return_type() {
         display_name: Arc::from("T"),
     });
     // `(x: T) => T` — both param and return reference T.
-    let fn_node = graph.intern_node(SemanticNodeData::Function {
+    let fn_node = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
@@ -8870,7 +8955,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
     let substituted = dispatch.substitute_semantic_type_param(fn_node, t_param, string_node);
     let data = graph.node_data(substituted).expect("substituted data");
     match data.as_ref() {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..
@@ -9492,7 +9577,8 @@ fn unary_function(
     return_ty: SemanticNodeId,
 ) -> SemanticNodeId {
     use crate::semantic_query::FunctionParam;
-    graph.intern_node(SemanticNodeData::Function {
+    graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam {
                 name: Some(Arc::from("p")),
@@ -11946,7 +12032,8 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
 
     // Node route, FUNCTION value surface: `Wrap2<() => T>['a']` is OPEN,
     // the `() => string` twin CLOSED.
-    let fn_open = graph.intern_node(SemanticNodeData::Function {
+    let fn_open = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: t_param,
         type_parameters: Arc::from(
@@ -11968,7 +12055,8 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         "Omit<Wrap2<() => T>['a'], 'x'> (node route) must be OPEN — function \
          params/returns are value surfaces at ValueSensitive"
     );
-    let fn_closed = graph.intern_node(SemanticNodeData::Function {
+    let fn_closed = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: string_ty,
         type_parameters: Arc::from(
@@ -12849,7 +12937,8 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // no closed-key claim. The function argument is a closed LEAF at
     // `KeyDomain`, so an all-args rule would wrongly prove the produced
     // key domain (the open `T`!) closed.
-    let fn_to_t = graph.intern_node(SemanticNodeData::Function {
+    let fn_to_t = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: t_param,
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
@@ -12869,7 +12958,8 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // Even with an ALL-CLOSED argument, a value-producing utility stays
     // not-provably-closed: the produced keys come from the argument's
     // VALUE structure the key-domain walk never proved finite.
-    let fn_to_obj = graph.intern_node(SemanticNodeData::Function {
+    let fn_to_obj = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: simple_object(&graph, &[("a", string_ty)]),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
@@ -16331,7 +16421,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
 /// in `shallow_lower_type_expr_with_context` (lower.rs).
 ///
 /// A bare constructor type `new (x: Foo) => Bar` lowers through the SAME
-/// `SemanticNodeData::Function` carrier as `TypeExpr::Function` (conservative
+/// `SemanticNodeData::Signature` carrier as `TypeExpr::Function` (conservative
 /// function-like treatment; the constructor-vs-function distinction is consumed
 /// by the Vue runtime-ctor reducer + the wire-graph builder BEFORE query-time
 /// dispatch). It MUST NOT route to the wildcard `_ => opaque(QueryError::Miss)`
@@ -16341,7 +16431,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
 /// wildcard absorbed it and produced `SemanticNodeData::Opaque(QueryError::Miss)`
 /// — so query-time projection of `defineProps<{ f: new () => Foo }>()` regressed
 /// `f` to `Unknown("semanticMiss")`. This test asserts (a) the lowered node is
-/// `SemanticNodeData::Function` (NOT `Opaque`), preserving the parameter, and
+/// `SemanticNodeData::Signature` (NOT `Opaque`), preserving the parameter, and
 /// (b) it raises back to `TypeExpr::Function`. Both assertions FAIL against the
 /// pre-fix wildcard.
 #[test]
@@ -16397,7 +16487,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     // single parameter survives lowering.
     let data = graph.node_data(lowered).expect("constructor type interned");
     match data.as_ref() {
-        SemanticNodeData::Function { params, .. } => {
+        SemanticNodeData::Signature { params, .. } => {
             assert_eq!(
                 params.len(),
                 1,
@@ -16415,24 +16505,24 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
              absorbed it instead of the explicit ConstructorType arm lowering it \
              function-like",
         ),
-        other => panic!("expected SemanticNodeData::Function, got {other:?}"),
+        other => panic!("expected SemanticNodeData::Signature, got {other:?}"),
     }
 
-    // (b) Raising the carrier back yields `TypeExpr::Function` (the bound
-    // function-like wire decision: the constructor distinction is erased at the
-    // query-time round-trip boundary, never surfaced as `semanticMiss`).
+    // (b) Raising the carrier back yields `TypeExpr::ConstructorType` — the
+    // call/construct distinction is SEMANTIC and survives the round trip
+    // (never surfaced as `semanticMiss`).
     let raised = dispatch
         .materialize_output_type_expr_for_test(lowered)
-        .expect("function carrier must raise back to a TypeExpr");
+        .expect("signature carrier must raise back to a TypeExpr");
     match &raised {
-        TypeExpr::Function(func) => {
+        TypeExpr::ConstructorType(func) => {
             assert_eq!(
                 func.parameters.len(),
                 1,
-                "raised function must preserve the constructor-type parameter",
+                "raised constructor must preserve its parameter",
             );
         }
-        other => panic!("expected raised TypeExpr::Function, got {other:?}"),
+        other => panic!("expected raised TypeExpr::ConstructorType, got {other:?}"),
     }
 }
 
@@ -16663,7 +16753,7 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
     let function_shape =
         |data: &SemanticNodeData| -> Option<(usize, Option<Arc<SemanticNodeData>>)> {
             match data {
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
                     params,
                     type_parameters,
                     ..
@@ -18729,7 +18819,7 @@ fn signature_return_data(
 ) -> SemanticNodeData {
     let graph = host.project_type_store().semantic_graph();
     let data = graph.node_data(sig.node);
-    let Some(SemanticNodeData::Function { return_type, .. }) = data.as_deref() else {
+    let Some(SemanticNodeData::Signature { return_type, .. }) = data.as_deref() else {
         panic!("overload-set entry must be a Function node, got {data:?}");
     };
     let ret = graph
@@ -18848,7 +18938,7 @@ fn resolve_overload_set_applies_explicit_type_args_per_candidate() {
         .unwrap_or_else(|err| panic!("instantiated overload set must resolve, got {err:?}"));
     assert_eq!(refs.len(), 1);
     let data = graph.node_data(refs[0].node);
-    let Some(SemanticNodeData::Function {
+    let Some(SemanticNodeData::Signature {
         params,
         return_type,
         type_parameters,
@@ -19065,7 +19155,8 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
         base: decl_identity_value(host, "/w/class_mech.ts", "Boxed"),
         args: Arc::from(vec![t_param].into_boxed_slice()),
     });
-    let func = graph.intern_node(SemanticNodeData::Function {
+    let func = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: carrier_return,
         type_parameters: Arc::from(

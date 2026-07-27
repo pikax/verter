@@ -1246,7 +1246,7 @@ fn instance_export_display_node(
             let sig = surface.call_signatures[0];
             if matches!(
                 store.node_data(follow_alias_chain(store, sig)).as_deref(),
-                Some(SemanticNodeData::Function { .. })
+                Some(SemanticNodeData::Signature { .. })
             ) {
                 return sig;
             }

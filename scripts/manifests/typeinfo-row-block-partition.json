@@ -231,12 +231,6 @@
     },
     {
       "file": "relation_semantics.rs",
-      "function": "relation_optional_property_not_assignable_to_required",
-      "block": "U2.RELATION_INFER",
-      "capability": "RelationSemantics"
-    },
-    {
-      "file": "relation_semantics.rs",
       "function": "relation_readonly_property_assignable_to_mutable",
       "block": "U2.RELATION_INFER",
       "capability": "RelationSemantics"

@@ -4,7 +4,7 @@
 //! [`TypeInfoSurface`] is the typeinfo-owned PUBLIC projection of the shared
 //! semantic graph's one-level surface ([`SurfaceView`]). It is a THIN
 //! projection — it reads the span-rich GRAPH payloads
-//! ([`SurfaceMember::spans`], [`SemanticNodeData::Function`]'s
+//! ([`SurfaceMember::spans`], [`SemanticNodeData::Signature`]'s
 //! `signature_span` / `return_type_span`, [`IndexSignature::spans`]) and pairs
 //! each span with its DECLARATION file. For a named member / index signature
 //! that file is the member's own `declaration_origin` (stamped from the
@@ -480,7 +480,7 @@ fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfo
     let canonical = node_origin_file(graph, node);
     let (signature_span, parameter_spans, return_type_span) = match graph.node_data(node) {
         Some(data) => match &*data {
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 signature_span,
                 return_type_span,

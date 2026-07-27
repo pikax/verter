@@ -858,8 +858,9 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    `ReturnOnly`-prone only when it is INPUT-DEGRADED — a §18.4 property routed
    through `admit_decision` once taint producers land (see the `TODO(§18.4)` in
    `absorbed_output`). `error` relates **bidirectionally like `any`** in
-   `relate_nodes` (so a broken sub-result never cascades spurious
-   `NotAssignable`). `QueryError::DeclPlaceholder` is an expandable carrier, NOT
+   the relation authority (`execute_relate` — the wildcard fires in both the
+   O(tag) prefilter and the structural reducer, before the `never` bottom arm,
+   so a broken sub-result never cascades spurious `NotAssignable`). `QueryError::DeclPlaceholder` is an expandable carrier, NOT
    the error type, and is excluded from both the absorption and the relation
    flip.
 

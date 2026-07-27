@@ -1071,11 +1071,13 @@ pub fn audit_key_for_node(
             "TypeParam({}::{}#{})",
             decl.canonical_id, display_name, param_index
         ),
-        SemanticNodeData::Infer { name } => format!("Infer({name})"),
+        SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
+            format!("Infer({name})")
+        }
         SemanticNodeData::Conditional { distributive, .. } => {
             format!("Conditional(distributive={distributive})")
         }
-        SemanticNodeData::Function { params, .. } => format!("Function[{}p]", params.len()),
+        SemanticNodeData::Signature { params, .. } => format!("Function[{}p]", params.len()),
         SemanticNodeData::DeclRef { identity } => {
             format!("DeclRef({}::{})", identity.canonical_id, identity.decl_name)
         }
@@ -1101,9 +1103,6 @@ pub fn audit_key_for_node(
             )
         }
         SemanticNodeData::RawFallback { value } => format!("RawFallback(\"{}\")", value.raw()),
-        SemanticNodeData::ConstructorType { signature } => {
-            format!("ConstructorType({})", signature.0)
-        }
         SemanticNodeData::SyntheticBinding { id: binding, .. } => format!(
             "SyntheticBinding({}::{})",
             binding.scope_canonical_id, binding.binding_name

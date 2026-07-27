@@ -22,7 +22,7 @@ use super::projectors::define_shapes::slot_field_function_source;
 // Test 1 — `slot_field_function_source` publishes the slot's content-free
 // SOURCE: the authored payload position when the resolver stamped one, else
 // the closed FUNCTION fact whose composition through the shared bridge
-// interns a real `SemanticNodeData::Function` carrier (node synthesis is
+// interns a real `SemanticNodeData::Signature` carrier (node synthesis is
 // demand-driven at the raise, never an eager `TypeExpr`).
 // ---------------------------------------------------------------------------
 
@@ -118,7 +118,7 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
     assert!(
         matches!(
             data.as_deref(),
-            Some(crate::semantic_query::SemanticNodeData::Function { params, .. }) if params.len() == 1
+            Some(crate::semantic_query::SemanticNodeData::Signature { kind: _, params, .. }) if params.len() == 1
         ),
         "the raised closed Function fact must intern a Function carrier with the props param, got {data:?}"
     );

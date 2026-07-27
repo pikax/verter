@@ -5,7 +5,7 @@
  * Emits three checked-in, generated-not-hand-maintained files:
  *
  * 1. `crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
- *    — the 356 `IgnoredTestRow`s, each with the full 13-column schema.
+ *    — the 355 `IgnoredTestRow`s, each with the full 13-column schema.
  * 2. `crates/verter_session/tests/cases/manifest_data/typeinfo_additional_proof_rows.rs`
  *    — the CLOSED set of 7 coverage-only `AdditionalProofRow`s.
  * 3. `crates/verter_session/tests/cases/manifest_data/typeinfo_parity_blocks.rs`
@@ -16,7 +16,7 @@
  * authoritative machine-readable row→block partition in
  * `scripts/manifests/typeinfo-row-block-partition.json` joined with the live
  * `#[ignore = "..."]` discovery + the Capability Map — NOT hand-typed
- * 356 times. The `AdditionalProofRow` table (file 2) and the
+ * 355 times. The `AdditionalProofRow` table (file 2) and the
  * `TYPEINFO_PARITY_BLOCKS` DAG (file 3, with each block's
  * `required_guards`/`verification_labels`/prereqs/mechanisms) are
  * authored in this generator's own data maps (`buildAdditionalRows`,
@@ -3019,8 +3019,8 @@ function main(checkOnly = false) {
     });
   }
 
-  if (rows.length !== 356) {
-    process.stderr.write(`error: expected 356 IgnoredTestRows, built ${rows.length}\n`);
+  if (rows.length !== 355) {
+    process.stderr.write(`error: expected 355 IgnoredTestRows, built ${rows.length}\n`);
     return 5;
   }
 

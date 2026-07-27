@@ -3,7 +3,7 @@
 //! The 26 relation identities of `RELATION_QUERY_SPECS`, each validated
 //! against its checked-in tsgo-captured snapshot through the relation
 //! consumption driver (`oracle::relation_driver`) — tsgo NEVER launches here.
-//! Parity is enforced for the 17 non-ledger rows; the 9 known-mismatch ledger
+//! Parity is enforced for the 18 non-ledger rows; the 8 known-mismatch ledger
 //! rows assert the engine's live answer against the registry PIN instead, so a
 //! future engine fix flips loudly. This family is NOT M=0: the honest state is
 //! captured-records-with-known-mismatch-ledger
@@ -143,16 +143,16 @@ fn relation_infer_rows_capture_ordered_bindings_with_projected_bounds() {
 }
 
 // =====================================================================
-// The family-execute guard: `execute(SemanticQueryKey::Relate)`
-// stays an explicit `Miss` (the relation engine rides `relate_nodes`,
-// never the family execute path).
+// The family-execute ACTIVATION guards: `execute(SemanticQueryKey::Relate)`
+// is the LIVE sole relation authority (the degenerate `Miss` arm and the
+// execute-invisibility fence are deleted; the adapter rides it).
 // =====================================================================
 
 #[test]
-fn relate_family_execute_stays_an_explicit_miss() {
+fn relate_family_execute_is_the_live_relation_authority() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
-        ProjectionMode, QueryError, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        ProjectionMode, QueryResult, RelationOutcome, SemanticQueryApi, SemanticQueryValue,
     };
     use std::sync::Arc;
 
@@ -180,49 +180,42 @@ fn relate_family_execute_stays_an_explicit_miss() {
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
-    // The full relation identity (the same constructor `relate_nodes` uses).
-    let key = dispatch.relate_memo_key(source, target);
-    let result = dispatch.execute_type_node(SemanticQueryKey::Relate {
-        source: key.source,
-        target: key.target,
-        relation: key.relation,
-        policy: key.policy,
-        source_freshness: key.source_freshness,
-        inference_context: key.inference_context,
-        context: key.context,
-    });
-    assert!(
-        matches!(result, QueryResult::Error(QueryError::Miss)),
-        "the family `execute(Relate)` path must stay an explicit Miss this block, got {result:?}"
-    );
+    // The full relation identity (the same constructor the authority uses).
+    let key = dispatch.relate_key_for(source, target);
+    let result = dispatch.execute(key.to_query_key());
+    match result {
+        QueryResult::Value(output) => match output.value {
+            SemanticQueryValue::Relation(payload) => {
+                assert_eq!(
+                    payload.outcome,
+                    RelationOutcome::NotAssignable,
+                    "string is not assignable to number — the live authority must decide"
+                );
+            }
+            other => panic!("execute(Relate) must produce SemanticQueryValue::Relation, got {other:?}"),
+        },
+        other => panic!(
+            "execute(Relate) must be a LIVE producer (the degenerate Miss arm is deleted), got {other:?}"
+        ),
+    }
 }
 
-/// WARM-leak discriminator (the activation leak): after a relation
-/// judgement is planted through the PRODUCTION admission path
-/// (`relate_nodes`), a warm relation entry exists in the family memo's
-/// `Relate` family. `execute(SemanticQueryKey::Relate)` on the SAME full
-/// identity must STILL be an explicit `Miss` — never the stored compute
-/// verdict — and `execute_type_node` must keep its pre-rehome behavior
-/// (explicit `Miss`, NOT a `ValueDomainMismatch` raised on the stored
-/// `RelationVerdict`).
-///
-/// DISCRIMINATES against the warm-serve leak: without the
-/// execute-invisibility fence, the execute warm path resolves the same
-/// `(FamilyKey::Relate, ModeSlot::Single)` slot the admission planted
-/// and serves it — `execute` returns `Value(RelationVerdict(..))` and
-/// `execute_type_node` returns `Error(ValueDomainMismatch)`; both
-/// assertions fail. The cold-probe guard above stays: it covers the
-/// no-warm-entry case.
+/// WARM replay + non-aliasing guard (the activation's warm path): a
+/// decided judgement admits into the `Relate` family and warm-serves the
+/// SAME payload through `execute(Relate)`; `execute_type_node(Relate)`
+/// rejects with `ValueDomainMismatch` (a Relation value never narrows to
+/// a type node); a generation bump misses the warm read and recomputes.
 #[test]
-fn relate_family_execute_stays_miss_with_warm_relation_entry() {
+fn relate_family_execute_warm_replays_decided_payload() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
-        ProjectionMode, QueryError, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        ProjectionMode, QueryError, QueryResult, RelationOutcome, SemanticQueryApi,
+        SemanticQueryValue,
     };
     use std::sync::Arc;
 
     let host = make_host_with_footprint();
-    let canonical = "/fixtures/relate_family_warm_leak.ts";
+    let canonical = "/fixtures/relate_family_warm_replay.ts";
     upsert_ts(
         &host,
         canonical,
@@ -245,63 +238,65 @@ fn relate_family_execute_stays_miss_with_warm_relation_entry() {
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
-    // Plant through the PRODUCTION admission path: `relate_nodes`
-    // computes and admits the judgement into the family memo's `Relate`
-    // family. The warm entry must really exist, else this test would not
-    // discriminate.
-    let (verdict, _fence) = dispatch.relate_nodes(source, target);
-    let key = dispatch.relate_memo_key(source, target);
+    let key = dispatch.relate_key_for(source, target);
+    let query_key = key.to_query_key();
+    // Cold decide → one admitted entry.
+    let first = dispatch.execute(query_key.clone());
     let graph = host.project_type_store().semantic_graph();
     assert_eq!(
         graph.relation_memo_count(),
         1,
-        "fixture: the production admission path planted one relation entry",
+        "fixture: the cold decide admitted one relation entry",
     );
     assert!(
-        graph.get_relation(host.as_ref(), &key).is_some(),
-        "fixture: the planted entry warm-serves through `get_relation`",
+        graph.get_relation_payload(host.as_ref(), &key).is_some(),
+        "fixture: the admitted entry warm-serves through the payload read",
     );
-
-    let query_key = SemanticQueryKey::Relate {
-        source: key.source,
-        target: key.target,
-        relation: key.relation,
-        policy: key.policy,
-        source_freshness: key.source_freshness,
-        inference_context: key.inference_context.clone(),
-        context: key.context,
-    };
-    let _ = verdict;
-
-    // `execute(Relate)` on the SAME full identity: explicit Miss, never
-    // the stored verdict.
-    let executed = dispatch.execute(query_key.clone());
-    assert!(
-        matches!(executed, QueryResult::Error(QueryError::Miss)),
-        "with a warm relation entry planted, `execute(Relate)` must STILL be an explicit \
-         Miss — the stored compute verdict must not warm-serve the family execute path \
-         (activation leak), got {executed:?}",
-    );
-
-    // `execute_type_node(Relate)`: unchanged pre-rehome behavior — an
-    // explicit Miss, NOT a `ValueDomainMismatch` raised on the stored
-    // `RelationVerdict`.
-    let executed_node = dispatch.execute_type_node(query_key);
-    assert!(
-        matches!(executed_node, QueryResult::Error(QueryError::Miss)),
-        "with a warm relation entry planted, `execute_type_node(Relate)` must keep its \
-         pre-rehome explicit Miss (never a ValueDomainMismatch on the stored verdict), \
-         got {executed_node:?}",
-    );
-
-    // The relation entry itself is untouched by the execute misses.
     assert!(
         matches!(
-            graph.get_relation(host.as_ref(), &key),
-            Some((_, crate::semantic_query::RelationResult::NotAssignable))
+            first,
+            QueryResult::Value(ref output)
+                if matches!(&output.value, SemanticQueryValue::Relation(payload)
+                    if payload.outcome == RelationOutcome::NotAssignable)
         ),
-        "the planted judgement stays readable through `get_relation` (the sole relation \
-         read surface)",
+        "the cold decide must produce the NotAssignable payload",
+    );
+
+    // Warm replay: the SAME `execute(Relate)` serves the SAME payload
+    // without growing the memo (the activation's warm path).
+    let second = dispatch.execute(query_key.clone());
+    assert!(
+        matches!(
+            second,
+            QueryResult::Value(ref output)
+                if matches!(&output.value, SemanticQueryValue::Relation(payload)
+                    if payload.outcome == RelationOutcome::NotAssignable)
+        ),
+        "the warm replay must serve the same NotAssignable payload",
+    );
+    assert_eq!(
+        graph.relation_memo_count(),
+        1,
+        "the warm replay must not grow the memo",
+    );
+
+    // `execute_type_node(Relate)`: a Relation value never narrows to a
+    // type node — `ValueDomainMismatch`, never a fabricated node.
+    let executed_node = dispatch.execute_type_node(query_key);
+    assert!(
+        matches!(
+            executed_node,
+            QueryResult::Error(QueryError::ValueDomainMismatch { .. })
+        ),
+        "execute_type_node(Relate) must reject a Relation value with ValueDomainMismatch, got {executed_node:?}",
+    );
+
+    // Generation gate: a project-generation bump misses the warm read
+    // (the entry stays but recomputes on next ask).
+    host.project_type_store().bump_project_generation();
+    assert!(
+        graph.get_relation_payload(host.as_ref(), &key).is_none(),
+        "a project-generation bump must miss the warm relation read",
     );
 }
 

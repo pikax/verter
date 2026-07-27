@@ -104,7 +104,8 @@ fn function_shape(
     let graph = dispatch.graph();
     let data = graph.node_data(node)?;
     match data.as_ref() {
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind: _,
             params,
             type_parameters,
             ..

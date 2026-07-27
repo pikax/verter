@@ -224,7 +224,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `Infer` binder. Under a `TypeParam` binder the node is
             // a fresh conditional-scoped declaration shadowing the
             // parameter — never an occurrence of it.
-            SemanticNodeData::Infer { name }
+            SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name }
                 if parameter_is_infer
                     && parameter_name
                         .as_ref()
@@ -526,14 +526,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
                 }
-                // Shadowing check by node-id equality. Both
-                // `mapper.parameter` and `parameter` are
-                // `SemanticNodeId`s, so the comparison is direct
-                // and distinguishes a mapper that binds the same
-                // node-id as the caller's `parameter_node` from one
-                // that binds a structurally-equivalent but distinct
-                // binder identity.
-                let shadowed = mapper.parameter_node == parameter_node;
+                // Shadowing check on BOTH rewrite axes. Node-id equality
+                // covers the `TypeParam`-binder rewrite (node-id-based —
+                // a distinct binder identity cannot be captured by it).
+                // An `Infer` binder ALSO rewrites by NAME (the
+                // cross-variant bridge above), so a mapped key parameter
+                // that merely shares the binder's NAME shadows it inside
+                // the positions the mapped binder scopes (`value_expr` +
+                // the `as`-remap `name_type`) — a node-id-only check let
+                // the outer `infer K` capture the mapped's own `K`
+                // occurrences across the `Infer`/`TypeParam` boundary.
+                // `source` / `key_space` are OUTSIDE the mapped binder's
+                // scope and keep substituting either way.
+                let name_shadowed = parameter_is_infer
+                    && parameter_name.as_ref().is_some_and(|binder_name| {
+                        matches!(
+                            self.graph().node_data(mapper.parameter_node).as_deref(),
+                            Some(
+                                SemanticNodeData::TypeParam { display_name, .. }
+                            ) if display_name.as_ref() == binder_name.as_ref()
+                        )
+                    });
+                let shadowed = mapper.parameter_node == parameter_node || name_shadowed;
                 let (sub_source, source_changed) =
                     self.substitute_with_change_tracking(*source, parameter_node, arg);
                 let (sub_key_space, key_space_changed) =
@@ -635,12 +649,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
                 }
+                // Capture-avoidance for an `Infer` binder — the same
+                // shadow rule the Mapped arm applies, here on the
+                // conditional-scope axis: a
+                // nested conditional whose OWN `extends` pattern DECLARES
+                // the same infer name RE-BINDS it — `Infer { name }` is
+                // name-identity, so the inner declaration IS the binder
+                // node. The re-binding scopes the extends pattern and the
+                // TRUE branch; the check and the FALSE branch stay in the
+                // OUTER binder's scope and still substitute. The
+                // detection is DECLARATION-scoped
+                // ([`Self::extends_pattern_declares_infer`]): a bare
+                // REFERENCE to the outer binder (a same-name `TypeParam`
+                // shell) does not shadow, and an `Infer` declared under a
+                // deeper `Conditional`/`Mapped` scope inside `extends`
+                // binds at THAT level, not here.
+                let shadowed_by_inner_infer = parameter_is_infer
+                    && self.extends_pattern_declares_infer(*extends, parameter_node);
                 let (sub_check, cc) =
                     self.substitute_with_change_tracking(*check, parameter_node, arg);
-                let (sub_extends, ec) =
-                    self.substitute_with_change_tracking(*extends, parameter_node, arg);
-                let (sub_true, tc) =
-                    self.substitute_with_change_tracking(*true_branch_ref, parameter_node, arg);
+                let (sub_extends, ec) = if shadowed_by_inner_infer {
+                    (*extends, false)
+                } else {
+                    self.substitute_with_change_tracking(*extends, parameter_node, arg)
+                };
+                let (sub_true, tc) = if shadowed_by_inner_infer {
+                    (*true_branch_ref, false)
+                } else {
+                    self.substitute_with_change_tracking(*true_branch_ref, parameter_node, arg)
+                };
                 let (sub_false, fc) =
                     self.substitute_with_change_tracking(*false_branch_ref, parameter_node, arg);
                 if !(cc || ec || tc || fc) {
@@ -708,13 +745,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // when the outer binder fires. This is the primary
             // materialisation path for nested-infer in TS conditional
             // `extends` clauses.
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
+                kind,
                 params,
                 return_type,
                 type_parameters,
                 signature_span,
                 return_type_span,
             } => {
+                // Capture-avoidance (the Mapped-arm precedent, on the
+                // NAME axis the Infer binder rewrites by): a function
+                // whose OWN `type_parameters` declare the binder's name
+                // SHADOWS it for the whole signature — its params,
+                // return, and constraint/default positions reference the
+                // inner declaration, never the outer infer binder. Do
+                // not descend; a name-rewrite here would capture the
+                // shadowed binder (`<U>() => U` must never become
+                // `<U>() => bound`).
+                if parameter_is_infer {
+                    if let Some(binder_name) = parameter_name.as_ref() {
+                        if type_parameters
+                            .iter()
+                            .any(|tp| tp.name.as_ref() == binder_name.as_ref())
+                        {
+                            return (node, false);
+                        }
+                    }
+                }
                 let mut any_changed = false;
                 let mut new_params = Vec::with_capacity(params.len());
                 for param in params.iter() {
@@ -765,7 +822,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (
                     self.graph().intern_preserving_scope(
                         node,
-                        SemanticNodeData::Function {
+                        SemanticNodeData::Signature {
+                            kind: *kind,
                             params: Arc::from(new_params.into_boxed_slice()),
                             return_type: sub_return,
                             type_parameters: Arc::from(new_type_parameters.into_boxed_slice()),
@@ -828,6 +886,137 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => (node, false),
         }
+    }
+
+    /// Declaration-scoped shadow predicate for the Conditional
+    /// substitution arm: `true` iff `pattern` — a conditional's own
+    /// `extends` pattern — DECLARES the infer binder `binder` at THIS
+    /// pattern's level. Only a reachable `Infer` node with the binder's
+    /// name counts (name-identity interning makes the inner declaration
+    /// the binder node itself); explicitly NOT counted:
+    ///
+    /// - a bare REFERENCE to the name (a same-name `TypeParam` shell —
+    ///   references never re-bind);
+    /// - an `Infer` beneath a nested `Conditional` or `Mapped` inside the
+    ///   pattern — TS scopes `infer` to the NEAREST enclosing conditional
+    ///   (and a mapped type introduces its own binder scope), so such a
+    ///   declaration binds at that inner level, never at this one.
+    ///
+    /// This is deliberately a separate predicate from
+    /// [`Self::subtree_references_node`], whose unrestricted
+    /// reference-reachability semantics its other callers depend on.
+    fn extends_pattern_declares_infer(
+        &self,
+        pattern: SemanticNodeId,
+        binder: SemanticNodeId,
+    ) -> bool {
+        let Some(SemanticNodeData::Infer { name }) =
+            self.graph().node_data(binder).as_deref().cloned()
+        else {
+            return false;
+        };
+        let graph = self.graph();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = vec![pattern];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Infer { name: n } => {
+                    if n.as_ref() == name.as_ref() {
+                        return true;
+                    }
+                }
+                // A nested CONDITIONAL is the only infer-binding
+                // boundary: an `infer` beneath it declares at THAT
+                // conditional's level — do not descend. A `Mapped` is NOT
+                // a boundary — an `infer` in its source / value /
+                // `as`-remap declares for the ENCLOSING conditional (the
+                // `conditional_binds_mapped_as_remap_infer_in_true_branch`
+                // producer contract).
+                SemanticNodeData::Conditional { .. } => {}
+                SemanticNodeData::Mapped { source, mapper } => {
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    stack.push(mapper.value_expr);
+                    if let Some(remap) = mapper.name_remap {
+                        stack.push(remap);
+                    }
+                }
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
+                SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                    for member in members.iter() {
+                        stack.push(*member);
+                    }
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        stack.push(element.value);
+                    }
+                }
+                SemanticNodeData::Object(surface) => {
+                    for member in surface.members.iter() {
+                        stack.push(member.value);
+                    }
+                    for signature in surface.call_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.construct_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(k) = surface.keyspace {
+                        stack.push(k);
+                    }
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    ..
+                } => {
+                    for param in params.iter() {
+                        stack.push(param.ty);
+                    }
+                    stack.push(*return_type);
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(c);
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(d);
+                        }
+                    }
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    for arg in args.iter() {
+                        stack.push(*arg);
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for expr in expressions.iter() {
+                        stack.push(*expr);
+                    }
+                }
+                SemanticNodeData::KeyOf { base } => stack.push(*base),
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
+                        stack.push(*idx_node);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Read-only walker that returns `true` iff `target` is structurally
@@ -913,7 +1102,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // a fresh conditional-scoped declaration shadowing the
                 // parameter — substitute leaves it intact, so the
                 // walker must not count it as a reference.
-                SemanticNodeData::Infer { name } => {
+                SemanticNodeData::Infer { name } | SemanticNodeData::InferRef { name } => {
                     if target_is_infer {
                         if let Some(t) = target_name.as_ref() {
                             if t.as_ref() == name.as_ref() {
@@ -1021,7 +1210,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         stack.push(*contributor);
                     }
                 }
-                SemanticNodeData::Function {
+                SemanticNodeData::Signature {
                     params,
                     return_type,
                     type_parameters,

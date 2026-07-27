@@ -623,7 +623,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
 
     let is_assignable = |a: SemanticNodeId, b: SemanticNodeId| {
         matches!(
-            dispatch.relate_nodes(a, b).0,
+            dispatch.execute_relate_pair_as_result_for_tests(a, b),
             RelationResult::Assignable { .. }
         )
     };
@@ -669,7 +669,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     assert!(
         matches!(
-            dispatch.relate_nodes(string, number).0,
+            dispatch.execute_relate_pair_as_result_for_tests(string, number),
             RelationResult::NotAssignable
         ),
         "string <: number must stay NotAssignable — the bidirectional flip is error-specific"

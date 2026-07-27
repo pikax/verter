@@ -105,6 +105,7 @@ pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod relation;
 pub(crate) mod relation_predicates;
+pub(crate) mod relation_txn;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
@@ -317,6 +318,14 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// The transient per-relation-root cold-compute frame (design
+    /// `docs/arch/u2-relation-infer-design.md` §2.1): the ONE shared
+    /// re-entry / cycle-id space (only `Relate` wired at U2) with its
+    /// relation-assumption typed view, the SCC ledger, the inference
+    /// session stack, and the deferred-admission ledger. TRANSIENT, never
+    /// a cache key, never thread-local — it rides this dispatch exactly
+    /// like the other cold-compute cycle guards above.
+    pub(super) relation_txn: std::cell::RefCell<relation_txn::CheckerTransaction>,
     connected_demand: ConnectedDemandState,
     #[cfg(test)]
     connected_work_limit_for_tests: std::cell::Cell<usize>,
@@ -422,6 +431,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            relation_txn: std::cell::RefCell::new(relation_txn::CheckerTransaction::default()),
             connected_demand: ConnectedDemandState::new(
                 MAX_CONNECTED_PROJECTION_WORK,
                 MAX_CONNECTED_QUERY_DEPTH,
@@ -1040,7 +1050,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let graph = self.ctx.project_type_store().semantic_graph();
         let data = graph.node_data(node)?;
         match &*data {
-            SemanticNodeData::Function { .. } => {
+            // Both kinds intentionally: a lone signature of EITHER kind is
+            // its own overload set (mirroring the Object arm, which chains
+            // the call AND construct buckets); each `SignatureRef` node
+            // carries its kind for consumers to discriminate.
+            SemanticNodeData::Signature { .. } => {
                 Some(Arc::from(vec![SignatureRef { node }].into_boxed_slice()))
             }
             SemanticNodeData::Object(surface) => Some(Arc::from(
@@ -1583,25 +1597,14 @@ impl Drop for DispatchInjectParseFactGuard {
     }
 }
 
-/// Tri-state result of [`ProjectSemanticDispatch::shallow_relation_check`].
-/// The relation authority is [`ProjectSemanticDispatch::relate_nodes`];
-/// this enum only carries the hot-path fast-decision cases handled
-/// inline by `build_conditional` before falling through to the full
-/// engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShallowRelation {
-    Assignable,
-    NotAssignable,
-    Unknown,
-}
-
 /// Tri-state outcome of
 /// [`ProjectSemanticDispatch::conditional_branch_selection`] — the ONE
 /// shared conditional branch-selection oracle, factored out of
-/// `build_conditional`'s relation path (the pre-relation infer-pattern
-/// cases, then `shallow_relation_check`, then the full memoised
-/// `relate_nodes` engine) and reused by the key-domain closedness
-/// classifiers in `raise.rs` for selected-branch-only classification.
+/// `build_conditional`'s relation path (the infer-pattern cases and the
+/// full memoised relation engine, both through the sole relation
+/// authority `execute(SemanticQueryKey::Relate)`) and reused by the
+/// key-domain closedness classifiers in `raise.rs` for
+/// selected-branch-only classification.
 /// `Deferred` covers a genuinely undecidable relation (`Unknown`) AND
 /// the lattice-extreme checks that semantically use both branches
 /// (`any`) or dominate (`error`).
@@ -1610,27 +1613,6 @@ pub(super) enum ConditionalBranchSelection {
     True,
     False,
     Deferred,
-}
-
-/// Payload of a PRE-RELATION infer-pattern branch selection
-/// ([`ProjectSemanticDispatch::pre_relation_infer_selection`]) — the
-/// structural cases that select the TRUE branch before any relation
-/// query, owned by the shared oracle so `build_conditional`'s reduction
-/// and the `raise.rs` closedness classifiers cannot diverge on them.
-/// The payload carries what the selection BINDS: `build_conditional`
-/// substitutes the bindings into the true branch; the classifiers bind
-/// the branch's infer names to the same check-derived identities.
-#[derive(Debug, Clone)]
-pub(super) enum InferPatternSelection {
-    /// `check extends infer X ? T : F` — an infer pattern matches
-    /// anything ⇒ TRUE selected with `X := check`, for ANY check.
-    BareInfer { name: Arc<str> },
-    /// `check extends (x: infer U, …) => infer R ? T : F` — TRUE
-    /// selected with the positional `name := node` bindings extracted
-    /// from the materialised check signature (params zip + return).
-    FunctionInfer {
-        bindings: Vec<(Arc<str>, SemanticNodeId)>,
-    },
 }
 
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
@@ -2095,6 +2077,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = &key_for_build {
                 return self.build_classify_broad_runtime(subject);
             }
+            // The SOLE relation authority (design
+            // `docs/arch/u2-relation-infer-design.md`): `execute(Relate)`
+            // is a LIVE producer — decided binary judgements admit into
+            // the `Relate` family slot, `BudgetExceeded` returns-but-
+            // never-admits, undecided judgements surface `Miss`. The
+            // degenerate `Opaque(Miss)` arm and the execute-invisibility
+            // fence are deleted.
+            if let SemanticQueryKey::Relate { .. } = &key_for_build {
+                return self.build_relate(&crate::semantic_query::RelateMemoKey::from_query_key(
+                    &key_for_build,
+                ));
+            }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             if matches!(&key_for_build, SemanticQueryKey::Instantiate(_)) {
                 if let Err(reasons) = self.charge_connected_work() {
@@ -2186,17 +2180,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::NormalizeIntersection { members } => {
                     self.build_normalize_intersection(members)
                 }
-                // The relation engine routes through the family memo's
-                // `Relate` family (keyed on the full `RelateMemoKey`) via
-                // `relate_nodes` — `get_relation` /
-                // `compute_relation_and_admit` — not the cooperative
-                // `execute` path. The family `execute` path for `Relate` is
-                // therefore degenerate: it owns no relation logic and always
-                // yields `Opaque(Miss)`, fenced on the project generation so
-                // a stale miss never warms.
+                // The relation authority is handled BEFORE this match
+                // (the `build_relate` branch in `raw_build` above) — this
+                // arm is unreachable.
                 SemanticQueryKey::Relate { .. } => {
-                    let fence = self.project_generation_signature();
-                    (QueryResult::Error(QueryError::Miss), fence).into()
+                    unreachable!("execute(Relate) routes through build_relate, not the node-domain match")
                 }
                 SemanticQueryKey::ResolveMacroPayload {
                     owner,
@@ -2807,11 +2795,13 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         //
         // The helper already returns the typed semantic value held by the
         // family memo. This boundary adds only clean result provenance. The
-        // remaining non-producing keys (`Relate`, `ResolveAmbientNamespace`,
+        // remaining non-producing keys (`ResolveAmbientNamespace`,
         // `ResolveEnum`, `ApparentType`, `FlowNarrowingAt`,
         // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap.
-        // The boundary provenance is `clean` — a wrapper only, never a
-        // cached semantic fact.
+        // `Relate` is a LIVE producer (`build_relate`): its decided binary
+        // payloads reach the wrap; its undecided judgements surface
+        // `Error(Miss)`. The boundary provenance is `clean` — a wrapper
+        // only, never a cached semantic fact.
         match self.execute_via_cold_build_helper(key).value {
             QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
                 value,
@@ -3116,8 +3106,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
         // Hop 2: the slot value's first-parameter type holds the bindings.
+        // CALL kind only — a construct-signature slot value is not a
+        // callable slot shape and holds no bindings.
         let param0_ty = match node_data_for(self.ctx, slot_node).as_deref() {
-            Some(SemanticNodeData::Function { params, .. }) => match params.first() {
+            Some(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Call,
+                params,
+                ..
+            }) => match params.first() {
                 Some(param) => param.ty,
                 None => {
                     return CacheRead {

@@ -31,9 +31,9 @@ use verter_session::semantic_query::{
     OverloadSelectionPolicy, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
     RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureCode,
     RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationProofId,
-    RelationProofTable, RelationResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag, SubRelationPosition,
-    SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
+    RelationProofTable, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryKeyTag,
+    SemanticQueryValue, SemanticQueryValueTag, SubRelationPosition, SubRelationRef,
+    SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -296,12 +296,18 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
+    // The seed payload is a DECIDED outcome: under the
+    // `execute(SemanticQueryKey::Relate)` authority `Unknown` is never
+    // admitted to the relation memo (the
+    // retired `RelationResult::Unknown` seed has no admissible form). These guards assert
+    // memo SLOT COUNTS only — the outcome value is irrelevant to the
+    // re-keying discrimination.
     let publish = |key: RelateMemoKey| {
-        graph.insert_relation(
+        graph.insert_relation_payload_for_tests(
             key,
             ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new()),
-            RelationResult::Unknown,
+            graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
         );
     };
@@ -490,12 +496,18 @@ fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
+    // The seed payload is a DECIDED outcome: under the
+    // `execute(SemanticQueryKey::Relate)` authority `Unknown` is never
+    // admitted to the relation memo (the
+    // retired `RelationResult::Unknown` seed has no admissible form). These guards assert
+    // memo SLOT COUNTS only — the outcome value is irrelevant to the
+    // re-keying discrimination.
     let publish = |key: RelateMemoKey| {
-        graph.insert_relation(
+        graph.insert_relation_payload_for_tests(
             key,
             ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new()),
-            RelationResult::Unknown,
+            graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
         );
     };

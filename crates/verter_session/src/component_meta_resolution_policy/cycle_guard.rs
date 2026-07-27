@@ -195,7 +195,9 @@ fn normalize_one_node(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> Norm
     }
     match ctx.node_data(node).as_deref() {
         Some(SemanticNodeData::Literal(value)) => NormalizedTypeArg::Literal(hash_literal(value)),
-        Some(SemanticNodeData::Infer { .. }) => NormalizedTypeArg::None,
+        Some(SemanticNodeData::Infer { .. }) | Some(SemanticNodeData::InferRef { .. }) => {
+            NormalizedTypeArg::None
+        }
         _ => NormalizedTypeArg::AnonymousShape(hash_node(node, ctx)),
     }
 }
@@ -446,6 +448,10 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(18);
             hasher.write(name.as_bytes());
         }
+        SemanticNodeData::InferRef { name } => {
+            hasher.write_u8(27);
+            hasher.write(name.as_bytes());
+        }
         SemanticNodeData::Conditional {
             check,
             extends,
@@ -460,13 +466,20 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hash_node_rec(ctx, *true_branch_ref, hasher, seen, depth + 1);
             hash_node_rec(ctx, *false_branch_ref, hasher, seen, depth + 1);
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
+            kind,
             params,
             return_type,
             type_parameters,
             ..
         } => {
             hasher.write_u8(20);
+            // The kind is semantic identity: `() => R` and `new () => R`
+            // must never fingerprint-collide.
+            hasher.write_u8(match kind {
+                crate::semantic_query::SignatureKind::Call => 0,
+                crate::semantic_query::SignatureKind::Construct => 1,
+            });
             hasher.write_u64(params.len() as u64);
             for param in params.iter() {
                 if let Some(name) = param.name.as_deref() {
@@ -484,10 +497,6 @@ fn hash_node_rec<H: std::hash::Hasher>(
             for param in type_parameters.iter() {
                 hasher.write(param.name.as_bytes());
             }
-        }
-        SemanticNodeData::ConstructorType { signature } => {
-            hasher.write_u8(21);
-            hash_node_rec(ctx, *signature, hasher, seen, depth + 1);
         }
         SemanticNodeData::MergedDecl { contributors } => {
             hasher.write_u8(22);

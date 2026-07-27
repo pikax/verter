@@ -1453,7 +1453,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     .construct_signatures
                                     .last()
                                     .and_then(|sig| match self.graph().node_data(*sig).as_deref() {
-                                        Some(SemanticNodeData::Function {
+                                        Some(SemanticNodeData::Signature {
                                             return_type, ..
                                         }) => Some(*return_type),
                                         _ => None,
@@ -2482,12 +2482,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 | SemanticNodeData::TemplateLiteral { .. }
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
-                | SemanticNodeData::Function { .. }
+                | SemanticNodeData::InferRef { .. }
+                | SemanticNodeData::Signature { .. }
                 // Raw-fallback / constructor / synthetic-binding carriers
                 // cannot be path-navigated as-is and have no head-resolution
                 // rail. Return Opaque(Miss).
                 | SemanticNodeData::RawFallback { .. }
-                | SemanticNodeData::ConstructorType { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {
                     // Can't descend further through generic path-walk —
                     // template-literal relation matching is its own
@@ -3197,8 +3197,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             //
             // Distribution-trigger guard: only distribute when the
             // `check` is unbound (TypeParam / Infer). Concrete checks
-            // that produced a deferred shell because `relate_nodes`
-            // returned `Unknown` (e.g., a structural relation the
+            // that produced a deferred shell because
+            // `execute(SemanticQueryKey::Relate)` returned `Unknown`
+            // (e.g., a structural relation the
             // shallow check can't decide) MUST NOT distribute — the
             // relation may still resolve at a more concrete callsite
             // (after substitutions land), and a premature distribute
@@ -3215,7 +3216,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             } if matches!(self.mode(), ProjectionMode::Expanded)
                 && matches!(
                     self.graph().node_data(*check).as_deref(),
-                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
+                    Some(
+                        SemanticNodeData::TypeParam { .. }
+                            | SemanticNodeData::Infer { .. }
+                            | SemanticNodeData::InferRef { .. }
+                    )
                 ) =>
             {
                 let true_branch = *true_branch_ref;
@@ -4027,7 +4032,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let check_data = self.graph().node_data(check_id);
                 let is_open = matches!(
                     check_data.as_deref(),
-                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. })
+                    Some(
+                        SemanticNodeData::TypeParam { .. }
+                            | SemanticNodeData::Infer { .. }
+                            | SemanticNodeData::InferRef { .. }
+                    )
                 );
                 drop(check_data);
                 if is_open && self.context.is_macro_object_surface() {
@@ -4402,14 +4411,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::TypeParam { .. }
             | SemanticNodeData::Infer { .. }
-            | SemanticNodeData::Function { .. }
+            | SemanticNodeData::InferRef { .. }
+            | SemanticNodeData::Signature { .. }
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::TypeOf(_)
             // Raw-fallback / constructor / synthetic-binding carriers contribute
             // no shallow surface members (a raw-fallback holds no surface; a
             // constructor / synthetic binding is its own terminal).
             | SemanticNodeData::RawFallback { .. }
-            | SemanticNodeData::ConstructorType { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 drop(data);
                 self.contribute_surface(

@@ -475,7 +475,8 @@ pub(crate) fn slot_param_root_is_symbolic_only(
         | SemanticNodeData::KeyOf { .. }
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
-        | SemanticNodeData::Infer { .. } => true,
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. } => true,
         SemanticNodeData::InstantiationRef { base, args } => {
             // Skeleton-instantiate the carrier under its OWN `(base, args)` so the
             // substitution actually binds — but unbound parameters become
@@ -557,7 +558,9 @@ fn node_contains_free_type_param(
         return false;
     };
     match data.as_ref() {
-        SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. } => true,
+        SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::InferRef { .. } => true,
         SemanticNodeData::Alias(inner) => {
             node_contains_free_type_param(dispatch, *inner, depth + 1)
         }
@@ -1013,10 +1016,17 @@ pub(crate) fn compute_bindings_via_graph(
         )
         .unwrap_or(slot_member.value);
 
-        // Step 4: read Function.params[0].ty.
+        // Step 4: read Function.params[0].ty. CALL kind only — a construct
+        // signature is not a callable slot shape and synthesizes no
+        // bindings (the realize fallback above hands back the raw member
+        // value, so the kind must be re-asserted here).
         let param0_ty =
             match crate::project_semantic_dispatch::node_data_for(ctx, realized).as_deref() {
-                Some(SemanticNodeData::Function { params, .. }) => match params.first() {
+                Some(SemanticNodeData::Signature {
+                    kind: crate::semantic_query::SignatureKind::Call,
+                    params,
+                    ..
+                }) => match params.first() {
                     Some(p) => p.ty,
                     None => continue,
                 },
@@ -1478,7 +1488,7 @@ fn node_reaches_non_owner_ref(
                 || surface.call_signatures.iter().copied().any(recur)
                 || surface.construct_signatures.iter().copied().any(recur)
         }
-        SemanticNodeData::Function {
+        SemanticNodeData::Signature {
             params,
             return_type,
             ..

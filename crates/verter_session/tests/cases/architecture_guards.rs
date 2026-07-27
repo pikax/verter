@@ -6077,6 +6077,14 @@ mod foundations_guards {
             // `oracle_core::query_specs` module and the `tests/` `oracle_registry`
             // include); the size is intentional generated audit data.
             "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_query_specs.rs",
+            // The relation authority — one cohesive engine: the
+            // reentry/assumption frame machinery, the coinductive SCC
+            // discharge + admission routing, the inference-session plumbing,
+            // and the structural reducer share one worklist driver and the
+            // per-transaction state; the transient shapes already live in
+            // the sibling `relation_txn.rs`. The size is intentional
+            // cohesion (same precedent as `expr.rs` / `tokenizer.rs`).
+            "crates/verter_session/src/project_semantic_dispatch/relation.rs",
             // Block-1.5 substrate split — view-aware prepared-decl
             // bundle/type/value variants live alongside their base
             // counterparts so the cache invariants stay in one file.

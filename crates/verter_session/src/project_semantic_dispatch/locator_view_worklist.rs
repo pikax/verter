@@ -407,6 +407,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 memo.insert((root, root_context), root);
                 return ProjectedViewOutcome::complete(root);
@@ -889,6 +890,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 work_credit.consume()?;
                 crate::loop5_instrumentation::watchdog_beat();
@@ -962,6 +964,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
                 | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {
                     work_credit.consume()?;
                     crate::loop5_instrumentation::watchdog_beat();
@@ -1099,6 +1102,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
                 memo.insert((node, context), node);
                 Ok(false)
@@ -1247,7 +1251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .filter(|_| remaining == 0)
                     .map(|keyspace| (keyspace, context))
             }
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,
@@ -1278,9 +1282,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 None
             }
-            SemanticNodeData::ConstructorType { signature } => {
-                (index == 0).then_some((*signature, context))
-            }
             SemanticNodeData::KeyOf { base } => (index == 0).then_some((*base, context)),
             SemanticNodeData::IndexedAccess {
                 object,
@@ -1310,6 +1311,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. }
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
@@ -1342,7 +1344,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context: context.into_structural_provenance(),
             },
             SemanticNodeData::Object(view) => ProjectionChildPlan::Object { view, context },
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,

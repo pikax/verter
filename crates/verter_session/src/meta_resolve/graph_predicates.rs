@@ -740,7 +740,7 @@ pub(crate) fn body_contains_recursive_ref_to_name(
                 }
             }
             SemanticNodeData::KeyOf { base } => stack.push(*base),
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 ..
@@ -928,7 +928,7 @@ pub(crate) fn collect_ref_identities_node(
                 }
             }
             SemanticNodeData::KeyOf { base } => stack.push(*base),
-            SemanticNodeData::Function {
+            SemanticNodeData::Signature {
                 params,
                 return_type,
                 type_parameters,

@@ -345,7 +345,7 @@ fn typeof_default_construct_return_node(
         "the synthesized .vue default's typeof carries exactly one construct signature"
     );
     let ctor_fn = view.construct_signatures[0];
-    let SemanticNodeData::Function { return_type, .. } = graph
+    let SemanticNodeData::Signature { return_type, .. } = graph
         .node_data(ctor_fn)
         .as_deref()
         .cloned()

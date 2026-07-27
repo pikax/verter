@@ -139,7 +139,8 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         element: leaf,
         readonly: false,
     });
-    let callable = graph.intern_node(SemanticNodeData::Function {
+    let callable = graph.intern_node(SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from([]),
         return_type: leaf,
         type_parameters: Arc::from([]),

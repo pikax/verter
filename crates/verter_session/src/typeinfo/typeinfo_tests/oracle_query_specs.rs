@@ -2005,7 +2005,7 @@ pub(crate) enum RelationEngineVerdict {
 pub(crate) enum EngineObservationPin {
     /// The observation adapter REJECTS the key: the target pattern carries
     /// `infer` binders (an inference context), which the engine's
-    /// `relate_nodes` identity (assignable, default policy, regular source, no
+    /// `execute(SemanticQueryKey::Relate)` identity (assignable, default policy, regular source, no
     /// inference context) does not support this block. The engine can produce
     /// NO verdict for the row — a direct inference target returns `Unknown`
     /// today, which is an engine failure, never an oracle verdict.
@@ -2201,17 +2201,15 @@ pub(crate) const RELATION_QUERY_SPECS: &[RelationQuerySpec] = &[
         &["relation_required_property_assignable_to_optional"],
         None,
     ),
-    // LEDGER (source-proven): the engine answers `assignable` today
-    // (`relation_optional_property_not_assignable_to_required` is `#[ignore]`d
-    // for exactly this); the oracle captures `not_assignable`.
+    // Parity-enforced: the relation authority rejects optional-to-required
+    // under `strictNullChecks` (the optional slot may be absent), matching
+    // the oracle's captured `not_assignable`.
     relation_spec(
         "relation_optional_to_required",
         "{ a?: string }",
         "{ a: string }",
         &["relation_optional_property_not_assignable_to_required"],
-        Some(EngineObservationPin::MismatchedVerdict(
-            RelationEngineVerdict::Assignable,
-        )),
+        None,
     ),
     relation_spec(
         "relation_empty_to_all_optional",

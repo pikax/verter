@@ -550,7 +550,8 @@ fn nsnippet_function(
     rest_tuple: crate::semantic_query::SemanticNodeId,
 ) -> crate::semantic_query::SemanticNodeId {
     let void = nprim(graph, crate::semantic_query::PrimitiveKind::Void);
-    graph.intern_node(crate::semantic_query::SemanticNodeData::Function {
+    graph.intern_node(crate::semantic_query::SemanticNodeData::Signature {
+        kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![
                 crate::semantic_query::FunctionParam::synthetic(
