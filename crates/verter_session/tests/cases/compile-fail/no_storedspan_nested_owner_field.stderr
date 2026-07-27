@@ -1,10 +1,10 @@
-error[E0277]: the trait bound `MemberSpans: NoStoredSpanWitness` is not satisfied
+error[E0277]: the trait bound `MemberSpans: verter_no_storedspan::__private::NoStoredSpanWitness` is not satisfied
   --> tests/cases/compile-fail/no_storedspan_nested_owner_field.rs:10:10
    |
 10 | #[derive(verter_no_storedspan::NoStoredSpan)]
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `NoStoredSpanWitness` is not implemented for `MemberSpans`
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `verter_no_storedspan::__private::NoStoredSpanWitness` is not implemented for `MemberSpans`
    |
-   = help: the following other types implement trait `NoStoredSpanWitness`:
+   = help: the following other types implement trait `verter_no_storedspan::__private::NoStoredSpanWitness`:
              ()
              (A, B)
              (A, B, C)
@@ -14,5 +14,4 @@ error[E0277]: the trait bound `MemberSpans: NoStoredSpanWitness` is not satisfie
              AnalyzedMacroFact
              AnalyzedMacroKindFact
            and $N others
-   = help: see issue #48214
    = note: this error originates in the derive macro `verter_no_storedspan::NoStoredSpan` (in Nightly builds, run with -Z macro-backtrace for more info)

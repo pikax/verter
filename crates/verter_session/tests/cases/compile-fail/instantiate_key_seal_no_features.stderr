@@ -12,17 +12,17 @@ note: the enum `InstantiateBodySource` is defined here
    | pub(crate) enum InstantiateBodySource {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0599]: no function or associated item named `non_file_for_tests` found for struct `InstantiateContext` in the current scope
+error[E0599]: no associated function or constant named `non_file_for_tests` found for struct `InstantiateContext` in the current scope
   --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:40:49
    |
 40 |     let _deleted_non_file = InstantiateContext::non_file_for_tests(prc, Default::default());
-   |                                                 ^^^^^^^^^^^^^^^^^^ function or associated item not found in `InstantiateContext`
+   |                                                 ^^^^^^^^^^^^^^^^^^ associated function or constant not found in `InstantiateContext`
 
-error[E0599]: no function or associated item named `file_backed_for_tests` found for struct `InstantiateContext` in the current scope
+error[E0599]: no associated function or constant named `file_backed_for_tests` found for struct `InstantiateContext` in the current scope
   --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:42:29
    |
 42 |         InstantiateContext::file_backed_for_tests(prc, Default::default(), Default::default());
-   |                             ^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `InstantiateContext`
+   |                             ^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `InstantiateContext`
 
 error: cannot construct `InstantiateContext` with struct literal syntax due to private fields
   --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:49:27

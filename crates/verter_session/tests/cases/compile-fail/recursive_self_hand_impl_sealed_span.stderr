@@ -1,16 +1,20 @@
-error[E0277]: the trait bound `shadow::Arc<[Recipe]>: __private::recursive_self_sealed::Sealed<Recipe>` is not satisfied
+error[E0277]: the trait bound `shadow::Arc<[Recipe]>: verter_no_storedspan::__private::recursive_self_sealed::Sealed<Recipe>` is not satisfied
   --> tests/cases/compile-fail/recursive_self_hand_impl_sealed_span.rs:36:68
    |
 36 | impl verter_no_storedspan::__private::RecursiveSelfArc<Recipe> for shadow::Arc<[Recipe]> {}
    |                                                                    ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `__private::recursive_self_sealed::Sealed<Recipe>` is not implemented for `shadow::Arc<[Recipe]>`
+help: the trait `verter_no_storedspan::__private::recursive_self_sealed::Sealed<Recipe>` is not implemented for `shadow::Arc<[Recipe]>`
   --> tests/cases/compile-fail/recursive_self_hand_impl_sealed_span.rs:30:5
    |
 30 |     pub struct Arc<T: ?Sized>(pub PhantomData<*const T>);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
-   = help: the trait `__private::recursive_self_sealed::Sealed<Owner>` is implemented for `std::sync::Arc<[Owner]>`
-note: required by a bound in `RecursiveSelfArc`
+help: the trait `verter_no_storedspan::__private::recursive_self_sealed::Sealed<Owner>` is implemented for `std::sync::Arc<[Owner]>`
+  --> $WORKSPACE/crates/verter_no_storedspan/src/lib.rs
+   |
+   |         impl<Owner> Sealed<Owner> for ::std::sync::Arc<[Owner]> {}
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `verter_no_storedspan::__private::RecursiveSelfArc`
   --> $WORKSPACE/crates/verter_no_storedspan/src/lib.rs
    |
    |     pub trait RecursiveSelfArc<Owner: ?Sized>: recursive_self_sealed::Sealed<Owner> {}
