@@ -233,16 +233,16 @@ export function describeBinaryFamily(family: BinaryFamily): void {
       expect(mod.serverBinaryPath(options)).toBe(binary);
     });
 
-    it("falls back to the bare binary name (PATH) when nothing is on disk", () => {
-      const row = matrix[0];
-      const empty = mkdtempSync(join(tmpdir(), `${packageName}-empty-`));
-      const resolved = mod.resolveServerBinary({
-        ...hostFor(row),
-        platformPackageDir: () => empty,
-      });
-      expect(resolved.source).toBe("path");
-      expect(resolved.path).toBe(row.binaryName);
-    });
+    // The rest of the search order — a development build, and the bare-name
+    // PATH fallback when nothing is on disk — is asserted in
+    // `packages/binary-launcher/launcher.spec.ts`, over a launcher built on
+    // directories that suite owns. It cannot be asserted from here: this
+    // family's launcher probes the REAL repository's `target/`, which holds a
+    // binary on a contributor's machine and none on a CI runner that never
+    // compiles Rust, so the outcome would be decided by whether the developer
+    // happened to build rather than by the resolver. What IS this family's to
+    // prove is that its exported entry points are the shared launcher's — the
+    // case above, and the candidate list asserted in full further up.
 
     it("throws a supported-target list for an unsupported host", () => {
       const unsupported = { platform: "freebsd", arch: "x64", musl: false };
