@@ -785,6 +785,9 @@ importers:
       '@verter/typescript-plugin':
         specifier: workspace:^
         version: link:../typescript-plugin
+      verter-mcp:
+        specifier: workspace:^
+        version: link:../verter-mcp
     devDependencies:
       '@types/chai':
         specifier: ^4.3.20

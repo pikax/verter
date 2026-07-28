@@ -1,47 +1,34 @@
 # LSP / MCP decoupling
 
-`verter_lsp` no longer depends on `verter_mcp` by default.
+`verter_lsp` does not depend on `verter_mcp`.
 
-The MCP server is now optional and lives behind the `mcp` Cargo feature:
-
-```toml
-# crates/verter_lsp/Cargo.toml
-[features]
-mcp = ["dep:verter_mcp", "dep:rmcp", "dep:axum"]
-
-[dependencies]
-verter_mcp = { path = "../verter_mcp", optional = true }
-rmcp       = { version = "1", features = [...], optional = true }
-axum       = { version = "0.8", optional = true }
-```
-
-`cargo build -p verter_lsp` produces an LSP binary that does not link
-`verter_mcp`, `rmcp`, or `axum`. The `--mcp-port` CLI flag is still
-parsed (so existing IDE configurations remain syntactically valid) but
-the LSP logs a warning and does not start an MCP HTTP server.
+`verter_lsp` and `verter_mcp` are two independent products on top of the same
+`verter_session` core. `cargo build -p verter_lsp` produces an LSP binary that
+does not link `verter_mcp`, `rmcp`, or `axum`, and there is no Cargo feature
+that re-embeds the MCP server into the LSP process. The `--mcp-port` CLI flag
+is still parsed (so existing IDE configurations remain syntactically valid)
+but the LSP logs a guidance warning and does not start an MCP server; the
+`$/verter/mcpReady` notification is never sent.
 
 ## Why we decoupled
 
 Tier-C cleanup objective: keep the dependency direction of the workspace
-intentional. `verter_lsp` and `verter_mcp` are two independent surfaces
-on top of the same `verter_session` core. Coupling them in
-`Cargo.toml` blurred that boundary, increased the LSP's compile cost,
-and made it impossible to ship an LSP build that did not also build
-the MCP server.
+intentional. Coupling the two surfaces in `Cargo.toml` blurred that boundary,
+increased the LSP's compile cost, made it impossible to ship an LSP build
+that did not also build the MCP server, and let an MCP crash take the LSP
+with it.
 
 The architecture guard `lsp_mcp_dependency_direction`
-(`crates/verter_session/tests/architecture_guards.rs`) enforces that
-`verter_lsp/Cargo.toml` declares `verter_mcp` only as
-`optional = true`.
+(`crates/verter_session/tests/cases/architecture_guards.rs`) enforces that
+`crates/verter_lsp/Cargo.toml` never declares `verter_mcp` as a non-optional
+dependency.
 
-## Migration paths for clients that previously consumed MCP-via-LSP
+## Running the MCP server
 
-There are now two supported ways to run the MCP server:
-
-### Option 1 — Spawn the standalone MCP binary
+Spawn the standalone MCP binary:
 
 ```bash
-cargo build -p verter_mcp --bin verter-mcp
+cargo build -p verter_mcp
 ./target/debug/verter-mcp --project-root /path/to/project
 ```
 
@@ -51,35 +38,51 @@ process and shares no in-process state with `verter-lsp`. Clients pick whichever
 transport they prefer (stdio for local agents, HTTP for remote agents) and route
 notifications/requests directly to that process.
 
-`crates/verter_mcp_server/` builds a second, byte-for-byte equivalent entry
-point (`verter-mcp-server`) that exists so the LSP crate need not depend on
-`verter_mcp`. It is not distributed; use `verter-mcp`.
+`crates/verter_mcp_server/` builds a second, behaviorally identical entry point
+(`verter-mcp-server`); both binaries run the shared `verter_mcp::run::run`
+body. It exists so no crate ever needs a dependency edge to `verter_mcp` just
+to name an entry point. It is not distributed; use `verter-mcp`.
 
-This is the recommended path for IDEs that previously asked
-`verter-lsp` to start MCP via `--mcp-port`. Spawning a dedicated
-process keeps the LSP binary small and prevents an MCP crash from
-taking the LSP with it.
+### HTTP readiness record
 
-### Option 2 — Build the LSP with `--features mcp`
+With `--transport http`, the server binds before its initial project scan and
+announces the bound port (OS-assigned under `--port 0`) as exactly one JSON
+line on stdout:
 
-```bash
-cargo build -p verter_lsp --features mcp
-./target/debug/verter-lsp --mcp-port=0
+```json
+{"verterMcpHttpReady":{"port":54321,"url":"http://127.0.0.1:54321/mcp"}}
 ```
 
-This restores the legacy behavior: a single `verter-lsp` process that
-also runs an MCP HTTP server on the given port. Suitable for
-distributions that want a single binary and accept the larger compile
-graph and shared-process failure mode.
+Human `tracing` output goes to stderr and is not port identity. A spawning
+host must parse this record — the encoding contract lives in
+`crates/verter_mcp/src/readiness.rs`, with the TypeScript mirror parser in
+`packages/vue-vscode/src/mcpServer.ts`.
 
-## What clients see
+## What the VS Code extension does
 
-* `--mcp-port` on a feature-disabled build → LSP logs a warning and
-  does not start MCP. The `$/verter/mcpReady` notification is not sent.
-* `--mcp-port` on `--features mcp` → identical behavior to the
-  pre-decoupling LSP: an HTTP MCP server is bound to
-  `127.0.0.1:<port>` and `$/verter/mcpReady` is sent with the actual
-  bound port.
-* `verter-mcp-server` in its own process → identical CLI to the legacy
-  `verter-mcp` binary in `crates/verter_mcp/`. The two binaries
-  delegate to the same `VerterMcpServer` implementation.
+When `verter.mcp.enabled` (default true), the extension spawns the standalone
+`verter-mcp` binary with `--transport http --port <verter.mcp.port>` (default
+0 = auto-assign) and `--client-pid <extension host pid>`, parses the readiness
+record, registers the endpoint with VS Code's MCP provider API
+(`lm.registerMcpServerDefinitionProvider`), and mirrors the port into the
+workspace's `.mcp.json` for Claude Code CLI.
+
+`--client-pid` is the same containment contract as `verter-lsp`: the server
+exits when the named host process dies, so a hard extension-host kill cannot
+orphan an HTTP listener (`verter_tsgo_api::process::ClientProcessGuard`).
+The extension-side supervisor (`createMcpServerLifecycle`) replaces a child
+on config change only after the predecessor has really exited, and answers a
+post-ready crash by removing the provider registration and respawning within
+a bounded budget.
+
+Binary discovery reuses the `verter-mcp` npm launcher (installed platform
+package → workspace `target/{debug,release}` dev build → the VSIX-staged
+`bin/verter-mcp` → `PATH`). Release packaging fails closed: `package.mjs`
+inspects the packed VSIX and refuses to produce one without the per-target
+`bin/verter-mcp` engine.
+
+The extension still passes `--mcp-port` to the LSP for now: the flag is inert
+server-side (guidance warning only), and the DX log canary
+(`packages/vue-vscode/e2e/dx/dxLogCanary.ts`) deliberately uses that
+deterministic warning as its capture probe. Removing the flag from
+`buildLspLaunchArgs` is gated on the canary adopting a replacement trigger.

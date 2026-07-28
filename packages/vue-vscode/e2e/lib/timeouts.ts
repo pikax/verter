@@ -281,6 +281,12 @@ export const POLL_BUDGETS = {
   // to 27s while Mocha killed at 15s. The current 12s fits, but fitting by luck is
   // not the property under check.
   activationHeartbeat: { budgetMs: 12_000, parentTimeoutMs: 15_000 },
+  // The standalone verter-mcp child starts in parallel with the LSP; by the
+  // time `isLspReady()` holds it is usually already announced, but a debug
+  // binary on a loaded CI runner can trail the (provider-independent) LSP
+  // ready line, so the two MCP activation tests poll the log instead of
+  // reading it once.
+  activationMcpReady: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   diagnosticsUnresolvedRetry: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   diagnosticsClearRetry: { budgetMs: 20_000, parentTimeoutMs: SUITE_TIMEOUT_MS },
   confidenceProbe: { budgetMs: 10_000, parentTimeoutMs: SUITE_TIMEOUT_MS },

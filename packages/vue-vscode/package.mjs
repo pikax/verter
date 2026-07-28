@@ -22,11 +22,11 @@
  * would install anywhere while carrying the host-arch shim. A bare `node package.mjs`
  * (no `--target`, no `--allow-universal`) fails closed during shim staging.
  */
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
-import { stageShimBinary } from "./stage-bin.mjs";
+import { assertVsixContainsMcpEngine, stageShimBinary } from "./stage-bin.mjs";
 import {
   discoverWorkspacePackages,
   patchWorkspaceRanges,
@@ -102,6 +102,25 @@ try {
   // forwarding the argv to vsce (which would reject an unknown option).
   const args = packagingArgv.filter((a) => a !== "--allow-universal").join(" ");
   execSync(`npx @vscode/vsce package ${args}`, { stdio: "inherit", cwd: __dirname });
+
+  // --- Step 3b: Inspect the PRODUCED VSIX (fail closed) ---
+  // The extension spawns the standalone `verter-mcp` and `verter.mcp.enabled`
+  // defaults to true, so a VSIX without the engine ships a dead setting.
+  // Inspecting the packed bytes (not the staging inputs) catches every way the
+  // binary can go missing: an un-downloaded release artifact, a pruned bin/
+  // entry, a soft-warn prepare step, a vsce ignore rule.
+  const producedVsix = readdirSync(__dirname)
+    .filter((entry) => entry.endsWith(".vsix"))
+    .map((entry) => ({ entry, modified: statSync(path.join(__dirname, entry)).mtimeMs }))
+    .sort((left, right) => right.modified - left.modified)[0];
+  if (!producedVsix) {
+    throw new Error("vsce reported success but no .vsix file was produced");
+  }
+  const verifiedEntry = assertVsixContainsMcpEngine({
+    vsixPath: path.join(__dirname, producedVsix.entry),
+    vsceTarget,
+  });
+  console.log(`VSIX engine check: ${producedVsix.entry} contains ${verifiedEntry}`);
 } finally {
   // --- Step 4: Restore package.json ---
   writeFileSync(pkgPath, originalPkgText);

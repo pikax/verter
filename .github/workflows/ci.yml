@@ -795,8 +795,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-lsp-debug
-      - name: Build verter-lsp, relay shim and DX baseline (debug)
-        run: cargo build -p verter_lsp -p verter_relay_shim -p verter_dx_baseline
+      - name: Build verter-lsp, relay shim, DX baseline and MCP server (debug)
+        run: cargo build -p verter_lsp -p verter_relay_shim -p verter_dx_baseline -p verter_mcp
       - uses: actions/upload-artifact@v6
         with:
           name: lsp-debug-bins
@@ -804,6 +804,7 @@ jobs:
             target/debug/verter-lsp
             target/debug/verter-relay-shim
             target/debug/verter-dx-baseline
+            target/debug/verter-mcp
           if-no-files-found: error
           retention-days: 1
 
@@ -865,7 +866,7 @@ jobs:
           name: lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
-        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
       - name: Download provider integration builds
         uses: actions/download-artifact@v7
         with:
@@ -906,7 +907,7 @@ jobs:
           name: lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
-        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
       - name: Download provider integration builds
         uses: actions/download-artifact@v7
         with:
@@ -967,7 +968,7 @@ jobs:
           name: lsp-debug-bins
           path: target/debug
       - name: Make editor integration binaries executable
-        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp
       - name: Download built extension
         uses: actions/download-artifact@v7
         with:
@@ -1098,7 +1099,7 @@ jobs:
           name: lsp-debug-bins
           path: target/debug
       - name: Make debug LSP binaries executable
-        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-dx-baseline
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim target/debug/verter-mcp target/debug/verter-dx-baseline
       # Build the harness (and its workspace deps, including the lsp-test-client) so
       # the gates can import the published dist and drive both real binaries.
       - name: Build DX harness

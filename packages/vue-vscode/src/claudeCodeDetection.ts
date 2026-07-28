@@ -41,10 +41,27 @@ export function checkClaudeCodeAndNotify(context: ExtensionContext, log: LogOutp
     });
 }
 
+/** The `.mcp.json` URL for a bound (or placeholder-0) MCP port. */
+export function mcpJsonUrlForPort(port: number): string {
+  // 127.0.0.1, NOT localhost: the server binds 127.0.0.1, and an IPv6-first
+  // resolver would send `localhost` to `::1` where nothing listens.
+  return `http://127.0.0.1:${port}/mcp`;
+}
+
 /**
  * Write/update `.mcp.json` in the workspace root with the Verter MCP server config.
+ *
+ * `liveUrl` is REQUIRED and must be the CURRENT standalone server endpoint:
+ * the command path resolves it first (starting the server and waiting when
+ * nothing is running — `resolveMcpEndpointForSetup`) and refuses instead of
+ * calling this when no live endpoint exists. A known-dead placeholder is
+ * never written.
  */
-export function setupMcpForClaudeCode(context: ExtensionContext, log: LogOutputChannel): void {
+export function setupMcpForClaudeCode(
+  context: ExtensionContext,
+  log: LogOutputChannel,
+  liveUrl: string,
+): void {
   const workspaceRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
     window.showWarningMessage("No workspace folder open. Open a project first.");
@@ -67,18 +84,13 @@ export function setupMcpForClaudeCode(context: ExtensionContext, log: LogOutputC
     mcpConfig.mcpServers = {};
   }
 
-  // Add/update the verter entry with a placeholder URL.
-  // The actual port is dynamic (OS-assigned) and will be updated
-  // by updateMcpPort() when the MCP server sends $/verter/mcpReady.
-  (mcpConfig.mcpServers as Record<string, unknown>).verter = {
-    url: `http://localhost:0/mcp`,
-  };
+  (mcpConfig.mcpServers as Record<string, unknown>).verter = { url: liveUrl };
 
   writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
 
-  log.info(`Wrote MCP config to ${mcpJsonPath}`);
+  log.info(`Wrote MCP config to ${mcpJsonPath} (live endpoint ${liveUrl})`);
   window.showInformationMessage(
-    "Verter MCP configured in .mcp.json. The port will be updated automatically when the server starts. Restart Claude Code to activate.",
+    "Verter MCP configured in .mcp.json with the running server's endpoint. Restart Claude Code to activate.",
   );
 }
 
@@ -95,7 +107,7 @@ function isClaudeCodeInstalled(): boolean {
 
 /**
  * Update the verter entry in `.mcp.json` with the actual MCP port.
- * Called when the LSP sends `$/verter/mcpReady` with the dynamic port.
+ * Called when the spawned standalone MCP server announces its dynamic port.
  * Only writes if `.mcp.json` already has a verter entry (avoids creating
  * the file for users who haven't opted in).
  */
@@ -116,7 +128,7 @@ export function updateMcpPort(workspaceRoot: string, port: number, log: LogOutpu
   const servers = mcpConfig.mcpServers as Record<string, unknown>;
   if (!servers.verter) return; // No verter entry — don't create one
 
-  servers.verter = { url: `http://localhost:${port}/mcp` };
+  servers.verter = { url: mcpJsonUrlForPort(port) };
   writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
   log.info(`Updated .mcp.json with MCP port ${port}`);
 }

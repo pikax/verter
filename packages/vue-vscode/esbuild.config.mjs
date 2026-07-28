@@ -25,7 +25,10 @@ export function productionBundleConfig(options = {}) {
     entryPoints: [PRODUCTION_ENTRY_POINT],
     bundle: true,
     outfile: path.join(packageDir, "dist", "extension.js"),
-    external: ["vscode", "@verter/typescript-plugin"],
+    // `verter-mcp` (the standalone MCP server's launcher) must resolve at
+    // RUNTIME: its binary discovery derives the workspace root from its own
+    // on-disk location, which inlining into the bundle would falsify.
+    external: ["vscode", "@verter/typescript-plugin", "verter-mcp"],
     format: "cjs",
     platform: "node",
     target: "node18",

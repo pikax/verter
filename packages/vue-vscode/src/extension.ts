@@ -87,6 +87,13 @@ import {
   shouldRestartLanguageServerForConfigurationChange,
 } from "./languageServerConfig";
 import { createTypeScriptPluginRefreshScheduler } from "./typescriptPluginRefreshScheduler";
+import {
+  createMcpServerLifecycle,
+  resolveMcpServerBinary,
+  runMcpSetupCommand,
+  type McpHttpReadyRecord,
+  type McpLaunchConfig,
+} from "./mcpServer";
 import { clientProcessLifetimeArg } from "./clientProcessLifetime";
 import { addShowRecentAuditRecordsCommand } from "./audit";
 import {
@@ -124,6 +131,24 @@ type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
 let getClient: GetClient | undefined;
 let stopHeartbeat: (() => void) | undefined;
 let activationContext: ExtensionContext | undefined;
+/**
+ * The live standalone MCP endpoint, set on readiness and cleared whenever the
+ * server stops serving. `verter.setupMcpForClaudeCode` reads it so a setup
+ * click AFTER readiness writes the real port instead of a placeholder.
+ */
+let currentMcpEndpoint: McpHttpReadyRecord | undefined;
+function setCurrentMcpEndpoint(record: McpHttpReadyRecord | undefined) {
+  currentMcpEndpoint = record;
+}
+/**
+ * Re-syncs the LIVE start attempt's MCP lifecycle against the current
+ * configuration. Set while an attempt owns an MCP lifecycle, cleared on
+ * attempt disposal (same lifetime discipline as `currentMcpEndpoint`).
+ * `verter.setupMcpForClaudeCode` calls it so an explicit Setup click can
+ * retry a FAILED MCP child (missing binary, exhausted crash-respawn budget)
+ * even though the LSP itself is already running.
+ */
+let retryMcpLifecycleSync: (() => void) | undefined;
 const activationGate = createActivationGate<ActivationRuntime>(async () => {
   if (!activationContext) {
     throw new Error("Verter activation context was not initialized");
@@ -555,9 +580,29 @@ async function activateExtension(context: ExtensionContext) {
       }
       await server.restart(true);
     }),
-    commands.registerCommand("verter.setupMcpForClaudeCode", () =>
-      setupMcpForClaudeCode(context, log),
-    ),
+    commands.registerCommand("verter.setupMcpForClaudeCode", async () => {
+      if (!workspace.workspaceFolders?.[0]) {
+        window.showWarningMessage("No workspace folder open. Open a project first.");
+        return;
+      }
+      // Command-triggered activation with no carrier open never started the
+      // LSP/MCP lifecycle — resolve a LIVE endpoint first (starting the
+      // server, re-syncing a failed MCP lifecycle, and waiting when
+      // necessary) and refuse rather than write a known-dead placeholder.
+      // The wiring itself lives in `runMcpSetupCommand` (unit-covered).
+      await runMcpSetupCommand({
+        readMcpEnabled: () =>
+          workspace.getConfiguration("verter").get<boolean>("mcp.enabled", true),
+        getEndpoint: () => currentMcpEndpoint,
+        ensureLanguageServerStarted,
+        retryMcpLifecycleSync: () => retryMcpLifecycleSync?.(),
+        writeSetup: (url) => setupMcpForClaudeCode(context, log, url),
+        refuse: (message) => {
+          log.warn(`MCP setup for Claude Code refused: ${message}`);
+          window.showWarningMessage(message);
+        },
+      });
+    }),
   );
 
   if (
@@ -1112,41 +1157,95 @@ async function startVueLanguageServer(
   registerTypeProviderPidListener(client);
 
   // ── MCP server auto-registration ────────────────────────────────
-  // When the MCP HTTP server binds a dynamic port, it sends $/verter/mcpReady.
-  // We register it with VS Code's MCP provider API so Copilot Chat discovers it,
-  // and update .mcp.json for Claude Code CLI.
+  // The LSP no longer embeds an MCP server (LSP/MCP decoupling): when
+  // `verter.mcp.enabled`, this start attempt spawns the STANDALONE
+  // `verter-mcp` binary (HTTP transport, OS-assigned port by default) and
+  // learns the bound port from the child's stdout readiness record. The port
+  // is then registered with VS Code's MCP provider API so Copilot Chat
+  // discovers it, and mirrored into .mcp.json for Claude Code CLI.
+  //
+  // Lifecycle (createMcpServerLifecycle): the child belongs to this attempt
+  // (disposal kills it); `--client-pid` binds the server's lifetime to the
+  // extension host exactly like the LSP's containment, so a hard host kill
+  // cannot orphan an HTTP listener; a config change replaces the child only
+  // AFTER the predecessor really exited; a post-ready crash tears the
+  // provider registration down and respawns within a bounded budget.
+  // `syncMcpServer` re-reads configuration on every supervisor restart — the
+  // `verter.mcp.*` settings are restart-required, so a settings change lands
+  // here through the config-change restart path.
   let mcpProviderDisposable: Disposable | undefined;
-  attempt.add({ dispose: () => mcpProviderDisposable?.dispose() });
-  function registerMcpListener(lc: LanguageClient) {
-    lc.onNotification(NotificationType.McpReady, (params: { port: number }) => {
-      log.info(`MCP HTTP server ready on port ${params.port}`);
-
-      // Register with VS Code's MCP provider API (Copilot Chat auto-discovery)
-      try {
-        mcpProviderDisposable?.dispose();
-        mcpProviderDisposable = lm.registerMcpServerDefinitionProvider("verter", {
-          provideMcpServerDefinitions() {
-            return [
-              new McpHttpServerDefinition(
-                "Verter Vue Analysis",
-                Uri.parse(`http://localhost:${params.port}/mcp`),
-              ),
-            ];
-          },
-        });
-        log.info("Registered MCP server with VS Code MCP provider API");
-      } catch (e) {
-        log.warn(`Failed to register MCP server with VS Code: ${e}`);
-      }
-
-      // Update .mcp.json for Claude Code CLI
-      const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (wsRoot) {
-        updateMcpPort(wsRoot, params.port, log);
-      }
-    });
+  function desiredMcpLaunchConfig(): McpLaunchConfig | undefined {
+    const verterConfig = workspace.getConfiguration("verter");
+    if (!verterConfig.get<boolean>("mcp.enabled", true)) {
+      return undefined;
+    }
+    return {
+      port: verterConfig.get<number>("mcp.port", 0),
+      lintPreset: verterConfig.get<string>("mcp.lintPreset", "recommended"),
+      rootPath,
+      clientPid: process.pid,
+    };
   }
-  registerMcpListener(client);
+  const mcpLifecycle = createMcpServerLifecycle({
+    log,
+    resolveBinary: () => resolveMcpServerBinary(context.extensionPath),
+    events: {
+      onReady(record) {
+        // The readiness line below is E2E acceptance surface
+        // (e2e/suite/activation.test.ts): the port comes from the child's
+        // parsed readiness record, never from human stderr logs, and the
+        // suite proves it by connecting to the endpoint itself.
+        log.info(`MCP HTTP server ready on port ${record.port}`);
+
+        // Register with VS Code's MCP provider API (Copilot Chat auto-discovery)
+        try {
+          mcpProviderDisposable?.dispose();
+          mcpProviderDisposable = lm.registerMcpServerDefinitionProvider("verter", {
+            provideMcpServerDefinitions() {
+              // VS Code pulls definitions only from a provider that really
+              // reached its MCP service, so this line is the observable the
+              // E2E registration test keys on — a no-op registration never
+              // produces it.
+              log.info(`MCP server definitions pulled by VS Code (port ${record.port})`);
+              return [new McpHttpServerDefinition("Verter Vue Analysis", Uri.parse(record.url))];
+            },
+          });
+          log.info("Registered MCP server with VS Code MCP provider API");
+        } catch (e) {
+          log.warn(`Failed to register MCP server with VS Code: ${e}`);
+        }
+        setCurrentMcpEndpoint(record);
+
+        // Update .mcp.json for Claude Code CLI
+        const wsRoot = workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (wsRoot) {
+          updateMcpPort(wsRoot, record.port, log);
+        }
+      },
+      onStopped(reason) {
+        // A dead URL must not stay registered with VS Code or advertised to
+        // the setup command.
+        setCurrentMcpEndpoint(undefined);
+        mcpProviderDisposable?.dispose();
+        mcpProviderDisposable = undefined;
+        if (reason === "crash") {
+          log.warn("MCP provider registration removed: the standalone server stopped serving");
+        }
+      },
+    },
+  });
+  attempt.add({
+    dispose: () => {
+      mcpProviderDisposable?.dispose();
+      mcpProviderDisposable = undefined;
+      setCurrentMcpEndpoint(undefined);
+      retryMcpLifecycleSync = undefined;
+      mcpLifecycle.dispose();
+    },
+  });
+  const syncMcpServer = () => mcpLifecycle.sync(desiredMcpLaunchConfig());
+  retryMcpLifecycleSync = syncMcpServer;
+  syncMcpServer();
 
   // ── Vite config trust prompt ────────────────────────────────────
   // When the LSP sends $/verter/viteConfigTrustRequired, show a warning
@@ -1529,7 +1628,10 @@ async function startVueLanguageServer(
           bindPlainScriptSync(client);
           registerTypeProviderPidListener(client);
           registerServerNotifications(client);
-          registerMcpListener(client);
+          // The standalone MCP child is attempt-owned, not client-owned: a
+          // crash-recovery restart keeps the running server, while a
+          // config-change restart re-reads the `verter.mcp.*` settings here.
+          syncMcpServer();
           registerViteConfigTrustHandler(client);
           registerTypeProviderStatusHandler(client);
           tsQueryHandler = undefined; // Drop every project's TS service on restart

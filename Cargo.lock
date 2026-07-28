@@ -4069,6 +4069,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_tsgo_api",
  "verter_type_expr",
  "verter_workspace",
  "walkdir",
@@ -4078,17 +4079,10 @@ dependencies = [
 name = "verter_mcp_server"
 version = "0.0.1-beta.3"
 dependencies = [
- "axum",
  "clap",
- "rmcp",
  "tokio",
- "tracing",
  "tracing-subscriber",
- "verter_diagnostics",
  "verter_mcp",
- "verter_semantic",
- "verter_session",
- "verter_workspace",
 ]
 
 [[package]]

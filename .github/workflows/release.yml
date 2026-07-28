@@ -1483,7 +1483,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-vsix:
     name: Package VS Code Extension
-    needs: [validate, test, build-lsp, build-native]
+    needs: [validate, test, build-lsp, build-native, build-mcp]
     # Skipped in a rehearsal, as the publish job it feeds always has been —
     # packaging five platform VSIXes is cost the dry run does not pay today.
     if: needs.validate.outputs.dry-run != 'true'
@@ -1513,6 +1513,13 @@ jobs:
         with:
           pattern: native-*
           path: /tmp/native-artifacts
+
+      # Download all MCP server binaries (the extension spawns the standalone
+      # verter-mcp; a VSIX without it ships `verter.mcp.enabled` dead)
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-*
+          path: /tmp/mcp-artifacts
 
       # Package per platform
       - name: Package VSIX
@@ -1557,12 +1564,23 @@ jobs:
             if [ "$platform" = "win32-x64" ]; then
               LSP_BIN="verter-lsp.exe"
               SHIM_BIN="verter-relay-shim.exe"
+              MCP_BIN="verter-mcp.exe"
             else
               LSP_BIN="verter-lsp"
               SHIM_BIN="verter-relay-shim"
+              MCP_BIN="verter-mcp"
             fi
             cp "/tmp/lsp-artifacts/lsp-${lsp_pkg}/${LSP_BIN}" "packages/vue-vscode/bin/${LSP_BIN}"
             chmod +x "packages/vue-vscode/bin/${LSP_BIN}" 2>/dev/null || true
+
+            # --- MCP server binary ---
+            # Fail closed here AND in package.mjs (which inspects the packed
+            # VSIX bytes): the per-target verter-mcp must ship, or
+            # `verter.mcp.enabled` (default true) is dead on real installs.
+            MCP_SOURCE="/tmp/mcp-artifacts/mcp-${lsp_pkg}/${MCP_BIN}"
+            test -f "$MCP_SOURCE"
+            cp "$MCP_SOURCE" "packages/vue-vscode/bin/${MCP_BIN}"
+            chmod +x "packages/vue-vscode/bin/${MCP_BIN}" 2>/dev/null || true
 
             # package.mjs validates the target-specific relay executable's
             # format, architecture, and embedded Verter identity before it

@@ -4,4 +4,5 @@
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
 mod carrier_routing_no_vue_gate;
+mod http_readiness;
 mod mcp_tool_audit_integration;

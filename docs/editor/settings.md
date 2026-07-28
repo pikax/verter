@@ -75,8 +75,8 @@ These colors are theme-aware and have separate defaults for dark, light, high co
 
 | Setting                             | Type                                                                                     | Default         | Description                                                                             |
 | ----------------------------------- | ---------------------------------------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------- |
-| `verter.mcp.enabled`                | `boolean`                                                                                | `true`          | Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents |
-| `verter.mcp.port`                   | `number`                                                                                 | `6772`          | Port for the MCP HTTP endpoint. Set to `0` for auto-assign.                             |
+| `verter.mcp.enabled`                | `boolean`                                                                                | `true`          | Spawn the standalone `verter-mcp` HTTP server alongside the LSP, providing Vue analysis tools to AI agents |
+| `verter.mcp.port`                   | `number`                                                                                 | `0`             | Port for the MCP HTTP endpoint. `0` (the default) auto-assigns a free port, which is then registered with VS Code's MCP provider API and mirrored into `.mcp.json`. |
 | `verter.mcp.lintPreset`             | `"essential"` \| `"recommended"` \| `"all"` \| `"performance"` \| `"a11y"` \| `"strict"` | `"recommended"` | Lint preset for the MCP server's diagnostic tools                                       |
 | `verter.mcp.claudeCodeNotification` | `boolean`                                                                                | `true`          | Show a notification when Claude Code is detected with MCP setup instructions            |
 

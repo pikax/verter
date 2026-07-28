@@ -28,6 +28,7 @@ import {
   rmSync,
 } from "node:fs";
 import path from "node:path";
+import { inflateRawSync } from "node:zlib";
 
 /** The fixed on-disk stem of the shim binary (never tsgo-shaped). */
 export const SHIM_STEM = "verter-relay-shim";
@@ -41,7 +42,16 @@ export const SHIM_STEM = "verter-relay-shim";
  * staging enforces a strict `bin/` whitelist (`[shim basename, ...EXTRA_ALLOWED_BIN_ENTRIES]`)
  * and prunes everything else, so an unlisted file is never silently tolerated.
  */
-export const EXTRA_ALLOWED_BIN_ENTRIES = ["verter-lsp", "verter-lsp.exe"];
+export const EXTRA_ALLOWED_BIN_ENTRIES = [
+  "verter-lsp",
+  "verter-lsp.exe",
+  // The standalone MCP server the extension spawns (`verter.mcp.enabled`
+  // defaults to true). Without these two names the release workflow's
+  // pre-staged engine is pruned before `vsce package` and every published
+  // VSIX ships the dead setting again.
+  "verter-mcp",
+  "verter-mcp.exe",
+];
 
 /**
  * The ASCII identity-marker prefix the shim binary embeds in its `.rodata` (see
@@ -589,4 +599,155 @@ function readdirSafe(readdir, dir) {
   } catch {
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Packed-VSIX inspection (fail-closed engine checks)
+// ---------------------------------------------------------------------------
+
+/**
+ * The MCP engine filename a VSIX for `vsceTarget` must carry. A universal
+ * (targetless, dev-only) build stages the HOST platform's binary.
+ */
+export function mcpEngineBinaryName(vsceTarget, hostPlatform = process.platform) {
+  if (vsceTarget === undefined) {
+    return hostPlatform === "win32" ? "verter-mcp.exe" : "verter-mcp";
+  }
+  return vsceTarget.startsWith("win32-") ? "verter-mcp.exe" : "verter-mcp";
+}
+
+/**
+ * Parse a zip (VSIX) central directory into rich entry rows.
+ *
+ * Dependency-free on purpose: packaging must not trust a copy of the staging
+ * inputs — it inspects the BYTES vsce actually produced. Exact central
+ * directory parsing, not a substring scan, so `verter-mcp` cannot be
+ * satisfied by a stray `verter-mcp.exe` (or vice versa).
+ *
+ * @param {string} vsixPath
+ * @returns {{ buffer: Buffer, entries: { name: string, method: number, compressedSize: number, localHeaderOffset: number }[] }}
+ */
+function readVsixCentralDirectory(vsixPath) {
+  const buffer = readFileSync(vsixPath);
+  // End-of-central-directory: fixed 22 bytes plus a comment of up to 65535 —
+  // scan back for its signature.
+  const eocdSignature = 0x06054b50;
+  let eocd = -1;
+  const scanFloor = Math.max(0, buffer.length - 22 - 65535);
+  for (let i = buffer.length - 22; i >= scanFloor; i--) {
+    if (buffer.readUInt32LE(i) === eocdSignature) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd === -1) {
+    throw new Error(`${vsixPath} has no zip end-of-central-directory record — not a VSIX?`);
+  }
+  const entryCount = buffer.readUInt16LE(eocd + 10);
+  const cdOffset = buffer.readUInt32LE(eocd + 16);
+  if (entryCount === 0xffff || cdOffset === 0xffffffff) {
+    throw new Error(`${vsixPath} uses zip64 — teach readVsixCentralDirectory zip64 first`);
+  }
+  const entries = [];
+  let cursor = cdOffset;
+  for (let i = 0; i < entryCount; i++) {
+    if (buffer.readUInt32LE(cursor) !== 0x02014b50) {
+      throw new Error(`${vsixPath}: corrupt central directory at entry ${i}`);
+    }
+    const method = buffer.readUInt16LE(cursor + 10);
+    const compressedSize = buffer.readUInt32LE(cursor + 20);
+    const nameLength = buffer.readUInt16LE(cursor + 28);
+    const extraLength = buffer.readUInt16LE(cursor + 30);
+    const commentLength = buffer.readUInt16LE(cursor + 32);
+    const localHeaderOffset = buffer.readUInt32LE(cursor + 42);
+    entries.push({
+      name: buffer.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8"),
+      method,
+      compressedSize,
+      localHeaderOffset,
+    });
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  return { buffer, entries };
+}
+
+/** Every entry name in a zip (VSIX) central directory. */
+export function listVsixEntries(vsixPath) {
+  return readVsixCentralDirectory(vsixPath).entries.map((entry) => entry.name);
+}
+
+/**
+ * The decompressed bytes of one zip entry (stored or deflate — the two
+ * methods vsce produces).
+ *
+ * @param {Buffer} buffer - the whole zip file.
+ * @param {{ name: string, method: number, compressedSize: number, localHeaderOffset: number }} entry
+ * @returns {Buffer}
+ */
+function readVsixEntryBytes(buffer, entry) {
+  // The LOCAL header's name/extra lengths govern the data offset (the local
+  // extra field can differ from the central one).
+  const local = entry.localHeaderOffset;
+  if (buffer.readUInt32LE(local) !== 0x04034b50) {
+    throw new Error(`zip entry ${entry.name}: corrupt local file header`);
+  }
+  const nameLength = buffer.readUInt16LE(local + 26);
+  const extraLength = buffer.readUInt16LE(local + 28);
+  const dataStart = local + 30 + nameLength + extraLength;
+  const raw = buffer.subarray(dataStart, dataStart + entry.compressedSize);
+  if (entry.method === 0) return Buffer.from(raw);
+  if (entry.method === 8) return inflateRawSync(raw);
+  throw new Error(`zip entry ${entry.name}: unsupported compression method ${entry.method}`);
+}
+
+/**
+ * FAIL CLOSED unless the packed VSIX carries the MCP engine for its target —
+ * present under the exact per-target name AND with executable bytes whose
+ * format/arch match that target.
+ *
+ * `verter.mcp.enabled` defaults to true: a VSIX without `bin/verter-mcp`
+ * re-ships the dead setting. And presence alone is not enough: the vsce
+ * prepublish hook can overwrite a staged CROSS-TARGET engine with a newer
+ * HOST build — an ELF binary named `verter-mcp` inside a darwin VSIX looks
+ * correct and cannot execute. Packaging is the last owner that can refuse,
+ * so it validates the packed entry's header bytes (the same
+ * {@link detectExecutableFormatArch} contract the relay shim is held to).
+ */
+export function assertVsixContainsMcpEngine({
+  vsixPath,
+  vsceTarget,
+  hostPlatform = process.platform,
+  hostArch = process.arch,
+}) {
+  const expected = `extension/bin/${mcpEngineBinaryName(vsceTarget, hostPlatform)}`;
+  const { buffer, entries } = readVsixCentralDirectory(vsixPath);
+  const entry = entries.find((candidate) => candidate.name === expected);
+  if (!entry) {
+    throw new Error(
+      `packaged VSIX ${vsixPath} does not contain ${expected} — the MCP server engine is ` +
+        `missing. release.yml stages the per-target artifact; locally run ` +
+        `\`cargo build --release -p verter_mcp\` before packaging. Refusing to produce a VSIX ` +
+        `that ships \`verter.mcp.enabled\` (default true) with no engine.`,
+    );
+  }
+
+  const bytes = readVsixEntryBytes(buffer, entry);
+  const want = expectedFormatArch(vsceTarget, hostPlatform, normalizeArch(hostArch));
+  const got = detectExecutableFormatArch(bytes);
+  if (!got) {
+    throw new Error(
+      `packaged VSIX ${vsixPath}: ${expected} is not a recognized executable image ` +
+        `(expected ${want.format}/${want.arch} for ${vsceTarget ?? "the host"}). ` +
+        `Refusing to ship an engine that cannot run.`,
+    );
+  }
+  if (got.format !== want.format || normalizeArch(got.arch ?? "") !== normalizeArch(want.arch)) {
+    throw new Error(
+      `packaged VSIX ${vsixPath}: ${expected} is ${got.format}/${got.arch ?? "unknown-arch"} but ` +
+        `the ${vsceTarget ?? "host"} VSIX needs ${want.format}/${want.arch}. A newer HOST build ` +
+        `likely overwrote the staged cross-target engine during vsce prepublish — restage the ` +
+        `per-target binary. Refusing to ship a wrong-platform engine.`,
+    );
+  }
+  return expected;
 }

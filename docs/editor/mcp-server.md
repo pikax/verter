@@ -21,9 +21,15 @@ verter-mcp process
 ::: warning The LSP no longer hosts MCP in-process
 Earlier versions ran the MCP server as an HTTP endpoint inside the `verter-lsp`
 process, and the VS Code extension started it via `--mcp-port`. That embedding
-was removed: `verter-lsp` now rejects `--mcp-port` with a warning telling you to
-run the standalone binary, so the `verter.mcp.*` VS Code settings do not
-currently start anything. Launch `verter-mcp` from your agent's MCP config as
+was removed: `verter-lsp` parses `--mcp-port` only to warn that the standalone
+binary owns MCP now.
+
+In VS Code, the `verter.mcp.*` settings drive the standalone binary instead:
+when `verter.mcp.enabled` (the default), the extension spawns `verter-mcp
+--transport http` with an auto-assigned port, registers the endpoint with
+VS Code's MCP provider API (so Copilot Chat discovers it), and updates the
+port of an existing `verter` entry in the workspace's `.mcp.json` for Claude
+Code CLI. Outside VS Code, launch `verter-mcp` from your agent's MCP config as
 shown below.
 :::
 
@@ -87,11 +93,16 @@ local launcher instead, which avoids `npx` resolution entirely:
 
 After configuring, restart Claude Code to activate the MCP connection.
 
-::: warning The extension's setup command writes the old HTTP config
-The Verter extension still offers a **"Verter: Setup MCP for Claude Code"**
-command (`verter.setupMcpForClaudeCode`) that writes a `url` pointing at
-`http://localhost:6772/mcp`. Nothing serves that endpoint since MCP moved out of
-the LSP process — use one of the `command` forms above instead.
+::: tip The extension's setup command writes the live HTTP endpoint
+The **"Verter: Setup MCP for Claude Code"** command
+(`verter.setupMcpForClaudeCode`) writes the running standalone server's
+actual `http://127.0.0.1:<port>/mcp` endpoint. When nothing is running yet
+(for example, no `.vue`/`.svelte` file has been opened), the command starts
+the server and waits for its bound port; if the server cannot become ready —
+or `verter.mcp.enabled` is off — the command explains why and writes
+nothing, rather than persisting a dead endpoint. The `command` forms above
+remain the right choice for agents that should own the server process
+themselves (stdio transport).
 :::
 
 ## Without npm

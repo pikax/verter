@@ -28,7 +28,7 @@
     "watch": "node esbuild.mjs --watch",
     "test": "vitest run --dir src && pnpm run test:e2e:lib:unit && pnpm run test:e2e:acceptance:unit",
     "vscode:prepublish": "node esbuild.mjs --production",
-    "prepare:e2e:rust": "cargo build -p verter_lsp -p verter_relay_shim --manifest-path ../../Cargo.toml",
+    "prepare:e2e:rust": "cargo build -p verter_lsp -p verter_relay_shim -p verter_mcp --manifest-path ../../Cargo.toml",
     "prepare:e2e:ts": "pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json && pnpm run attest:e2e:build",
     "prepare:e2e": "pnpm run prepare:e2e:rust && pnpm run prepare:e2e:ts",
     "attest:e2e:build": "node e2e/scripts/write-suite-build-manifest.mjs",
@@ -57,7 +57,8 @@
     "package:darwin-arm64": "node package.mjs --target darwin-arm64"
   },
   "dependencies": {
-    "@verter/typescript-plugin": "workspace:^"
+    "@verter/typescript-plugin": "workspace:^",
+    "verter-mcp": "workspace:^"
   },
   "devDependencies": {
     "@types/chai": "^4.3.20",
@@ -260,12 +261,12 @@
         "verter.mcp.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Start an HTTP MCP endpoint alongside the LSP, providing Vue analysis tools to AI agents."
+          "description": "Spawn the standalone verter-mcp HTTP server alongside the LSP, providing Vue analysis tools to AI agents."
         },
         "verter.mcp.port": {
           "type": "number",
-          "default": 6772,
-          "description": "Port for the MCP HTTP endpoint. Set to 0 for auto-assign."
+          "default": 0,
+          "description": "Port for the MCP HTTP endpoint. 0 (the default) auto-assigns a free port, which is then registered with VS Code's MCP provider API and mirrored into .mcp.json."
         },
         "verter.mcp.lintPreset": {
           "type": "string",

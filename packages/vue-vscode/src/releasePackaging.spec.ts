@@ -1,7 +1,13 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { deflateRawSync } from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+// eslint-disable-next-line -- packaging helpers are JavaScript executed by package.mjs
+// @ts-expect-error -- stage-bin.mjs intentionally has no generated declaration file.
+import { assertVsixContainsMcpEngine, listVsixEntries } from "../stage-bin.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(here, "..");
@@ -303,5 +309,328 @@ describe("release gating", () => {
     );
     expect(body, "the test job must check formatting").toContain("cargo fmt");
     expect(body, "the test job must run the JS suite").toMatch(/pnpm (run )?test/);
+  });
+});
+
+/**
+ * The packaged VSIX must also carry the standalone MCP engine.
+ *
+ * `verter.mcp.enabled` defaults to true and the extension SPAWNS
+ * `bin/verter-mcp` — a VSIX without it re-ships the original dead-setting
+ * defect while CI stays green (E2E resolves `target/debug/verter-mcp`, which
+ * CI builds; a marketplace install has no `target/`). Three rails hold it:
+ * the release workflow stages the per-target artifact fail-closed, the
+ * staging whitelist admits it, and `package.mjs` inspects the PACKED VSIX
+ * bytes and refuses to produce one without the engine.
+ */
+describe("VSIX MCP engine payload", () => {
+  const stageBin = read("packages/vue-vscode/stage-bin.mjs");
+  const release = read(".github/workflows/release.yml");
+  const packageMjs = read("packages/vue-vscode/package.mjs");
+
+  it("whitelists the MCP engine so staging does not delete it", () => {
+    const match = stageBin.match(/EXTRA_ALLOWED_BIN_ENTRIES\s*=\s*\[([^\]]*)\]/);
+    expect(match, "EXTRA_ALLOWED_BIN_ENTRIES must exist in stage-bin.mjs").toBeTruthy();
+    expect(
+      match![1].includes("verter-mcp"),
+      "stage-bin.mjs prunes every bin/ entry outside its whitelist. Without `verter-mcp` " +
+        "the release workflow's pre-staged MCP engine is deleted before `vsce package`.",
+    ).toBe(true);
+    expect(
+      match![1].includes("verter-mcp.exe"),
+      "Windows ships `verter-mcp.exe`; a POSIX-only whitelist drops the engine on win32.",
+    ).toBe(true);
+  });
+
+  it("build-vsix depends on build-mcp so the artifacts exist to stage", () => {
+    const graph = parseNeedsGraph(release);
+    expect(graph.has("build-vsix"), "release.yml must define build-vsix").toBe(true);
+    expect(
+      graph.get("build-vsix"),
+      "build-vsix downloads mcp-* artifacts; without a direct needs edge to build-mcp " +
+        "they may not exist yet and the download silently matches nothing.",
+    ).toContain("build-mcp");
+  });
+
+  it("stages the per-target MCP artifact fail-closed before packaging", () => {
+    const body = release.match(/^ {2}build-vsix:\n([\s\S]*?)(?=^ {2}\S|\Z)/m)?.[1] ?? "";
+    expect(body, "build-vsix must download the mcp-* artifacts").toContain("pattern: mcp-*");
+    expect(body, "build-vsix must stage the per-target verter-mcp binary").toContain(
+      "/tmp/mcp-artifacts/mcp-${lsp_pkg}/${MCP_BIN}",
+    );
+    expect(
+      body,
+      "a missing MCP artifact must fail the packaging step (test -f), not fall through",
+    ).toMatch(/test -f "\$MCP_SOURCE"/);
+    expect(body, "win32 stages the .exe engine name").toContain('MCP_BIN="verter-mcp.exe"');
+  });
+
+  it("package.mjs inspects the packed VSIX for the engine", () => {
+    expect(
+      packageMjs,
+      "package.mjs must call assertVsixContainsMcpEngine on the produced .vsix — the " +
+        "staging inputs can all look right while vsce packs something else.",
+    ).toContain("assertVsixContainsMcpEngine");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Functional discrimination for the VSIX inspection itself: a hand-rolled
+// zip whose entries carry REAL content bytes. The inspector parses the zip
+// central directory AND validates the packed engine's executable header
+// against the target, so name-only satisfaction (a host-arch binary under
+// the right name — the vsce-prepublish-overwrite hazard) must fail.
+// ---------------------------------------------------------------------------
+
+interface ZipEntrySpec {
+  readonly name: string;
+  readonly content?: Buffer;
+}
+
+/** Build a minimal valid zip of STORED entries with the given contents. */
+function zipWithEntries(entries: ZipEntrySpec[]): Buffer {
+  const chunks: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const { name, content } of entries) {
+    const nameBytes = Buffer.from(name, "utf8");
+    const data = content ?? Buffer.alloc(0);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // local file header signature
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0, 8); // method 0 = stored
+    local.writeUInt32LE(data.length, 18); // compressed size
+    local.writeUInt32LE(data.length, 22); // uncompressed size
+    local.writeUInt16LE(nameBytes.length, 26);
+    chunks.push(local, nameBytes, data);
+
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0); // central directory signature
+    cd.writeUInt16LE(20, 4); // version made by
+    cd.writeUInt16LE(20, 6); // version needed
+    cd.writeUInt16LE(0, 10); // method 0 = stored
+    cd.writeUInt32LE(data.length, 20); // compressed size
+    cd.writeUInt32LE(data.length, 24); // uncompressed size
+    cd.writeUInt16LE(nameBytes.length, 28);
+    cd.writeUInt32LE(offset, 42); // local header offset
+    central.push(cd, nameBytes);
+    offset += local.length + nameBytes.length + data.length;
+  }
+  const cdStart = offset;
+  const cdBuffer = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdBuffer.length, 12);
+  eocd.writeUInt32LE(cdStart, 16);
+  return Buffer.concat([...chunks, cdBuffer, eocd]);
+}
+
+/** Minimal ELF header bytes: magic + e_machine (LE u16 at 18). */
+function elfBytes(machine: number): Buffer {
+  const bytes = Buffer.alloc(24);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46], 0);
+  bytes.writeUInt16LE(machine, 18);
+  return bytes;
+}
+
+/** Minimal thin little-endian 64-bit Mach-O bytes: MH_MAGIC_64 + cputype. */
+function machoBytes(cputype: number): Buffer {
+  const bytes = Buffer.alloc(12);
+  bytes.set([0xcf, 0xfa, 0xed, 0xfe], 0);
+  bytes.writeUInt32LE(cputype, 4);
+  return bytes;
+}
+
+/** Minimal PE bytes: MZ + e_lfanew → PE\0\0 + Machine. */
+function peBytes(machine: number): Buffer {
+  const bytes = Buffer.alloc(0x60);
+  bytes.set([0x4d, 0x5a], 0);
+  bytes.writeUInt32LE(0x40, 0x3c);
+  bytes.set([0x50, 0x45, 0x00, 0x00], 0x40);
+  bytes.writeUInt16LE(machine, 0x44);
+  return bytes;
+}
+
+const ELF_X64 = () => elfBytes(0x3e);
+const ELF_ARM64 = () => elfBytes(0xb7);
+const MACHO_ARM64 = () => machoBytes(0x0100000c);
+const PE_X64 = () => peBytes(0x8664);
+
+describe("VSIX inspection helpers", () => {
+  let scratchDir: string;
+  beforeEach(() => {
+    scratchDir = mkdtempSync(path.join(tmpdir(), "verter-vsix-inspect-"));
+  });
+  afterEach(() => {
+    rmSync(scratchDir, { recursive: true, force: true });
+  });
+
+  const writeZip = (name: string, entries: ZipEntrySpec[]): string => {
+    const zipPath = path.join(scratchDir, name);
+    writeFileSync(zipPath, zipWithEntries(entries));
+    return zipPath;
+  };
+
+  it("lists exact central-directory entry names", () => {
+    const zipPath = writeZip("sample.vsix", [
+      { name: "extension/package.json" },
+      { name: "extension/bin/verter-mcp", content: ELF_X64() },
+    ]);
+    expect(listVsixEntries(zipPath)).toEqual([
+      "extension/package.json",
+      "extension/bin/verter-mcp",
+    ]);
+  });
+
+  it("accepts a VSIX whose engine bytes match the target", () => {
+    const linux = writeZip("ok-linux.vsix", [
+      { name: "extension/bin/verter-mcp", content: ELF_X64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: linux, vsceTarget: "linux-x64" }),
+    ).not.toThrow();
+
+    const mac = writeZip("ok-mac.vsix", [
+      { name: "extension/bin/verter-mcp", content: MACHO_ARM64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: mac, vsceTarget: "darwin-arm64" }),
+    ).not.toThrow();
+
+    const win = writeZip("ok-win.vsix", [
+      { name: "extension/bin/verter-mcp.exe", content: PE_X64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: win, vsceTarget: "win32-x64" }),
+    ).not.toThrow();
+  });
+
+  it("REFUSES a VSIX without the engine", () => {
+    const zipPath = writeZip("missing.vsix", [{ name: "extension/package.json" }]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: zipPath, vsceTarget: "linux-x64" }),
+    ).toThrow(/does not contain extension\/bin\/verter-mcp/);
+  });
+
+  it("REFUSES a right-named engine with wrong-platform bytes (prepublish overwrite)", () => {
+    // The exact hazard: packaging darwin-arm64 on a Linux runner where a
+    // newer HOST build overwrote the staged cross-target engine — an ELF
+    // binary named verter-mcp inside a mac VSIX.
+    const elfInMacVsix = writeZip("elf-in-mac.vsix", [
+      { name: "extension/bin/verter-mcp", content: ELF_ARM64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: elfInMacVsix, vsceTarget: "darwin-arm64" }),
+    ).toThrow(/ELF/);
+  });
+
+  it("REFUSES a right-format engine with the wrong CPU arch", () => {
+    const wrongArch = writeZip("wrong-arch.vsix", [
+      { name: "extension/bin/verter-mcp", content: ELF_ARM64() },
+    ]);
+    // The matcher must name BOTH sides of the mismatch — only the
+    // format/arch-mismatch branch produces this text. A loose /arch/ would
+    // also match this fixture's own filename inside any other error message
+    // (every refusal embeds vsixPath), proving nothing about the error class.
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: wrongArch, vsceTarget: "linux-x64" }),
+    ).toThrow(/is ELF\/aarch64 but the linux-x64 VSIX needs ELF\/x86_64/);
+  });
+
+  it("REFUSES engine bytes that are no recognized executable at all", () => {
+    const script = writeZip("script.vsix", [
+      { name: "extension/bin/verter-mcp", content: Buffer.from("#!/bin/sh\necho nope\n") },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: script, vsceTarget: "linux-x64" }),
+    ).toThrow(/not a recognized|recognized executable/i);
+  });
+
+  it("requires the EXACT per-target name — an .exe does not satisfy POSIX, nor vice versa", () => {
+    const exeOnly = writeZip("exe-only.vsix", [
+      { name: "extension/bin/verter-mcp.exe", content: PE_X64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: exeOnly, vsceTarget: "linux-x64" }),
+    ).toThrow(/does not contain/);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: exeOnly, vsceTarget: "win32-x64" }),
+    ).not.toThrow();
+
+    const posixOnly = writeZip("posix-only.vsix", [
+      { name: "extension/bin/verter-mcp", content: ELF_X64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: posixOnly, vsceTarget: "win32-x64" }),
+    ).toThrow(/does not contain extension\/bin\/verter-mcp\.exe/);
+  });
+
+  it("a universal build requires the HOST platform's engine name and format", () => {
+    const machoHost = writeZip("host.vsix", [
+      { name: "extension/bin/verter-mcp", content: MACHO_ARM64() },
+    ]);
+    expect(() =>
+      assertVsixContainsMcpEngine({
+        vsixPath: machoHost,
+        vsceTarget: undefined,
+        hostPlatform: "darwin",
+        hostArch: "arm64",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertVsixContainsMcpEngine({
+        vsixPath: machoHost,
+        vsceTarget: undefined,
+        hostPlatform: "win32",
+        hostArch: "x64",
+      }),
+    ).toThrow(/verter-mcp\.exe/);
+    // Same name, wrong bytes for the host: a Mach-O engine in a linux
+    // universal build fails on format, not name.
+    expect(() =>
+      assertVsixContainsMcpEngine({
+        vsixPath: machoHost,
+        vsceTarget: undefined,
+        hostPlatform: "linux",
+        hostArch: "x64",
+      }),
+    ).toThrow(/MachO|ELF/);
+  });
+
+  it("reads entry bytes back from DEFLATE-compressed entries too", () => {
+    // vsce writes deflated entries; the byte validation must not depend on
+    // stored-only zips. Round-trip through a real deflate.
+    const deflated = deflateRawSync(ELF_X64());
+    const nameBytes = Buffer.from("extension/bin/verter-mcp", "utf8");
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(8, 8); // method 8 = deflate
+    local.writeUInt32LE(deflated.length, 18);
+    local.writeUInt32LE(ELF_X64().length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt16LE(8, 10);
+    cd.writeUInt32LE(deflated.length, 20);
+    cd.writeUInt32LE(ELF_X64().length, 24);
+    cd.writeUInt16LE(nameBytes.length, 28);
+    cd.writeUInt32LE(0, 42);
+    const cdStart = 30 + nameBytes.length + deflated.length;
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(1, 8);
+    eocd.writeUInt16LE(1, 10);
+    eocd.writeUInt32LE(46 + nameBytes.length, 12);
+    eocd.writeUInt32LE(cdStart, 16);
+    const zipPath = path.join(scratchDir, "deflated.vsix");
+    writeFileSync(zipPath, Buffer.concat([local, nameBytes, deflated, cd, nameBytes, eocd]));
+    expect(() =>
+      assertVsixContainsMcpEngine({ vsixPath: zipPath, vsceTarget: "linux-x64" }),
+    ).not.toThrow();
   });
 });

@@ -9914,11 +9914,14 @@ fn guard9_predicate_passes_for_known_implementor() {
 // guard supersedes that allowance — the cross-product dependency is
 // removed in full.
 //
-// The companion D26 acceptance test
-// `lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves` then asserts
-// the binary entrypoints actually reflect that boundary AND that
-// `verter_mcp_server` still ships the standalone HTTP launcher so
-// IDE consumers have a separately-shippable transport.
+// The companion structural guard
+// `lsp_binary_compile_graph_cannot_reach_verter_mcp` then asserts the
+// RESOLVED workspace dependency graph reflects that boundary
+// transitively; the standalone HTTP launcher's liveness is owned by the
+// behavioral spawn tests driving the shared serving contract in
+// `crates/verter_mcp/tests/support/http_serving_contract.rs` (one per
+// entry binary: `crates/verter_mcp/tests/cases/http_readiness.rs` and
+// `crates/verter_mcp_server/tests/cases/http_serving.rs`).
 // ===========================================================================
 
 /// Predicate: scan a `Cargo.toml` snippet for any dependency declaration
@@ -10064,97 +10067,136 @@ fn guard10_predicate_rejects_deliberate_cross_product_dep() {
 }
 
 // ===========================================================================
-// D26 — lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves
+// D26 — lsp_binary_compile_graph_cannot_reach_verter_mcp
 //
-// Combined acceptance discriminator for the Tier 3 LSP/MCP product
-// boundary decoupling. The test FAILS for two distinct reasons
-// before Tier 3 lands and PASSES only when both conditions hold:
+// The LSP and MCP products ship as separate processes; the LSP binary
+// must not embed the MCP server. That boundary is held STRUCTURALLY:
+// `cargo metadata` — cargo's own parse of every workspace manifest
+// (every declaration form, renames, dotted tables, target-gated
+// sections) — must show NO dependency path from `verter_lsp` to
+// `verter_mcp` over the dep kinds that link into the compiled binary
+// (normal + build; dev-deps never ship). `verter_mcp` is an
+// unpublished, path-only workspace crate, so any dependency path to it
+// runs entirely through workspace members and the workspace-local BFS
+// below is a complete transitive check. With the dep edge provably
+// absent, the COMPILER rejects any `use verter_mcp` / `verter_mcp::`
+// reference in LSP sources — the retired source-text greps of
+// `verter_lsp/src/main.rs` proved strictly less (one file, direct
+// references only) and are superseded, not weakened.
 //
-//   (a) `verter_lsp` has been fully decoupled from `verter_mcp` —
-//       no Cargo dep, no `serve_mcp_http` function on the binary
-//       entrypoint, no `verter_mcp::` path references, no
-//       `use verter_mcp` import.
-//   (b) `verter_mcp_server` still ships the standalone HTTP launcher
-//       so consumers retain a working out-of-process MCP transport.
-//
-// Per plan §5.2: pre-Tier-3 FAILS for two distinct reasons (Cargo dep
-// present OR HTTP launcher broken); post-Tier-3 PASSES only when
-// both conditions hold.
+// The other half of the original acceptance — "the standalone MCP HTTP
+// launcher still serves" — is owned by the shared BEHAVIORAL serving
+// contract `crates/verter_mcp/tests/support/http_serving_contract.rs`
+// (`assert_http_launcher_binds_announces_and_serves`), which runs a real
+// entry binary with `--transport http --port 0`, requires the canonical
+// readiness record as the FIRST stdout line, then POSTs an MCP
+// `initialize` to the ANNOUNCED `/mcp` URL and requires a completed 200
+// streamable-HTTP response (session id + `serverInfo`) — a launcher that
+// binds and announces but parks before running the HTTP service fails,
+// because the listener backlog alone satisfies only a bare TCP connect.
+// Both shipped entry points delegate to the shared `verter_mcp::run::run`,
+// and EACH is pinned by its own spawn test driving that contract:
+// `crates/verter_mcp/tests/cases/http_readiness.rs` (`verter-mcp`) and
+// `crates/verter_mcp_server/tests/cases/http_serving.rs`
+// (`verter-mcp-server`), so a divergence between the twins is covered.
 // ===========================================================================
 
 #[test]
-#[allow(non_snake_case)]
-fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
-    // ── Condition (a) — LSP no longer embeds MCP ──
-    let lsp_cargo = read_workspace_file("crates/verter_lsp/Cargo.toml");
+fn lsp_binary_compile_graph_cannot_reach_verter_mcp() {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let output = std::process::Command::new(cargo)
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run `cargo metadata`");
     assert!(
-        !cargo_toml_declares_dep(&lsp_cargo, "verter_mcp"),
-        "D26 condition (a) violation: `crates/verter_lsp/Cargo.toml` \
-         still declares `verter_mcp` as a dependency. Tier 3 deletes \
-         this dep so the LSP binary cannot embed the MCP server.",
+        output.status.success(),
+        "`cargo metadata` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse `cargo metadata` output");
+    let packages = json
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .expect("cargo metadata reports packages");
+
+    let member_names: BTreeSet<&str> = packages
+        .iter()
+        .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+        .collect();
+    // The guard must fail LOUDLY if either endpoint vanishes — a silently
+    // empty traversal would prove nothing.
+    assert!(
+        member_names.contains("verter_lsp"),
+        "D26 guard integrity: workspace no longer contains `verter_lsp`; \
+         re-point this guard at the LSP product crate."
+    );
+    assert!(
+        member_names.contains("verter_mcp"),
+        "D26 guard integrity: workspace no longer contains `verter_mcp`; \
+         re-point this guard at the MCP product crate."
     );
 
-    // The LSP binary entrypoint must not host the in-process MCP
-    // server. We assert the absence of the `serve_mcp_http` function
-    // (the embedding point) and any direct `verter_mcp` reference.
-    let lsp_main = read_workspace_file("crates/verter_lsp/src/main.rs");
-    assert!(
-        !lsp_main.contains("fn serve_mcp_http"),
-        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
-         still defines `serve_mcp_http`. Tier 3 deletes this in-process \
-         MCP launcher; consumers must spawn `verter_mcp_server` \
-         instead.",
-    );
-    assert!(
-        !lsp_main.contains("use verter_mcp"),
-        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
-         still imports `verter_mcp`. Tier 3 removes all cross-product \
-         imports from the LSP binary.",
-    );
-    assert!(
-        !lsp_main.contains("verter_mcp::"),
-        "D26 condition (a) violation: `crates/verter_lsp/src/main.rs` \
-         still references `verter_mcp::` symbols on a path. Tier 3 \
-         removes all cross-product references from the LSP binary.",
-    );
+    // Workspace-member dependency edges over LINKING kinds only: `null`
+    // (normal) and `build`. Dev-deps do not enter the shipped binary and
+    // guard 10 (`no_cross_product_binary_imports`) already rejects a direct
+    // declaration of any kind.
+    let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for package in packages {
+        let name = package
+            .get("name")
+            .and_then(|n| n.as_str())
+            .expect("package has a name");
+        let deps = package
+            .get("dependencies")
+            .and_then(|v| v.as_array())
+            .expect("package lists dependencies");
+        for dep in deps {
+            let kind = dep.get("kind").and_then(|k| k.as_str());
+            if kind == Some("dev") {
+                continue;
+            }
+            let dep_name = dep
+                .get("name")
+                .and_then(|n| n.as_str())
+                .expect("dependency has a name");
+            if member_names.contains(dep_name) {
+                edges.entry(name).or_default().push(dep_name);
+            }
+        }
+    }
 
-    // ── Condition (b) — MCP HTTP launcher still serves ──
-    // The standalone `verter_mcp_server` binary must continue to
-    // expose the HTTP transport so consumers that previously routed
-    // through `verter-lsp --mcp-port=...` retain a working
-    // out-of-process replacement. We assert the presence of the
-    // `Transport::Http` arm wired through `axum::serve` on a TCP
-    // listener — the structural shape that proves the launcher
-    // still serves.
-    let mcp_main = read_workspace_file("crates/verter_mcp_server/src/main.rs");
-    assert!(
-        mcp_main.contains("Transport::Http"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer matches \
-         `Transport::Http` — the standalone MCP HTTP launcher is \
-         broken. Tier 3 requires this launcher remain operational.",
-    );
-    assert!(
-        mcp_main.contains("axum::serve"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer calls \
-         `axum::serve` — the HTTP transport is broken. Tier 3 \
-         requires this launcher remain operational.",
-    );
-    assert!(
-        mcp_main.contains("TcpListener::bind"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer binds a \
-         TCP listener — the HTTP transport cannot start. Tier 3 \
-         requires this launcher remain operational.",
-    );
-    assert!(
-        mcp_main.contains("StreamableHttpService"),
-        "D26 condition (b) violation: \
-         `crates/verter_mcp_server/src/main.rs` no longer wires the \
-         `StreamableHttpService` rmcp transport. Tier 3 requires \
-         this launcher remain operational.",
-    );
+    // BFS from `verter_lsp` with predecessor tracking, so a violation
+    // names the exact path that re-embedded MCP.
+    let mut predecessor: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut queue = VecDeque::from(["verter_lsp"]);
+    let mut visited: BTreeSet<&str> = BTreeSet::from(["verter_lsp"]);
+    while let Some(current) = queue.pop_front() {
+        for &next in edges.get(current).into_iter().flatten() {
+            if visited.insert(next) {
+                predecessor.insert(next, current);
+                queue.push_back(next);
+            }
+        }
+    }
+
+    if visited.contains("verter_mcp") {
+        let mut path = vec!["verter_mcp"];
+        while let Some(&prev) = predecessor.get(path[path.len() - 1]) {
+            path.push(prev);
+        }
+        path.reverse();
+        panic!(
+            "D26 violation: the LSP binary's compile graph reaches `verter_mcp` \
+             via {} — the LSP and MCP products must ship as separate processes \
+             with no cross-product compile-graph coupling. Spawn the standalone \
+             `verter-mcp` binary instead.",
+            path.join(" -> "),
+        );
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
