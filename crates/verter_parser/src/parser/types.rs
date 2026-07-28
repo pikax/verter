@@ -52,6 +52,26 @@ pub struct RootNodeScript {
     pub is_setup: bool,
     /// Parsed `lang` attribute (e.g., `ts`, `tsx`).
     pub lang: Option<ScriptLanguage>,
+    /// The `lang` attribute's VALUE, HTML-entity-decoded — Vue's own
+    /// `block.lang`. `None` when the attribute is absent.
+    ///
+    /// Kept beside the parsed [`Self::lang`] because the two answer different
+    /// questions. [`Self::lang`] answers "which dialect do we generate for",
+    /// where `ts` and `typescript` are the same answer and every unrecognised
+    /// spelling collapses to [`ScriptLanguage::Unknown`]. This answers "did the
+    /// author write the same thing in both blocks", which is the comparison
+    /// Vue's `compileScript` performs (`scriptLang !== scriptSetupLang`) — and
+    /// under the parsed enum `ts` vs `typescript`, and two DIFFERENT
+    /// unrecognised spellings, would both compare equal while Vue rejects.
+    ///
+    /// It is the DECODED value, not the source bytes, because that is what Vue
+    /// compares: its SFC parser entity-decodes attribute values, so
+    /// `lang="t&#115;"` is `ts` there and the pair `t&#115;`/`ts` is accepted.
+    /// Comparing the source bytes rejects it — a FALSE refusal, and a build
+    /// that refuses valid Vue is worse than one that mislabels it. The same
+    /// decoded text also drives [`Self::lang`], so a dialect is classified from
+    /// what the author wrote rather than from how they spelled it.
+    pub lang_value: Option<Box<str>>,
     /// `src="..."` attribute value span (external script source).
     pub src: Option<Span>,
     /// `generic="..."` attribute value span (generic type parameters for `<script setup>`).
@@ -64,6 +84,167 @@ pub struct RootNodeScript {
 
     /// Raw content span between open and close tags. `None` if self-closing.
     pub content: Option<Span>,
+}
+
+/// The authored script dialect of an SFC — the ONE classification every
+/// generated-companion consumer shares.
+///
+/// TypeScript decides what to typecheck AND how to PARSE from a file's
+/// extension/ScriptKind, not from a compiler flag
+/// (`typescript/lib/typescript.js`'s `getScriptKindFromFileName`): `.ts`/`.tsx`
+/// are ALWAYS checked (so `strict`/`noImplicitAny` fires on every untyped
+/// parameter) while `.js`/`.jsx` are checked only under `checkJs`, and
+/// independently `.jsx`/`.tsx` accept JSX syntax while `.js`/`.ts` do not (in a
+/// `.ts` file `<div/>` parses as a type assertion). Both axes are load-bearing,
+/// so this is a FOUR-way classification and never a `is_javascript: bool` —
+/// collapsing it mislabels `lang="jsx"` as `.js` and `lang="tsx"` as `.ts`,
+/// which turns an authored `<div/>` into a syntax error.
+///
+/// Every companion Verter hands an engine is labelled from here: the IDE
+/// validation carrier's `.jsx`/`.tsx` extension reads
+/// [`Self::is_javascript`] (the carrier is JSX-bearing by construction — the
+/// template lowers into it — so only the JS-vs-TS axis is open there), and the
+/// public-API stub's extension reads [`Self::extension`]. One classifier, so
+/// the two surfaces of the same file can never disagree about its ScriptKind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfcScriptDialect {
+    /// `lang="js"` / `lang="javascript"` / no `lang` — `.js`, JS ScriptKind.
+    JavaScript,
+    /// `lang="jsx"` — `.jsx`, JSX ScriptKind.
+    Jsx,
+    /// `lang="ts"` / `lang="typescript"`, and every generated declaration
+    /// surface — `.ts`, TS ScriptKind.
+    TypeScript,
+    /// `lang="tsx"` — `.tsx`, TSX ScriptKind.
+    Tsx,
+}
+
+impl SfcScriptDialect {
+    /// Whether this dialect is JavaScript (checked only under `checkJs`)
+    /// rather than TypeScript (always checked).
+    #[must_use]
+    pub const fn is_javascript(self) -> bool {
+        matches!(self, Self::JavaScript | Self::Jsx)
+    }
+
+    /// Whether this dialect's ScriptKind accepts JSX syntax.
+    #[must_use]
+    pub const fn is_jsx(self) -> bool {
+        matches!(self, Self::Jsx | Self::Tsx)
+    }
+
+    /// The file extension (without a leading dot) TypeScript maps to this
+    /// dialect's ScriptKind.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::JavaScript => "js",
+            Self::Jsx => "jsx",
+            Self::TypeScript => "ts",
+            Self::Tsx => "tsx",
+        }
+    }
+}
+
+/// The `lang` of an SFC's `<script setup>` and its plain `<script>` disagree.
+///
+/// Vue REJECTS such an SFC outright (`@vue/compiler-sfc`'s `compileScript`
+/// throws ``[@vue/compiler-sfc] <script> and <script setup> must have the same
+/// language type.``), and so does Verter — the parser emits
+/// [`CompilerErrorCode::ScriptLangMismatch`] for it.
+///
+/// [`CompilerErrorCode::ScriptLangMismatch`]: crate::diagnostics::CompilerErrorCode::ScriptLangMismatch
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfcScriptLangConflict {
+    /// The `<script setup>` block's decoded `lang` value, `None` when absent.
+    pub setup_lang: Option<Box<str>>,
+    /// The plain `<script>` block's decoded `lang` value, `None` when absent.
+    pub script_lang: Option<Box<str>>,
+}
+
+/// Whether the SFC's two script blocks disagree about `lang`.
+///
+/// **The single implementation of this rule.** Both blocks must be present for a
+/// conflict to exist — a lone block never conflicts with anything.
+///
+/// The comparison is over each block's DECODED `lang` value, which is exactly
+/// what Vue's `compileScript` compares:
+///
+/// ```js
+/// const scriptLang = script && script.lang
+/// const scriptSetupLang = scriptSetup && scriptSetup.lang
+/// if (script && scriptSetup && scriptLang !== scriptSetupLang) throw new Error(
+///   `[@vue/compiler-sfc] <script> and <script setup> must have the same language type.`)
+/// ```
+///
+/// (`@vue/compiler-sfc` 3.5.x, `compileScript`.) `block.lang` there is the
+/// entity-DECODED attribute value, so `lang="t&#115;"` is `ts` and Vue accepts
+/// it beside `lang="ts"`. That is why [`RootNodeScript::lang_value`] holds the
+/// decoded text and not the source bytes: comparing bytes rejects a pair Vue
+/// accepts, and refusing valid Vue is a worse failure than mislabelling it.
+///
+/// What stays rejected, because Vue rejects it too: `lang="ts"` beside
+/// `lang="typescript"` (both name TypeScript, but they are different strings),
+/// an absent `lang` beside `lang="js"` (both mean JavaScript), and two DIFFERENT
+/// unrecognised spellings (`lang="coffee"` / `lang="cson"`). Comparing the
+/// parsed [`ScriptLanguage`] instead would pass all three through Verter and
+/// fail them in Vue — an SFC that builds here and not there.
+#[must_use]
+pub fn sfc_script_lang_conflict(
+    script_setup: Option<&RootNodeScript>,
+    script: Option<&RootNodeScript>,
+) -> Option<SfcScriptLangConflict> {
+    let (setup, plain) = (script_setup?, script?);
+    (setup.lang_value != plain.lang_value).then(|| SfcScriptLangConflict {
+        setup_lang: setup.lang_value.clone(),
+        script_lang: plain.lang_value.clone(),
+    })
+}
+
+/// Classify an SFC's authored script dialect.
+///
+/// An explicit `lang` wins, `<script setup>`'s before the plain `<script>`'s; a
+/// script block with NO `lang` is JavaScript (Vue's own default); an SFC with
+/// no script block at all (template-only) and an unrecognised `lang`
+/// (`lang="coffee"`) both default to TypeScript.
+///
+/// **A mixed-language SFC has no authored dialect, and this function is not the
+/// place that decides what to do about it.** Such an SFC is invalid Vue — Vue's
+/// own `compileScript` THROWS — and the parser reports it
+/// ([`sfc_script_lang_conflict`], `ScriptLangMismatch`). A whole-project BUILD
+/// must refuse it outright rather than label it, because either label is a
+/// guess that silently corrupts the result: `.ts`/`.tsx` strict-checks the
+/// JavaScript block (a flood of implicit-any errors on code the project never
+/// asked to have checked) and `.js`/`.jsx` deletes every genuine diagnostic in
+/// the TypeScript one. That refusal lives at the build boundary
+/// (`verter_tsc`), which emits the diagnostic and generates NO companion at
+/// all.
+///
+/// This classifier still has to return something for the surfaces that keep
+/// working on a transiently-invalid file — an editor must not go dark on the
+/// keystroke between `<script setup lang="ts">` and its sibling gaining the
+/// same `lang` — and there the answer is fail-CLOSED to TypeScript: over-
+/// reporting is recoverable, silently dropping a block's diagnostics is not.
+#[must_use]
+pub fn sfc_script_dialect(
+    script_setup: Option<&RootNodeScript>,
+    script: Option<&RootNodeScript>,
+) -> SfcScriptDialect {
+    if sfc_script_lang_conflict(script_setup, script).is_some() {
+        return SfcScriptDialect::TypeScript;
+    }
+    let has_any_script = script_setup.is_some() || script.is_some();
+    let lang = script_setup
+        .and_then(|s| s.lang)
+        .or_else(|| script.and_then(|s| s.lang));
+    match lang {
+        Some(ScriptLanguage::TypeScript) => SfcScriptDialect::TypeScript,
+        Some(ScriptLanguage::TSX) => SfcScriptDialect::Tsx,
+        Some(ScriptLanguage::JavaScript) => SfcScriptDialect::JavaScript,
+        Some(ScriptLanguage::JSX) => SfcScriptDialect::Jsx,
+        None if has_any_script => SfcScriptDialect::JavaScript,
+        None | Some(ScriptLanguage::Unknown) => SfcScriptDialect::TypeScript,
+    }
 }
 
 /// A parsed `<style>` SFC root block.

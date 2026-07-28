@@ -53,13 +53,14 @@ use crate::code_transform::{CodeTransform, GeneratedSourceRange};
 use crate::common::Span;
 use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use crate::parser::types::SfcScriptDialect;
 use crate::parser::Syntax;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::{
-    extract_options_component_macro_args, parse_script, DefaultExportType, ImportSpecifierKind,
-    MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
+    extract_options_component_macro_args, parse_script, CallableShape, DefaultExportType,
+    ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
     RuntimeConstructorSyntax, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
 };
 
@@ -87,6 +88,31 @@ pub struct TscOutput {
     pub code: String,
     /// The JSON source map string (without base64 encoding).
     pub source_map: String,
+    /// The dialect of [`Self::code`] — the ScriptKind a consumer writing this
+    /// surface to a companion file must label it with.
+    ///
+    /// This is the dialect of the code the surface CARRIES, which is not
+    /// automatically the SFC's authored dialect: a surface built only from
+    /// GENERATED declarations (`declare const`, `type` aliases) is TypeScript
+    /// whatever language the SFC was written in, and a surface that copies an
+    /// authored body verbatim is whatever the author wrote. Getting it wrong in
+    /// either direction is a real defect — a JavaScript body labelled `.ts`
+    /// makes `strict`/`noImplicitAny` report on a file the project never asked
+    /// to have checked, and a `declare`-bearing surface labelled `.js` is a
+    /// syntax error.
+    ///
+    /// The producer-by-producer contract:
+    ///
+    /// | producer | copies an authored body? | reported dialect |
+    /// |---|---|---|
+    /// | [`generate_options_api_stub`] | YES, verbatim | the authored dialect |
+    /// | [`generate_code`] | only a TypeScript-dialect `<script setup>` body | `TypeScript`, or `Tsx` when a `lang="tsx"` body was copied |
+    /// | [`generate_testing_code`] | YES, the `<script setup>` body | `TypeScript` |
+    /// | [`generate_empty_stub`] | no | `TypeScript` |
+    /// | [`generate_declaration_code`] | no | `TypeScript` |
+    /// | [`generate_declaration_empty_stub`] | no | `TypeScript` |
+    /// | [`generate_options_api_declaration`] | no (re-renders declarations) | `TypeScript` |
+    pub dialect: SfcScriptDialect,
 }
 
 /// Explicit semantic input contract for TSC generation.
@@ -605,6 +631,15 @@ struct ExposeEntry {
     /// When `Some(ident)`, the codegen emits `name: typeof ident`.
     /// When `None`, falls back to `name: any` (methods, complex expressions).
     typeof_target: Option<String>,
+    /// A declaration-legal type for this member, for the surfaces that do NOT
+    /// emit the setup body and therefore cannot resolve `typeof ident`.
+    ///
+    /// `Some` when the member's call shape is recoverable from the authored
+    /// syntax: a `defineExpose` method shorthand, or a `typeof_target` that
+    /// names a `function` declaration or a function-valued `const`/`let`/`var`.
+    /// `None` when nothing is recoverable, and the surface must fall back to
+    /// `unknown`.
+    declaration_fallback: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1093,6 +1128,35 @@ fn validate_terminal_generation<'a>(
     Ok(attrs_type)
 }
 
+/// The OXC `SourceType` a `<script setup>` body must be parsed under.
+///
+/// FOUR-way, on the same two axes and for the same reasons the generated
+/// companion's extension is:
+///
+/// - **JSX axis.** `<div/>` is a JSX element in a `.tsx`/`.jsx` ScriptKind and a
+///   TYPE ASSERTION in a `.ts` one, so parsing a `lang="tsx"` body as plain
+///   TypeScript loses the whole body — and every macro in it — to a parse error.
+/// - **Language axis.** TypeScript syntax is not JavaScript syntax, and the
+///   difference is not merely permissive: in TS mode `a < b > (c)` parses as a
+///   GENERIC CALL and in JS mode as two comparisons, so a JavaScript body read
+///   as TypeScript is not just over-accepted, it can be MIS-parsed. Reading a
+///   `lang="js"` body as TypeScript also silently accepts `interface`,
+///   `x satisfies T`, `x!`, and `defineProps<T>()` in a file the engine will
+///   later reject outright — Verter would extract macros from syntax the author
+///   is not allowed to write.
+///
+/// The module-kind axis is deliberately untouched: every arm is
+/// [`SourceType::unambiguous`]-derived, exactly as `SourceType::ts()` is, so
+/// this function moves the LANGUAGE and JSX flags and nothing else.
+fn setup_source_type(dialect: SfcScriptDialect) -> SourceType {
+    match dialect {
+        SfcScriptDialect::JavaScript => SourceType::unambiguous(),
+        SfcScriptDialect::Jsx => SourceType::unambiguous().with_jsx(true),
+        SfcScriptDialect::TypeScript => SourceType::ts(),
+        SfcScriptDialect::Tsx => SourceType::tsx(),
+    }
+}
+
 /// Cached intermediate state from SFC macro extraction.
 ///
 /// Captures everything that depends on the SFC source text alone (steps 1–7)
@@ -1112,6 +1176,12 @@ pub struct ExtractedTscState {
     sfc_source: String,
     /// Filename for source maps.
     filename: Option<String>,
+    /// The SFC's AUTHORED script dialect, classified once here from the parsed
+    /// blocks through the shared classifier. Cached with the rest of the
+    /// syntax-owned state so the cached generation path reaches the same
+    /// classification the direct path does — the two must never disagree about
+    /// a file's ScriptKind.
+    authored_dialect: SfcScriptDialect,
 }
 
 impl std::fmt::Debug for ExtractedTscState {
@@ -1145,6 +1215,9 @@ pub fn extract_tsc_state(
     let mut syntax = Syntax::new(false);
     tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
 
+    let authored_dialect =
+        crate::parser::types::sfc_script_dialect(syntax.script_setup(), syntax.script());
+
     let setup = syntax.script_setup()?;
     let content_span = setup.content?;
 
@@ -1152,7 +1225,7 @@ pub fn extract_tsc_state(
 
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts())
+    let parse_result = Parser::new(&alloc, content_str, setup_source_type(authored_dialect))
         .with_config(TokensParserConfig)
         .parse();
     let tokens = parse_result.tokens.as_slice().to_vec();
@@ -1216,6 +1289,7 @@ pub fn extract_tsc_state(
         content_str: content_str.to_string(),
         sfc_source: sfc_source.to_owned(),
         filename: options.filename.clone(),
+        authored_dialect,
     })
 }
 
@@ -1270,6 +1344,7 @@ pub fn generate_tsc_from_state(
             None, // narrowing not used in cache path
             root_element_tag,
             &state.content_str,
+            state.authored_dialect,
         ),
     })
 }
@@ -1383,7 +1458,20 @@ pub fn generate_tsc_output_with_options(
         if let Some(script) = syntax.script() {
             if let Some(content) = script.content {
                 let content_str = &sfc_source[content.start as usize..content.end as usize];
-                return Ok(generate_options_api_stub(component_name, content_str));
+                // The stub passes the AUTHORED body through, so the surface's
+                // dialect is the author's — routed through the shared SFC
+                // script-dialect classification, the same one that picks the
+                // validation carrier's `.jsx`/`.tsx` extension. All FOUR
+                // dialects are distinct here: the body is copied verbatim, so
+                // `lang="jsx"` needs a JSX-capable ScriptKind (`.jsx`, not
+                // `.js`) and `lang="tsx"` needs `.tsx`, not `.ts`.
+                let dialect =
+                    crate::parser::types::sfc_script_dialect(syntax.script_setup(), Some(script));
+                return Ok(generate_options_api_stub(
+                    component_name,
+                    content_str,
+                    dialect,
+                ));
             }
         }
         return Ok(generate_empty_stub(component_name));
@@ -1397,10 +1485,12 @@ pub fn generate_tsc_output_with_options(
     };
 
     let content_str = &sfc_source[content_span.start as usize..content_span.end as usize];
+    let authored_dialect =
+        crate::parser::types::sfc_script_dialect(syntax.script_setup(), syntax.script());
 
     // ── 2. OXC-parse script content ───────────────────────────────────
     let alloc = Allocator::default();
-    let parse_result = Parser::new(&alloc, content_str, SourceType::ts())
+    let parse_result = Parser::new(&alloc, content_str, setup_source_type(authored_dialect))
         .with_config(TokensParserConfig)
         .parse();
     let tokens = parse_result.tokens.as_slice().to_vec();
@@ -1501,6 +1591,7 @@ pub fn generate_tsc_output_with_options(
             narrowing.as_ref(),
             root_element_tag.as_deref(),
             content_str,
+            authored_dialect,
         ),
     })
 }
@@ -3035,6 +3126,7 @@ fn build_macro_state<'a>(
                     type_params.as_ref(),
                     object_arg.as_ref(),
                     content_str,
+                    items,
                     type_usage_tracker,
                     &mut state,
                 );
@@ -3795,10 +3887,98 @@ fn process_slots(
     type_usage_tracker.mark_dependency_paths(&tp.type_dependency_paths);
 }
 
+/// Render a syntactic call shape as a declaration-legal function type.
+///
+/// The parameters are the AUTHORED ones — their names (so a consumer's
+/// signature help reads like the source) and their arity — each typed `any`,
+/// which is precisely what TypeScript itself gives an unannotated JavaScript
+/// parameter. The return type is `any` for the same reason: nothing here
+/// inspects a body, and a project that is not checking its JavaScript has
+/// already said `any` is the answer. What this buys over `unknown` is that the
+/// member can be CALLED at all.
+fn render_callable_shape(shape: &CallableShape<'_>) -> String {
+    // `?` is legal only on a TRAILING run of parameters: TypeScript rejects a
+    // required parameter after an optional one (TS1016). JavaScript has no such
+    // rule — `function focus(target = 0, mode) {}` is fine, and a caller reaches
+    // `mode` by passing `undefined` for `target` — so the authored optionality
+    // is a FACT that cannot always be expressed. Where it cannot, the parameter
+    // renders REQUIRED: a caller must pass something positionally anyway, and
+    // the alternative is a declaration that does not compile at all.
+    //
+    // So find where the trailing all-optional run begins and mark only from
+    // there. `(a = 1, b)` renders `(a: any, b: any)`; `(a, b = 1)` renders
+    // `(a: any, b?: any)`; `(a = 1, b = 2)` renders both optional. A rest
+    // parameter never blocks the run — `(a?: any, ...rest: any[])` is legal.
+    let trailing_optional_from = shape
+        .params
+        .iter()
+        .rposition(|param| !param.optional)
+        .map_or(0, |last_required| last_required + 1);
+
+    let mut rendered = String::from("(");
+    for (index, param) in shape.params.iter().enumerate() {
+        if index > 0 {
+            rendered.push_str(", ");
+        }
+        let name = param
+            .name
+            .filter(|name| is_testing_decl_ident(name))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("arg{index}"));
+        rendered.push_str(&name);
+        if index >= trailing_optional_from {
+            rendered.push('?');
+        }
+        rendered.push_str(": any");
+    }
+    if shape.has_rest {
+        if !shape.params.is_empty() {
+            rendered.push_str(", ");
+        }
+        rendered.push_str("...rest: any[]");
+    }
+    rendered.push_str(") => any");
+    rendered
+}
+
+/// The declaration-legal type for an exposed member whose setup body will NOT
+/// be emitted, or `None` when nothing is recoverable from the syntax.
+///
+/// Two places carry a call shape, and both are the AUTHORED one:
+///
+/// - the `defineExpose` property itself, when its value is a function — a
+///   method shorthand (`focus(target) {}`) or a function/arrow-valued property
+///   (`focus: (target) => …`);
+/// - otherwise the setup DECLARATION the property names (`{ bump }` →
+///   `function bump(step) {…}`).
+///
+/// A permissive `(...args: any[]) => any` is deliberately NOT a fallback here.
+/// It is callable, but it accepts any arity, so `child.focus()` and
+/// `child.focus(1, 2)` both type-check against a one-parameter method — a
+/// method's arity is exactly what a consumer needs checked, and inventing a
+/// variadic one is a quieter wrong answer than `unknown`.
+fn expose_declaration_fallback(
+    property_callable: Option<&CallableShape<'_>>,
+    typeof_target: Option<&str>,
+    items: &[ScriptItem<'_>],
+) -> Option<String> {
+    if let Some(shape) = property_callable {
+        return Some(render_callable_shape(shape));
+    }
+    let target = typeof_target?;
+    items.iter().find_map(|item| match item {
+        ScriptItem::Declaration(decl) if decl.name == Some(target) => {
+            decl.callable.as_ref().map(render_callable_shape)
+        }
+        _ => None,
+    })
+}
+
 fn process_expose(
     type_params: Option<&MacroTypeParams>,
     object_arg: Option<&MacroObjectArg<'_>>,
     content_str: &str,
+    items: &[ScriptItem<'_>],
     type_usage_tracker: &mut TypeUsageTracker<'_>,
     state: &mut TscMacroState,
 ) {
@@ -3828,9 +4008,15 @@ fn process_expose(
                     None
                 }
             };
+            let declaration_fallback = expose_declaration_fallback(
+                prop.callable.as_ref(),
+                typeof_target.as_deref(),
+                items,
+            );
             state.expose_entries.push(ExposeEntry {
                 name: prop.name.to_string(),
                 typeof_target,
+                declaration_fallback,
             });
         }
     }
@@ -3986,7 +4172,11 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 /// `InstanceType<typeof import('./Foo.vue.verter.ts')['default']>` resolve to
 /// the full component instance rather than `never` (the public-API carrier is
 /// the `.verter.ts` surface).
-fn generate_options_api_stub(_component_name: &str, script_content: &str) -> TscOutput {
+fn generate_options_api_stub(
+    _component_name: &str,
+    script_content: &str,
+    dialect: SfcScriptDialect,
+) -> TscOutput {
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
 
@@ -4039,7 +4229,13 @@ fn generate_options_api_stub(_component_name: &str, script_content: &str) -> Tsc
         )
     };
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // The body is the author's, verbatim: only the `defineComponent(` wrap
+        // and its import are synthesized, and both are ordinary JavaScript.
+        dialect,
+    }
 }
 
 fn generate_empty_stub(component_name: &str) -> TscOutput {
@@ -4051,7 +4247,13 @@ fn generate_empty_stub(component_name: &str) -> TscOutput {
         name = name,
         map = encoded,
     );
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // A generated `defineComponent({})` + `declare const` surface: no
+        // authored body reaches it, so it is TypeScript whatever the SFC is.
+        dialect: SfcScriptDialect::TypeScript,
+    }
 }
 
 /// Project an Options-API component's full public surface into the
@@ -4192,7 +4394,12 @@ fn generate_declaration_empty_stub(component_name: &str) -> TscOutput {
         name = name,
         map = encoded,
     );
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // Pure generated declarations, no authored body.
+        dialect: SfcScriptDialect::TypeScript,
+    }
 }
 
 // ── Narrowing types for TSC path ──────────────────────────────────────────
@@ -4563,7 +4770,28 @@ fn generate_testing_code(
         encoded
     ));
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // The testing surface's companion name is descriptor-owned and FIXED
+        // (`VirtualFileNaming::testing_api_suffix`, a single `.__verter_test.ts`
+        // mirrored into `packages/language-shared` and byte-pinned), so this
+        // reports what that name says: a TypeScript root.
+        //
+        // That is the NAME, not an accurate description of the code. This
+        // surface copies the authored `<script setup>` body verbatim — it has
+        // to, since `typeof <binding>` must resolve — so a `lang="tsx"` body
+        // carries JSX into a `.ts` root (where `<span/>` is a type assertion)
+        // and a `lang="js"` body is strict-checked in a root the project never
+        // asked to have checked. Reporting the author's dialect here would not
+        // fix either: the name would not follow it, and the generated frame
+        // (`type` aliases, `declare function`, `declare const`) is not legal in
+        // a `.js`/`.jsx` root at all, so the JavaScript arm needs a JSDoc frame
+        // or a split module, not a label. The acceptance for all four arms is
+        // written and RED at
+        // `tests::testing_surface_reports_the_dialect_of_the_code_it_carries`.
+        dialect: SfcScriptDialect::TypeScript,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4577,8 +4805,22 @@ fn generate_code(
     narrowing: Option<&TscNarrowingInfo>,
     root_element_tag: Option<&str>,
     setup_content: &str,
+    authored_dialect: SfcScriptDialect,
 ) -> TscOutput {
-    let needs_setup_body = !state.expose_entries.is_empty();
+    // A runtime-object `defineExpose({ x })` needs the authored setup body
+    // inlined so `typeof x` resolves the exposed binding's inferred type. That
+    // body lands in a surface that ALSO emits `type` aliases and
+    // `declare const` — TypeScript-only syntax — so the surface can never be a
+    // `.js`/`.jsx` root, and inlining a JAVASCRIPT body into it would hand the
+    // engine a TypeScript root full of the author's untyped JavaScript:
+    // `strict`/`noImplicitAny` then reports TS7006 on every untyped parameter
+    // of a file the project never asked to have checked. So a JavaScript SFC
+    // does NOT inline its body; its exposed members render through the SAME
+    // declaration-legal `unknown` placeholder the declaration path already
+    // uses. Precision for JavaScript expose entries, versus a flood of false
+    // diagnostics — and the flood is the defect this surface's language label
+    // exists to prevent.
+    let needs_setup_body = !state.expose_entries.is_empty() && !authored_dialect.is_javascript();
     let mut out = TscWriter::new(if needs_setup_body { 2048 } else { 512 });
 
     // ── Import ────────────────────────────────────────────────────────
@@ -4754,8 +4996,9 @@ fn generate_code(
         root_element_tag,
         narrowing,
         full_gp.as_deref(),
-        // `Public` emits the setup body, so `typeof <exposed-binding>` resolves.
-        true,
+        // `typeof <exposed-binding>` resolves only where the setup body was
+        // actually emitted.
+        needs_setup_body,
     );
     out.push_str(&format!("export default {}\n", component_name));
 
@@ -4768,7 +5011,20 @@ fn generate_code(
         encoded
     ));
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // The generated frame (`type` aliases, `declare const`) is TypeScript.
+        // The one dimension the copied body can still move is JSX: a
+        // `lang="tsx"` setup body carries JSX elements, which a `.ts`
+        // ScriptKind parses as type assertions — a syntax error. Without a
+        // copied body there is no JSX and the surface is plain TypeScript.
+        dialect: if needs_setup_body && authored_dialect.is_jsx() {
+            SfcScriptDialect::Tsx
+        } else {
+            SfcScriptDialect::TypeScript
+        },
+    }
 }
 
 /// Render the explicit instance-shape body of the `declare const Component`
@@ -4917,25 +5173,38 @@ fn render_instance_shape_body(
                     }
                 }
             } else {
-                // Declaration path: the setup body is OMITTED, so the exposed
-                // binding is NOT in scope — `typeof <ident>` would be an unbound
-                // value reference (an erroring declaration). Render a
-                // declaration-legal placeholder instead. `unknown` (not `any`)
-                // preserves the public member shape without inventing a type or
-                // silently widening to an unsound `any`.
+                // The setup body is OMITTED here, so the exposed binding is NOT
+                // in scope and `typeof <ident>` would be an unbound value
+                // reference (an erroring declaration). The member's type comes
+                // from what the AUTHORED syntax already tells us instead.
                 //
-                // TODO(follow-up): this is a PRECISION placeholder, not the final
-                // declaration strategy. A runtime-object `defineExpose({ x })`
-                // entry's exact type is the inferred type of the setup binding
-                // `x`, which is not yet captured in the typed macro/codegen state
-                // (only the identifier name is). Capturing resolved setup-binding
-                // types — at the point setup bindings are already classified — is
-                // required so the declaration can render each exposed member's
-                // exact type; this MUST land before the declaration carrier is
-                // wired to a consuming engine. The type-PARAMETER form
-                // (`defineExpose<{ x: T }>()`) already renders its exact type via
-                // `expose_type_text` above and is unaffected.
-                out.push_str(&format!("{}: unknown", render_member_key(&entry.name)));
+                // For a function — a `function` declaration, a function-valued
+                // `const`, or a `defineExpose` method shorthand — that is its
+                // call shape: authored parameter names, arity, optionality,
+                // every parameter `any`, returning `any`. It is not the inferred
+                // type, and it does not pretend to be; it is what TypeScript
+                // itself gives an unannotated JavaScript function, and it makes
+                // the member CALLABLE. `unknown` does not: a `bump: unknown`
+                // member cannot be called, indexed, or passed anywhere, so a
+                // parent that consumes the component gets an error for using a
+                // perfectly good method — the false diagnostic relocated from
+                // the component to everyone who imports it.
+                //
+                // Everything else falls back to `unknown`, deliberately: a
+                // `const count = ref(0)` member's type is the RESULT of
+                // inference, not a shape, and there is nothing in the syntax to
+                // recover it from. `unknown` over `any` there keeps the member
+                // present without inventing a type. That residue is bounded and
+                // recorded — the type-PARAMETER form
+                // (`defineExpose<{ count: Ref<number> }>()`) renders its exact
+                // type through `expose_type_text` above and is the authored way
+                // to say what a non-function member is.
+                match &entry.declaration_fallback {
+                    Some(rendered) => {
+                        out.push_str(&format!("{}: {rendered}", render_member_key(&entry.name)))
+                    }
+                    None => out.push_str(&format!("{}: unknown", render_member_key(&entry.name))),
+                }
             }
         }
         out.push_str(" }>\n");
@@ -5056,7 +5325,12 @@ fn generate_declaration_code(
         encoded
     ));
 
-    TscOutput { code, source_map }
+    TscOutput {
+        code,
+        source_map,
+        // Pure generated declarations, no authored body.
+        dialect: SfcScriptDialect::TypeScript,
+    }
 }
 
 // ── Build helpers ─────────────────────────────────────────────────────────────

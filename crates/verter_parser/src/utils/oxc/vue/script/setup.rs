@@ -17,8 +17,9 @@ use super::macros::{
 };
 use super::shared::ScriptParseContext;
 use super::types::{
-    AsyncKind, DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError,
-    ScriptErrorKind, ScriptItem, ScriptTypeDeclaration, TypeDeclarationKind,
+    AsyncKind, CallableParam, CallableShape, DeclarationKind, ScriptAsync, ScriptBinding,
+    ScriptDeclaration, ScriptError, ScriptErrorKind, ScriptItem, ScriptTypeDeclaration,
+    TypeDeclarationKind,
 };
 use super::usage::{
     detect_vue_api_call, CallSiteContext, EmitCallUsage, EmitEventName, InjectUsage, LifecycleHook,
@@ -156,6 +157,7 @@ pub fn process_setup_statement<'a>(
                         name_span: Some(Span::from(id.span)),
                         kind: DeclarationKind::Class,
                         is_ref_like: false,
+                        callable: None,
                     }));
                 }
             }
@@ -411,7 +413,16 @@ fn process_variable_declaration<'a>(
 
         // Track declarations at top level
         if setup_ctx.should_track_declarations() {
-            collect_declarations_from_pattern(&declarator.id, kind, is_ref_like, items);
+            collect_declarations_from_pattern(
+                &declarator.id,
+                kind,
+                is_ref_like,
+                declarator
+                    .init
+                    .as_ref()
+                    .and_then(callable_shape_of_initializer),
+                items,
+            );
         }
     }
 }
@@ -446,6 +457,7 @@ fn process_function_declaration<'a>(
                 name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like: false,
+                callable: Some(callable_shape(&func.params)),
             }));
         }
     }
@@ -1187,6 +1199,7 @@ fn extract_object_arg<'a>(
                         property_span: Span::from(p.span),
                         value_span,
                         is_method: p.method,
+                        callable: callable_shape_of_initializer(&p.value),
                         required,
                         has_default,
                         runtime_types,
@@ -1397,6 +1410,7 @@ fn collect_declarations_from_pattern<'a>(
     pattern: &BindingPattern<'a>,
     kind: DeclarationKind,
     is_ref_like: bool,
+    callable: Option<CallableShape<'a>>,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
     match pattern {
@@ -1407,28 +1421,29 @@ fn collect_declarations_from_pattern<'a>(
                 name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like,
+                callable,
             }));
         }
         BindingPattern::ObjectPattern(obj) => {
             // Destructured bindings are never ref-like
             for prop in &obj.properties {
-                collect_declarations_from_pattern(&prop.value, kind, false, items);
+                collect_declarations_from_pattern(&prop.value, kind, false, None, items);
             }
             if let Some(rest) = &obj.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, false, items);
+                collect_declarations_from_pattern(&rest.argument, kind, false, None, items);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             // Destructured bindings are never ref-like
             for elem in arr.elements.iter().flatten() {
-                collect_declarations_from_pattern(elem, kind, false, items);
+                collect_declarations_from_pattern(elem, kind, false, None, items);
             }
             if let Some(rest) = &arr.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, false, items);
+                collect_declarations_from_pattern(&rest.argument, kind, false, None, items);
             }
         }
         BindingPattern::AssignmentPattern(assign) => {
-            collect_declarations_from_pattern(&assign.left, kind, is_ref_like, items);
+            collect_declarations_from_pattern(&assign.left, kind, is_ref_like, callable, items);
         }
     }
 }
@@ -1808,4 +1823,49 @@ fn collect_instance_access_usage(
         binding_span,
         preceding_await_span,
     });
+}
+
+/// The authored call shape of a formal parameter list.
+///
+/// Syntax only: names where the parameter is a plain identifier, optionality
+/// from a default initializer or an explicit `?`, and whether a rest parameter
+/// follows. Nothing here inspects a body or infers a type.
+///
+/// `optional` is the AUTHORED fact — "this parameter has a default, or is
+/// explicitly `?`" — not a claim that it can be spelled `?` in a TypeScript
+/// declaration. JavaScript allows `function f(a = 1, b) {}`; TypeScript does
+/// not allow `(a?: any, b: any)`. Reconciling the two is the RENDERER's job
+/// (`render_callable_shape`), which marks only a trailing run of optional
+/// parameters. Losing the fact here instead would erase optionality from the
+/// `(a = 1, b = 2)` case, where it is expressible and useful.
+fn callable_shape<'a>(params: &FormalParameters<'a>) -> CallableShape<'a> {
+    CallableShape {
+        params: params
+            .items
+            .iter()
+            .map(|param| CallableParam {
+                name: match &param.pattern {
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                },
+                optional: param.optional || param.initializer.is_some(),
+            })
+            .collect(),
+        has_rest: params.rest.is_some(),
+    }
+}
+
+/// The call shape of a variable declarator's INITIALIZER, when the initializer
+/// is itself a function.
+///
+/// `const bump = (step) => …` and `const bump = function (step) {…}` declare a
+/// callable binding exactly as `function bump(step) {…}` does; anything else —
+/// including `ref(0)`, a call, a literal — has no syntactically knowable call
+/// shape and yields `None`.
+fn callable_shape_of_initializer<'a>(init: &Expression<'a>) -> Option<CallableShape<'a>> {
+    match init {
+        Expression::ArrowFunctionExpression(arrow) => Some(callable_shape(&arrow.params)),
+        Expression::FunctionExpression(func) => Some(callable_shape(&func.params)),
+        _ => None,
+    }
 }

@@ -7,6 +7,7 @@
 
 use oxc_ast::ast::{Argument, Expression, Program, Statement, TSType};
 
+use super::types::CallableShape;
 use crate::common::Span;
 use verter_type_expr::facts::TypeDependencyPathFact;
 
@@ -123,6 +124,13 @@ pub struct MacroProperty<'a> {
     pub value_span: Option<Span>,
     /// Whether this property uses method shorthand (e.g., `foo() { ... }`)
     pub is_method: bool,
+    /// The property's authored call shape when its value is a function — a
+    /// method shorthand (`bump(step) {}`) or a function/arrow-valued property
+    /// (`bump: (step) => …`). `None` otherwise.
+    ///
+    /// Captured from the typed OXC node at the producer, so a consumer that
+    /// needs the member's signature never re-slices the property's source text.
+    pub callable: Option<CallableShape<'a>>,
     /// Whether the prop has `required: true` in object form.
     /// Extracted from the OXC AST (not string parsing).
     pub required: bool,

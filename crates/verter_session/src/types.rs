@@ -2240,6 +2240,18 @@ pub struct TscResponse {
     pub code: Arc<str>,
     /// JSON source map (always present — embedded inline in `code`).
     pub source_map: Option<Arc<str>>,
+    /// The dialect of [`Self::code`] — the ScriptKind a consumer writing this
+    /// surface to a companion file must label it with, because TypeScript
+    /// decides both what to typecheck AND how to parse from a file's
+    /// extension.
+    ///
+    /// This is the dialect of the code the surface CARRIES, not the carrier's
+    /// authored language: a surface built only from generated declarations is
+    /// TypeScript whatever the component was written in, while the Vue
+    /// Options-API stub passes the authored `<script>` body through verbatim
+    /// and reports that body's dialect. See
+    /// [`verter_compiler::tsc::TscOutput::dialect`] for the per-producer table.
+    pub dialect: verter_compiler::tsc::SfcScriptDialect,
 }
 
 /// Typed failure produced while projecting a framework carrier's public API.

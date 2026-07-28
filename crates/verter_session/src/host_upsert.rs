@@ -1182,10 +1182,24 @@ impl VerterHost {
     /// Apply preprocessed block overrides for template, script, style, and custom blocks.
     ///
     /// Unified API that replaces the single-purpose `apply_style_overrides`.
-    /// Template/script overrides build a synthetic SFC source with the `lang`
-    /// attribute stripped and block content replaced, then invalidate the compile
-    /// slot so the next `get_virtual_file` recompiles from the synthetic source.
-    /// Style overrides delegate to the existing style override logic.
+    /// Template/script overrides build a synthetic SFC source with the block
+    /// content replaced, then invalidate the compile slot so the next
+    /// `get_virtual_file` recompiles from the synthetic source. Style overrides
+    /// delegate to the existing style override logic.
+    ///
+    /// **A `lang` attribute is stripped only when it names a PREPROCESSOR
+    /// language** — one whose override content has already been compiled to
+    /// something the compiler reads, so a tag still claiming `coffee` would be
+    /// lying. A NATIVE script dialect (`ts`/`tsx`/`js`/`jsx`) is KEPT: the
+    /// override of a `<script lang="ts">` block is still TypeScript, and that
+    /// attribute is the only thing on the synthetic source that says so.
+    /// Stripping it changes both how the body is PARSED (`defineProps<T>()` and
+    /// every type annotation stop being syntax, so the macro is silently not
+    /// found) and how the generated companion is LABELLED (`.jsx`, which is
+    /// never typechecked). See `block_splice::build_synthetic_source`.
+    ///
+    /// This is a PUBLIC surface, reachable from the NAPI and WASM bindings'
+    /// `applyBlockOverrides`, so both behaviours are user-visible.
     pub fn apply_block_overrides(
         &self,
         req: BlockOverrideRequest,

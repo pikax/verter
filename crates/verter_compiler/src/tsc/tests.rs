@@ -1586,7 +1586,7 @@ fn offset_to_zero_based_line_col(text: &str, offset: usize) -> (u32, u32) {
 #[test]
 fn tsc_codegen_type_only_props_inlined_in_declare() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { Props } from './types'
 defineProps<Props>()
 </script><template><div>hello</div></template>"#,
@@ -1738,7 +1738,7 @@ defineProps({ title: String, count: { type: Number, required: true } })
 #[test]
 fn tsc_codegen_define_model_runtime_and_typed() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 const title = defineModel<string>('title')
 </script><template/>"#,
         &[model_fixture("title", "string")],
@@ -1954,7 +1954,7 @@ export default MyComponent
 #[test]
 fn tsc_codegen_proptype_extraction() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({
   items: Array as PropType<string[]>,
@@ -1981,7 +1981,7 @@ defineProps({
 #[test]
 fn tsc_codegen_factory_function_default() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({
   config: { type: Object as PropType<{name: string}>, default: () => ({}) }
@@ -2002,7 +2002,7 @@ defineProps({
 #[test]
 fn tsc_codegen_mixed_type_sources() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({
   title: String,
@@ -2028,7 +2028,7 @@ defineProps({
 #[test]
 fn tsc_codegen_complex_real_world_sfc() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { PropType } from 'vue'
 
@@ -2104,7 +2104,7 @@ const isValid = computed(() => props.title !== '')
 #[test]
 fn tsc_codegen_runtime_stripping_as_proptype() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({ items: Array as PropType<string[]> })
 </script><template/>"#,
@@ -2123,7 +2123,7 @@ defineProps({ items: Array as PropType<string[]> })
 #[test]
 fn tsc_codegen_with_defaults_makes_props_optional() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 withDefaults(defineProps<{ title: string; count: number }>(), {
   title: 'hello'
 })
@@ -2154,7 +2154,7 @@ withDefaults(defineProps<{ title: string; count: number }>(), {
 #[test]
 fn tsc_codegen_with_defaults_imported_type() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { Props } from './types'
 withDefaults(defineProps<Props>(), { title: 'hello' })
 </script><template/>"#,
@@ -2241,7 +2241,7 @@ defineProps({ color: { type: String, default: 'red' } })
 #[test]
 fn tsc_codegen_proptype_with_default_is_optional() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({ config: { type: Object as PropType<{name: string}>, default: () => ({}) } })
 </script><template/>"#,
@@ -2292,7 +2292,7 @@ defineProps({
 #[test]
 fn tsc_codegen_define_model_default_name() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 const mv = defineModel<number>()
 </script><template/>"#,
         &[model_fixture("modelValue", "number")],
@@ -2316,7 +2316,7 @@ const mv = defineModel<number>()
 #[test]
 fn tsc_codegen_multiple_define_models() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 const first = defineModel<string>('firstName')
 const last = defineModel<string>('lastName')
 </script><template/>"#,
@@ -2359,7 +2359,7 @@ const val = defineModel('value')
 #[test]
 fn tsc_codegen_define_model_imported_type() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { User } from './types'
 const user = defineModel<User>()
 </script><template/>"#,
@@ -2422,7 +2422,7 @@ const user = defineModel<User>()
 #[test]
 fn tsc_codegen_define_model_with_define_props() {
     let r = gen_tsc_with(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 defineProps({ label: String })
 const text = defineModel<string>()
 </script><template/>"#,
@@ -2443,7 +2443,7 @@ const text = defineModel<string>()
 #[test]
 fn tsc_codegen_edge_cases() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({
   cb: Function,
@@ -2700,7 +2700,7 @@ defineProps({ cb: Function })
 #[test]
 fn tsc_codegen_proptype_union_parens() {
     let r = gen_tsc(
-        r#"<script setup>
+        r#"<script setup lang="ts">
 import type { PropType } from 'vue'
 defineProps({ msg: String as PropType<string | (() => any)> })
 </script><template/>"#,
@@ -6533,5 +6533,487 @@ defineOptions({ "custom-opt": true })
         !testing.contains(" custom-opt: true"),
         "defineOptions key must never render bare (testing): got {}",
         testing
+    );
+}
+
+// ── Public-API surface dialect (the generated stub's own ScriptKind) ────────
+
+/// The public-API surface reports the DIALECT of the code it CARRIES, so the
+/// consumer that writes it to a companion file can label it correctly.
+///
+/// TypeScript decides both what to TYPECHECK and how to PARSE from a file's
+/// extension/ScriptKind: a surface written to a `.ts` file is checked under the
+/// project's `strict` settings whatever language its body is actually in, and a
+/// `.ts`/`.js` ScriptKind rejects JSX syntax outright. So the classification is
+/// FOUR-way, never a JavaScript/TypeScript boolean.
+///
+/// Fails against the pre-change tree: `TscOutput` carried no dialect at all, so
+/// the only companion name a consumer could compose was a hardcoded `.ts`.
+#[test]
+fn public_api_surface_reports_the_dialect_of_the_code_it_carries() {
+    use crate::parser::types::SfcScriptDialect;
+
+    // Positive: an Options-API JavaScript `<script>` passes a JavaScript body
+    // through — labelling it TypeScript makes `strict` report TS7006 on every
+    // untyped parameter of a file the user never asked to have checked.
+    let js_options = gen_tsc_output(
+        "<script>\nexport default { methods: { bump(step) { return step + 1 } } }\n</script>\n\
+         <template><div/></template>",
+    );
+    assert_eq!(
+        js_options.dialect,
+        SfcScriptDialect::JavaScript,
+        "an Options-API JavaScript `<script>` body is JavaScript: {}",
+        js_options.code
+    );
+
+    // Negative: the SAME construct with `lang="ts"` stays TypeScript — the
+    // classification must not relabel TypeScript surfaces (that would silently
+    // DROP every real TypeScript error in an Options-API component).
+    let ts_options = gen_tsc_output(
+        "<script lang=\"ts\">\nexport default { methods: { bump(step: number) { return step + 1 } } }\n</script>\n\
+         <template><div/></template>",
+    );
+    assert_eq!(
+        ts_options.dialect,
+        SfcScriptDialect::TypeScript,
+        "an Options-API `lang=\"ts\"` body stays TypeScript: {}",
+        ts_options.code
+    );
+
+    // The JSX axis, which a JavaScript/TypeScript boolean cannot express. The
+    // Options-API stub copies the authored body verbatim, so an authored
+    // `<div/>` needs a JSX-capable ScriptKind: `.jsx` (NOT `.js`, where JSX is
+    // a syntax error) and `.tsx` (NOT `.ts`, where `<div/>` parses as a type
+    // assertion).
+    let jsx_options = gen_tsc_output(
+        "<script lang=\"jsx\">\nexport default { render() { return <div/> } }\n</script>\n\
+         <template><div/></template>",
+    );
+    assert_eq!(
+        jsx_options.dialect,
+        SfcScriptDialect::Jsx,
+        "a `lang=\"jsx\"` Options-API body needs a JSX ScriptKind: {}",
+        jsx_options.code
+    );
+    assert_eq!(
+        jsx_options.dialect.extension(),
+        "jsx",
+        "the JSX dialect names the `.jsx` extension"
+    );
+    let tsx_options = gen_tsc_output(
+        "<script lang=\"tsx\">\nexport default { render(): unknown { return <div/> } }\n</script>\n\
+         <template><div/></template>",
+    );
+    assert_eq!(
+        tsx_options.dialect,
+        SfcScriptDialect::Tsx,
+        "a `lang=\"tsx\"` Options-API body needs a TSX ScriptKind: {}",
+        tsx_options.code
+    );
+    assert_eq!(
+        tsx_options.dialect.extension(),
+        "tsx",
+        "the TSX dialect names the `.tsx` extension"
+    );
+
+    // Negative, and the reason this is NOT simply the SFC's script language:
+    // a JavaScript `<script setup>` projects a GENERATED TypeScript declaration
+    // surface. Labelling it JavaScript would put `declare`/type-annotation
+    // syntax into a `.js` file — a syntax error, not a relaxed check.
+    let js_setup = gen_tsc_output(
+        "<script setup>\nconst props = defineProps({ label: { type: String } })\n\
+         function bump(step) { return step + 1 }\n</script>\n<template><div/></template>",
+    );
+    assert_eq!(
+        js_setup.dialect,
+        SfcScriptDialect::TypeScript,
+        "a JavaScript `<script setup>` still projects a TypeScript declaration \
+         surface: {}",
+        js_setup.code
+    );
+    assert!(
+        js_setup.code.contains("declare"),
+        "the JavaScript-setup surface really is a declaration surface (the \
+         premise of the assertion above): {}",
+        js_setup.code
+    );
+
+    // Negative: a template-only SFC has no authored script at all and keeps the
+    // TypeScript default.
+    let template_only = gen_tsc_output("<template><div/></template>");
+    assert_eq!(
+        template_only.dialect,
+        SfcScriptDialect::TypeScript,
+        "a template-only SFC keeps the TypeScript default: {}",
+        template_only.code
+    );
+}
+
+/// A JavaScript `<script setup>` whose `defineExpose({ … })` would otherwise
+/// have its AUTHORED body copied into the generated TypeScript stub must not
+/// carry that body — the stub is a `declare`/`type`-bearing TypeScript root, so
+/// an inlined JavaScript body is typechecked under `strict`/`noImplicitAny` and
+/// every untyped parameter reports a false TS7006.
+///
+/// Fails against the pre-change tree: `needs_setup_body` was
+/// `!expose_entries.is_empty()` alone, so the JavaScript body below WAS copied
+/// into a surface the consumer then named `.vue.ts`.
+#[test]
+fn javascript_setup_body_never_enters_the_typescript_public_stub() {
+    use crate::parser::types::SfcScriptDialect;
+
+    const JS_EXPOSE: &str = "<script setup>\nfunction bump(step) { return step + 1 }\n\
+         defineExpose({ bump })\n</script>\n<template><div/></template>";
+
+    let js = gen_tsc_output(JS_EXPOSE);
+    assert_eq!(
+        js.dialect,
+        SfcScriptDialect::TypeScript,
+        "the stub is a declaration surface: {}",
+        js.code
+    );
+    assert!(
+        !js.code.contains("function bump(step)"),
+        "the authored JavaScript body must NOT be copied into a TypeScript \
+         root — it is exactly what produced the false TS7006 flood: {}",
+        js.code
+    );
+    assert!(
+        js.code.contains("bump: (step: any) => any"),
+        "the exposed member keeps a CALLABLE type recovered from the authored \
+         syntax — its own parameter name and arity, every parameter `any`, which \
+         is what TypeScript gives an unannotated JavaScript function: {}",
+        js.code
+    );
+    assert!(
+        !js.code.contains("bump: unknown"),
+        "`unknown` would relocate the false diagnostic to every consumer: a \
+         parent cannot call an `unknown` member: {}",
+        js.code
+    );
+    assert!(
+        !js.code.contains("typeof bump"),
+        "`typeof bump` would be an unbound value reference once the body is \
+         omitted: {}",
+        js.code
+    );
+
+    // Negative: a member whose type is the RESULT of inference rather than a
+    // syntactic shape stays `unknown`. `ref(0)` is a call, not a function
+    // declaration; there is nothing in the syntax to recover, and inventing
+    // `any` there would silently widen a member the consumer would then use
+    // unchecked. This is the bounded residue, and the authored way to say what
+    // it is remains `defineExpose<{ count: Ref<number> }>()`.
+    let js_ref = gen_tsc_output(
+        "<script setup>\nimport { ref } from 'vue'\nconst count = ref(0)\n\
+         defineExpose({ count })\n</script>\n<template><div/></template>",
+    );
+    assert!(
+        js_ref.code.contains("count: unknown"),
+        "a non-function member has no recoverable call shape: {}",
+        js_ref.code
+    );
+
+    // And a function-valued `const` is recovered exactly as a `function`
+    // declaration is — the two spell the same thing.
+    let js_arrow = gen_tsc_output(
+        "<script setup>\nconst reset = (to = 0, ...rest) => to\n\
+         defineExpose({ reset })\n</script>\n<template><div/></template>",
+    );
+    assert!(
+        js_arrow
+            .code
+            .contains("reset: (to?: any, ...rest: any[]) => any"),
+        "an arrow initializer carries its own optionality and rest parameter: {}",
+        js_arrow.code
+    );
+
+    // A member declared INSIDE the macro — method shorthand, and a
+    // function-valued property — carries its authored shape too, from the
+    // property's own value rather than a setup declaration it never names.
+    //
+    // A permissive `(...args: any[]) => any` would be callable and therefore
+    // "not `unknown`", but it accepts ANY arity: `child.focus()` and
+    // `child.focus(1, 2)` would both type-check against a one-parameter method.
+    // Arity is exactly what a consumer needs checked.
+    let js_method = gen_tsc_output(
+        "<script setup>\ndefineExpose({ focus(target) { return target }, \
+         blur: (immediate = false) => immediate })\n</script>\n<template><div/></template>",
+    );
+    assert!(
+        js_method.code.contains("focus: (target: any) => any"),
+        "a method shorthand carries its authored name and arity: {}",
+        js_method.code
+    );
+    assert!(
+        js_method.code.contains("blur: (immediate?: any) => any"),
+        "a function-valued property does too: {}",
+        js_method.code
+    );
+    assert!(
+        !js_method.code.contains("...args: any[]"),
+        "no member may fall back to a variadic shape that erases its arity: {}",
+        js_method.code
+    );
+
+    // A DEFAULTED parameter followed by a REQUIRED one. `?` is legal only on a
+    // trailing run of parameters — TypeScript rejects a required parameter after
+    // an optional one (TS1016) — while JavaScript happily allows the authored
+    // form. Where the authored optionality cannot be expressed, the parameter
+    // renders REQUIRED: a caller has to pass something positionally anyway, and
+    // the alternative is a declaration that does not compile at all.
+    let js_mixed_defaults = gen_tsc_output(
+        "<script setup>\ndefineExpose({ scrollTo(region = 'top', mode) { return [region, mode] }, \
+         resize(width, height = 0) { return width + height } })\n</script>\n\
+         <template><div/></template>",
+    );
+    assert!(
+        js_mixed_defaults
+            .code
+            .contains("scrollTo: (region: any, mode: any) => any"),
+        "a default BEFORE a required parameter cannot be spelled `?`, so it \
+         renders required rather than emitting TS1016: {}",
+        js_mixed_defaults.code
+    );
+    assert!(
+        !js_mixed_defaults.code.contains("region?"),
+        "`(region?: any, mode: any)` is the TS1016 shape and must never be \
+         emitted: {}",
+        js_mixed_defaults.code
+    );
+    // Negative: this is a PLACEMENT rule, not "defaults are ignored". A
+    // trailing default is expressible and stays optional.
+    assert!(
+        js_mixed_defaults
+            .code
+            .contains("resize: (width: any, height?: any) => any"),
+        "a TRAILING default is expressible and must stay optional: {}",
+        js_mixed_defaults.code
+    );
+
+    // Negative: the SAME component in TypeScript still inlines its body, so the
+    // exposed binding keeps its inferred type. Without this half, "never inline"
+    // would pass by inlining nothing at all.
+    let ts = gen_tsc_output(
+        "<script setup lang=\"ts\">\nfunction bump(step: number) { return step + 1 }\n\
+         defineExpose({ bump })\n</script>\n<template><div/></template>",
+    );
+    assert_eq!(
+        ts.dialect,
+        SfcScriptDialect::TypeScript,
+        "a TypeScript setup body keeps the surface TypeScript: {}",
+        ts.code
+    );
+    assert!(
+        ts.code.contains("function bump(step: number)"),
+        "a TypeScript body IS still inlined: {}",
+        ts.code
+    );
+    assert!(
+        ts.code.contains("bump: typeof bump"),
+        "and its exposed member resolves through `typeof`: {}",
+        ts.code
+    );
+
+    // And a `lang="tsx"` body — inlined, and therefore carrying JSX — moves the
+    // surface to the TSX ScriptKind, which is the only one that parses it.
+    let tsx = gen_tsc_output(
+        "<script setup lang=\"tsx\">\nconst node = <div/>\ndefineExpose({ node })\n</script>\n\
+         <template><div/></template>",
+    );
+    assert_eq!(
+        tsx.dialect,
+        SfcScriptDialect::Tsx,
+        "an inlined TSX body makes the surface TSX: {}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("const node = <div/>"),
+        "the TSX body really is inlined (the premise of the assertion above): {}",
+        tsx.code
+    );
+}
+
+/// The `<script setup>` body is parsed under the AUTHORED dialect's ScriptKind,
+/// on BOTH axes — so TypeScript-only syntax in a `lang="js"`/`lang="jsx"` body
+/// is not silently accepted, and JSX in a `lang="jsx"` body is not lost.
+///
+/// That parse is not a private detail of macro extraction: the same program
+/// feeds item/import/binding collection, test bindings, type imports, usage
+/// tracking, macro state, attrs-type parsing, and the scope inventories. The
+/// observable used here is the testing surface's binding list, which is
+/// populated directly from it.
+///
+/// Fails against a two-way `is_jsx ? tsx() : ts()` mapping: it reads EVERY
+/// JavaScript body as TypeScript, so the `lang="js"` case below collects
+/// `shown`/`n` from a body that is not valid JavaScript at all, and the
+/// `lang="jsx"` case is read as TSX for the same reason. The JavaScript arms
+/// are not merely over-accepted either — in TypeScript mode `a < b > (c)` is a
+/// generic call and in JavaScript two comparisons, so a JavaScript body read as
+/// TypeScript can be MIS-parsed, not just leniently parsed.
+#[test]
+fn the_setup_body_is_parsed_under_its_authored_script_kind() {
+    // TypeScript-only syntax (`interface`, a type annotation) in a body the
+    // author declared JavaScript. Under a JavaScript ScriptKind it does not
+    // parse, so nothing is collected from it — which is the honest answer: the
+    // engine will reject the same body, and Vue's own `compileScript` runs a
+    // JavaScript parse over a `lang="js"` block.
+    const TS_ONLY_BODY: &str = "interface Local { label: string }\n\
+                                const shown: Local = { label: 'x' }\n\
+                                const n = 1\n";
+
+    let ts = gen_tsc_testing(&format!(
+        "<script setup lang=\"ts\">\n{TS_ONLY_BODY}</script>\n<template><div/></template>"
+    ));
+    assert!(
+        ts.contains("shown: typeof shown") && ts.contains("n: typeof n"),
+        "the TypeScript body parses and its bindings are collected — the \
+         premise the JavaScript assertion below discriminates against: {ts}"
+    );
+
+    let js = gen_tsc_testing(&format!(
+        "<script setup lang=\"js\">\n{TS_ONLY_BODY}</script>\n<template><div/></template>"
+    ));
+    assert!(
+        js.contains("type __Verter_TestBindings = {}"),
+        "TypeScript-only syntax in a `lang=\"js\"` body must not be silently \
+         accepted: {js}"
+    );
+    assert!(
+        !js.contains("shown: typeof shown") && !js.contains("n: typeof n"),
+        "no binding may be recovered from a body a JavaScript ScriptKind \
+         cannot parse: {js}"
+    );
+
+    // Negative, and the half that stops the assertion above from passing for a
+    // parser that simply fails on every JavaScript body: a VALID JavaScript
+    // body still parses and still yields its bindings.
+    let valid_js = gen_tsc_testing(
+        "<script setup lang=\"js\">\nconst shown = { label: 'x' }\nconst n = 1\n</script>\n\
+         <template><div/></template>",
+    );
+    assert!(
+        valid_js.contains("shown: typeof shown") && valid_js.contains("n: typeof n"),
+        "a valid JavaScript body still parses under the JavaScript ScriptKind: \
+         {valid_js}"
+    );
+
+    // The JSX axis of the same classification, which a JavaScript/TypeScript
+    // boolean cannot express: `lang="jsx"` is JavaScript AND JSX-capable.
+    const JSX_BODY: &str = "const node = <span class=\"badge\">hi</span>\nconst n = 1\n";
+    let jsx = gen_tsc_testing(&format!(
+        "<script setup lang=\"jsx\">\n{JSX_BODY}</script>\n<template><div/></template>"
+    ));
+    assert!(
+        jsx.contains("node: typeof node") && jsx.contains("n: typeof n"),
+        "a `lang=\"jsx\"` body must reach a JSX-capable ScriptKind — collapsing \
+         it onto plain JavaScript loses the whole body to a parse error: {jsx}"
+    );
+
+    // And the same JSX body under `lang="js"` does NOT parse — the two
+    // JavaScript dialects are genuinely distinct, not one arm wearing two names.
+    let jsx_as_js = gen_tsc_testing(&format!(
+        "<script setup lang=\"js\">\n{JSX_BODY}</script>\n<template><div/></template>"
+    ));
+    assert!(
+        !jsx_as_js.contains("node: typeof node"),
+        "JSX is a syntax error in a non-JSX JavaScript ScriptKind: {jsx_as_js}"
+    );
+}
+
+/// The TESTING surface reports the dialect of the code it carries, on both axes
+/// — the same contract the public-API surface above already satisfies.
+///
+/// It copies the authored `<script setup>` body VERBATIM (that is its whole
+/// purpose: `typeof <binding>` must resolve, so omitting the body is TS2304),
+/// which makes it the one surface whose dialect is fully the author's:
+///
+/// - a `lang="tsx"`/`lang="jsx"` body carries JSX, and a `.ts` ScriptKind parses
+///   `<span/>` as a type assertion — a syntax error, not a relaxed check;
+/// - a `lang="js"`/`lang="jsx"` body is JavaScript, and a `.ts`/`.tsx` root is
+///   ALWAYS checked, so `strict`/`noImplicitAny` reports TS7006 on every untyped
+///   parameter of a file the project never asked to have checked.
+///
+/// **IGNORED: the implementation is not here yet, and this test says so rather
+/// than passing vacuously.** Un-ignoring it today FAILS on the first assertion.
+/// Two things are missing, and the JSX axis cannot land without the second:
+///
+/// 1. The emitter. The JSX axis is a label — a `.tsx` root holds the generated
+///    `type`/`declare` frame AND an authored JSX body. The JAVASCRIPT axis is
+///    not: the frame is `type __OmitNew<T> = …`, `declare function defineProps…`,
+///    `declare const C: … & { new(…): … }` — none of it legal in a `.js`/`.jsx`
+///    root — so a JavaScript testing carrier needs the frame expressed as JSDoc,
+///    or the authored body moved to its own JavaScript module the frame reads
+///    through `typeof import(…)`. Neither is a label change.
+/// 2. The NAME. `VirtualFileNaming::testing_api_suffix` is a single
+///    `&'static str` pinned to `.__verter_test.ts`, mirrored into
+///    `packages/language-shared/src/virtual-file-naming.generated.ts` and
+///    `client-framework-manifest.generated.ts` and byte-pinned by their
+///    freshness guards. Reporting a dialect here changes nothing until that
+///    column enumerates its alternatives the way the `ide` column's
+///    `JsxConditional` already does, and a production emitter picks between them
+///    from the dialect. Until then a dialect on this surface would be an inert
+///    field — which is why this test is ignored rather than the field changed.
+#[test]
+#[ignore = "the four-way testing carrier is not implemented: see the doc comment \
+            — the JavaScript frame and the descriptor naming column both have to \
+            change, and a dialect reported here alone would be inert"]
+fn testing_surface_reports_the_dialect_of_the_code_it_carries() {
+    use crate::parser::types::SfcScriptDialect;
+
+    // A `lang="tsx"` body carries JSX into the surface verbatim.
+    let tsx = gen_tsc_output_testing(
+        "<script setup lang=\"tsx\">\nconst node = <span class=\"badge\">hi</span>\n</script>\n\
+         <template><div/></template>",
+    );
+    assert!(
+        tsx.code
+            .contains("const node = <span class=\"badge\">hi</span>"),
+        "the body really is copied verbatim (the premise of every assertion \
+         here): {}",
+        tsx.code
+    );
+    assert_eq!(
+        tsx.dialect,
+        SfcScriptDialect::Tsx,
+        "a copied JSX body needs a JSX-capable ScriptKind: {}",
+        tsx.code
+    );
+
+    // And a JavaScript body makes the surface JavaScript — the axis that also
+    // needs a JSDoc frame, not just a label.
+    let js = gen_tsc_output_testing(
+        "<script setup lang=\"js\">\nfunction bump(step) { return step + 1 }\n</script>\n\
+         <template><div/></template>",
+    );
+    assert_eq!(
+        js.dialect,
+        SfcScriptDialect::JavaScript,
+        "an untyped JavaScript body must not be labelled a checked TypeScript \
+         root: {}",
+        js.code
+    );
+    let jsx = gen_tsc_output_testing(
+        "<script setup lang=\"jsx\">\nconst node = <span/>\nfunction bump(step) { return step }\n\
+         </script>\n<template><div/></template>",
+    );
+    assert_eq!(
+        jsx.dialect,
+        SfcScriptDialect::Jsx,
+        "JavaScript AND JSX is its own dialect, not either one alone: {}",
+        jsx.code
+    );
+
+    // Negative: a TypeScript body keeps the TypeScript label — the four arms are
+    // distinct, not one relabelling that moves everything.
+    let ts = gen_tsc_output_testing(
+        "<script setup lang=\"ts\">\nconst n: number = 1\n</script>\n<template><div/></template>",
+    );
+    assert_eq!(
+        ts.dialect,
+        SfcScriptDialect::TypeScript,
+        "a TypeScript body stays TypeScript: {}",
+        ts.code
     );
 }

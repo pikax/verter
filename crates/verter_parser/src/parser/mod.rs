@@ -124,6 +124,12 @@ pub struct Syntax {
     script_node: Option<RootNodeScript>,
     /// The `<script setup>` block, if any.
     script_setup_node: Option<RootNodeScript>,
+    /// Whether `ScriptLangMismatch` has already been reported for this SFC.
+    ///
+    /// One authoring mistake is one diagnostic. Without this latch an SFC with a
+    /// DUPLICATE `<script setup>` reports the same mismatch once per setup
+    /// block, because each one lands beside the same disagreeing plain sibling.
+    script_lang_mismatch_reported: bool,
     /// All `<style>` blocks (multiple allowed).
     style_nodes: Vec<RootNodeStyle>,
     /// Custom/unknown blocks (e.g., `<i18n>`, `<docs>`).
@@ -182,6 +188,7 @@ impl Syntax {
             template_mode,
             script_node: None,
             script_setup_node: None,
+            script_lang_mismatch_reported: false,
             style_nodes: Vec::new(),
             unknown_nodes: Vec::new(),
 
@@ -902,6 +909,17 @@ impl Syntax {
         content: Option<Span>,
         ctx: &SyntaxPluginContext<'alloc>,
     ) {
+        // The `lang` attribute's VALUE, entity-decoded ONCE here — Vue's own
+        // `block.lang`. Everything downstream reads this: the `ScriptLanguage`
+        // classification and the cross-block comparison both answer questions
+        // about what the author WROTE, not about how they spelled it, and
+        // `lang="t&#115;"` is `ts` to Vue's SFC parser.
+        let lang_value = self.prop_lang.take().map(|span| {
+            let raw = &ctx.input[span.start as usize..span.end as usize];
+            let mut decoded = String::with_capacity(raw.len());
+            crate::common::html_entities::decode_html_entities_into(&mut decoded, raw);
+            decoded.into_boxed_str()
+        });
         let node = RootNodeScript {
             tag_open: make_open_tag(se),
             tag_close,
@@ -909,12 +927,42 @@ impl Syntax {
             src: self.prop_src.take(),
             generic: self.prop_generic.take(),
             attrs: self.prop_attrs.take(),
-            lang: self.prop_lang.take().map(|lang| {
-                ScriptLanguage::from_bytes(&ctx.bytes[lang.start as usize..lang.end as usize])
-            }),
+            lang: lang_value
+                .as_ref()
+                .map(|lang| ScriptLanguage::from_bytes(lang.as_bytes())),
+            lang_value,
             attributes: self.take_props(),
             content,
         };
+
+        // The SFC's two script blocks must agree about `lang` — Vue's
+        // `compileScript` throws outright on a mismatch. Checked HERE, as a
+        // block lands beside an already-stored sibling, through the SHARED rule
+        // (`sfc_script_lang_conflict`) rather than a second hand-written
+        // comparison: one rule, one implementation, so a correction to what
+        // "the same language" means cannot land in one of two places.
+        //
+        // It fires AT MOST ONCE per SFC. "The second block lands" is not the
+        // same as "exactly two blocks land": `<script setup lang="ts">`,
+        // `<script lang="js">`, `<script setup lang="ts">` stores three, and
+        // each setup block compares against the same plain sibling — one
+        // authoring mistake reported twice, and the CLI printed VTER1002 twice
+        // for it. The duplicate blocks have their own diagnostic
+        // (`DuplicateScriptSetup`); this rule speaks once.
+        let (setup_side, plain_side) = if self.prop_setup {
+            (Some(&node), self.script_node.as_ref())
+        } else {
+            (self.script_setup_node.as_ref(), Some(&node))
+        };
+        if !self.script_lang_mismatch_reported
+            && crate::parser::types::sfc_script_lang_conflict(setup_side, plain_side).is_some()
+        {
+            self.script_lang_mismatch_reported = true;
+            self.diagnostics.push(
+                Diagnostic::error("syntax", CompilerErrorCode::ScriptLangMismatch)
+                    .with_span(Span::new(se.tag_open_start, se.tag_open_end)),
+            );
+        }
 
         if self.prop_setup {
             if self.script_setup_node.is_some() {
@@ -1785,4 +1833,42 @@ impl Syntax {
     fn take_props(&mut self) -> Vec<NodeProp> {
         self.element_props.drain(..).collect()
     }
+}
+
+/// The reporting span of an SFC's `<script>`/`<script setup>` `lang`
+/// disagreement, or `None` when its script blocks agree (or there is at most
+/// one).
+///
+/// Such an SFC is INVALID VUE — `@vue/compiler-sfc`'s `compileScript` throws
+/// ``<script> and <script setup> must have the same language type.`` — so a
+/// consumer that generates typechecked companions from it has nothing correct
+/// to generate: labelling the companion TypeScript strict-checks the JavaScript
+/// block, and labelling it JavaScript deletes every genuine diagnostic in the
+/// TypeScript one. This is the ONE query a build boundary needs in order to
+/// refuse the file instead of guessing.
+///
+/// It is deliberately the parser's OWN rule, observed through the parser's own
+/// diagnostics rather than re-derived: the comparison (raw attribute text, Vue's
+/// own) and the once-per-SFC latch live in [`Syntax::store_script_node`] and
+/// have exactly one implementation.
+///
+/// Cost is one tokenizer pass over `source`. A caller that already holds a
+/// parsed SFC should read its diagnostics instead of calling this.
+#[must_use]
+pub fn sfc_script_lang_mismatch_span(source: &str) -> Option<Span> {
+    let bytes = source.as_bytes();
+    let options = crate::diagnostics::SyntaxPluginOptions::default();
+    let ctx = SyntaxPluginContext {
+        input: source,
+        bytes,
+        options: &options,
+        diagnostics: Vec::new(),
+    };
+    let mut syntax = Syntax::new(false);
+    crate::tokenizer::byte::tokenize_sfc(bytes, |event| syntax.handle(&event, &ctx));
+    syntax
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == CompilerErrorCode::ScriptLangMismatch)
+        .and_then(|diagnostic| diagnostic.span)
 }

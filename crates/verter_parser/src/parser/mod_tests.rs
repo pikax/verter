@@ -794,6 +794,261 @@ fn duplicate_script_setup_emits_diagnostic() {
 }
 
 // ========================================================================
+// 14b. Script dialect classification + mixed-language rejection
+// ========================================================================
+
+/// Parse `input` and return `(diagnostics, classified dialect)`.
+fn script_dialect_of(
+    input: &str,
+) -> (
+    Vec<CompilerErrorCode>,
+    crate::parser::types::SfcScriptDialect,
+) {
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(false);
+    tokenize_and_feed(&mut syn, input, &ctx);
+    let codes = syn.diagnostics.iter().map(|d| d.code).collect();
+    let dialect = crate::parser::types::sfc_script_dialect(
+        syn.script_setup_node.as_ref(),
+        syn.script_node.as_ref(),
+    );
+    (codes, dialect)
+}
+
+/// The classification is FOUR-way, and each arm names the extension whose
+/// TypeScript ScriptKind matches.
+///
+/// Fails against a `is_javascript: bool` classifier: it maps `lang="jsx"` onto
+/// the same answer as `lang="js"` (so the authored `<div/>` lands in a `.js`
+/// root, where it is a syntax error) and `lang="tsx"` onto the same answer as
+/// `lang="ts"` (where `<div/>` parses as a type assertion).
+#[test]
+fn script_dialect_separates_all_four_authored_dialects() {
+    use crate::parser::types::SfcScriptDialect;
+
+    for (input, expected, ext) in [
+        (
+            "<script setup>a</script>",
+            SfcScriptDialect::JavaScript,
+            "js",
+        ),
+        (
+            "<script setup lang=\"js\">a</script>",
+            SfcScriptDialect::JavaScript,
+            "js",
+        ),
+        (
+            "<script setup lang=\"jsx\">a</script>",
+            SfcScriptDialect::Jsx,
+            "jsx",
+        ),
+        (
+            "<script setup lang=\"ts\">a</script>",
+            SfcScriptDialect::TypeScript,
+            "ts",
+        ),
+        (
+            "<script setup lang=\"tsx\">a</script>",
+            SfcScriptDialect::Tsx,
+            "tsx",
+        ),
+        // No script block at all, and an unrecognised lang, both default to
+        // TypeScript: there is no authored JavaScript for a JS label to describe.
+        (
+            "<template><div/></template>",
+            SfcScriptDialect::TypeScript,
+            "ts",
+        ),
+        (
+            "<script setup lang=\"coffee\">a</script>",
+            SfcScriptDialect::TypeScript,
+            "ts",
+        ),
+    ] {
+        let (codes, dialect) = script_dialect_of(input);
+        assert_eq!(dialect, expected, "classifying {input}");
+        assert_eq!(dialect.extension(), ext, "extension for {input}");
+        assert!(
+            !codes.contains(&CompilerErrorCode::ScriptLangMismatch),
+            "a single-block SFC never conflicts with itself: {input} -> {codes:?}"
+        );
+    }
+}
+
+/// A mixed-language SFC is REPORTED (Vue's `compileScript` throws on it) and
+/// classified fail-closed as TypeScript — never toward JavaScript, which would
+/// delete every genuine diagnostic in the TypeScript block.
+///
+/// Fails against the pre-change tree twice over: no diagnostic existed at all,
+/// and the classification resolved BOTH mixed forms by falling through to a
+/// block's `lang`, so `<script setup>` (JS) + `<script lang="ts">` classified
+/// JavaScript.
+#[test]
+fn mixed_script_languages_are_reported_and_classified_fail_closed() {
+    use crate::parser::types::SfcScriptDialect;
+
+    for input in [
+        "<script setup>a</script><script lang=\"ts\">b</script>",
+        "<script lang=\"ts\">b</script><script setup>a</script>",
+        "<script setup lang=\"ts\">a</script><script>b</script>",
+        "<script setup lang=\"ts\">a</script><script lang=\"js\">b</script>",
+        // The REVERSE mix, and the reason the rule is fail-closed rather than
+        // setup-block-wins: letting the JavaScript setup block decide labels the
+        // whole SFC JavaScript, and a `.js`/`.jsx` root is not typechecked at
+        // all — so every real error in the `lang="ts"` block silently vanishes.
+        "<script setup lang=\"js\">a</script><script lang=\"ts\">b</script>",
+        "<script setup lang=\"jsx\">a</script><script lang=\"ts\">b</script>",
+        // Vue compares the RAW attribute text, so these three are mismatches to
+        // Vue and must be mismatches here: the same language spelled two ways,
+        // an absent `lang` beside the explicit spelling of its own default, and
+        // two DIFFERENT unrecognised spellings. Comparing the normalized
+        // `ScriptLanguage` instead passes all three (`typescript` and `ts` are
+        // one enum value; every unrecognised spelling is `Unknown`) and they
+        // then fail in Vue — an SFC that builds here and not there.
+        "<script setup lang=\"ts\">a</script><script lang=\"typescript\">b</script>",
+        "<script setup>a</script><script lang=\"js\">b</script>",
+        "<script setup lang=\"coffee\">a</script><script lang=\"cson\">b</script>",
+    ] {
+        let (codes, dialect) = script_dialect_of(input);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|c| **c == CompilerErrorCode::ScriptLangMismatch)
+                .count(),
+            1,
+            "exactly one mismatch diagnostic for {input}: {codes:?}"
+        );
+        assert_eq!(
+            dialect,
+            SfcScriptDialect::TypeScript,
+            "a mixed SFC resolves fail-closed to TypeScript: {input}"
+        );
+    }
+
+    // Negative: blocks whose raw `lang` text AGREES are not a mismatch —
+    // including two blocks that both omit it, and two that both spell the same
+    // unrecognised language. Without this half the assertion above would pass
+    // for a rule that reports every two-block SFC.
+    for (input, expected) in [
+        (
+            "<script setup>a</script><script>b</script>",
+            SfcScriptDialect::JavaScript,
+        ),
+        (
+            "<script setup lang=\"ts\">a</script><script lang=\"ts\">b</script>",
+            SfcScriptDialect::TypeScript,
+        ),
+        (
+            "<script setup lang=\"typescript\">a</script><script lang=\"typescript\">b</script>",
+            SfcScriptDialect::TypeScript,
+        ),
+        (
+            "<script setup lang=\"coffee\">a</script><script lang=\"coffee\">b</script>",
+            SfcScriptDialect::TypeScript,
+        ),
+    ] {
+        let (codes, dialect) = script_dialect_of(input);
+        assert!(
+            !codes.contains(&CompilerErrorCode::ScriptLangMismatch),
+            "agreeing blocks are not a mismatch: {input} -> {codes:?}"
+        );
+        assert_eq!(dialect, expected, "classifying {input}");
+    }
+}
+
+/// The `lang` comparison is over the DECODED attribute value, so an
+/// entity-spelled `lang` agrees with the plain spelling of the same language.
+///
+/// Vue's SFC parser entity-decodes attribute values, so `lang="t&#115;"` is
+/// `ts` there and `compileScript` accepts it beside `lang="ts"`. Verified
+/// against the pinned `@vue/compiler-sfc`: `parse()` reports `lang: "ts"` for
+/// both blocks.
+///
+/// Fails against a comparison over the SOURCE BYTES: `t&#115;` and `ts` are
+/// different byte strings, so it reports a mismatch — and because a mismatch
+/// makes `verter-tsc` REFUSE the SFC, that is a build that rejects valid Vue.
+/// A false refusal is a worse failure than the mislabelling this classification
+/// exists to prevent.
+#[test]
+fn an_entity_encoded_lang_agrees_with_its_plain_spelling() {
+    use crate::parser::types::SfcScriptDialect;
+
+    for (input, expected) in [
+        // `t&#115;` -> `ts`, `&#116;s` -> `ts`, `&#x74;s` -> `ts`.
+        (
+            "<script setup lang=\"t&#115;\">a</script><script lang=\"ts\">b</script>",
+            SfcScriptDialect::TypeScript,
+        ),
+        (
+            "<script setup lang=\"ts\">a</script><script lang=\"&#116;s\">b</script>",
+            SfcScriptDialect::TypeScript,
+        ),
+        (
+            "<script setup lang=\"&#x74;s\">a</script><script lang=\"t&#115;\">b</script>",
+            SfcScriptDialect::TypeScript,
+        ),
+        // And the JavaScript-family spellings, so the acceptance is not a
+        // TypeScript-shaped accident.
+        (
+            "<script setup lang=\"js&#120;\">a</script><script lang=\"jsx\">b</script>",
+            SfcScriptDialect::Jsx,
+        ),
+    ] {
+        let (codes, dialect) = script_dialect_of(input);
+        assert!(
+            !codes.contains(&CompilerErrorCode::ScriptLangMismatch),
+            "an entity-spelled `lang` decodes to the same language and must be \
+             ACCEPTED, exactly as Vue accepts it: {input} -> {codes:?}"
+        );
+        assert_eq!(
+            dialect, expected,
+            "and the decoded value classifies the dialect: {input}"
+        );
+    }
+
+    // Negative: decoding is not a licence to accept anything. An entity that
+    // decodes to a DIFFERENT language is still a mismatch — otherwise the rule
+    // above would pass for a check that simply stopped comparing.
+    let (codes, _) = script_dialect_of(
+        "<script setup lang=\"j&#115;\">a</script><script lang=\"ts\">b</script>",
+    );
+    assert!(
+        codes.contains(&CompilerErrorCode::ScriptLangMismatch),
+        "`js` and `ts` disagree however they are spelled: {codes:?}"
+    );
+}
+
+/// One authoring mistake is ONE diagnostic, however many script blocks the SFC
+/// piles up.
+///
+/// Fails against a check that fires whenever a landing block disagrees with an
+/// already-stored sibling: a duplicated `<script setup>` compares against the
+/// same plain sibling a second time, so a single mismatch was reported twice
+/// and the CLI printed `VTER1002` twice for it.
+#[test]
+fn a_duplicated_script_block_does_not_report_the_same_mismatch_twice() {
+    let input = "<script setup lang=\"ts\">a</script>\
+                 <script lang=\"js\">b</script>\
+                 <script setup lang=\"ts\">c</script>";
+    let (codes, _) = script_dialect_of(input);
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|c| **c == CompilerErrorCode::ScriptLangMismatch)
+            .count(),
+        1,
+        "one mismatch, reported once: {codes:?}"
+    );
+    // Negative: the duplication itself is still reported — the latch silences
+    // the mismatch rule, not the duplicate-block rule.
+    assert!(
+        codes.contains(&CompilerErrorCode::DuplicateScriptSetup),
+        "the duplicate `<script setup>` must still be reported: {codes:?}"
+    );
+}
+
+// ========================================================================
 // 15. Root-attribute contamination
 // ========================================================================
 
@@ -1316,7 +1571,11 @@ fn multiple_unknown_root_nodes() {
 /// @ai-generated - Tests a complete SFC with template, script, script setup, style, and unknown.
 #[test]
 fn complete_sfc_all_sections() {
-    let input = "<template><div>hi</div></template><script>export default {}</script><script setup lang=\"ts\">const x = 1</script><style scoped>.a{}</style><style module>.b{}</style><i18n>locale</i18n>";
+    // Both script blocks declare the SAME `lang` — Vue rejects an SFC whose
+    // `<script>` and `<script setup>` disagree, and so does the parser
+    // (`ScriptLangMismatch`), which this "every section present" fixture must
+    // not trip on.
+    let input = "<template><div>hi</div></template><script lang=\"ts\">export default {}</script><script setup lang=\"ts\">const x = 1</script><style scoped>.a{}</style><style module>.b{}</style><i18n>locale</i18n>";
     let opts = SyntaxPluginOptions::default();
     let ctx = make_ctx(input, &opts);
     let mut syn = Syntax::new(false);

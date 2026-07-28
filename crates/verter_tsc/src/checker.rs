@@ -56,6 +56,14 @@ pub struct CheckResult {
     pub emitted_files: Vec<PathBuf>,
     pub public_api_outcomes: Vec<PublicApiOutcome>,
     pub public_api_failures: Vec<PublicApiFailure>,
+    /// How many input carriers were ADMITTED — i.e. had companions generated
+    /// for them at all. Lower than the input count exactly when the run refused
+    /// an invalid SFC (see [`CarrierAdmission`]).
+    ///
+    /// The public-API projection produces one outcome per admitted carrier, so
+    /// this — not the input count — is what that per-carrier invariant is
+    /// checked against. A refused SFC has no projection to have an outcome for.
+    pub admitted_carriers: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +113,9 @@ impl std::fmt::Display for PublicApiFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "{}: error VTER1001: {} [code={}, detailCode={}, subject={}, declarationShapeReason={}, memberOrdinal={}, outcomeKind={}, outcomeReason={}, outcomeDiagnostic={}]",
+            "{}: error {}: {} [code={}, detailCode={}, subject={}, declarationShapeReason={}, memberOrdinal={}, outcomeKind={}, outcomeReason={}, outcomeDiagnostic={}]",
             self.source.display(),
+            crate::reporter::VerterCode::PublicApiProjectionFailure,
             self.message,
             self.code,
             self.detail_code,
@@ -215,8 +224,29 @@ fn generate_public_api_stubs(
         let hash = simple_hash(canonical_id.as_bytes());
         // The stub's on-disk name is internal: `lower_tsc_validation_carrier_specifiers` connects
         // the codegen's carrier-API specifier to this file via `vue_ts_map`, so
-        // the `.vue.ts` extension here only needs `allowImportingTsExtensions`.
-        let stub_name = format!("{component_name}_{hash:016x}.vue.ts");
+        // a `.vue.ts`/`.vue.tsx` extension here only needs
+        // `allowImportingTsExtensions` (a `.vue.js`/`.vue.jsx` stub needs
+        // nothing — it is an ordinary JavaScript specifier).
+        //
+        // The STUB'S OWN DIALECT picks the extension, for the same reason the
+        // validation carrier's does: the stub is a program root and its
+        // diagnostics are surfaced passthrough, and TypeScript decides both
+        // what to typecheck AND how to parse from the extension/ScriptKind.
+        // Almost every stub is a GENERATED TypeScript declaration surface
+        // (JavaScript `<script setup>` SFCs included — their surface is
+        // `declare`-based TypeScript), so this is not simply the SFC's script
+        // language. The exception is the Options-API stub, which passes the
+        // authored `<script>` body through verbatim: for a JavaScript
+        // Options-API SFC that root is JavaScript, and labelling it `.ts` made
+        // `strict`/`noImplicitAny` report TS7006 on every untyped parameter of
+        // a file the project never asked to have checked — while collapsing
+        // `lang="jsx"` onto `.js` or `lang="tsx"` onto `.ts` makes the authored
+        // `<div/>` a SYNTAX error. All four extensions are reachable; the
+        // dialect comes from the projection itself, never re-derived here.
+        let stub_name = format!(
+            "{component_name}_{hash:016x}.vue.{ext}",
+            ext = tsc_response.dialect.extension()
+        );
         let stub_path = base_dir.join(&stub_name);
 
         vue_ts_map.insert(canonical_id, stub_path.clone());
@@ -237,9 +267,14 @@ fn generate_public_api_stubs(
 ///
 /// Uses `compile()` with `CompileTarget::TSX` for full type checking.
 /// IN-MEMORY: nothing is written to disk — `base_dir` only roots each carrier's
-/// deterministic virtual path (`<base>/Name_<hash>.tsx`). Returns
-/// `(vue_path, tsx_code, virtual tsx_path)` tuples; the in-memory `--api` overlay
+/// deterministic virtual path (`<base>/Name_<hash>.tsx`, or `.jsx` for a
+/// JavaScript carrier — see the extension derivation below). Returns
+/// `(vue_path, tsx_code, virtual tsx_path)` rows; the in-memory `--api` overlay
 /// serves the code and the synthetic tsconfig lists the path in `files`.
+///
+/// `vue_files` is the ADMITTED set ([`CarrierAdmission`]) — an SFC Vue itself
+/// refuses to compile never reaches here, so there is no carrier for it to
+/// mislabel.
 fn generate_all_tsx(
     host: &VerterHost,
     vue_files: &[PathBuf],
@@ -321,12 +356,41 @@ fn generate_all_tsx(
             }
 
             let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
-            let tsx_name = format!("{component_name}_{hash:016x}.tsx");
+            // The CARRIER'S LANGUAGE picks the companion extension, through the
+            // SAME derivation the LSP uses. TypeScript decides what to check
+            // from the file's extension/ScriptKind, not from a Verter flag:
+            // `.tsx` is always typechecked (so `strict`/`noImplicitAny` fires
+            // TS7006 on every untyped parameter of a JavaScript SFC), while
+            // `.jsx` is checked only under `checkJs`. Hardcoding `.tsx` here
+            // therefore mislabelled every JS carrier as TypeScript and produced
+            // a TS7006 flood the LSP never shows for the same file. The fix is
+            // the label, NOT a `checkJs` switch and NOT a diagnostic filter:
+            // `checkJs` still comes from the user's own tsconfig through the
+            // synthetic config's `extends`, so a `checkJs: true` project keeps
+            // reporting real JavaScript errors.
+            let tsx_name = verter_workspace::carrier_ide_provider_path(
+                &format!("{component_name}_{hash:016x}"),
+                tsx_block.is_jsx,
+            );
             let tsx_path = base_dir.join(&tsx_name);
 
             Ok((vue_path.clone(), code, tsx_path))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// The 1-indexed `(line, column)` of a byte offset in `source`.
+///
+/// Column counts UTF-16 code units, matching what the TypeScript engine reports
+/// for every other diagnostic on this rail, so a Verter-native diagnostic and an
+/// engine one point at the same place in an editor.
+fn one_indexed_position(source: &str, offset: usize) -> (u32, u32) {
+    let offset = offset.min(source.len());
+    let before = &source[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let column = source[line_start..offset].encode_utf16().count() + 1;
+    (line as u32, column as u32)
 }
 
 /// Declaration-generation stage: generate minimal TSC declaration output for every `.vue` file.
@@ -427,6 +491,71 @@ fn build_host_config() -> HostConfig {
     HostConfig::batch_typecheck()
 }
 
+/// Which carrier sources this run will generate companions for, and why the
+/// others were refused.
+///
+/// **A build refuses what Vue refuses.** `@vue/compiler-sfc`'s `compileScript`
+/// THROWS on an SFC whose `<script>` and `<script setup>` declare different
+/// `lang`s, so such a file has no authored dialect and Verter has nothing
+/// correct to generate from it. Both available labels are wrong in a way no
+/// test downstream can see:
+///
+/// - a `.tsx`/`.ts` companion is ALWAYS typechecked, so the JavaScript block's
+///   every untyped parameter reports TS7006 — a flood on code the project never
+///   asked to have checked, which is precisely the defect the generated
+///   companions' dialect labelling exists to remove;
+/// - a `.jsx`/`.js` companion is checked only under `checkJs`, so every genuine
+///   error in the TypeScript block silently disappears.
+///
+/// So the file is REFUSED: it contributes ONE `VTER1002` diagnostic against the
+/// authored `.vue` and NO companion of any kind — no validation carrier, no
+/// public-API stub, no declaration carrier. Nothing derived from an invalid SFC
+/// is ever handed to the engine. Importers are unaffected: the `declare module
+/// '*.vue'` ambient shim still resolves the bare import, so a refusal does not
+/// cascade into TS2307 across the project.
+///
+/// This is a BUILD boundary, and it is drawn there on the merits, not out of
+/// deference to the existing corpus. The editing surfaces deliberately keep
+/// working on a transiently-mixed file — a user is mid-keystroke between giving
+/// one block its `lang` and the other, and an editor that blanks out at that
+/// moment is a worse tool — so they classify fail-closed toward TypeScript
+/// (`verter_parser::parser::types::sfc_script_dialect`). A build has no such
+/// excuse: the file is finished, and it is wrong.
+///
+/// Breadth of existing fixtures is explicitly NOT part of that reasoning. The
+/// tracked corpus holds many dual-script SFCs but almost none that actually
+/// disagree, so "too much would break" was never true and is not why the
+/// refusal lives here. If the editing surfaces later gain a defensible way to
+/// refuse too, this boundary should move — the argument above is the only thing
+/// holding it.
+#[derive(Debug, Default)]
+struct CarrierAdmission {
+    /// The sources companions WILL be generated from, in input order.
+    admitted: Vec<PathBuf>,
+    /// One Verter-native diagnostic per refused source.
+    refusals: Vec<Diagnostic>,
+}
+
+impl CarrierAdmission {
+    /// Admit `vue_path` unless its two script blocks disagree about `lang`.
+    fn admit(&mut self, vue_path: &Path, source: &str) {
+        let Some(span) = verter_compiler::parser::sfc_script_lang_mismatch_span(source) else {
+            self.admitted.push(vue_path.to_path_buf());
+            return;
+        };
+        let (line, col) = one_indexed_position(source, span.start as usize);
+        self.refusals.push(Diagnostic::verter(
+            vue_path.to_string_lossy().replace('\\', "/"),
+            line,
+            col,
+            crate::reporter::VerterCode::ScriptLangMismatch,
+            verter_compiler::diagnostics::CompilerErrorCode::ScriptLangMismatch
+                .message()
+                .to_string(),
+        ));
+    }
+}
+
 /// Run the full type-checking pipeline.
 ///
 /// The `--noEmit` TYPECHECK diagnostic set is produced IN-MEMORY through the tsgo
@@ -452,12 +581,14 @@ pub fn run(
             emitted_files: Vec::new(),
             public_api_outcomes: Vec::new(),
             public_api_failures: Vec::new(),
+            admitted_carriers: 0,
         });
     }
 
     // ONE shared VerterHost (Batch preset): upsert every `.vue` once. Both stages
     // build from it — the typecheck overlay carriers and the declaration `.tsc.tsx`.
     let host = VerterHost::new_standalone(build_host_config());
+    let mut admission = CarrierAdmission::default();
     for vue_path in &config.vue_files {
         let source = fs::read_to_string(vue_path).map_err(|error| {
             api_check::TypecheckError::new(format!(
@@ -465,6 +596,7 @@ pub fn run(
                 vue_path.display()
             ))
         })?;
+        admission.admit(vue_path, &source);
         let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
         let _update = host
             .upsert(UpsertRequest {
@@ -485,8 +617,14 @@ pub fn run(
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
     // A hard failure here (engine absent / connect / protocol) aborts the whole run
     // with `Err` — we never proceed to emit against a compromised typecheck.
-    let in_memory = run_inmemory_typecheck(&host, config, tsconfig_path, tsgo_bin)?;
-    let mut diagnostics = in_memory.value;
+    //
+    // Only ADMITTED carriers reach it. A refused SFC produces no companion at
+    // all, so nothing of it is ever handed to the engine; its refusal
+    // diagnostic leads the report.
+    let in_memory =
+        run_inmemory_typecheck(&host, config, &admission.admitted, tsconfig_path, tsgo_bin)?;
+    let mut diagnostics = admission.refusals.clone();
+    diagnostics.extend(in_memory.value);
     let public_api_outcomes = in_memory.outcomes;
     let mut public_api_failures = in_memory.failures;
 
@@ -494,8 +632,14 @@ pub fn run(
     //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
     //    engine that cannot run the emit is a hard error, never silent success. ──
     let emitted_files = if opts.declaration {
-        let (decl_diagnostics, emitted, declaration_failures) =
-            run_declaration_stage(&host, config, tsconfig_path, opts, tsgo_bin)?;
+        let (decl_diagnostics, emitted, declaration_failures) = run_declaration_stage(
+            &host,
+            config,
+            &admission.admitted,
+            tsconfig_path,
+            opts,
+            tsgo_bin,
+        )?;
         diagnostics.extend(decl_diagnostics);
         for failure in declaration_failures {
             if !public_api_failures.iter().any(|existing| {
@@ -522,6 +666,7 @@ pub fn run(
         emitted_files,
         public_api_outcomes,
         public_api_failures,
+        admitted_carriers: admission.admitted.len(),
     })
 }
 
@@ -762,9 +907,14 @@ fn resolve_tsgo_engine_for(
 /// (full TSX + public-API stubs + ambient shims) and the synthetic tsconfig as an
 /// in-memory overlay, then drive the gated [`api_check::typecheck`] over EVERY
 /// configured-project root file. No temp files, no subprocess, no tsc fallback.
+///
+/// `admitted` is the [`CarrierAdmission`] set, NOT `config.vue_files`: a refused
+/// SFC contributes no carrier, no stub, and no `files` entry, so nothing derived
+/// from it can reach the engine.
 fn run_inmemory_typecheck(
     host: &VerterHost,
     config: &TsConfig,
+    admitted: &[PathBuf],
     tsconfig_path: &Path,
     tsgo_bin: Option<&Path>,
 ) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
@@ -790,9 +940,9 @@ fn run_inmemory_typecheck(
 
     // Generate the validation carriers IN-MEMORY, rooted at deterministic
     // in-project virtual paths (so node_modules resolution walks from the root).
-    let stubs = generate_public_api_stubs(host, &config.vue_files, &root);
+    let stubs = generate_public_api_stubs(host, admitted, &root);
     let (stub_files, vue_ts_map) = stubs.value;
-    let mut tsx_files = generate_all_tsx(host, &config.vue_files, &root)?;
+    let mut tsx_files = generate_all_tsx(host, admitted, &root)?;
     // Lower the generated TSX's OWN carrier specifiers to the public-API stubs (or
     // strip back to the bare carrier for the `*.vue` wildcard shim).
     for (_, code, _) in &mut tsx_files {
@@ -867,7 +1017,7 @@ fn run_inmemory_typecheck(
     };
     let virtual_tsconfig_path = slash(&root.join("verter-tsc-check.tsconfig.json"));
 
-    let diagnostics = api_check::typecheck(api_check::TypecheckInputs {
+    let engine_diagnostics = api_check::typecheck(api_check::TypecheckInputs {
         engine: engine.as_path(),
         cwd: root.as_path(),
         tsconfig_path: virtual_tsconfig_path,
@@ -875,7 +1025,7 @@ fn run_inmemory_typecheck(
         files: overlay_files,
     })?;
     Ok(PublicApiBatch {
-        value: diagnostics,
+        value: engine_diagnostics,
         outcomes: stubs.outcomes,
         failures: stubs.failures,
     })
@@ -898,6 +1048,7 @@ fn run_inmemory_typecheck(
 fn run_declaration_stage(
     host: &VerterHost,
     config: &TsConfig,
+    admitted: &[PathBuf],
     tsconfig_path: &Path,
     opts: &EmitOptions,
     tsgo_bin: Option<&Path>,
@@ -919,7 +1070,7 @@ fn run_declaration_stage(
             decl_dir.display()
         ))
     })?;
-    let declaration_batch = generate_all_tsc(host, &config.vue_files, &decl_dir)?;
+    let declaration_batch = generate_all_tsc(host, admitted, &decl_dir)?;
     let declaration_generated = declaration_batch.value;
 
     // vue-shims so the checker resolves `import X from '*.vue'`.
@@ -1301,6 +1452,24 @@ fn synthetic_tsconfig_value(
         // errors if both jsxFactory and react-jsx are present.
         compiler_options["jsxFactory"] = serde_json::json!(null);
         compiler_options["jsxFragmentFactory"] = serde_json::json!(null);
+    }
+    // A JavaScript carrier (`.jsx`, from a JS SFC) is only a legal program root
+    // under `allowJs`; without it TypeScript rejects the explicitly-listed file
+    // outright (TS6054, "unsupported extension"). This is MEMBERSHIP only —
+    // `checkJs`, which decides whether those carriers are TYPECHECKED, is
+    // deliberately NOT written here so it keeps coming from the user's own
+    // tsconfig through `extends`. Set only when a JS carrier is actually
+    // present, so a TypeScript-only project's module resolution is byte-for-byte
+    // unchanged; `include` is `[]` and every root is listed in `files`, so this
+    // can never widen the program. The predicate is the JavaScript-root class,
+    // not just today's producer: `.jsx` is the only JS root anything currently
+    // contributes (`classify_file` admits `.ts`/`.tsx`/`.mts`/`.cts` only), and
+    // `allowJs` governs `.js` identically, so both belong here.
+    if files
+        .iter()
+        .any(|f| f.ends_with(".jsx") || f.ends_with(".js"))
+    {
+        compiler_options["allowJs"] = serde_json::json!(true);
     }
     if opts.declaration {
         compiler_options["declaration"] = serde_json::json!(true);
@@ -2573,8 +2742,40 @@ if ($Args -contains '--lsp') {
     /// tests drive [`run_declaration_stage`] directly (see
     /// [`run_declaration_only`]), leaving the declaration-stage diagnostics as
     /// the only ones they observe.
+    /// The directory both fixture mocks install into (the resolver's
+    /// project-local `.bin` shim tier).
+    fn mock_bin_dir(project_root: &Path) -> PathBuf {
+        project_root.join("node_modules").join(".bin")
+    }
+
+    /// The on-disk path of the mock installed by [`write_mock_tsc`] /
+    /// [`write_mock_tsc_error_with_emit`] — the resolver's `legacy_bin_shim`
+    /// name (`tsgo` / `tsgo.cmd`).
+    ///
+    /// Declaration-stage fixtures name this path EXPLICITLY through the
+    /// `--tsgo-bin` seam rather than hoping the project-local tier wins the
+    /// ambient resolution. Tier 1 of the shared resolver is the process `PATH`
+    /// (`tsc` first, then `tsgo`) and it OUTRANKS the project-local
+    /// `node_modules` tier, so on any machine carrying a system `tsc` that
+    /// passes the version + [`Capability::Lsp`] smoke — a Linux CI runner with
+    /// TypeScript installed — the ambient binary silently becomes the oracle
+    /// and the fixture asserts against a stranger. Naming the mock explicitly
+    /// makes it the ONLY candidate (`resolve_explicit_engine` empties
+    /// `path_entries` and disables every lower tier), which is test
+    /// hermeticity, not a production tier change: production still resolves
+    /// through `ResolutionRequest::for_environment`.
+    ///
+    /// [`Capability::Lsp`]: verter_tsgo_api::toolchain::validation::Capability
+    fn mock_engine_path(project_root: &Path) -> PathBuf {
+        mock_bin_dir(project_root).join(if cfg!(target_os = "windows") {
+            "tsgo.cmd"
+        } else {
+            "tsgo"
+        })
+    }
+
     fn write_mock_tsc(project_root: &Path, mode: &str) {
-        let bin_dir = project_root.join("node_modules").join(".bin");
+        let bin_dir = mock_bin_dir(project_root);
         fs::create_dir_all(&bin_dir).unwrap();
         fs::write(bin_dir.join("mock-mode.txt"), mode).unwrap();
 
@@ -2716,7 +2917,7 @@ printf "export declare const ok: number;\n" > "$declaration_dir/$(basename "$tsc
     /// This simulates real tsc behavior where errors in some files don't prevent
     /// emission of declarations for other (non-erroring) files.
     fn write_mock_tsc_error_with_emit(project_root: &Path, _decl_dir: &Path) {
-        let bin_dir = project_root.join("node_modules").join(".bin");
+        let bin_dir = mock_bin_dir(project_root);
         fs::create_dir_all(&bin_dir).unwrap();
 
         #[cfg(target_os = "windows")]
@@ -2848,6 +3049,189 @@ exit 1
         }
     }
 
+    /// The marker every diagnostic the PATH decoy prints carries. A fixture
+    /// that observes it resolved the AMBIENT `PATH` engine instead of the
+    /// project's own mock.
+    const PATH_DECOY_MARKER: &str = "verter-tsc PATH decoy engine";
+
+    /// Install a hostile ambient-`PATH` engine into `dir` and return its path.
+    ///
+    /// It is deliberately PLAUSIBLE: it answers `--version` with a supported
+    /// tsgo version and completes the `--lsp` handshake with a matching
+    /// `serverInfo`, so it passes the shared resolver's bounded probe + support
+    /// policy + [`Capability::Lsp`] smoke and therefore WINS tier 1. It is
+    /// installed under the resolver's FIRST PATH name (`tsc` / `tsc.cmd`),
+    /// which is exactly the shape of the system `/usr/local/bin/tsc` that
+    /// displaced the project mock on Linux CI. Its `--declaration` behaviour is
+    /// unmistakably wrong (three marker diagnostics, no emit), so any fixture
+    /// that resolves it fails loudly instead of silently asserting against a
+    /// stranger.
+    ///
+    /// [`Capability::Lsp`]: verter_tsgo_api::toolchain::validation::Capability
+    fn write_path_decoy_engine(dir: &Path) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+
+        #[cfg(target_os = "windows")]
+        {
+            let ps1 = dir.join("path-decoy.ps1");
+            fs::write(
+                &ps1,
+                r#"
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+
+if ($Args -contains '--version') {
+    Write-Output 'Version 7.0.2'
+    exit 0
+}
+
+__MOCK_LSP_HANDSHAKE_PS1__
+
+Write-Output "decoy_a.ts(1,1): error TS9001: __PATH_DECOY_MARKER__ was resolved."
+Write-Output "decoy_b.ts(2,2): error TS9002: __PATH_DECOY_MARKER__ was resolved."
+Write-Output "decoy_c.ts(3,3): error TS9003: __PATH_DECOY_MARKER__ was resolved."
+exit 2
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_PS1__", MOCK_LSP_HANDSHAKE_PS1)
+                .replace("__PATH_DECOY_MARKER__", PATH_DECOY_MARKER),
+            )
+            .unwrap();
+            let shim = dir.join("tsc.cmd");
+            fs::write(
+                &shim,
+                "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0path-decoy.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            )
+            .unwrap();
+            shim
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let script = dir.join("tsc");
+            fs::write(
+                &script,
+                r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo "Version 7.0.2"
+    exit 0
+  fi
+done
+
+__MOCK_LSP_HANDSHAKE_SH__
+
+printf "decoy_a.ts(1,1): error TS9001: __PATH_DECOY_MARKER__ was resolved.\n"
+printf "decoy_b.ts(2,2): error TS9002: __PATH_DECOY_MARKER__ was resolved.\n"
+printf "decoy_c.ts(3,3): error TS9003: __PATH_DECOY_MARKER__ was resolved.\n"
+exit 2
+"#
+                .replace("__MOCK_LSP_HANDSHAKE_SH__", MOCK_LSP_HANDSHAKE_SH)
+                .replace("__PATH_DECOY_MARKER__", PATH_DECOY_MARKER),
+            )
+            .unwrap();
+
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+            script
+        }
+    }
+
+    /// Serializes the process-global environment mutation the decoy fixtures
+    /// perform so two of them can never interleave.
+    static PATH_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Makes the decoy directory the AMBIENT engine for the guard's lifetime:
+    /// PREPENDS it to `PATH` and CLEARS `VERTER_TSGO_BIN`. Both are restored on
+    /// drop.
+    ///
+    /// Prepend, never replace: the fixture engines are `/bin/sh` (or
+    /// PowerShell) scripts that call ordinary utilities, so they still need a
+    /// working `PATH`. The canonical gate runs these tests under
+    /// `cargo nextest` (one process per test), so the mutation is additionally
+    /// process-isolated there; the mutex covers the in-process
+    /// `cargo test -p verter_tsc` run.
+    ///
+    /// `VERTER_TSGO_BIN` has to go with it. The instrument check calls
+    /// `resolve_tsgo_engine(.., None)`, which builds its request through
+    /// `ResolutionRequest::for_environment` — and that reads the env override
+    /// as tier 1, ABOVE the `PATH` traversal. A developer with the documented
+    /// override exported would resolve their own engine instead of the decoy
+    /// and get a spurious failure from a fixture that has nothing to do with
+    /// their environment. Only these two channels can out-rank the decoy;
+    /// tiers 3 and 4 (update cache, bundled sidecar) rank below `PATH` and
+    /// cannot displace it.
+    struct PathPrefixGuard {
+        previous_path: Option<std::ffi::OsString>,
+        previous_env_override: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PathPrefixGuard {
+        fn prepend(dir: &Path) -> Self {
+            use verter_tsgo_api::toolchain::discovery::ENV_OVERRIDE_VAR;
+
+            let lock = PATH_MUTATION_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous_path = std::env::var_os("PATH");
+            let previous_env_override = std::env::var_os(ENV_OVERRIDE_VAR);
+            let mut entries = vec![dir.to_path_buf()];
+            if let Some(existing) = &previous_path {
+                entries.extend(std::env::split_paths(existing));
+            }
+            let joined = std::env::join_paths(entries).expect("a joinable PATH");
+            std::env::set_var("PATH", joined);
+            std::env::remove_var(ENV_OVERRIDE_VAR);
+            Self {
+                previous_path,
+                previous_env_override,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for PathPrefixGuard {
+        fn drop(&mut self) {
+            use verter_tsgo_api::toolchain::discovery::ENV_OVERRIDE_VAR;
+
+            match &self.previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.previous_env_override {
+                Some(value) => std::env::set_var(ENV_OVERRIDE_VAR, value),
+                None => std::env::remove_var(ENV_OVERRIDE_VAR),
+            }
+        }
+    }
+
+    /// Assert the ambient resolution the declaration stage USED to perform now
+    /// selects `decoy` — the instrument check for every decoy fixture below.
+    ///
+    /// Without it a green run proves nothing: if the decoy failed to install,
+    /// failed the capability smoke, or lost tier 1 for any reason, the
+    /// "hostile PATH" is not hostile and the assertions that follow are
+    /// vacuous. This checks the FAILING case, not only the passing one.
+    fn assert_path_decoy_wins_ambient_resolution(project_root: &Path, decoy: &Path) {
+        let ambient = resolve_tsgo_engine(
+            project_root,
+            verter_tsgo_api::toolchain::validation::Capability::Lsp,
+            None,
+        )
+        .expect(
+            "the decoy must pass the shared resolver's version + Lsp capability smoke — \
+             otherwise this fixture's PATH is not hostile and discriminates nothing",
+        );
+        let ambient_norm = ambient.to_string_lossy().replace('\\', "/");
+        let decoy_norm = decoy.to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            ambient_norm, decoy_norm,
+            "the PATH decoy must OUTRANK the project-local fixture mock (tier 1 beats \
+             tier 2); ambient resolution picked {ambient_norm}"
+        );
+    }
+
     // ── DISCRIMINATING (B3): a wedged declaration engine (hangs with a
     //    grandchild holding the pipes) fails BOUNDED and leaves NO live
     //    descendant — the invocation is bounded end-to-end with a process-tree
@@ -2882,12 +3266,19 @@ exit 1
         let tsconfig = temp.path().join("tsconfig.json");
         fs::write(&tsconfig, "{}").unwrap();
 
+        // The bound has to outlast the fixture's own startup, not just the
+        // wedge: `/bin/sh` must run, fork `sleep 600`, and write the pid file
+        // before the kill lands, and under the gate's test parallelism a second
+        // is not always enough — the tree then dies before the pid file exists
+        // and the assertion below reads a missing file. Five seconds against a
+        // 600s sleep still proves the bound fires, and the elapsed check keeps
+        // guarding that it fired at all.
         let start = std::time::Instant::now();
         let result = invoke_checker_bounded(
             &script_path,
             &tsconfig,
             &opts,
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
         );
         let err = match result {
             Ok(_) => panic!("a wedged engine must fail the bounded invocation"),
@@ -2903,12 +3294,23 @@ exit 1
             start.elapsed()
         );
 
-        // The pipe-holding grandchild must not survive the tree kill.
-        let pid: u32 = std::fs::read_to_string(&pid_file)
-            .expect("the grandchild registered its pid")
-            .trim()
-            .parse()
-            .expect("a pid");
+        // The pipe-holding grandchild must not survive the tree kill. Poll for
+        // the record: the fixture writes it from a shell that may still be
+        // scheduling when the bound fires.
+        let pid_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let recorded = loop {
+            match std::fs::read_to_string(&pid_file) {
+                Ok(text) if !text.trim().is_empty() => break text,
+                other => {
+                    assert!(
+                        std::time::Instant::now() < pid_deadline,
+                        "the grandchild never registered its pid: {other:?}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        };
+        let pid: u32 = recorded.trim().parse().expect("a pid");
         for _ in 0..100 {
             if !process_alive(pid) {
                 return;
@@ -2933,6 +3335,32 @@ exit 1
         tsconfig_path: &Path,
         opts: &EmitOptions,
     ) -> (Vec<Diagnostic>, Vec<PathBuf>) {
+        let host = declaration_fixture_host(config);
+        // Name the fixture mock EXPLICITLY: `None` here resolves through the
+        // real process environment (`VERTER_TSGO_BIN`, then `PATH`), and PATH
+        // outranks the project-local `.bin` shim the fixture installs — so an
+        // ambient `tsc` becomes the oracle and the assertions below describe a
+        // stranger. See [`mock_engine_path`].
+        let mock = mock_engine_path(&config.root_dir);
+        let (diagnostics, emitted, failures) = run_declaration_stage(
+            &host,
+            config,
+            &config.vue_files,
+            tsconfig_path,
+            opts,
+            Some(mock.as_path()),
+        )
+        .expect("the declaration stage must run against the validating mock checker");
+        assert!(
+            failures.is_empty(),
+            "fixture projection failures: {failures:?}"
+        );
+        (diagnostics, emitted)
+    }
+
+    /// The host every declaration-stage fixture drives: mirrors [`run`]'s
+    /// construction + per-`.vue` upsert.
+    fn declaration_fixture_host(config: &TsConfig) -> VerterHost {
         let host = VerterHost::new_standalone(build_host_config());
         for vue_path in &config.vue_files {
             let source = match fs::read_to_string(vue_path) {
@@ -2948,14 +3376,7 @@ exit 1
                 aliases: Vec::new(),
             });
         }
-        let (diagnostics, emitted, failures) =
-            run_declaration_stage(&host, config, tsconfig_path, opts, None)
-                .expect("the declaration stage must run against the validating mock checker");
-        assert!(
-            failures.is_empty(),
-            "fixture projection failures: {failures:?}"
-        );
-        (diagnostics, emitted)
+        host
     }
 
     fn create_run_fixture(
@@ -4925,6 +5346,97 @@ import type { Foo } from './types'"#;
         );
     }
 
+    /// DISCRIMINATING: a hostile ambient `PATH` must not change the
+    /// declaration stage's oracle.
+    ///
+    /// This is the exact shape of the Linux-CI failure: the shared resolver's
+    /// tier 1 is the process `PATH` (`tsc`, then `tsgo`) and it outranks the
+    /// project-local `node_modules/.bin` tier, so a runner carrying a system
+    /// `/usr/local/bin/tsc` that passes the version + `Capability::Lsp` smoke
+    /// silently became the declaration engine — four fixtures then asserted
+    /// against a binary they never installed (`1` expected diagnostic, `4`
+    /// observed). The stage now names the fixture mock through the
+    /// `--tsgo-bin` seam, which empties `path_entries`, so `PATH` cannot
+    /// participate at all.
+    ///
+    /// Fails against the pre-change tree: there `run_declaration_only` passed
+    /// `None` and the decoy — installed first on `PATH` under the resolver's
+    /// first executable name — won, producing three marker diagnostics and no
+    /// emit.
+    #[test]
+    fn hostile_path_decoy_never_displaces_the_declaration_fixture_engine() {
+        let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-fail");
+        let decoy_dir = config.root_dir.join("_path_decoy");
+        let decoy = write_path_decoy_engine(&decoy_dir);
+        let _path = PathPrefixGuard::prepend(&decoy_dir);
+
+        // Instrument check against the FAILING case: prove the decoy really is
+        // selectable and really does outrank the fixture mock. Without this a
+        // green assertion below could mean nothing more than "the decoy never
+        // installed".
+        assert_path_decoy_wins_ambient_resolution(&config.root_dir, &decoy);
+
+        let (diagnostics, emitted_files) = run_declaration_only(
+            &config,
+            &tsconfig_path,
+            &EmitOptions {
+                no_emit: false,
+                declaration: true,
+                declaration_dir: Some(decl_dir.clone()),
+            },
+        );
+
+        // Positive: the fixture mock is still the oracle.
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "the project's own mock must remain the oracle under a hostile PATH: \
+             {diagnostics:?}"
+        );
+        assert_eq!(diagnostics[0].ts_code, 2304);
+        assert!(
+            diagnostics[0].message.contains("MissingType"),
+            "the fixture mock's message must survive: {}",
+            diagnostics[0].message
+        );
+        assert!(
+            diagnostics[0]
+                .file
+                .replace('\\', "/")
+                .ends_with("/src/Test.vue"),
+            "the fixture mock's diagnostic must remap to the vue source: {}",
+            diagnostics[0].file
+        );
+
+        // Negative: nothing the decoy produced may reach the output.
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains(PATH_DECOY_MARKER)),
+            "no ambient-PATH engine output may reach the reported diagnostics: \
+             {diagnostics:?}"
+        );
+        assert!(
+            emitted_files.is_empty(),
+            "a declaration-phase failure must not report emitted files"
+        );
+    }
+
+    // The explicit-engine fail-closed contract (a `--tsgo-bin` value that does
+    // not exist is a hard, flag-named error and never falls through to a lower
+    // tier) is pinned by `explicit_tsgo_bin_nonexistent_is_a_flag_named_error`
+    // and its two siblings below. Those exercise `resolve_explicit_engine`
+    // directly, which is where the whole contract lives: it empties
+    // `path_entries` and disables every lower tier, so a hostile `PATH` has
+    // nowhere to land BEFORE the declaration stage is reached. A
+    // declaration-stage rerun of the same assertions under a `PATH` decoy adds
+    // no discrimination — it passes identically whether or not the fixtures
+    // name their mock through `--tsgo-bin`, which is the only thing the
+    // declaration-fixture hermeticity change altered.
+    //
+    // `hostile_path_decoy_never_displaces_the_declaration_fixture_engine`
+    // above is the discriminating test for THAT change.
+
     #[test]
     fn run_declaration_phase_success_postprocesses_vue_declarations() {
         let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-success");
@@ -5053,6 +5565,143 @@ const props = defineProps<{ msg: string }>()
         );
     }
 
+    // ── Validation-carrier ScriptKind (JS vs TS) ──────────────────
+
+    /// Drive the REAL producer — [`generate_all_tsx`], the function whose
+    /// output the in-memory `--api` overlay serves — over one SFC and return
+    /// the virtual carrier path it named.
+    fn validation_carrier_path_for(dir: &Path, name: &str, source: &str) -> PathBuf {
+        let vue_path = dir.join(name);
+        fs::write(&vue_path, source).unwrap();
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let generated = generate_all_tsx(&host, std::slice::from_ref(&vue_path), dir)
+            .expect("the validation carrier must be generated");
+        assert_eq!(generated.len(), 1, "one carrier per input SFC");
+        generated.into_iter().next().unwrap().2
+    }
+
+    /// DISCRIMINATING: the validation carrier's extension follows the SFC's
+    /// script language, because TypeScript decides what to typecheck from the
+    /// file's extension/ScriptKind.
+    ///
+    /// `.tsx`/`.ts` are ALWAYS checked, so under `strict`/`noImplicitAny` a
+    /// JavaScript SFC labelled `.tsx` reports TS7006 on every untyped
+    /// parameter — a flood neither `vue-tsc` (with `checkJs` off) nor Verter's
+    /// own LSP produces for the same file. The LSP has always routed through
+    /// `is_jsx` → `carrier_ide_provider_path`; the CLI hardcoded `.tsx`. This
+    /// asserts the two now agree.
+    ///
+    /// Fails against the pre-change tree: there every carrier was named
+    /// `{Component}_{hash}.tsx` regardless of `is_jsx`.
+    #[test]
+    fn validation_carrier_extension_follows_the_sfc_script_language() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // Positive: a JS SFC (`<script setup>`, no `lang`) projects `.jsx`.
+        let js = validation_carrier_path_for(
+            temp.path(),
+            "JsSetup.vue",
+            "<script setup>\nfunction bump(step) { return step + 1 }\n</script>\n\
+             <template><button @click=\"bump(1)\">go</button></template>\n",
+        );
+        assert_eq!(
+            js.extension().and_then(|e| e.to_str()),
+            Some("jsx"),
+            "a JavaScript SFC must project a JavaScript carrier: {}",
+            js.display()
+        );
+
+        // Negative: a TS SFC still projects `.tsx` — the fix must not relabel
+        // TypeScript carriers as JavaScript (that would silently DROP every
+        // real TypeScript error under a default tsconfig).
+        let ts = validation_carrier_path_for(
+            temp.path(),
+            "TsSetup.vue",
+            "<script setup lang=\"ts\">\nfunction bump(step: number) { return step + 1 }\n\
+             </script>\n<template><button @click=\"bump(1)\">go</button></template>\n",
+        );
+        assert_eq!(
+            ts.extension().and_then(|e| e.to_str()),
+            Some("tsx"),
+            "a TypeScript SFC must keep its TypeScript carrier: {}",
+            ts.display()
+        );
+
+        // The derivation is the SHARED naming authority, not a CLI-local
+        // heuristic: both names must equal what the LSP would compose for the
+        // same stem and `is_jsx`.
+        for (path, is_jsx) in [(&js, true), (&ts, false)] {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
+            let expected = verter_workspace::carrier_ide_provider_path(stem, is_jsx);
+            assert_eq!(
+                path.file_name().and_then(|s| s.to_str()),
+                Some(expected.as_str()),
+                "the CLI must compose the same companion name as the LSP"
+            );
+        }
+    }
+
+    /// A JavaScript carrier is only a legal program root under `allowJs`;
+    /// without it TypeScript rejects the explicitly-listed `.jsx` file
+    /// (TS6054). `checkJs` must NOT be written — it decides whether those
+    /// carriers are typechecked and has to keep coming from the user's own
+    /// tsconfig through `extends`, so a `checkJs: true` project still reports
+    /// real JavaScript errors and a `checkJs: false` one still stays quiet.
+    #[test]
+    fn synthetic_tsconfig_admits_js_carriers_without_deciding_check_js() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let opts = EmitOptions {
+            no_emit: true,
+            declaration: false,
+            declaration_dir: None,
+        };
+
+        let with_js = synthetic_tsconfig_value(
+            "/project/tsconfig.json",
+            &["/project/A_0.jsx".into(), "/project/B_1.tsx".into()],
+            &opts,
+            temp.path(),
+        );
+        assert_eq!(
+            with_js["compilerOptions"]["allowJs"],
+            serde_json::json!(true),
+            "a listed `.jsx` carrier requires allowJs to enter the program"
+        );
+        assert!(
+            with_js["compilerOptions"].get("checkJs").is_none(),
+            "checkJs must stay the user's decision (inherited via `extends`), never \
+             forced by verter-tsc: {}",
+            with_js["compilerOptions"]
+        );
+
+        // Negative: a TypeScript-only carrier set must be byte-for-byte
+        // unchanged — no allowJs, so module resolution cannot start preferring
+        // JavaScript for a project that never asked for it.
+        let ts_only = synthetic_tsconfig_value(
+            "/project/tsconfig.json",
+            &["/project/B_1.tsx".into()],
+            &opts,
+            temp.path(),
+        );
+        assert!(
+            ts_only["compilerOptions"].get("allowJs").is_none(),
+            "a TypeScript-only carrier set must not gain allowJs: {}",
+            ts_only["compilerOptions"]
+        );
+    }
+
     // ── Cross-component type resolution tests ─────────────────────
 
     #[test]
@@ -5137,6 +5786,135 @@ defineProps<{ msg: string }>()
             !stub_content.contains(".vue.ts"),
             "stub should not contain .vue.ts import paths: {stub_content}"
         );
+    }
+
+    /// Drive the REAL producer — [`generate_public_api_stubs`] — over one SFC
+    /// and return the virtual stub path it named.
+    fn public_api_stub_path_for(dir: &Path, name: &str, source: &str) -> PathBuf {
+        let vue_path = dir.join(name);
+        fs::write(&vue_path, source).unwrap();
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let batch = generate_public_api_stubs(&host, std::slice::from_ref(&vue_path), dir);
+        assert!(
+            batch.failures.is_empty(),
+            "projection failures: {:?}",
+            batch.failures
+        );
+        let (mut stub_files, _) = batch.value;
+        assert_eq!(stub_files.len(), 1, "one stub per input SFC");
+        stub_files.remove(0).0
+    }
+
+    /// DISCRIMINATING: the public-API stub's extension follows the language of
+    /// the code the stub CARRIES — the same ScriptKind rule the validation
+    /// carrier follows, reached through the other generated root.
+    ///
+    /// The stub is a program root and its diagnostics are surfaced passthrough,
+    /// so a stub named `.vue.ts` is typechecked as TypeScript whatever its body
+    /// is. The Options-API stub passes the authored `<script>` body through
+    /// verbatim, so for a JavaScript Options-API SFC that root is JavaScript
+    /// wearing a TypeScript label — under `strict` every untyped parameter
+    /// reports TS7006 on a file the project never asked to have checked.
+    ///
+    /// Fails against the pre-change tree: there EVERY stub was named
+    /// `{Component}_{hash}.vue.ts` unconditionally.
+    #[test]
+    fn public_api_stub_extension_follows_the_stub_body_language() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // Positive: a JavaScript Options-API `<script>` body is a JavaScript
+        // root and must be labelled `.vue.js`.
+        let js_options = public_api_stub_path_for(
+            temp.path(),
+            "JsOptions.vue",
+            "<script>\nexport default { methods: { bump(step) { return step + 1 } } }\n\
+             </script>\n<template><div/></template>\n",
+        );
+        assert!(
+            js_options
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".vue.js")),
+            "a JavaScript Options-API stub must be labelled JavaScript: {}",
+            js_options.display()
+        );
+
+        // Negative: the same construct under `lang="ts"` keeps `.vue.ts` — the
+        // fix must not relabel TypeScript stubs, which would silently DROP
+        // every real TypeScript error an Options-API component contributes.
+        let ts_options = public_api_stub_path_for(
+            temp.path(),
+            "TsOptions.vue",
+            "<script lang=\"ts\">\nexport default { methods: { bump(step: number) { return step + 1 } } }\n\
+             </script>\n<template><div/></template>\n",
+        );
+        assert!(
+            ts_options
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".vue.ts")),
+            "a TypeScript Options-API stub keeps its TypeScript label: {}",
+            ts_options.display()
+        );
+
+        // Negative, and the reason this is NOT the SFC's script language: a
+        // JavaScript `<script setup>` projects a GENERATED TypeScript
+        // declaration surface. Labelling it `.vue.js` would put `declare` /
+        // type-annotation syntax into a JavaScript root — a syntax error, not
+        // a relaxed check.
+        let js_setup = public_api_stub_path_for(
+            temp.path(),
+            "JsSetup.vue",
+            "<script setup>\nconst props = defineProps({ label: { type: String } })\n\
+             function bump(step) { return step + 1 }\n</script>\n<template><div/></template>\n",
+        );
+        assert!(
+            js_setup
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".vue.ts")),
+            "a JavaScript `<script setup>` still projects a TypeScript stub: {}",
+            js_setup.display()
+        );
+
+        // The JSX axis, which a JavaScript/TypeScript boolean cannot express.
+        // The Options-API stub copies the authored body verbatim, so an
+        // authored `<div/>` needs a JSX-capable ScriptKind: `.vue.jsx` (a
+        // `.js` root cannot parse JSX at all) and `.vue.tsx` (a `.ts` root
+        // parses `<div/>` as a type assertion). Both were unreachable while the
+        // stub label was a boolean.
+        for (source_name, lang, expected) in [
+            ("JsxOptions.vue", "jsx", ".vue.jsx"),
+            ("TsxOptions.vue", "tsx", ".vue.tsx"),
+        ] {
+            let stub = public_api_stub_path_for(
+                temp.path(),
+                source_name,
+                &format!(
+                    "<script lang=\"{lang}\">\nexport default {{ render() {{ return <div/> }} }}\n\
+                     </script>\n<template><div/></template>\n"
+                ),
+            );
+            assert!(
+                stub.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(expected)),
+                "a `lang=\"{lang}\"` Options-API stub must be labelled {expected}: {}",
+                stub.display()
+            );
+        }
     }
 
     #[test]

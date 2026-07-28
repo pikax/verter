@@ -2522,6 +2522,7 @@ impl VerterHost {
                 } else {
                     Some(Arc::from(tsc_out.source_map))
                 },
+                dialect: tsc_out.dialect,
             }));
         };
 
@@ -2541,6 +2542,7 @@ impl VerterHost {
             } else {
                 Some(Arc::from(tsc_out.source_map))
             },
+            dialect: tsc_out.dialect,
         }))
     }
 

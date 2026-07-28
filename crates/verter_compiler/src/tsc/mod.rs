@@ -12,6 +12,10 @@ pub mod script;
 #[cfg(test)]
 mod tests;
 
+/// The four-way authored/carried script dialect every generated companion is
+/// labelled with. Re-exported here so a consumer of [`TscOutput`] reaches the
+/// classification through the same module.
+pub use crate::parser::types::SfcScriptDialect;
 pub use script::{
     extract_tsc_state, generate_tsc_from_state, generate_tsc_output,
     generate_tsc_output_with_options, ExtractedTscState, MacroTscInput, TscDeclarationShapeReason,

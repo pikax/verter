@@ -197,6 +197,39 @@ Classic/legacy scripts and JavaScript do not receive synthetic parameter types;
 JavaScript follows authored JSDoc and the workspace's `allowJs`/`checkJs` and
 strictness settings.
 
+The `verter-tsc` CLI applies the same rule as the editor: a JavaScript SFC
+projects a JavaScript companion, so a project that has not enabled `checkJs`
+gets no implicit-any errors from its `.vue` JavaScript, and one that has
+enabled it gets the same JavaScript diagnostics (including JSDoc-typed ones)
+the editor reports. This covers Options-API components too — a no-`setup`
+`<script>` block's body is passed through to the companion the CLI generates
+for cross-component imports, and that companion is JavaScript when the block
+is. `checkJs` is read from your own `tsconfig.json`; the CLI never sets it.
+
+The companion follows all four authored dialects, not just JavaScript versus
+TypeScript: `lang="jsx"` and `lang="tsx"` project JSX-capable companions, so an
+authored JSX element in a passed-through `<script>` body is parsed as JSX rather
+than reported as a syntax error (in a plain `.ts` file `<div/>` parses as a type
+assertion). A JavaScript `<script setup>` that calls `defineExpose({ … })` is
+the one case where the companion cannot carry the authored body at all: that
+surface is a generated TypeScript declaration, so the exposed members are
+published with `unknown` types instead. The component's own JavaScript is still
+checked, through the `.jsx` companion, exactly as your `checkJs` setting asks.
+
+### Mixed-language SFCs are rejected
+
+Vue's own compiler throws when an SFC's `<script>` and `<script setup>` blocks
+declare different `lang`s, and Verter reports the same thing rather than quietly
+picking one block's language:
+
+```
+src/Mixed.vue(4,1): error VTER1002: <script> and <script setup> must have the same language type.
+```
+
+Give both blocks the same `lang` (or leave both without one). Until you do,
+Verter treats the file as TypeScript so that no diagnostic from the TypeScript
+block goes missing.
+
 ::: warning TSGO Limitation
 TSGO has a known limitation: re-exported `.vue` components (e.g., barrel files) may lose their typing. This is why `auto` mode defaults to tsserver when a workspace TypeScript installation is found.
 :::

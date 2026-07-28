@@ -90,6 +90,10 @@ pub enum CompilerErrorCode {
     DuplicateScriptSetup,
     /// Duplicate `<script>` block.
     DuplicateScript,
+    /// `<script setup>` and `<script>` declare different `lang`s. Vue rejects
+    /// the SFC outright; Verter reports it rather than silently picking one
+    /// block's language for the generated companions.
+    ScriptLangMismatch,
 
     // -- Directive duplication --
     /// Duplicate built-in directive on the same element (v-if, v-for, v-slot, v-once).
@@ -183,6 +187,9 @@ impl CompilerErrorCode {
             }
             Self::DuplicateScript => {
                 "Duplicate <script> block — only one plain <script> is allowed per SFC."
+            }
+            Self::ScriptLangMismatch => {
+                "<script> and <script setup> must have the same language type."
             }
             Self::XDuplicateDirective => "Duplicate built-in directive on the same element.",
             Self::XInvalidExpression => "Error parsing JavaScript expression.",
