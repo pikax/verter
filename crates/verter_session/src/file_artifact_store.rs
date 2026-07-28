@@ -1597,20 +1597,37 @@ impl FileArtifactStore {
         // the prior versions' augmentation-index entries — a content edit
         // that RETARGETS or DROPS an augmentation must clean the PRIOR
         // target's index entry, which the new facts alone would not cover.
+        //
+        // The canonical's prior keys are resolved through the
+        // canonical→keys index (`canonical_keys`), NOT by scanning
+        // `self.artifacts`: a whole-store scan is O(total live entries)
+        // per insert, so every publish into a warm host re-walked the
+        // entire store. The index is maintained by the paired
+        // insert/removal chokepoints and its only failure direction is a
+        // DANGLING key (listed here, absent from the map), so each
+        // candidate is confirmed against `self.artifacts` before it
+        // counts as a prior version — that preserves the scan's exact
+        // result set, which `had_prior` and `prior_base_payload` below
+        // both read as "a LIVE prior entry". Lock order is the
+        // documented one (index-slot guard → `self.artifacts` shard),
+        // matching every other index-backed reader.
         let prior_keys: Vec<FileArtifactKey> = self
-            .artifacts
-            .iter()
-            .filter(|entry| entry.key().canonical.as_ref() == canonical_id.as_ref())
-            .filter(|entry| {
-                // When the current key is a base-equivalent no-op we leave
-                // it in place; do NOT drain it (that would open the absent
-                // window this fix exists to close). Every OTHER prior key
-                // (stale content hashes, overlay-scoped variants) still
-                // drains.
-                !(current_key_is_base_equivalent && entry.key() == &current_key)
+            .canonical_keys
+            .get(canonical_id.as_ref())
+            .map(|slot| {
+                slot.value()
+                    .iter()
+                    // When the current key is a base-equivalent no-op we
+                    // leave it in place; do NOT drain it (that would open
+                    // the absent window this fix exists to close). Every
+                    // OTHER prior key (stale content hashes,
+                    // overlay-scoped variants) still drains.
+                    .filter(|key| !(current_key_is_base_equivalent && *key == &current_key))
+                    .filter(|key| self.artifacts.contains_key(*key))
+                    .cloned()
+                    .collect()
             })
-            .map(|entry| entry.key().clone())
-            .collect();
+            .unwrap_or_default();
         let had_prior = !prior_keys.is_empty() || current_key_is_base_equivalent;
         // Capture the prior BASE (base-key) payload BEFORE draining so the
         // bump-iff-actually-changed gate can compare it against the new

@@ -671,6 +671,63 @@ fn legacy_insert_does_not_bump_on_noop_replace() {
     );
 }
 
+/// The legacy `insert` prior-version drain resolves the canonical's
+/// prior keys through the canonical→keys index rather than scanning the
+/// whole store. This pins the result set that derivation must produce —
+/// it is a behaviour-PRESERVATION guard for that refactor, not a
+/// characterization of a behaviour change (it passes against both the
+/// scan and the index derivation, and fails against an index derivation
+/// that keys the wrong canonical, forgets the base-equivalent
+/// exclusion, or misses a live stale version).
+#[test]
+fn legacy_insert_drains_only_its_own_canonicals_prior_versions() {
+    let store = FileArtifactStore::new();
+    // Unrelated canonicals: none of these may be touched by an insert
+    // targeting a different canonical.
+    for i in 0u8..8 {
+        store.insert(
+            Arc::from(format!("/other{i}.ts").as_str()),
+            synth_indexed(0x10 + i),
+        );
+    }
+    let target: Arc<str> = Arc::from("/target.ts");
+    store.insert(Arc::clone(&target), synth_indexed(0x33));
+    assert_eq!(store.len(), 9);
+
+    // A content change drains exactly the prior version of THIS canonical.
+    store.insert(Arc::clone(&target), synth_indexed(0x44));
+    assert_eq!(
+        store.len(),
+        9,
+        "the legacy surface keeps exactly one entry per canonical"
+    );
+    assert!(
+        store.get("/target.ts", [0x33u8; 16]).is_none(),
+        "the stale prior version MUST be drained"
+    );
+    assert!(store.get("/target.ts", [0x44u8; 16]).is_some());
+    for i in 0u8..8 {
+        assert!(
+            store
+                .get(&format!("/other{i}.ts"), [0x10 + i; 16])
+                .is_some(),
+            "an insert on /target.ts MUST NOT drain /other{i}.ts"
+        );
+    }
+
+    // A base-equivalent re-insert leaves the current entry IN PLACE — it
+    // is never drained and re-inserted (that would open an absent window).
+    let before = store.artifact_generation();
+    store.insert(Arc::clone(&target), synth_indexed(0x44));
+    assert_eq!(
+        before,
+        store.artifact_generation(),
+        "a base-equivalent re-insert is a literal no-op"
+    );
+    assert!(store.get("/target.ts", [0x44u8; 16]).is_some());
+    assert_eq!(store.len(), 9);
+}
+
 #[test]
 fn legacy_insert_bumps_on_content_change() {
     // No-under-bump arm for the legacy surface: a content change MUST bump.

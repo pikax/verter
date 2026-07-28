@@ -4632,3 +4632,11 @@ impl HostStoreView {
         matches!(outcome, SnapshotBuildOutcome::Superseded { .. })
     }
 }
+
+/// Marginal-admit cost characterisation for [`HostStoreView::build`] —
+/// declared here rather than in `lib.rs` (which is line-ceiling guarded
+/// by `cases::g_misc1::no_lib_rs_growth`), following the same
+/// `#[cfg(test)] #[path]` pattern `host_resolve.rs` uses.
+#[cfg(test)]
+#[path = "store_view_marginal_admit_tests.rs"]
+mod store_view_marginal_admit_tests;
