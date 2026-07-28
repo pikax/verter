@@ -143,7 +143,7 @@ fn public_api_code(host: &VerterHost, canonical_id: &str) -> String {
     host.get_public_api(canonical_id)
         .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 
@@ -151,7 +151,7 @@ fn public_api_code_with_mode(host: &VerterHost, canonical_id: &str, mode: Public
     host.get_public_api_with_mode(canonical_id, mode, None)
         .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 
@@ -164,7 +164,7 @@ fn public_api_code_with_profile(
     host.get_public_api_with_mode(canonical_id, mode, Some(profile))
         .unwrap_or_else(|error| panic!("public API projection failed for {canonical_id}: {error}"))
         .unwrap_or_else(|| panic!("expected public api output for {canonical_id}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 
@@ -1777,7 +1777,8 @@ defineEmits<{ (e: 'click'): void }>()
         .expect("second projection")
         .expect("second call");
     assert_eq!(
-        api1.code, api2.code,
+        api1.dialect_labeled_code(),
+        api2.dialect_labeled_code(),
         "two consecutive calls must produce identical code"
     );
 }
@@ -4967,7 +4968,7 @@ fn public_api_carrier_goldens_match_direct_structured_projection() {
             verter_compiler::tsc::TscMode::Public,
         );
         assert_eq!(
-            projected.code.as_ref(),
+            projected.dialect_labeled_code().as_ref(),
             direct.code,
             "{canonical_id} registry code must equal the direct compiler"
         );
@@ -5041,7 +5042,7 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
         .expect("public-mode api output");
     let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Public);
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         direct.code,
         "registry projection must be byte-identical to the direct compiler producer"
     );
@@ -5051,7 +5052,7 @@ fn public_api_public_mode_is_byte_identical_through_projector_dispatch() {
         "registry source map must be byte-identical to the direct compiler producer"
     );
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         PUBLIC_API_PUBLIC_CODE_PIN,
         "public-mode rendered TSX must stay byte-identical through projector dispatch"
     );
@@ -5074,7 +5075,7 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         .expect("testing-mode api output");
     let direct = direct_compiler_public_api(&host, verter_compiler::tsc::TscMode::Testing);
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         direct.code,
         "registry projection must be byte-identical to the direct compiler producer"
     );
@@ -5084,7 +5085,7 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
         "registry source map must be byte-identical to the direct compiler producer"
     );
     assert_eq!(
-        r.code.as_ref(),
+        r.dialect_labeled_code().as_ref(),
         PUBLIC_API_TESTING_CODE_PIN,
         "testing-mode rendered TSX must stay byte-identical through projector dispatch"
     );
@@ -5115,7 +5116,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Declaration, None)
         .expect("declaration-mode projection")
         .expect("declaration-mode api output")
-        .code
+        .dialect_labeled_code()
         .to_string();
 
     // NEGATIVE: no runtime / value tokens.
@@ -5160,7 +5161,7 @@ fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() 
         .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
         .expect("public-mode projection")
         .expect("public-mode api output")
-        .code
+        .dialect_labeled_code()
         .to_string();
     assert!(
         public.contains("const __comp = defineComponent"),
@@ -5295,8 +5296,8 @@ fn public_api_through_alias_is_byte_identical_to_canonical() {
             .unwrap_or_else(|error| panic!("alias projection failed for {mode:?}: {error}"))
             .unwrap_or_else(|| panic!("alias request must render for {mode:?}"));
         assert_eq!(
-            via_alias.code.as_ref(),
-            via_canonical.code.as_ref(),
+            via_alias.dialect_labeled_code().as_ref(),
+            via_canonical.dialect_labeled_code().as_ref(),
             "alias request must produce byte-identical TSX to the canonical for {mode:?}"
         );
         assert_eq!(
@@ -6697,7 +6698,7 @@ fn parent_facing_widening_is_identical_under_the_batch_typecheck_scope() {
         .expect("one slot")
         .expect("no projection error")
         .expect("a stub")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(

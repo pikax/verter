@@ -817,14 +817,18 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             };
             if let Some(api) = api {
                 if let Some(dts_path) = committed_state.api_path.clone() {
+                    // Destination-keyed rendering (the `.verter.ts` companion
+                    // is TypeScript-labeled whatever the SFC's dialect);
+                    // stamp/record the SAME bytes that were delivered.
+                    let api_code = api.code_for_companion_path(&dts_path);
                     let result = if committed_state.api_background_loaded {
-                        project_sync.sync_dts(&dts_path, &api.code).await
+                        project_sync.sync_dts(&dts_path, api_code).await
                     } else {
-                        project_sync.open_dts(&dts_path, &api.code).await
+                        project_sync.open_dts(&dts_path, api_code).await
                     };
                     match result {
                         Ok(()) => {
-                            committed_state.mark_api_delivered(&api.code);
+                            committed_state.mark_api_delivered(api_code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the EXACT content
                             // just synced under this virtual path.
@@ -834,7 +838,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                                 deps.documents.host(),
                                 canonical_id,
                                 &dts_path,
-                                &api.code,
+                                api_code,
                                 api.source_map.as_deref(),
                             );
                         }

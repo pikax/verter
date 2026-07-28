@@ -581,6 +581,13 @@ pub struct NapiIdeResponse {
 }
 
 /// TSC output for TypeScript declaration generation (macro-extraction only).
+///
+/// `code` is the TYPESCRIPT-LABELED rendering of the public-API surface: every
+/// JS consumer of this wire places it at a fixed `.ts`-shaped companion path
+/// (the plugin mirror's `.verter.ts`, the playground carrier store), where the
+/// JavaScript/JSDoc rendering of a widened JS Options-API stub would have its
+/// types silently ignored. The wire carries no dialect and no second channel —
+/// selection happens host-side (`TscResponse::ts_labeled_code`).
 #[napi(object, use_nullable = true)]
 pub struct NapiTscResponse {
     pub code: String,

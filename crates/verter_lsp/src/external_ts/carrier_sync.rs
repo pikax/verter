@@ -856,7 +856,12 @@ fn build_carrier_companions(
     if let (Some(api), Some(dts_path)) = (api, next_state.api_path.as_ref()) {
         companions.push(CarrierCompanion::verbatim(
             Arc::from(dts_path.as_str()),
-            Arc::clone(&api.code),
+            // Destination-keyed rendering: the API companion path is the fixed
+            // `.verter.ts` — TypeScript-labeled whatever the SFC's dialect —
+            // so this selects the TS-labeled rendering. A widened JavaScript
+            // Options-API stub's dialect rendering spells its widening in
+            // JSDoc, which a `.ts` ScriptKind silently ignores.
+            Arc::clone(api.code_for_companion_path(dts_path)),
             api.source_map.clone(),
             SnapshotRole::CarrierApi,
             ScriptKind::Ts,

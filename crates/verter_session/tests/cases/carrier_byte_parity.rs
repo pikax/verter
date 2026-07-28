@@ -123,10 +123,13 @@ fn public_api_stub_with(
             aliases: Vec::new(),
         });
     }
+    // Parity is asserted on the dialect-labeled rendering (the raw produced
+    // stub); the TS-labeled twin is derived in the same generator call, so
+    // byte-stability of one implies the other.
     host.get_public_api(target)
         .unwrap_or_else(|error| panic!("public API projection failed for {target}: {error}"))
         .unwrap_or_else(|| panic!("get_public_api returned None for {target}"))
-        .code
+        .dialect_labeled_code()
         .to_string()
 }
 

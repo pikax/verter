@@ -170,7 +170,7 @@ fn compile_vue_ide(vue_source: &str) -> (String, String, String) {
         .get_public_api_with_mode("/src/Widget.vue", PublicApiMode::Public, None)
         .expect("public API projection")
         .expect("the .verter.ts public API companion")
-        .code
+        .ts_labeled_code()
         .to_string();
     (ide.code.to_string(), source_map, companion)
 }

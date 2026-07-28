@@ -813,12 +813,14 @@ impl DocumentRegistry {
                 is_js: t.is_jsx,
             });
 
-        // Get API output (declaration for cross-file type resolution)
-        let is_js = ide.as_ref().is_some_and(|b| b.is_js);
+        // Get API output (declaration for cross-file type resolution). This
+        // pane presents the PROVIDER-facing API surface — the same bytes the
+        // `.verter.ts` companion publishes — so it takes the TS-labeled
+        // rendering and is never JavaScript, whatever the SFC's dialect.
         let api = self.host.get_public_api(&canonical_id)?.map(|t| CodeBlock {
-            code: t.code.to_string(),
+            code: t.ts_labeled_code().to_string(),
             source_map: t.source_map.map(|m| m.to_string()),
-            is_js,
+            is_js: false,
         });
 
         // Get all virtual node kinds

@@ -591,7 +591,7 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
         .get_public_api("/Shim.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
 
     // The authored-name public value implements Svelte 5's native Component
     // contract without a constructable compatibility intersection.
@@ -684,7 +684,7 @@ fn svelte_runes_state_export_projects_the_native_component_exports_generic() {
         .get_public_api_with_mode("/ExposePublic.svelte", PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("the runes component projects a public declaration")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(
@@ -735,7 +735,7 @@ fn svelte_public_api_resolves_local_props_interface_from_macro_locator() {
             .get_public_api_with_mode(canonical, PublicApiMode::Declaration, None)
             .expect("Svelte declaration projection")
             .expect("a local Props interface projects a public declaration")
-            .code
+            .ts_labeled_code()
             .to_string();
 
         assert!(
@@ -812,7 +812,7 @@ let { title, count = 0 } = $props();
         .get_public_api_with_mode("/JsCard.svelte", PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("a JavaScript Svelte component projects a declaration import surface")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(
@@ -878,7 +878,7 @@ fn svelte_get_public_api_renders_native_event_and_snippet_props() {
         .get_public_api("/EventsSlots.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
 
     assert!(
         code.contains("import(\"svelte\").Component<"),
@@ -938,7 +938,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
         .get_public_api_with_mode("/Card.svelte", PublicApiMode::Declaration, None)
         .expect("Svelte declaration projection")
         .expect("svelte declaration output")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     // POSITIVE: the declaration surface is present and complete.
@@ -971,7 +971,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
         .get_public_api_with_mode("/Card.svelte", PublicApiMode::Public, None)
         .expect("Svelte public projection")
         .expect("svelte public output")
-        .code
+        .ts_labeled_code()
         .to_string();
     assert_eq!(
         decl, public,
@@ -1021,7 +1021,7 @@ fn svelte_public_api_keeps_same_name_module_and_instance_exports_typed() {
         .get_public_api_with_mode("/OwnerExact.svelte", PublicApiMode::Public, None)
         .expect("Svelte public projection")
         .expect("Svelte public output")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(
@@ -1249,7 +1249,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
         .get_public_api("/DirectChild.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
     let map_json = api
         .source_map
         .as_deref()
@@ -1321,7 +1321,7 @@ fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
         .get_public_api("/EditorContract.svelte")
         .expect("Svelte public API projection")
         .expect("a `.svelte` with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
     let map_json = api
         .source_map
         .as_deref()
@@ -1372,7 +1372,7 @@ fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
         .get_public_api("/LegacyCounter.svelte")
         .expect("Svelte public API projection")
         .expect("a legacy component with props projects a public API");
-    let code = api.code.as_ref();
+    let code = api.ts_labeled_code().as_ref();
     let map_json = api
         .source_map
         .as_deref()

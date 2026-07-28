@@ -210,7 +210,14 @@ The companion follows all four authored dialects, not just JavaScript versus
 TypeScript: `lang="jsx"` and `lang="tsx"` project JSX-capable companions, so an
 authored JSX element in a passed-through `<script>` body is parsed as JSX rather
 than reported as a syntax error (in a plain `.ts` file `<div/>` parses as a type
-assertion). A JavaScript `<script setup>` that calls `defineExpose({ … })` is
+assertion). The parent-facing attribute-fallthrough surface (issue #97) reaches
+JavaScript Options-API components too: inside their JavaScript companion it is
+spelled in JSDoc (`@typedef`/`@type`), never TypeScript-only syntax, so the
+companion stays legal JavaScript with zero `TS8xxx` syntax diagnostics while a
+parent's `<Child href="…">` is checked against the same widened surface a
+TypeScript child projects. Editor surfaces that store the companion in a
+TypeScript-labeled file receive the equivalent TypeScript rendering instead,
+because JSDoc types are only honored in JavaScript files. A JavaScript `<script setup>` that calls `defineExpose({ … })` is
 the one case where the companion cannot carry the authored body at all: that
 surface is a generated TypeScript declaration, so the exposed members are
 published with `unknown` types instead. The component's own JavaScript is still

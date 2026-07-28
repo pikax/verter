@@ -336,6 +336,45 @@ const MATRIX: &[(&str, bool, &str)] = &[
          fallthrough-only one would accept this",
     ),
     (
+        "AcceptAnchorAttrOnJsOptionsApiChild.vue",
+        true,
+        "JsOptionsApiAnchorRoot is the JAVASCRIPT (`<script>` with no `lang`) \
+         twin of OptionsApiAnchorRoot. Vue forwards `href` onto its `<a>` root \
+         identically in both dialects, so the parent-facing surface must not \
+         depend on the child's script language. Its `.vue.js` stub cannot hold \
+         TypeScript-only syntax (TS8006/8008/8009/8010 on generated code), so \
+         the widening is spelled in JSDoc there — this row is exactly the \
+         issue-#97 residue where the JS child rejected an attribute its \
+         byte-identical TS twin accepted",
+    ),
+    (
+        "RejectUnknownAttrOnJsOptionsApiChild.vue",
+        false,
+        "the JSDoc-widened surface is still the `<a>` element's real props type \
+         — never an index signature and never the `any` a broken JSDoc cast \
+         chain would leak",
+    ),
+    (
+        "RejectDeclaredPropWrongTypeOnJsOptionsApiChild.vue",
+        false,
+        "the JavaScript Options-API component's own `declaredProp: number` keeps \
+         its type through the JSDoc widening; the `/** @type {any} */` cast is a \
+         conduit inside the tail, not the published surface",
+    ),
+    (
+        "AcceptAnchorAttrOnJsSetupChild.vue",
+        true,
+        "a JavaScript `<script setup>` child projects a generated TypeScript \
+         declaration surface, so its widening never needed the JSDoc form — \
+         this row pins the third dialect cell so a regression cannot hide \
+         behind the Options-API-only fix",
+    ),
+    (
+        "RejectUnknownAttrOnJsSetupChild.vue",
+        false,
+        "and that surface stays the element's real props type",
+    ),
+    (
         "AcceptAnchorAttrOnAliasImportedChild.vue",
         true,
         "the child is imported through the tsconfig `@/*` alias. IDE codegen \
@@ -504,12 +543,33 @@ fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
         "OptionsApiAnchorRoot.vue",
         "ScriptlessAnchorRoot.vue",
         "AliasChildAnchorRoot.vue",
+        "JsOptionsApiAnchorRoot.vue",
+        "JsSetupAnchorRoot.vue",
     ] {
         assert!(
             !failing.iter().any(|f| f == child),
             "{child} must type-check cleanly; got errors.\n--- STDOUT ---\n{stdout}"
         );
     }
+
+    // ZERO TS8xxx anywhere in the run. The `.vue.js` stub of a JavaScript
+    // Options-API child copies the authored body verbatim AND carries its
+    // fallthrough widening — that widening must be spelled in JSDoc, because
+    // TypeScript-only syntax in a `.js`/`.jsx` carrier reports TS8006 ("'types'
+    // can only be used in TypeScript files") / TS8008 / TS8009 / TS8010 on
+    // Verter's OWN generated lines, whether or not `checkJs` is on. This is the
+    // exact regression the old dialect gate existed to prevent; the gate is
+    // gone, so this assertion holds the line instead.
+    let ts8xxx: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("error TS8"))
+        .collect();
+    assert!(
+        ts8xxx.is_empty(),
+        "the fixture run must report ZERO TS8xxx syntax diagnostics on generated \
+         carriers — TypeScript-only syntax leaked into a JavaScript stub:\n{}",
+        ts8xxx.join("\n")
+    );
 
     drop(temp_dir);
 }

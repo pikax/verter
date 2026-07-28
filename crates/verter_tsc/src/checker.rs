@@ -213,8 +213,12 @@ fn generate_public_api_stubs(
 
         // Rewrite relative imports in the public API code to absolute paths
         // (the stub will live in temp_dir, not the vue file's directory).
+        //
+        // DIALECT-labeled rendering: this stub is named
+        // `{name}.vue.{dialect.extension()}` below, so a JavaScript SFC's
+        // JSDoc-widened rendering lands in a `.js`/`.jsx` file that honors it.
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-        let code = rewrite_relative_imports(&tsc_response.code, vue_dir);
+        let code = rewrite_relative_imports(tsc_response.dialect_labeled_code(), vue_dir);
         // …and canonicalize the NON-relative carrier specifiers the first pass
         // cannot reach, so an aliased root-component reference resolves to its
         // generated stub instead of the empty `*.vue` wildcard shim.
@@ -460,8 +464,12 @@ fn generate_all_tsc(
         // Rewrite relative import() paths in the generated code to absolute paths.
         // The .tsc.tsx files live in a temp dir, so relative imports like
         // `import('./types')` need to resolve from the .vue file's directory.
+        //
+        // TS-labeled rendering: this consumer writes to a FIXED `.tsc.tsx`
+        // name below regardless of the SFC's dialect, and a `.tsx` ScriptKind
+        // silently ignores the JSDoc-widened JavaScript rendering.
         let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-        let code = rewrite_relative_imports(&tsc_out.code, vue_dir);
+        let code = rewrite_relative_imports(tsc_out.ts_labeled_code(), vue_dir);
 
         let raw_name = vue_path
             .file_stem()
@@ -782,6 +790,17 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
     let mut vue_global_components_augment = String::from("import \"vue\";\n");
     vue_global_components_augment.push_str(verter_compiler::VUE_GLOBAL_COMPONENTS_AUGMENTATION);
     vue_global_components_augment.push_str("\nexport {};\n");
+    // The introduce-on-absence `IntrinsicElementAttributes` augmentation. Every
+    // WIDENED TypeScript-carrier stub carries it in-file, but a widened
+    // JavaScript Options-API stub spells its fallthrough surface in JSDoc,
+    // which cannot express `declare module` — so the PROGRAM carries the
+    // augmentation for it here. Without this, an old-`vue` contract (< 3.3, no
+    // exported map) turns the JSDoc reference into a silent error type — the
+    // widening degrades OPEN, accepting every attribute — and, under `checkJs`,
+    // into a TS2694 on generated code.
+    let mut vue_intrinsic_map_augment = String::from("import \"vue\";\n");
+    vue_intrinsic_map_augment.push_str(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION);
+    vue_intrinsic_map_augment.push_str("\nexport {};\n");
     vec![
         (
             slash(&base.join("vue-shims.d.ts")),
@@ -802,6 +821,10 @@ fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
         (
             slash(&base.join("vue-global-components-augment.d.ts")),
             vue_global_components_augment,
+        ),
+        (
+            slash(&base.join("vue-intrinsic-map-augment.d.ts")),
+            vue_intrinsic_map_augment,
         ),
     ]
 }
@@ -2711,6 +2734,41 @@ fn cleanup_empty_dirs(dir: &Path) {
 mod tests {
     use super::*;
     use crate::tsconfig::load_tsconfig;
+
+    /// The ambient-shim inventory carries the `IntrinsicElementAttributes`
+    /// introduce-on-absence augmentation, as its own module carrier built from
+    /// the compiler's constant. The JSDoc-widened JavaScript Options-API stub
+    /// cannot spell `declare module` itself, so the PROGRAM must — the
+    /// semantic consequence of dropping it (the old-Vue OPEN degrade) is
+    /// pinned by the hermetic
+    /// `js_options_jsdoc_widening_is_fail_closed_only_with_the_ambient_augmentation`
+    /// gate in `verter_session`; this unit pins the WIRING that test cannot
+    /// see.
+    ///
+    /// DISCRIMINATING: deleting the `vue-intrinsic-map-augment.d.ts` row from
+    /// `ambient_shim_carriers` fails it.
+    #[test]
+    fn ambient_shims_carry_the_intrinsic_map_augmentation_for_jsdoc_widened_stubs() {
+        let carriers = ambient_shim_carriers(Path::new("/base"));
+        let augment = carriers
+            .iter()
+            .find(|(path, _)| path.ends_with("vue-intrinsic-map-augment.d.ts"))
+            .expect("the ambient shims include the intrinsic-map augmentation carrier");
+        assert!(
+            augment
+                .1
+                .contains(verter_compiler::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION),
+            "the carrier embeds the compiler's augmentation constant, so the two \
+             cannot drift: {}",
+            augment.1
+        );
+        assert!(
+            augment.1.contains("import \"vue\";") && augment.1.contains("export {};"),
+            "the augmentation is a MODULE carrier (import + export) so it augments \
+             the real `vue` instead of REPLACING it: {}",
+            augment.1
+        );
+    }
 
     /// Build a standalone host with each carrier upserted, so `generate_all_tsx`
     /// can thread the real Vue macro semantic bundle (a carrier that is not

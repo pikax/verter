@@ -6672,24 +6672,29 @@ fn public_api_surface_reports_the_dialect_of_the_code_it_carries() {
     );
 }
 
-/// The parent-facing fallthrough surface is spelled entirely in TypeScript-only
-/// syntax, and the Options-API stub copies the AUTHORED body through — so a
-/// JavaScript `<script>` produces a JavaScript stub with nowhere to put it.
-///
-/// This is the same principle the sibling test above states for `<script
-/// setup>` ("labelling it JavaScript would put `declare`/type-annotation syntax
-/// into a `.js` file — a syntax error, not a relaxed check"), applied to the
-/// one generator that cannot escape it by synthesising its surface instead: a
-/// widened JavaScript Options-API stub reports TS8006/TS8008/TS8009/TS8010 on
-/// Verter's OWN generated lines, and those are syntax diagnostics reported
+/// The parent-facing fallthrough surface of a JavaScript Options-API stub is
+/// spelled in JSDoc — never TypeScript-only syntax — because the stub copies
+/// the AUTHORED body through and its carrier is a `.js`/`.jsx` file: `type`
+/// aliases, `declare module`, and `declare const` there are TS8006/TS8008/
+/// TS8009/TS8010 syntax diagnostics on Verter's OWN generated lines, reported
 /// whether or not `checkJs` is on.
 ///
-/// Discriminates in BOTH directions: the TypeScript arm proves the widening is
-/// still emitted where it can be expressed, so a regression that simply stopped
-/// widening everything fails this test rather than passing it.
+/// Consumers that store the surface in a TypeScript-LABELED file regardless of
+/// dialect (the LSP's `.verter.ts` API companion, the tsserver-plugin mirror,
+/// the playground carrier store) take the SAME widened surface from
+/// [`TscOutput::ts_carrier_code`], rendered in the ordinary TypeScript shape —
+/// including the `declare module "vue"` introduce-on-absence augmentation JSDoc
+/// cannot express.
+///
+/// Discriminates in BOTH directions: the JavaScript arm proves the widening IS
+/// emitted (in JSDoc) where TypeScript syntax cannot go, and the TypeScript arm
+/// proves the ordinary rendering is untouched — a regression that re-gates the
+/// JavaScript arm, leaks TS-only syntax into it, or drops the TS-labeled twin
+/// fails here rather than passing.
 #[test]
-fn a_javascript_options_api_stub_is_never_widened_but_a_typescript_one_is() {
+fn a_javascript_options_api_stub_widens_in_jsdoc_with_a_typescript_labeled_twin() {
     use super::script::{FallthroughArm, InheritedComponentProps};
+    use crate::parser::types::SfcScriptDialect;
 
     // A resolvable branch with BOTH channels populated — the element arm and
     // the root-component arm — so every construct the widening can emit is in
@@ -6705,7 +6710,7 @@ fn a_javascript_options_api_stub_is_never_widened_but_a_typescript_one_is() {
         }],
     };
 
-    let gen_options_api = |script_open: &str| {
+    let gen_options_api = |script_open: &str, projection: &FallthroughPropsProjection| {
         generate_tsc_output_with_options(
             &format!(
                 "{script_open}\nexport default {{ props: {{ label: {{ type: String }} }} }}\n\
@@ -6717,13 +6722,13 @@ fn a_javascript_options_api_stub_is_never_widened_but_a_typescript_one_is() {
                 ..Default::default()
             },
             MacroTscInput::NotRequired,
-            &projection,
+            projection,
         )
         .expect("options-api fixture has no typed codegen macro")
     };
 
     // NEGATIVE: the JavaScript stub carries no TypeScript-only construct.
-    let js = gen_options_api("<script>");
+    let js = gen_options_api("<script>", &projection);
     for forbidden in [
         "type __Verter_RootElementAttrs",
         "type __Verter_DataAttrs",
@@ -6738,17 +6743,108 @@ fn a_javascript_options_api_stub_is_never_widened_but_a_typescript_one_is() {
             js.code
         );
     }
+    // POSITIVE: the widening is present, spelled in JSDoc. Both channels of the
+    // arm reach the surface, and the surface reaches BOTH parent-facing sites
+    // (the construct-signature parameter and the instance `$props`).
+    for required in [
+        "@typedef",
+        "__Verter_RootElementAttrs<\"a\">",
+        "__Verter_DataAttrs",
+        "__Verter_FallthroughOverlay",
+        "./Child.vue",
+        "@type {__OmitNew<typeof __Verter_ComponentOptions>",
+        "$props:",
+        "export default TestComp",
+    ] {
+        assert!(
+            js.code.contains(required),
+            "the JavaScript Options-API stub widens via JSDoc and must carry \
+             `{required}`: {}",
+            js.code
+        );
+    }
     // …and it is still a usable stub: the authored body survives, so the
-    // assertion above cannot be satisfied by emitting nothing at all.
+    // assertions above cannot be satisfied by emitting a synthetic surface.
     assert!(
         js.code.contains("props:") && js.code.contains("label"),
         "the JavaScript stub still carries its authored options body: {}",
         js.code
     );
+    assert_eq!(
+        js.dialect,
+        SfcScriptDialect::JavaScript,
+        "the widened JavaScript stub's carrier stays a `.js` file — the authored \
+         body must still be checked as JavaScript: {}",
+        js.code
+    );
 
-    // POSITIVE: the identical component with `lang="ts"` IS widened — the
-    // suppression is keyed on the dialect, not on the projection.
-    let ts = gen_options_api("<script lang=\"ts\">");
+    // The TS-LABELED twin: the same surface in ordinary TypeScript shape, for
+    // consumers whose carrier is a `.ts` file regardless of dialect. JSDoc
+    // types are honored ONLY in JavaScript-flavored files, so shipping the
+    // JSDoc rendering to a `.verter.ts` companion would silently lose the
+    // widening there.
+    let twin = js
+        .ts_carrier_code
+        .as_deref()
+        .expect("a widened JavaScript Options-API stub ships a TS-labeled twin");
+    for required in [
+        "type __Verter_RootElementAttrs",
+        "declare module \"vue\"",
+        "declare const TestComp",
+        "__Verter_RootElementAttrs<\"a\">",
+        "./Child.vue",
+    ] {
+        assert!(
+            twin.contains(required),
+            "the TS-labeled twin renders the ordinary TypeScript widening and \
+             must carry `{required}`: {twin}"
+        );
+    }
+    assert!(
+        !twin.contains("@typedef"),
+        "the TS-labeled twin is the ordinary TypeScript rendering, not the JSDoc \
+         one: {twin}"
+    );
+    assert!(
+        twin.contains("props:") && twin.contains("label"),
+        "the TS-labeled twin still carries the authored options body: {twin}"
+    );
+
+    // An UN-widened JavaScript stub is byte-stable: no JSDoc helpers, no twin.
+    let unwidened = gen_options_api("<script>", &FallthroughPropsProjection::none());
+    assert!(
+        !unwidened.code.contains("@typedef") && !unwidened.code.contains("@type"),
+        "an empty projection leaves the JavaScript stub un-widened: {}",
+        unwidened.code
+    );
+    assert!(
+        unwidened.ts_carrier_code.is_none(),
+        "an un-widened stub has no distinct TS-labeled rendering"
+    );
+
+    // The JSX half of the JavaScript family: a `lang="jsx"` body lands in a
+    // `.jsx` carrier, where TypeScript-only syntax is equally illegal and
+    // JSDoc is equally honored — same treatment as plain JavaScript.
+    let jsx = gen_options_api("<script lang=\"jsx\">", &projection);
+    assert_eq!(
+        jsx.dialect,
+        SfcScriptDialect::Jsx,
+        "a `lang=\"jsx\"` Options-API stub keeps its JSX carrier: {}",
+        jsx.code
+    );
+    assert!(
+        jsx.code.contains("@typedef") && !jsx.code.contains("declare const"),
+        "the `.jsx` carrier widens via JSDoc exactly as `.js` does: {}",
+        jsx.code
+    );
+    assert!(
+        jsx.ts_carrier_code.is_some(),
+        "the `.jsx` carrier ships the TS-labeled twin exactly as `.js` does"
+    );
+
+    // POSITIVE: the identical component with `lang="ts"` widens in TypeScript
+    // directly — no JSDoc, no twin (its `code` already IS the TS rendering).
+    let ts = gen_options_api("<script lang=\"ts\">", &projection);
     assert!(
         ts.code.contains("type __Verter_RootElementAttrs")
             && ts.code.contains("declare const")
@@ -6760,6 +6856,16 @@ fn a_javascript_options_api_stub_is_never_widened_but_a_typescript_one_is() {
         ts.code.contains("./Child.vue"),
         "a TypeScript Options-API stub still projects the root-component arm: {}",
         ts.code
+    );
+    assert!(
+        !ts.code.contains("@typedef"),
+        "the TypeScript stub does not spell its widening in JSDoc: {}",
+        ts.code
+    );
+    assert!(
+        ts.ts_carrier_code.is_none(),
+        "a TypeScript-dialect stub IS the TS-labeled rendering; a Some here \
+         would make consumers diverge on which bytes they publish"
     );
 }
 

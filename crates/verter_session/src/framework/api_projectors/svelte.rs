@@ -374,14 +374,16 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         );
 
         Ok(Some(ComponentApiProjection {
-            response: TscResponse {
-                code: Arc::from(code.as_str()),
-                source_map: Some(source_map),
-                // The Svelte API surface is rendered declaration text
-                // (`export declare const …`), never an authored body: it is
-                // TypeScript whatever the component's script language is.
-                dialect: verter_compiler::tsc::SfcScriptDialect::TypeScript,
-            },
+            // The Svelte API surface is rendered declaration text
+            // (`export declare const …`), never an authored body: it is
+            // TypeScript whatever the component's script language is — and
+            // therefore never needs a distinct TS-labeled rendering.
+            response: TscResponse::new(
+                Arc::from(code.as_str()),
+                Some(source_map),
+                verter_compiler::tsc::SfcScriptDialect::TypeScript,
+                None,
+            ),
             contract: resolved_props.map(|props| ComponentPublicContract { props: props.props }),
         }))
     }

@@ -328,7 +328,8 @@ const outerLabel = 'outer'
     let src_dir = tmp.join("src");
     let child_api_path = src_dir.join("TypedSlotComp.vue.ts");
     let parent_ide_path = src_dir.join("TemplateSlotCases.vue.tsx");
-    std::fs::write(&child_api_path, &*child_api.code).expect("child API should be written");
+    std::fs::write(&child_api_path, child_api.ts_labeled_code().as_ref())
+        .expect("child API should be written");
     std::fs::write(&parent_ide_path, &*parent_ide.code).expect("parent IDE should be written");
 
     let provider = TsserverTypeProvider::spawn(
@@ -348,7 +349,7 @@ const outerLabel = 'outer'
     let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
 
     provider
-        .open_file(&child_api_path_str, &child_api.code)
+        .open_file(&child_api_path_str, child_api.ts_labeled_code())
         .await
         .expect("child API should open");
     provider
@@ -540,7 +541,7 @@ const outerLabel = 'outer'
     let parent_ide_path_str = parent_ide_path.to_string_lossy().replace('\\', "/");
 
     provider
-        .open_file(&child_api_path_str, &child_api.code)
+        .open_file(&child_api_path_str, child_api.ts_labeled_code())
         .await
         .expect("child API should open");
     provider
@@ -715,14 +716,14 @@ const outerLabel = 'outer'
     provider
         .open_file(
             &child_api_path.to_string_lossy().replace('\\', "/"),
-            &child_api.code,
+            child_api.ts_labeled_code(),
         )
         .await
         .expect("child API should open");
     provider
         .open_file(
             &parent_api_path.to_string_lossy().replace('\\', "/"),
-            &parent_api.code,
+            parent_api.ts_labeled_code(),
         )
         .await
         .expect("parent API should open");

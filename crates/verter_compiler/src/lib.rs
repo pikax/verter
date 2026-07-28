@@ -81,6 +81,7 @@ pub use ide::script::VERTER_TYPES_AMBIENT_MODULE;
 pub use ide::script::VERTER_TYPES_STANDALONE_DTS;
 pub use ide::script::VUE_GLOBAL_COMPONENTS_AUGMENTATION;
 pub use ide::script::VUE_JSX_RUNTIME_AUGMENTATION;
+pub use tsc::script::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION;
 
 #[cfg(test)]
 mod compile_ported_tests;

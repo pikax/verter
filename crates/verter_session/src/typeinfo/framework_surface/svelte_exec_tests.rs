@@ -364,7 +364,7 @@ fn public_api_resolves_local_dispatcher_interface_through_shared_surface() {
         .get_public_api_with_mode(component, crate::PublicApiMode::Declaration, None)
         .expect("Svelte public API projection")
         .expect("a dispatcher-bearing Svelte component projects a public API")
-        .code
+        .ts_labeled_code()
         .to_string();
 
     assert!(

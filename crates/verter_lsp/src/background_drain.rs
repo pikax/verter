@@ -1019,14 +1019,18 @@ async fn apply_owner_resolved_carrier_sync(
                 };
             if let (Some(api), Some(dts_path)) = (api.as_ref(), committed_state.api_path.clone()) {
                 attempted.push(ProviderPathKind::Api);
+                // Destination-keyed rendering (the `.verter.ts` companion is
+                // TypeScript-labeled whatever the SFC's dialect); stamp/record
+                // the SAME bytes that were delivered.
+                let api_code = api.code_for_companion_path(&dts_path);
                 let result = if committed_state.api_background_loaded {
-                    sync.sync_dts(&dts_path, &api.code).await
+                    sync.sync_dts(&dts_path, api_code).await
                 } else {
-                    sync.open_dts(&dts_path, &api.code).await
+                    sync.open_dts(&dts_path, api_code).await
                 };
                 match result {
                     Ok(()) => {
-                        committed_state.mark_api_delivered(&api.code);
+                        committed_state.mark_api_delivered(api_code);
                         synced.push(ProviderPathKind::Api);
                         crate::provider_surface_store::record_carrier_api_surface(
                             documents.provider_surfaces(),
@@ -1034,7 +1038,7 @@ async fn apply_owner_resolved_carrier_sync(
                             documents.host(),
                             canonical_id,
                             &dts_path,
-                            &api.code,
+                            api_code,
                             api.source_map.as_deref(),
                         );
                     }
@@ -1262,14 +1266,16 @@ pub(super) async fn sync_api_to_provider_background_task(
     let mut committed_state = transition.next;
     let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
 
+    // Destination-keyed rendering; delivered/stamped/recorded consistently.
+    let api_code = api.code_for_companion_path(&dts_path);
     let result = if committed_state.api_background_loaded {
-        sync.sync_dts(&dts_path, &api.code).await
+        sync.sync_dts(&dts_path, api_code).await
     } else {
-        sync.open_dts(&dts_path, &api.code).await
+        sync.open_dts(&dts_path, api_code).await
     };
     match result {
         Ok(()) => {
-            committed_state.mark_api_delivered(&api.code);
+            committed_state.mark_api_delivered(api_code);
             synced_kinds.push(ProviderPathKind::Api);
             // Record a fresh generation pinning the synced content + its
             // same-content source map. This spawned task has no
@@ -1280,7 +1286,7 @@ pub(super) async fn sync_api_to_provider_background_task(
                 &host,
                 &canonical_id,
                 &dts_path,
-                &api.code,
+                api_code,
                 api.source_map.as_deref(),
             );
         }

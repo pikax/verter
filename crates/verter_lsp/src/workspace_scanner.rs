@@ -1035,13 +1035,18 @@ pub(crate) async fn sync_file_to_provider(
                     // rides the BACKGROUND lane so it never preempts (nor, on the
                     // owned tsgo provider, serializes behind a diagnostic barrier
                     // ahead of) the user's own interactive queries.
+                    //
+                    // Destination-keyed rendering (the `.verter.ts` companion
+                    // is TypeScript-labeled whatever the SFC's dialect);
+                    // stamp/record the SAME bytes that were delivered.
+                    let api_code = api.code_for_companion_path(&dts_path);
                     let result = if is_tsgo {
-                        sync.open_dts_background(&dts_path, &api.code).await
+                        sync.open_dts_background(&dts_path, api_code).await
                     } else {
-                        sync.load_dts_background(&dts_path, &api.code).await
+                        sync.load_dts_background(&dts_path, api_code).await
                     };
                     if result.is_ok() {
-                        committed_state.mark_api_delivered(&api.code);
+                        committed_state.mark_api_delivered(api_code);
                         synced_kinds.push(ProviderPathKind::Api);
                         // Record a fresh generation pinning the synced content + its
                         // same-content source map. The background scan has no
@@ -1052,7 +1057,7 @@ pub(crate) async fn sync_file_to_provider(
                             host,
                             canonical_id,
                             &dts_path,
-                            &api.code,
+                            api_code,
                             api.source_map.as_deref(),
                         );
                     }

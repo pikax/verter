@@ -189,7 +189,7 @@ fn compile_outputs() -> (String, Vec<CompanionFile>) {
     for name in comp_names {
         companions.push(CompanionFile {
             name,
-            code: comp_api.code.to_string(),
+            code: comp_api.ts_labeled_code().to_string(),
         });
     }
     // The consumer TSX re-exports its own default through its API companion
@@ -198,7 +198,7 @@ fn compile_outputs() -> (String, Vec<CompanionFile>) {
     for name in referenced_companion_names(&consumer_code, "MistypeConsumer") {
         companions.push(CompanionFile {
             name,
-            code: consumer_api.code.to_string(),
+            code: consumer_api.ts_labeled_code().to_string(),
         });
     }
 

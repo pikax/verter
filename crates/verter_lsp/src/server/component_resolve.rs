@@ -1113,7 +1113,7 @@ impl VerterLanguageServer {
                         .and_then(|projection| projection.contract.as_ref()),
                     projection
                         .as_ref()
-                        .map(|projection| projection.response.code.as_ref()),
+                        .map(|projection| projection.response.ts_labeled_code().as_ref()),
                     &target.usage_props,
                 )))
             }
@@ -1143,7 +1143,7 @@ impl VerterLanguageServer {
                         .and_then(|projection| projection.contract.as_ref()),
                     projection
                         .as_ref()
-                        .map(|projection| projection.response.code.as_ref()),
+                        .map(|projection| projection.response.ts_labeled_code().as_ref()),
                     &[],
                 )))
             }
@@ -1153,11 +1153,14 @@ impl VerterLanguageServer {
                 else {
                     return Ok(None);
                 };
+                // The hover text-parses the TYPE surface (handler props off
+                // the published `$props`), so it reads the TS-labeled
+                // rendering — the same bytes the provider companion holds.
                 let public_api = self
                     .documents
                     .host()
                     .get_public_api(&child.canonical_id)?
-                    .map(|api| api.code.to_string());
+                    .map(|api| api.ts_labeled_code().to_string());
                 Ok(hover::build_child_event_hover(
                     &target.vue_attr,
                     &child.analysis,

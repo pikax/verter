@@ -48,6 +48,30 @@ fn carrier_access_token_not_constructible_outside_verter_language() {
     t.compile_fail("tests/cases/compile-fail/carrier_access_token_struct_literal.rs");
 }
 
+/// The `TscResponse` rendering-channel seal has NO inside: the two code
+/// fields (`code`, `ts_carrier_code`) and the sole from-parts constructor
+/// live in the private `types::tsc_response` CHILD module, so even sibling
+/// code in `types.rs` — where Rust's per-module-including-descendants
+/// privacy would otherwise grant raw access — must go through the labeled
+/// selectors. The fixtures `include!` the REAL production module source into
+/// the same parent/child shape and prove a sibling-position raw field read
+/// is E0616 and a `new`-bypassing struct literal is E0451 (two fixtures
+/// because rustc suppresses the literal's E0451 once a typeck E0616 exists).
+/// An out-of-crate fixture could not discriminate this (the fields are
+/// private from outside the crate whether or not the child module exists);
+/// widening a field to `pub(crate)` would make both fixtures compile and
+/// fail this test.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn tsc_response_rendering_fields_are_sealed_to_their_child_module() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/tsc_response_raw_field_read_outside_child_module.rs");
+    t.compile_fail("tests/cases/compile-fail/tsc_response_struct_literal_outside_child_module.rs");
+}
+
 /// The compiler enforcement of the no-transitive-`TypeExpr` hot-carrier
 /// invariant. A field that owns a `verter_type_expr::TypeExpr` — directly, via
 /// an aliased `use TypeExpr as Body`, or through a nested owner like `ValueRef`

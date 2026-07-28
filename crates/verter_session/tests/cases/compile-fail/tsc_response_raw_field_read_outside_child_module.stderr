@@ -1,0 +1,11 @@
+error[E0616]: field `code` of struct `TscResponse` is private
+  --> tests/cases/compile-fail/tsc_response_raw_field_read_outside_child_module.rs:36:41
+   |
+36 |         std::sync::Arc::clone(&response.code)
+   |                                         ^^^^ private field
+
+error[E0616]: field `ts_carrier_code` of struct `TscResponse` is private
+  --> tests/cases/compile-fail/tsc_response_raw_field_read_outside_child_module.rs:40:18
+   |
+40 |         response.ts_carrier_code.clone()
+   |                  ^^^^^^^^^^^^^^^ private field

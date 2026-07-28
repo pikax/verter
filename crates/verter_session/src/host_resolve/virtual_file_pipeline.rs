@@ -2575,15 +2575,16 @@ impl VerterHost {
                 ),
                 &fallthrough_props,
             )?;
-            return Ok(Some(TscResponse {
-                code: Arc::from(tsc_out.code),
-                source_map: if tsc_out.source_map.is_empty() {
+            return Ok(Some(TscResponse::new(
+                Arc::from(tsc_out.code),
+                if tsc_out.source_map.is_empty() {
                     None
                 } else {
                     Some(Arc::from(tsc_out.source_map))
                 },
-                dialect: tsc_out.dialect,
-            }));
+                tsc_out.dialect,
+                tsc_out.ts_carrier_code.map(Arc::from),
+            )));
         };
 
         let tsc_out = verter_compiler::tsc::generate_tsc_from_state(
@@ -2596,15 +2597,16 @@ impl VerterHost {
             ),
             &fallthrough_props,
         )?;
-        Ok(Some(TscResponse {
-            code: Arc::from(tsc_out.code),
-            source_map: if tsc_out.source_map.is_empty() {
+        Ok(Some(TscResponse::new(
+            Arc::from(tsc_out.code),
+            if tsc_out.source_map.is_empty() {
                 None
             } else {
                 Some(Arc::from(tsc_out.source_map))
             },
-            dialect: tsc_out.dialect,
-        }))
+            tsc_out.dialect,
+            tsc_out.ts_carrier_code.map(Arc::from),
+        )))
     }
 
     /// Store a compile's diagnostics ONLY while the live source is still the

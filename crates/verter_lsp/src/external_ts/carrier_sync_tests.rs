@@ -214,6 +214,78 @@ fn commit_carrier_provider_state_admits_a_matching_owner_receipt() {
     );
 }
 
+/// The API companion path is the fixed `.verter.ts` — TypeScript-labeled
+/// whatever the SFC's dialect — so the gateway must publish the TS-labeled
+/// rendering. A widened JavaScript Options-API stub's `code` spells its
+/// fallthrough widening in JSDoc, which a `.ts` ScriptKind silently ignores:
+/// publishing `code` there would lose the widening for exactly the carrier the
+/// split exists for.
+///
+/// DISCRIMINATING: making `build_carrier_companions` select the DIALECT
+/// rendering (`dialect_labeled_code`, the only other reachable channel — the
+/// raw fields are private) flips the first assertion; dropping the `None`
+/// fallback of `ts_labeled_code` would flip the second. The publish-point SET
+/// is guarded structurally, not per-site: no publisher can reach an unlabeled
+/// raw `code` field at all.
+#[test]
+fn api_companion_publishes_the_ts_labeled_rendering() {
+    let state = owned_carrier_state();
+
+    // A widened JavaScript Options-API surface: JSDoc rendering in `code`,
+    // ordinary TypeScript rendering in `ts_carrier_code`.
+    let split = verter_session::TscResponse::new(
+        Arc::from("/** @type {__OmitNew<typeof __Verter_ComponentOptions>} */\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::JavaScript,
+        Some(Arc::from(
+            "declare const App: unknown\nexport default App\n",
+        )),
+    );
+    let companions = build_carrier_companions(
+        &state,
+        None,
+        Some(&split),
+        None,
+        "/workspace/src/App.vue",
+        None,
+    );
+    let api = companions
+        .iter()
+        .find(|companion| companion.role == SnapshotRole::CarrierApi)
+        .expect("an api_path + api response must publish an API companion");
+    assert_eq!(
+        &**api.content(),
+        "declare const App: unknown\nexport default App\n",
+        "the `.verter.ts` companion carries the TS-labeled rendering, never the \
+         JSDoc one"
+    );
+
+    // Control: a surface with no distinct TS rendering publishes `code` itself.
+    let unsplit = verter_session::TscResponse::new(
+        Arc::from("declare const App: number\nexport default App\n"),
+        None,
+        verter_compiler::tsc::SfcScriptDialect::TypeScript,
+        None,
+    );
+    let companions = build_carrier_companions(
+        &state,
+        None,
+        Some(&unsplit),
+        None,
+        "/workspace/src/App.vue",
+        None,
+    );
+    let api = companions
+        .iter()
+        .find(|companion| companion.role == SnapshotRole::CarrierApi)
+        .expect("an api_path + api response must publish an API companion");
+    assert_eq!(
+        &**api.content(),
+        "declare const App: number\nexport default App\n",
+        "without a split, the companion carries `code` unchanged"
+    );
+}
+
 /// A `CarrierCompanion` for the IDE role at `uri` carrying `content` + optional map.
 fn ide_companion(
     uri: &str,

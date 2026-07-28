@@ -405,22 +405,25 @@ impl VerterLanguageServer {
                         }
                     };
                     if let Some(api) = api {
+                        // Destination-keyed rendering; stamp/record the SAME
+                        // bytes that were delivered.
+                        let api_code = api.code_for_companion_path(&dts_path);
                         let result = if committed_state.api_background_loaded {
-                            sync.sync_dts(&dts_path, &api.code).await
+                            sync.sync_dts(&dts_path, api_code).await
                         } else {
-                            sync.open_dts(&dts_path, &api.code).await
+                            sync.open_dts(&dts_path, api_code).await
                         };
                         if let Err(e) = result {
                             tracing::warn!("sync_api: failed for {dts_path}: {e}");
                         } else {
-                            committed_state.mark_api_delivered(&api.code);
+                            committed_state.mark_api_delivered(api_code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the synced content +
                             // its same-content source map under this virtual path.
                             self.record_carrier_api_snapshot(
                                 &canonical_id,
                                 &dts_path,
-                                &api.code,
+                                api_code,
                                 api.source_map.as_deref(),
                             );
                         }
@@ -2169,7 +2172,7 @@ impl VerterLanguageServer {
                     outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
                 let delivered = self
-                    .sync_carrier_api_unresolved(canonical_id, &api.code)
+                    .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                     .await;
                 return outcome.and(ImportSyncOutcome::from_ok(delivered));
             }
@@ -2242,21 +2245,24 @@ impl VerterLanguageServer {
                         }
 
                         if let Some(dts_path) = committed_state.api_path.clone() {
+                            // Destination-keyed rendering; delivered/stamped/
+                            // recorded consistently.
+                            let api_code = api.code_for_companion_path(&dts_path);
                             let result = if committed_state.api_background_loaded {
-                                sync.sync_dts(&dts_path, &api.code).await
+                                sync.sync_dts(&dts_path, api_code).await
                             } else {
-                                sync.open_dts(&dts_path, &api.code).await
+                                sync.open_dts(&dts_path, api_code).await
                             };
                             outcome = outcome.and(ImportSyncOutcome::from_sync(&result));
                             if result.is_ok() {
-                                committed_state.mark_api_delivered(&api.code);
+                                committed_state.mark_api_delivered(api_code);
                                 synced_kinds.push(ProviderPathKind::Api);
                                 // Record a fresh generation pinning the EXACT content +
                                 // its same-content source map under this virtual path.
                                 self.record_carrier_api_snapshot(
                                     canonical_id,
                                     &dts_path,
-                                    &api.code,
+                                    api_code,
                                     api.source_map.as_deref(),
                                 );
                             } else if let Err(e) = result {
@@ -2361,7 +2367,7 @@ impl VerterLanguageServer {
                 };
                 if let Some(api) = api {
                     let delivered = self
-                        .sync_carrier_api_unresolved(canonical_id, &api.code)
+                        .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                         .await;
                     return outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
@@ -2544,22 +2550,25 @@ impl VerterLanguageServer {
                             canonical_id,
                             ProviderPathKind::Api,
                         );
+                        // Destination-keyed rendering; delivered/stamped/
+                        // recorded consistently.
+                        let api_code = api.code_for_companion_path(&dts_path);
                         let result = if is_bg {
-                            sync.sync_dts(&dts_path, &api.code).await
+                            sync.sync_dts(&dts_path, api_code).await
                         } else {
                             // First-time DTS sync: open_dts sends it to the provider
                             // (load_dts only caches locally, breaking cross-file ops).
-                            sync.open_dts(&dts_path, &api.code).await
+                            sync.open_dts(&dts_path, api_code).await
                         };
                         if result.is_ok() {
-                            committed_state.mark_api_delivered(&api.code);
+                            committed_state.mark_api_delivered(api_code);
                             synced_kinds.push(ProviderPathKind::Api);
                             // Record a fresh generation pinning the synced content +
                             // its same-content source map under this virtual path.
                             self.record_carrier_api_snapshot(
                                 canonical_id,
                                 &dts_path,
-                                &api.code,
+                                api_code,
                                 api.source_map.as_deref(),
                             );
                         }

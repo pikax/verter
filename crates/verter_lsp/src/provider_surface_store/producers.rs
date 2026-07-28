@@ -658,7 +658,10 @@ pub fn record_carrier_api_surface_code_only(
         }
     };
     let owned_map: Option<Arc<str>> = api
-        .filter(|api| &*api.code == api_code)
+        // Deliveries publish the TS-labeled rendering, so content identity is
+        // checked against those same bytes (for most surfaces identical to
+        // `code`; distinct only for a widened JavaScript Options-API stub).
+        .filter(|api| &**api.ts_labeled_code() == api_code)
         .and_then(|api| api.source_map.clone());
     record_carrier_api_surface(
         store,

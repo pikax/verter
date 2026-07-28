@@ -969,10 +969,18 @@ impl DeclOverlayOwner {
                     && state.decl_path.as_deref() == Some(decl_path.as_str())
             })
             .unwrap_or(false);
+        // Destination-keyed rendering: the `.d.<ext>.ts` declaration companion
+        // is TypeScript-labeled. The Declaration-mode projection never carries
+        // a distinct TS rendering (declaration surfaces are generated
+        // TypeScript already), so this is `code` today — routed through the
+        // selector so a future split cannot silently publish JSDoc-carrying
+        // bytes into a `.ts` overlay.
         let result = if already_live {
-            sync.sync_dts(&decl_path, &api.code).await
+            sync.sync_dts(&decl_path, api.code_for_companion_path(&decl_path))
+                .await
         } else {
-            sync.open_dts(&decl_path, &api.code).await
+            sync.open_dts(&decl_path, api.code_for_companion_path(&decl_path))
+                .await
         };
         if let Err(error) = result {
             tracing::warn!(

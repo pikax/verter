@@ -2865,7 +2865,7 @@ fn public_api_widens_under_build_scope_without_a_scope_wide_template_walk() {
         .get_public_api("Comp.vue")
         .expect("no projection error")
         .expect("a stub")
-        .code
+        .ts_labeled_code()
         .to_string();
     assert!(
         code.contains("__Verter_RootElementAttrs<\"div\">"),

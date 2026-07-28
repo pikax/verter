@@ -196,7 +196,12 @@ impl VerterLanguageServer {
             self.documents.host().get_public_api(canonical_id)
         });
         match projected {
-            Ok(api) => api.map(|api| api.code),
+            // The identity of what a delivery would carry: deliveries publish
+            // the TS-labeled rendering (the `.verter.ts` companion is
+            // TypeScript-labeled whatever the SFC's dialect), so the identity
+            // must be those same bytes or a widened JavaScript Options-API
+            // companion would never read as current.
+            Ok(api) => api.map(|api| std::sync::Arc::clone(api.ts_labeled_code())),
             Err(error) => {
                 crate::report_public_api_projection_error(
                     "current_public_api_identity",

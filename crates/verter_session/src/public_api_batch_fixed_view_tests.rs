@@ -87,7 +87,10 @@ fn norm(s: &str) -> String {
 
 /// Normalized `(code, source_map)` for a `TscResponse`.
 fn norm_response(r: &TscResponse) -> (String, Option<String>) {
-    (norm(&r.code), r.source_map.as_ref().map(|m| norm(m)))
+    (
+        norm(r.dialect_labeled_code()),
+        r.source_map.as_ref().map(|m| norm(m)),
+    )
 }
 
 const SHARED_TYPES_TS: &str = r#"export interface ButtonProps { label: string; size?: 'sm' | 'md' }
@@ -278,10 +281,10 @@ fn public_api_batch_equals_scalar_bytes() {
     // SFC's own macro arg — so it is NOT a discriminating content check.)
     let first = batch[0].as_ref().expect("first slot renders");
     assert!(
-        first.code.contains("payload: number"),
+        first.dialect_labeled_code().contains("payload: number"),
         "the rendered public-API surface must MATERIALIZE the imported \
          `ButtonEmits` payload as `payload: number`; got:\n{}",
-        first.code,
+        first.dialect_labeled_code(),
     );
 }
 
@@ -300,10 +303,10 @@ fn matrix_shared_imports_scalar_equals_batch() {
     for (i, slot) in batch.iter().enumerate() {
         let r = slot.as_ref().unwrap_or_else(|| panic!("Comp{i} renders"));
         assert!(
-            r.code.contains("payload: number"),
+            r.dialect_labeled_code().contains("payload: number"),
             "Comp{i} must MATERIALIZE the shared `ButtonEmits` payload \
              `payload: number`; got:\n{}",
-            r.code,
+            r.dialect_labeled_code(),
         );
     }
 }
@@ -354,11 +357,12 @@ defineEmits<E{i}>()
         let own_emit = format!(r#"((event: "go{i}", n: number) => void)"#);
         let own_handler = format!(r#""onGo{i}"?: (n: number) => void"#);
         assert!(
-            r.code.contains(&own_emit) && r.code.contains(&own_handler),
+            r.dialect_labeled_code().contains(&own_emit)
+                && r.dialect_labeled_code().contains(&own_handler),
             "Uniq{i} surface must MATERIALIZE its exact `{own_emit}` overload \
              and `{own_handler}` handler; \
              got:\n{}",
-            r.code,
+            r.dialect_labeled_code(),
         );
         for j in 0..N {
             if j == i {
@@ -367,10 +371,11 @@ defineEmits<E{i}>()
             let foreign_emit = format!(r#"((event: "go{j}", n: number) => void)"#);
             let foreign_handler = format!(r#""onGo{j}"?: (n: number) => void"#);
             assert!(
-                !r.code.contains(&foreign_emit) && !r.code.contains(&foreign_handler),
+                !r.dialect_labeled_code().contains(&foreign_emit)
+                    && !r.dialect_labeled_code().contains(&foreign_handler),
                 "Uniq{i} surface leaked another item's `{foreign_emit}` overload \
                  or `{foreign_handler}` handler (fixed-view cross-talk); got:\n{}",
-                r.code,
+                r.dialect_labeled_code(),
             );
         }
     }
@@ -419,10 +424,12 @@ defineEmits<ChildEmits>()
     // cross-SFC `<script>` export. A failed/empty cross-SFC walk would drop it.
     let parent = batch[1].as_ref().expect("Parent renders");
     assert!(
-        parent.code.contains("event: \"childEvt\", payload: number"),
+        parent
+            .dialect_labeled_code()
+            .contains("event: \"childEvt\", payload: number"),
         "Parent must MATERIALIZE the sibling SFC's `ChildEmits` \
          `(event: \"childEvt\", payload: number)` signature; got:\n{}",
-        parent.code,
+        parent.dialect_labeled_code(),
     );
 }
 
@@ -490,21 +497,23 @@ defineEmits<AugEmits>()
     // The imported emit still MATERIALIZES despite the augmenter in the
     // workspace (the augmenter does not poison the shared-view resolution).
     assert!(
-        r.code
+        r.dialect_labeled_code()
             .contains(r#"((event: "augd", payload: number) => void)"#)
-            && r.code.contains(r#""onAugd"?: (payload: number) => void"#),
+            && r.dialect_labeled_code()
+                .contains(r#""onAugd"?: (payload: number) => void"#),
         "with an external augmenter loaded, the imported `AugEmits` must still \
          MATERIALIZE the canonical `((event: \"augd\", payload: number) => void)` \
          overload and exact handler; got:\n{}",
-        r.code,
+        r.dialect_labeled_code(),
     );
     // The augmented PROP member stays SHALLOW (shallow-by-default): `AugProps`
     // is a bare ref, and the augmenter's `extra` does NOT appear.
     assert!(
-        r.code.contains("AugProps") && !r.code.contains("extra"),
+        r.dialect_labeled_code().contains("AugProps")
+            && !r.dialect_labeled_code().contains("extra"),
         "the imported PROP type must stay a shallow `AugProps` ref with NO \
          expanded `extra` member (shallow-by-default); got:\n{}",
-        r.code,
+        r.dialect_labeled_code(),
     );
 }
 
@@ -547,10 +556,10 @@ defineEmits<MEmits>()
     let before = assert_scalar_equals_batch(&host, &ids);
     let r0 = before[0].as_ref().expect("renders before mutation");
     assert!(
-        r0.code.contains("payload: number"),
+        r0.dialect_labeled_code().contains("payload: number"),
         "the imported emit payload must materialize as `number` before the \
          mutation; got:\n{}",
-        r0.code,
+        r0.dialect_labeled_code(),
     );
 
     // Mutate the DEPENDENCY's emit payload: number -> string. The threaded LIVE
@@ -563,11 +572,12 @@ defineEmits<MEmits>()
     let after = assert_scalar_equals_batch(&host, &ids);
     let r1 = after[0].as_ref().expect("renders after mutation");
     assert!(
-        r1.code.contains("payload: string") && !r1.code.contains("payload: number"),
+        r1.dialect_labeled_code().contains("payload: string")
+            && !r1.dialect_labeled_code().contains("payload: number"),
         "after the dependency emit mutation the threaded view must resolve the \
          NEW `string` payload (a stale / None-degraded view would still show \
          `number`); got:\n{}",
-        r1.code,
+        r1.dialect_labeled_code(),
     );
 }
 
@@ -622,15 +632,15 @@ defineEmits<DepEmits>()
     // — only reachable by on-demand materializing `Dep.vue`'s `<script>` export.
     assert!(
         consumer
-            .code
+            .dialect_labeled_code()
             .contains(r#"((event: "fwd", payload: number) => void)"#)
             && consumer
-                .code
+                .dialect_labeled_code()
                 .contains(r#""onFwd"?: (payload: number) => void"#),
         "the consumer's emit surface must MATERIALIZE the earlier-declared dep's \
          canonical `((event: \"fwd\", payload: number) => void)` overload and \
          exact handler; a stale/shallow/empty view would drop it. got:\n{}",
-        consumer.code,
+        consumer.dialect_labeled_code(),
     );
 }
 
@@ -688,16 +698,16 @@ defineEmits<DepBEmits>()
     // consumer's render (it is the SECOND id, not yet rendered at this point).
     assert!(
         consumer
-            .code
+            .dialect_labeled_code()
             .contains(r#"((event: "bInv", payload: number) => void)"#)
             && consumer
-                .code
+                .dialect_labeled_code()
                 .contains(r#""onBInv"?: (payload: number) => void"#),
         "the consumer's emit surface must MATERIALIZE the later-declared dep's \
          canonical `((event: \"bInv\", payload: number) => void)` overload and \
          exact handler (on-demand serve of the LATER batch item); a \
          stale/shallow/empty view would drop it. got:\n{}",
-        consumer.code,
+        consumer.dialect_labeled_code(),
     );
 }
 
