@@ -92,20 +92,15 @@ fn is_ntfs_illegal_byte(b: u8) -> bool {
     matches!(b, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*' | b'\\') || b < 0x20
 }
 
-/// Reserved Windows device names, matched case-insensitively against the
-/// component's stem (everything before the FIRST `.`): `NUL`, `nul.txt`,
-/// and `Nul.tar.gz` are all reserved. The console devices `CONIN$` /
-/// `CONOUT$` are reserved WITH the `$` only — bare `CONIN`/`CONOUT` are
-/// ordinary names.
-fn is_reserved_device_name(component: &[u8]) -> bool {
-    let stem = component.split(|&b| b == b'.').next().unwrap_or(component);
-    let upper: Vec<u8> = stem.iter().map(|b| b.to_ascii_uppercase()).collect();
-    match upper.as_slice() {
-        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CONIN$" | b"CONOUT$" => true,
-        [b'C', b'O', b'M', d] | [b'L', b'P', b'T', d] => (b'1'..=b'9').contains(d),
-        _ => false,
-    }
-}
+/// Reserved Windows device names — the SHARED classification owned by
+/// `verter_span::path`, not a second copy.
+///
+/// This guard and the exec-boundary verbatim-path simplifier both have to
+/// answer "is this component a Windows device?", and they used to answer it
+/// from two hand-written lists. The lists drifted: both omitted the
+/// superscript forms `COM¹`/`COM²`/`COM³` and `LPT¹`/`LPT²`/`LPT³` that
+/// Windows reserves alongside `COM1`–`COM9`. One owner, one answer.
+use verter_span::path::is_reserved_device_name;
 
 /// Rule 1: a tracked path must be valid UTF-8 — APFS mandates valid-UTF-8
 /// filenames, so a non-UTF-8 tracked path cannot materialize on macOS.
@@ -210,6 +205,12 @@ fn reserved_device_name_matcher_discriminates() {
     assert!(is_reserved_device_name(b"conin$"));
     assert!(is_reserved_device_name(b"CONOUT$.txt"));
     assert!(is_reserved_device_name(b"conout$.tar.gz"));
+    // The superscript-digit device forms Windows reserves alongside COM1–COM9.
+    // A tracked path containing one cannot check out on Windows either.
+    assert!(is_reserved_device_name("COM\u{b9}".as_bytes()));
+    assert!(is_reserved_device_name("com\u{b2}".as_bytes()));
+    assert!(is_reserved_device_name("LPT\u{b3}.log".as_bytes()));
+    assert!(!is_reserved_device_name("COM\u{b4}".as_bytes()));
     // Without the `$` the console device names are NOT reserved (unlike
     // CON itself, which is): `CONIN`/`CONOUT` are ordinary names.
     assert!(!is_reserved_device_name(b"conin"));

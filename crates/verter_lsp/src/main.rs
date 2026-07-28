@@ -663,6 +663,15 @@ struct ManagedEngineFacts {
     tsgo_notes: Vec<String>,
     /// The workspace/tsdk `tsserver.js`, if any.
     tsserver: Option<String>,
+    /// Why no configured project could supply one, when `tsserver` is `None` and
+    /// candidates were actually refused (as opposed to none existing).
+    ///
+    /// Without this the managed route reports a bare "no workspace tsserver",
+    /// which is the DEFAULT `auto` path when there is no editor rendezvous — so
+    /// an install refused for a nameable reason (an extended-length path node
+    /// cannot execute, a library-less install) reached the user's
+    /// `show_message` with no path, no reason, and no action.
+    tsserver_refusal: Option<String>,
     /// The Node runtime tsserver needs, if any.
     node: Option<String>,
 }
@@ -746,8 +755,14 @@ fn choose_managed_engine(facts: &ManagedEngineFacts) -> ManagedEngineChoice {
             reason: format!(
                 "no TypeScript engine available for {}: no supported tsgo candidate \
                  ({ENV_OVERRIDE_LABEL}, PATH, project-local node_modules, the update cache, the \
-                 bundled sidecar) and no workspace tsserver{}",
+                 bundled sidecar) and no workspace tsserver{}{}",
                 facts.workspace_root,
+                match &facts.tsserver_refusal {
+                    // A refused install is a DIFFERENT state from an absent one,
+                    // and the only one the user can act on.
+                    Some(refusal) => format!(" — {refusal}"),
+                    None => String::new(),
+                },
                 notes(" — ")
             ),
         },
@@ -857,6 +872,11 @@ fn probe_managed_engine(workspace_root: &str, tsdk: Option<&str>) -> ManagedEngi
             .servable
             .as_ref()
             .map(|probed| probed.resolved.path.to_string_lossy().into_owned()),
+        // Only when nothing serves AND something was actually refused: an
+        // empty-refusals workspace simply has no TypeScript installed, which the
+        // existing text already covers.
+        tsserver_refusal: (probe.servable.is_none() && !probe.refusals.is_empty())
+            .then(|| probe.refusal_summary()),
         node: verter_lsp::tsserver::find_node(),
     })
 }

@@ -48,6 +48,14 @@ use super::resilient;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectEngineKey {
     project: String,
+    /// The CANONICAL `tsserver.js` from `resolve_tsserver` — on Windows an
+    /// extended-length `\\?\D:\…` path. It stays canonical here because this is
+    /// an IDENTITY value (the `providers` map key that collapses concurrent cold
+    /// demands onto one spawn, and the respawn seed): two demands for the same
+    /// install must key equal, and re-normalizing an identity would split it.
+    /// The same string is ALSO the tsserver main-script argument, but the
+    /// verbatim prefix is stripped there and only there — inside
+    /// `TsserverTypeProvider::spawn`'s command builder, at the exec boundary.
     tsserver_path: String,
 }
 
@@ -406,6 +414,7 @@ fn resolve_engine_spec(
         path,
         source,
         default_lib_count,
+        skipped,
     } = resolve_tsserver(tsdk, Some(&project_dir)).map_err(|error| {
         format!(
             "TypeScript semantics are unavailable for owning project {}: {error}",
@@ -418,6 +427,17 @@ fn resolve_engine_spec(
              it cannot be served over the Node tsserver protocol",
             bound.project()
         ));
+    }
+    // A nearer install this resolution passed over swapped the toolchain for this
+    // project: the engine is not the one the project pinned. Never silent.
+    for rejection in &skipped {
+        tracing::warn!(
+            project = %bound.project(),
+            skipped = %rejection.path.display(),
+            serving = %path.display(),
+            "a nearer TypeScript install was refused ({}); serving from a different install",
+            rejection.reason
+        );
     }
     let workspace_root = binding.workspace_root().to_string();
     let tsserver_path = path.to_string_lossy().into_owned();
@@ -486,12 +506,27 @@ pub struct WorkspaceTsserverProbe {
 }
 
 impl WorkspaceTsserverProbe {
-    /// The serving-tier advisory for the weakest engine that will actually
-    /// serve, or `None` when every servable install is current-generation.
+    /// The user-visible advisory for this probe: the serving-tier notice for the
+    /// weakest engine that will actually serve, AND — when the serving project
+    /// passed over a nearer install — the skipped-tier notice naming it.
+    ///
+    /// Both ride the SAME `show_message` the serving-tier advisory already used,
+    /// so a silently swapped toolchain reaches the user through an existing
+    /// surface rather than a new one. `None` only when there is nothing to say.
     #[must_use]
     pub fn advisory(&self) -> Option<String> {
-        let version = self.lowest_servable_version?;
-        tsserver_serving_advisory(version, tsserver_serving_tier(Some(version)))
+        let tier = self.lowest_servable_version.and_then(|version| {
+            tsserver_serving_advisory(version, tsserver_serving_tier(Some(version)))
+        });
+        let skipped = self
+            .servable
+            .as_ref()
+            .and_then(|probed| probed.resolved.skipped_tier_advisory());
+        match (tier, skipped) {
+            (Some(tier), Some(skipped)) => Some(format!("{tier} {skipped}")),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
     }
 
     /// An actionable summary of why no project could be served.

@@ -975,6 +975,7 @@ mod tests {
             path: std::path::PathBuf::from("/somewhere/typescript/lib/tsserver.js"),
             source,
             default_lib_count: 1,
+            skipped: Vec::new(),
         };
 
         assert_eq!(

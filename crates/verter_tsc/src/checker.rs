@@ -38,7 +38,7 @@ use verter_session::{
 use crate::api_check;
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};
-use crate::tsconfig::{strip_unc_prefix, TsConfig};
+use crate::tsconfig::{simplify_verbatim_path, TsConfig};
 
 /// Options controlling what the checker emits.
 pub struct EmitOptions {
@@ -918,7 +918,7 @@ fn run_inmemory_typecheck(
     tsconfig_path: &Path,
     tsgo_bin: Option<&Path>,
 ) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
-    let root = strip_unc_prefix(&config.root_dir);
+    let root = simplify_verbatim_path(&config.root_dir).into_owned();
 
     // Resolve the GATED `--api` engine (a supported tsgo native binary —
     // validated end-to-end by the resolver). No tsc fallback for the typecheck
@@ -930,7 +930,7 @@ fn run_inmemory_typecheck(
         verter_tsgo_api::toolchain::validation::Capability::Api,
         tsgo_bin,
     ) {
-        Ok(p) => strip_unc_prefix(&p),
+        Ok(p) => simplify_verbatim_path(&p).into_owned(),
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: {e}\n(There is no tsc fallback for the typecheck path.)"
@@ -988,7 +988,7 @@ fn run_inmemory_typecheck(
     // `synthetic_tsconfig_value` builder), served in-memory at a virtual in-project
     // path so node_modules + the real user tsconfig (via `extends`) resolve from disk.
     let original_abs = match tsconfig_path.canonicalize() {
-        Ok(p) => slash(&strip_unc_prefix(&p)),
+        Ok(p) => slash(&simplify_verbatim_path(&p)),
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: cannot resolve tsconfig {}: {e}",
@@ -1086,11 +1086,12 @@ fn run_declaration_stage(
     let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
     let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
     for (vue_path, tsc_code, tsc_tsx_path) in &declaration_generated {
-        let canon = strip_unc_prefix(
+        let canon = simplify_verbatim_path(
             &tsc_tsx_path
                 .canonicalize()
                 .unwrap_or_else(|_| tsc_tsx_path.clone()),
-        );
+        )
+        .into_owned();
         tsx_to_vue.insert(
             canon.to_string_lossy().replace('\\', "/"),
             (vue_path.clone(), tsc_code.clone()),
@@ -1108,7 +1109,7 @@ fn run_declaration_stage(
     // proves the binary spawns and completes a real handshake, so a candidate
     // that merely answers `--version` can no longer mask a working one. A
     // resolution failure is a HARD failure (fail-closed).
-    let root = strip_unc_prefix(&config.root_dir);
+    let root = simplify_verbatim_path(&config.root_dir).into_owned();
     let checker_bin = match resolve_tsgo_engine(
         &root,
         verter_tsgo_api::toolchain::validation::Capability::Lsp,
@@ -1119,7 +1120,7 @@ fn run_declaration_stage(
                 "verter-tsc: declaration emit using tsgo at {}",
                 path.display()
             );
-            strip_unc_prefix(&path)
+            simplify_verbatim_path(&path).into_owned()
         }
         Err(e) => {
             return Err(api_check::TypecheckError::new(format!(
@@ -1214,16 +1215,22 @@ fn invoke_checker(
     invoke_checker_bounded(checker_bin, tsconfig_path, opts, DECLARATION_INVOKE_BOUND)
 }
 
-/// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
-/// against a short bound).
-fn invoke_checker_bounded(
+/// Build the EXACT command the external checker is invoked with.
+/// [`invoke_checker_bounded`] adds only the stdio wiring and the process-tree
+/// configuration, so this is the single argument-construction site for the tsc
+/// lane and the one place a path crosses into an argv another program parses.
+///
+/// Both path-valued arguments go through
+/// [`verter_span::path::simplify_verbatim_path`]: the checker parses them with
+/// its own path logic and does not understand the Windows extended-length
+/// (`\\?\`) prefix that `Path::canonicalize()` produces. A verbatim path with no
+/// Win32 equivalent is passed through untouched rather than rewritten to a
+/// different target.
+fn build_checker_command(
     checker_bin: &Path,
     tsconfig_path: &Path,
     opts: &EmitOptions,
-    bound: std::time::Duration,
-) -> Result<CheckerInvocation, String> {
-    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
-
+) -> std::process::Command {
     let mut cmd = if cfg!(target_os = "windows")
         && !reporter::is_native_binary(checker_bin)
         && checker_bin
@@ -1238,17 +1245,32 @@ fn invoke_checker_bounded(
         std::process::Command::new(checker_bin)
     };
 
-    let tsconfig_clean = strip_unc_prefix(tsconfig_path);
-    cmd.arg("--project").arg(&tsconfig_clean);
+    cmd.arg("--project")
+        .arg(simplify_verbatim_path(tsconfig_path).as_ref());
     if opts.no_emit {
         cmd.arg("--noEmit");
     }
     if opts.declaration {
         cmd.arg("--declaration");
         if let Some(dir) = &opts.declaration_dir {
-            cmd.arg("--declarationDir").arg(dir);
+            cmd.arg("--declarationDir")
+                .arg(simplify_verbatim_path(dir).as_ref());
         }
     }
+    cmd
+}
+
+/// The bound-injectable core of [`invoke_checker`] (tests drive a wedged engine
+/// against a short bound).
+fn invoke_checker_bounded(
+    checker_bin: &Path,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+    bound: std::time::Duration,
+) -> Result<CheckerInvocation, String> {
+    use verter_tsgo_api::process::{configure_tree_spawn_std, TreeKill};
+
+    let mut cmd = build_checker_command(checker_bin, tsconfig_path, opts);
 
     // Spawn with piped I/O and drain stdout/stderr in background threads to
     // avoid deadlock (child blocks on full pipe buffer if we don't read). The
@@ -1365,6 +1387,20 @@ fn reap_std_child_bounded(child: &mut std::process::Child, bound: std::time::Dur
     }
 }
 
+/// How a resolved path is spelled INSIDE the synthetic tsconfig — the `extends`
+/// target and every `files` entry. The external checker reads this JSON and
+/// resolves the strings itself, so the Windows extended-length (`\\?\`) prefix
+/// `Path::canonicalize()` produces must not survive into it; forward slashes are
+/// tsconfig's own separator on every platform.
+///
+/// ONE spelling for both, so an `extends` target and a `files` entry naming the
+/// same file can never disagree.
+fn synthetic_tsconfig_spelling(resolved: &Path) -> String {
+    simplify_verbatim_path(resolved)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Write a synthetic tsconfig.json in `temp_dir` that:
 /// - Extends the original tsconfig
 /// - Includes all .tsc.tsx files
@@ -1376,29 +1412,18 @@ fn write_temp_tsconfig(
     opts: &EmitOptions,
     root_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let original_abs = strip_unc_prefix(
+    let original_abs = synthetic_tsconfig_spelling(
         &original_tsconfig
             .canonicalize()
             .map_err(|e| format!("cannot resolve original tsconfig: {e}"))?,
     );
 
-    // Build file list with absolute paths (strip \\?\ prefix for Windows compatibility).
     let files: Vec<String> = tsc_tsx_files
         .iter()
-        .map(|p| {
-            let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-            strip_unc_prefix(&canon)
-                .to_string_lossy()
-                .replace('\\', "/")
-        })
+        .map(|p| synthetic_tsconfig_spelling(&p.canonicalize().unwrap_or_else(|_| p.to_path_buf())))
         .collect();
 
-    let tsconfig_json = synthetic_tsconfig_value(
-        &original_abs.to_string_lossy().replace('\\', "/"),
-        &files,
-        opts,
-        root_dir,
-    );
+    let tsconfig_json = synthetic_tsconfig_value(&original_abs, &files, opts, root_dir);
 
     let suffix = if opts.declaration { "decl" } else { "check" };
     let temp_tsconfig = temp_dir.join(format!("verter-tsc-{suffix}.tsconfig.json"));
@@ -1495,6 +1520,24 @@ fn synthetic_tsconfig_value(
     })
 }
 
+/// The `tsx_to_vue` lookup key for a checker-reported path, taken from the path
+/// already resolved against disk.
+///
+/// Must derive the SAME spelling [`synthetic_tsconfig_spelling`] gave the checker
+/// for that file, or the direct lookup misses and the remap falls through to
+/// suffix matching — which cannot distinguish two files that share a tail. The
+/// deleted crate-local `strip_unc_prefix` produced the RELATIVE `UNC/srv/...`
+/// for a network share, so on a UNC checkout every direct lookup missed.
+///
+/// Resolution against disk stays in the CALLER: this is the pure derivation, so
+/// the UNC branch is exercised without a `canonicalize()` that would attempt a
+/// real SMB/DNS round trip on Windows.
+fn diagnostic_file_key(resolved: &Path) -> String {
+    simplify_verbatim_path(resolved)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Remap raw tsc diagnostics from `.tsc.tsx` positions to `.vue` positions.
 fn remap_diagnostics(
     raw: Vec<TscDiagnostic>,
@@ -1505,12 +1548,11 @@ fn remap_diagnostics(
         .filter(|d| !is_temp_tsconfig_error(d))
         .map(|d| {
             // Try to find a matching vue entry using a suffix match on the file path.
-            let file_canon = strip_unc_prefix(
+            let file_key = diagnostic_file_key(
                 &PathBuf::from(&d.file)
                     .canonicalize()
                     .unwrap_or_else(|_| PathBuf::from(&d.file)),
             );
-            let file_key = file_canon.to_string_lossy().replace('\\', "/");
 
             // Direct map lookup.
             let maybe_vue = tsx_to_vue.get(&file_key).or_else(|| {
@@ -6363,6 +6405,266 @@ const props = defineProps<{ msg: string }>()
                 !msg.contains(unreachable),
                 "must not advertise the unreachable `{unreachable}` tier: {msg}"
             );
+        }
+    }
+
+    // ── Exec-boundary wiring: no `\\?\` path reaches the external checker ────
+    //
+    // These bind to the THREE production crossings where a canonicalized path
+    // becomes a string the external checker parses: the `--project`/
+    // `--declarationDir` argv, the synthetic tsconfig's `extends`/`files`
+    // spellings, and the diagnostic remap key. Each drives the production
+    // function with an explicitly-constructed verbatim value, because
+    // `canonicalize()` only produces that shape on Windows while what the
+    // boundary must DO with it is host-independent.
+
+    /// The verbatim-UNC form the crate's deleted `strip_unc_prefix` corrupted
+    /// into the relative path `UNC\srv\share\…`.
+    const VERBATIM_UNC_TSCONFIG: &str = r"\\?\UNC\build01\share\ws\tsconfig.json";
+    const VERBATIM_UNC_TSX: &str = r"\\?\UNC\build01\share\ws\a.tsc.tsx";
+
+    fn argv(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn checker_argv_carries_no_verbatim_project_or_declaration_dir() {
+        let opts = EmitOptions {
+            no_emit: false,
+            declaration: true,
+            declaration_dir: Some(PathBuf::from(r"\\?\D:\ws\dist\types")),
+        };
+        let cmd = build_checker_command(
+            Path::new("/opt/tsgo/tsgo"),
+            Path::new(VERBATIM_UNC_TSCONFIG),
+            &opts,
+        );
+        let args = argv(&cmd);
+
+        let project = args
+            .iter()
+            .position(|a| a == "--project")
+            .and_then(|i| args.get(i + 1))
+            .expect("--project is passed");
+        assert_eq!(
+            project, r"\\build01\share\ws\tsconfig.json",
+            "the UNC tsconfig must reach the checker as a real UNC path"
+        );
+        // NEGATIVE: not the naive prefix-strip's relative `UNC\...` spelling.
+        assert_ne!(project, r"UNC\build01\share\ws\tsconfig.json");
+
+        let decl_dir = args
+            .iter()
+            .position(|a| a == "--declarationDir")
+            .and_then(|i| args.get(i + 1))
+            .expect("--declarationDir is passed");
+        assert_eq!(decl_dir, r"D:\ws\dist\types");
+
+        // NEGATIVE: nothing at all in the argv carries a verbatim prefix.
+        for arg in &args {
+            assert!(
+                !arg.starts_with(r"\\?"),
+                "verbatim arg reached the checker: {arg}"
+            );
+        }
+        // POSITIVE control: the rest of the command line is intact.
+        assert!(args.iter().any(|a| a == "--declaration"), "argv = {args:?}");
+    }
+
+    #[test]
+    fn synthetic_tsconfig_spelling_is_a_real_unc_path_in_forward_slash_form() {
+        // The `extends` target and every `files` entry share this one spelling,
+        // so a checker reading the JSON resolves both to the same file.
+        assert_eq!(
+            synthetic_tsconfig_spelling(Path::new(VERBATIM_UNC_TSCONFIG)),
+            "//build01/share/ws/tsconfig.json"
+        );
+        // NEGATIVE: the naive prefix-strip yields a RELATIVE `UNC/...` spelling,
+        // which the checker resolves against its cwd — a different file.
+        assert_ne!(
+            synthetic_tsconfig_spelling(Path::new(VERBATIM_UNC_TSCONFIG)),
+            "UNC/build01/share/ws/tsconfig.json"
+        );
+        assert_eq!(
+            synthetic_tsconfig_spelling(Path::new(r"\\?\D:\ws\a.tsc.tsx")),
+            "D:/ws/a.tsc.tsx"
+        );
+        // A POSIX path is untouched.
+        assert_eq!(
+            synthetic_tsconfig_spelling(Path::new("/repo/ws/a.tsc.tsx")),
+            "/repo/ws/a.tsc.tsx"
+        );
+    }
+
+    #[test]
+    fn diagnostic_remap_key_is_a_real_unc_path_matching_the_spelling_the_checker_was_given() {
+        // The UNC branch, exercised on the PURE derivation. `remap_diagnostics`
+        // resolves the reported path against disk before deriving the key, and
+        // canonicalizing a `\\?\UNC\...` path on Windows attempts a real SMB/DNS
+        // round trip — a non-hermetic test and a latent CI stall. The resolution
+        // is the caller's; this is the derivation, and it is what must agree
+        // with the spelling the checker was handed.
+        assert_eq!(
+            diagnostic_file_key(Path::new(VERBATIM_UNC_TSX)),
+            "//build01/share/ws/a.tsc.tsx"
+        );
+        // The two spellings of one file MUST agree, or every direct lookup on a
+        // UNC checkout misses.
+        assert_eq!(
+            diagnostic_file_key(Path::new(VERBATIM_UNC_TSX)),
+            synthetic_tsconfig_spelling(Path::new(VERBATIM_UNC_TSX)),
+        );
+        // NEGATIVE: the naive prefix-strip's RELATIVE `UNC/...` spelling.
+        assert_ne!(
+            diagnostic_file_key(Path::new(VERBATIM_UNC_TSX)),
+            "UNC/build01/share/ws/a.tsc.tsx"
+        );
+    }
+
+    /// A rooted path on the CURRENT volume whose first component cannot exist.
+    ///
+    /// `remap_diagnostics` canonicalizes every reported path, so the fixture must
+    /// be one `canonicalize()` fails on instantly, everywhere. A drive letter is
+    /// NOT that: on Windows any letter may be a local, `subst`-ed, or
+    /// network-mapped drive, so `Q:` can reach SMB/DNS AND — if it resolves
+    /// through a mapping or junction to a different spelling — make a CORRECT
+    /// direct-lookup implementation false-fail. This form has no drive and no
+    /// UNC authority: on Windows it resolves against the current drive's root, on
+    /// Unix against `/`, and fails with a plain not-found on both without any
+    /// network access.
+    const NO_SUCH_ROOT: &str = "/verter-tsc-no-such-root-9f2c";
+
+    #[test]
+    fn diagnostic_remap_prefers_the_direct_key_over_a_suffix_matchable_decoy() {
+        // The direct lookup must be what resolves the diagnostic. Both entries
+        // below are reachable by the suffix fallback for the SAME reported path
+        // (`file_key.ends_with(k)` holds for the exact key AND for the shortened
+        // one), so a remap that skipped the direct lookup would pick whichever
+        // the HashMap iterated first — the decoy roughly half the time.
+        //
+        // `HashMap::new()` seeds a fresh `RandomState` per instance, so the run
+        // is repeated over fresh maps: with the direct lookup every round is
+        // correct; without it, all 64 rounds agreeing has probability 2^-64.
+        // The imprecision can only ever produce a false PASS on a broken tree,
+        // never a false FAIL on a correct one.
+        let reported = format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx");
+        for round in 0..64 {
+            let mut tsx_to_vue = HashMap::new();
+            tsx_to_vue.insert(
+                format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx"),
+                (PathBuf::from("/repo/one/a.vue"), String::new()),
+            );
+            tsx_to_vue.insert(
+                "one/ws/a.tsc.tsx".to_string(),
+                (PathBuf::from("/repo/decoy/a.vue"), String::new()),
+            );
+            let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                out[0].file, "/repo/one/a.vue",
+                "round {round}: the direct key must win over the suffix-matchable decoy"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_remap_distinguishes_two_roots_that_share_a_tail() {
+        // Two DISTINCT files with identical tails. Only an EXACT derived key
+        // tells them apart.
+        let mut tsx_to_vue = HashMap::new();
+        tsx_to_vue.insert(
+            format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx"),
+            (PathBuf::from("/repo/one/a.vue"), String::new()),
+        );
+        tsx_to_vue.insert(
+            format!("{NO_SUCH_ROOT}/two/ws/a.tsc.tsx"),
+            (PathBuf::from("/repo/two/a.vue"), String::new()),
+        );
+        for (reported, expected) in [
+            (
+                format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx"),
+                "/repo/one/a.vue",
+            ),
+            (
+                format!("{NO_SUCH_ROOT}/two/ws/a.tsc.tsx"),
+                "/repo/two/a.vue",
+            ),
+        ] {
+            let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                out[0].file, expected,
+                "{reported} remapped to the wrong source"
+            );
+        }
+
+        // NEGATIVE: a reported file with no entry — direct or by suffix — is left
+        // alone rather than attached to an unrelated `.vue`.
+        let orphan = format!("{NO_SUCH_ROOT}/three/ws/b.tsc.tsx");
+        let out = remap_diagnostics(vec![diag(&orphan)], &tsx_to_vue);
+        assert_eq!(out.len(), 1);
+        assert!(
+            !out[0].file.contains(".vue"),
+            "an unmatched file must not be remapped, got {:?}",
+            out[0].file
+        );
+    }
+
+    #[test]
+    fn diagnostic_remap_derives_its_key_through_the_shared_seam() {
+        // WIRING: proves `remap_diagnostics` performs `diagnostic_file_key`'s
+        // transform rather than using the reported string raw. The reported path
+        // carries backslashes, which only the seam rewrites; a remap that
+        // bypassed it would miss the direct key AND fail the suffix fallback.
+        // Still hermetic — the same non-existent rooted path, no drive, no UNC.
+        let reported = format!(r"{NO_SUCH_ROOT}\one\ws\a.tsc.tsx");
+        let mut tsx_to_vue = HashMap::new();
+        tsx_to_vue.insert(
+            diagnostic_file_key(Path::new(&reported)),
+            (PathBuf::from("/repo/one/a.vue"), String::new()),
+        );
+        let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].file, "/repo/one/a.vue");
+    }
+
+    /// CHARACTERIZATION of a hazard this branch does NOT fix, recorded so the
+    /// key-derivation work above is understood correctly: when the exact key is
+    /// absent, the suffix fallback attaches the diagnostic to any entry sharing a
+    /// tail — here an unrelated source. That is precisely why the derived key
+    /// must match the spelling the checker was given: the deleted
+    /// `strip_unc_prefix` produced a key the map never contained, so on a UNC
+    /// checkout EVERY diagnostic fell into this fallback. With two tail-sharing
+    /// entries and no exact key the winner additionally depends on HashMap
+    /// iteration order.
+    #[test]
+    fn a_reported_path_with_no_exact_key_suffix_matches_an_unrelated_source() {
+        let mut tsx_to_vue = HashMap::new();
+        tsx_to_vue.insert(
+            "ws/a.tsc.tsx".to_string(),
+            (PathBuf::from("/repo/decoy/a.vue"), String::new()),
+        );
+        // The exact key is NOT in the map.
+        let reported = format!("{NO_SUCH_ROOT}/one/ws/a.tsc.tsx");
+        let out = remap_diagnostics(vec![diag(&reported)], &tsx_to_vue);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].file.contains("decoy"),
+            "documents the fallback's reach, got {:?}",
+            out[0].file
+        );
+    }
+
+    fn diag(file: &str) -> crate::reporter::TscDiagnostic {
+        crate::reporter::TscDiagnostic {
+            file: file.to_string(),
+            line: 1,
+            col: 1,
+            severity: crate::reporter::Severity::Error,
+            ts_code: 2322,
+            message: "Type error".to_string(),
         }
     }
 }
