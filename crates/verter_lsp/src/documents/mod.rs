@@ -286,6 +286,7 @@ impl DocumentRegistry {
     }
 
     /// Handle a document being changed.
+    ///
     pub fn did_change(&self, uri: &Uri, version: i32, text: &str) -> HostUpdateResult {
         let uri_str = uri.as_str().to_string();
         tracing::info!(
@@ -338,46 +339,58 @@ impl DocumentRegistry {
         #[cfg(not(target_arch = "wasm32"))]
         self.host.notify_upsert(&canonical_id, source.clone());
 
-        // Trigger re-compilation for framework carriers (Vue / Svelte SFCs).
-        // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
-        // Main-less carrier (Svelte) re-populates its `CachedTsx`; `get_ide`
-        // below rebuilds the position mapper from the fresh source map.
-        if is_carrier {
-            let compile_start = std::time::Instant::now();
-            let _ = self
-                .host
-                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read());
-            tracing::info!(
-                "DocumentRegistry::did_change ENSURE_COMPILED_DONE elapsed={:?} thread={:?}",
-                compile_start.elapsed(),
-                std::thread::current().id()
-            );
-        }
-
+        // A document commit owes the document's TEXT. It does not owe the IDE
+        // TSX, and it must not pay for it per keystroke.
+        //
+        // `tower-lsp-server` does not spawn a task per notification: `Server::serve`
+        // queues handler futures and polls them INLINE on the serve thread (see
+        // `crate::SERVE_THREAD_STACK_BYTES`), and `handle_did_change` runs from
+        // entry through this commit without ever pending — an uncontended
+        // `did_change_mutex.lock()` completes in the current poll and the commit
+        // itself is synchronous. Handler k therefore finishes before handler k+1
+        // is polled at all, so a compile here is a strictly serialized queue whose
+        // length is the user's typing speed. That is the ~9s of
+        // https://github.com/pikax/verter/issues/96.
+        //
+        // Nor can it be coalesced from inside the handler: a notification still
+        // sitting in the serve loop's channel has not been polled, so nothing on
+        // this path can know that a newer revision is already on the wire.
+        //
+        // The IDE TSX is produced where it is DEMANDED — the debounced
+        // coordinator's `sync_file`, the interactive repair path
+        // (`ensure_current_file_synced` → `recompile_and_refresh_mapper`), and
+        // `DocumentRegistry::get_ide`'s slow path. Each drives
+        // `ensure_ide_compiled` itself, and each is already coalesced or
+        // singleflighted.
+        //
+        // There is NO exception for a carrier that has no projection yet. Making
+        // the commit compile in that case looks bounded ("only until the first
+        // projection exists") but is not: a compile that FAILS installs no
+        // projection, so the next edit compiles again — and a malformed
+        // intermediate revision is the ordinary state of a file being typed, not
+        // an edge case. That reinstates exactly the serialized per-keystroke
+        // queue this method exists to avoid. A missing projection is instead made
+        // recovered on the paths that already compile for open documents — the
+        // debounced coordinator tick and the pending-snapshot drain, via
+        // `recover_missing_carrier_projection`. Deliberately NOT the foreground
+        // repair: `current_file_needs_inline_type_provider_sync` still declines a
+        // projection-less document, because that repair loads the dependency
+        // closure and would cold-load children on ordinary interactive requests.
         let new_line_index = LineIndex::new(&source, self.encoding());
 
         // Rebuild the document's provider projection.
-        // When compilation fails (e.g., temporarily invalid SFC during typing),
-        // preserve the old projection so position-dependent features keep working.
-        let rebuild_carrier = |this: &Self| -> Option<DocumentProviderProjection> {
-            this.host
-                .get_ide(&canonical_id, &this.tsx_profile.read())
-                .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
-                .map(DocumentProviderProjection::carrier_ide)
-        };
         let prior_projection = || {
             self.documents
                 .get(&uri_str)
                 .and_then(|d| d.projection.clone())
         };
         let projection = if is_carrier {
-            match &result {
-                Ok(update) if update.changed => {
-                    // Keep old projection if new compilation failed (Bug 3 fix).
-                    rebuild_carrier(self).or_else(prior_projection)
-                }
-                _ => prior_projection(),
-            }
+            // Always the prior projection: the commit compiles nothing, so
+            // `get_ide` (a pure cached read) has no fresh source map to rebuild
+            // from. This is the same carry a failed compile has always used. The
+            // demand-side rebuild installs the mapper that matches the text
+            // readers see.
+            prior_projection()
         } else {
             // Self-file (rune module or plain TS-family script; unknown
             // extension → `None`). The prelude offset is content-independent;
@@ -504,6 +517,87 @@ impl DocumentRegistry {
     /// the projection discriminant).
     pub fn get_projection(&self, uri: &Uri) -> Option<DocumentProviderProjection> {
         self.documents.get(uri.as_str())?.projection.clone()
+    }
+
+    /// Recover a carrier that has NO provider projection: compile its IDE
+    /// surface, then install the projection from it.
+    ///
+    /// A document with no projection fails closed downstream — every
+    /// provider-backed feature refuses it, and the foreground repair
+    /// deliberately declines to build one (that path loads the dependency
+    /// closure, so it must not run for a carrier whose compile is failing). So
+    /// recovery has to happen on the paths that already compile for open
+    /// documents, and it has to happen on ALL of them: the debounced
+    /// coordinator tick returns early on a provider-less route or before a
+    /// resolver snapshot is published, and the pending-snapshot drain compiles
+    /// on a different path entirely.
+    ///
+    /// Bounded by the MISSING projection, never by keystroke: it is a no-op the
+    /// moment one exists, and the document-commit path never calls it.
+    pub fn recover_missing_carrier_projection(&self, canonical_id: &str) {
+        let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
+            return;
+        };
+        if self
+            .documents
+            .get(uri.as_str())
+            .is_none_or(|document| document.projection.is_some())
+        {
+            return;
+        }
+        // `ensure_ide_compiled` answers `Ok(false)` for a non-carrier without
+        // compiling, so this costs nothing for a document that has no IDE
+        // surface to build.
+        let profile = self.tsx_profile.read().clone();
+        if !self
+            .host
+            .ensure_ide_compiled(canonical_id, &profile)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.install_missing_carrier_projection(canonical_id);
+    }
+
+    /// Install a carrier's provider projection from the host's CACHED IDE
+    /// surface, but only when the document has none.
+    ///
+    /// The document commit does not compile, so a carrier whose open-time
+    /// compile failed carries no projection — and a document with no projection
+    /// fails closed downstream (`capture_provider_request_surface` returns
+    /// `None`, and `current_file_needs_inline_type_provider_sync` reads that
+    /// absence as "not a carrier, nothing to repair"). The debounced coordinator
+    /// already compiles the IDE surface once per quiet window; this turns that
+    /// compile into the projection the document was missing, at no extra compile
+    /// and on no foreground request path.
+    ///
+    /// Reads the host cache only — it never compiles — and leaves a document
+    /// that already has a projection untouched, so it cannot disturb the
+    /// steady-state carry.
+    pub fn install_missing_carrier_projection(&self, canonical_id: &str) {
+        let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
+            return;
+        };
+        let uri_str = uri.as_str().to_string();
+        if self
+            .documents
+            .get(&uri_str)
+            .is_none_or(|document| document.projection.is_some())
+        {
+            return;
+        }
+        let Some(mapper) = self
+            .host
+            .get_ide(canonical_id, &self.tsx_profile.read())
+            .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
+        else {
+            return;
+        };
+        if let Some(mut entry) = self.documents.get_mut(&uri_str) {
+            if entry.projection.is_none() {
+                entry.projection = Some(DocumentProviderProjection::carrier_ide(mapper));
+            }
+        }
     }
 
     /// Get the unified source↔provider position mapper for a document, ready
@@ -739,10 +833,18 @@ impl DocumentRegistry {
             return Ok(None);
         };
 
-        // Get IDE output (TSX/JSX for template type checking)
+        // Get IDE output (TSX/JSX for template type checking).
+        //
+        // `get_ide` is a pure cached read, and the document commit deliberately
+        // does not compile — so this reader, whose whole purpose is to hand the
+        // caller the current TSX, must drive the compile itself rather than
+        // report the surface missing. An `Err` (a genuine compile failure) leaves
+        // `ide` `None` exactly as before.
+        let profile = self.tsx_profile.read().clone();
+        let _ = self.host.ensure_ide_compiled(&canonical_id, &profile);
         let ide = self
             .host
-            .get_ide(&canonical_id, &self.tsx_profile.read())
+            .get_ide(&canonical_id, &profile)
             .map(|t| CodeBlock {
                 code: t.code.to_string(),
                 source_map: t.source_map.map(|m| m.to_string()),
@@ -1382,26 +1484,30 @@ mod tests {
         );
     }
 
-    /// A document EDIT REBUILDS the position-mapper `Arc` rather than mutating
-    /// the existing pointee: after `did_change` recompiles a carrier whose TSX
-    /// changed, `get_position_mapper` hands out an `Arc` that is a FRESH
-    /// allocation — NOT `Arc::ptr_eq` to the pre-edit handle.
+    /// A mapper REBUILD replaces the position-mapper `Arc` rather than mutating
+    /// the existing pointee: after `recompile_and_refresh_mapper` recompiles a
+    /// carrier whose TSX changed, `get_position_mapper` hands out an `Arc` that
+    /// is a FRESH allocation — NOT `Arc::ptr_eq` to the pre-rebuild handle.
     ///
-    /// This is the companion to the read-path share test: within one document
-    /// version the `Arc` is shared (cheap handle clones), but ACROSS an edit the
-    /// projection is REPLACED whole (`rebuild_carrier` wraps a fresh
-    /// `PositionMapper` in a new `Arc::new`, then overwrites `entry.projection`).
+    /// This is the companion to the read-path share test: within one projection
+    /// the `Arc` is shared (cheap handle clones), but a rebuild REPLACES it whole
+    /// (a fresh `PositionMapper` in a new `Arc::new`, overwriting
+    /// `entry.projection`).
     ///
-    /// Discriminating: the pre-edit and post-edit handles are captured and
-    /// compared by allocation address. If a future refactor mutated the mapper
-    /// in place behind the SAME `Arc` (e.g. `Arc::get_mut` to overwrite the
-    /// source map + lookup tables) instead of installing a fresh `Arc`, the two
-    /// handles would alias and `Arc::ptr_eq` would be TRUE — failing this
-    /// assertion. The edit changes the `<script>` body so the recompiled TSX
-    /// genuinely differs (`update.changed`), forcing the rebuild branch rather
-    /// than the keep-prior-projection fallback.
+    /// The rebuild is driven explicitly because the document COMMIT no longer
+    /// compiles — see `committing_an_edit_does_not_compile_the_ide_tsx`. The
+    /// second half asserts that carry-forward directly, so the pair pins both
+    /// halves of the split: the commit keeps the existing handle, and the
+    /// demand-time rebuild replaces it.
+    ///
+    /// Discriminating: the handles are captured before and after and compared by
+    /// allocation address. A refactor that mutated the mapper in place behind the
+    /// SAME `Arc` (e.g. `Arc::get_mut` to overwrite the source map + lookup
+    /// tables) would alias, `std::ptr::eq` would be TRUE, and this fails. The
+    /// edit changes the `<script>` body so the recompiled TSX genuinely differs,
+    /// forcing the rebuild branch rather than the keep-prior-projection fallback.
     #[test]
-    fn did_change_installs_a_fresh_position_mapper_arc() {
+    fn a_mapper_rebuild_installs_a_fresh_position_mapper_arc() {
         let host = Arc::new(verter_session::VerterHost::new_standalone(
             verter_session::HostConfig::default(),
         ));
@@ -1424,27 +1530,218 @@ mod tests {
         };
 
         // Edit the document: change the script body so the recompiled IDE TSX
-        // genuinely differs (drives `update.changed` → the rebuild branch).
+        // genuinely differs.
         let _ = registry.did_change(
             &uri,
             2,
             "<script lang=\"ts\">let total = 100; let extra = 1;</script>\n<div>{total}</div>",
         );
 
-        // The post-edit read must hand out a DIFFERENT allocation: the rebuild
-        // installed a fresh `Arc`, it did not mutate the old pointee in place.
+        // The COMMIT carries the existing handle forward untouched — it owes the
+        // text, not the TSX.
+        let committed = registry
+            .get_position_mapper(&uri)
+            .expect("the commit must CARRY the mapper, never drop it");
+        let ProviderPositionMapper::SourceMap(committed_arc) = &committed else {
+            panic!("a .svelte carrier mapper must remain the SourceMap projection");
+        };
+        assert!(
+            std::ptr::eq(before_arc.as_ref(), committed_arc.as_ref()),
+            "the document commit must carry the SAME mapper allocation forward: \
+             rebuilding it there is the per-keystroke compile issue #96 is about, and \
+             dropping it strands the document with no projection at all"
+        );
+
+        // The DEMAND-time rebuild is what replaces it, with a fresh allocation.
+        registry
+            .recompile_and_refresh_mapper(&uri)
+            .expect("the edited carrier must recompile on demand");
         let after = registry
             .get_position_mapper(&uri)
-            .expect("a .svelte carrier must expose a source-map mapper after the edit");
+            .expect("a .svelte carrier must expose a source-map mapper after the rebuild");
         let ProviderPositionMapper::SourceMap(after_arc) = &after else {
             panic!("a .svelte carrier mapper must remain the SourceMap projection");
         };
 
         assert!(
             !std::ptr::eq(before_arc.as_ref(), after_arc.as_ref()),
-            "a doc edit must REPLACE the position-mapper Arc with a fresh \
-             allocation (rebuild installs a new Arc; it must not mutate the \
-             pre-edit pointee in place)"
+            "a mapper rebuild must REPLACE the position-mapper Arc with a fresh \
+             allocation (it must not mutate the pre-rebuild pointee in place)"
+        );
+    }
+
+    /// Cold compile RUNS this host has started — the feature-independent rail
+    /// bumped once per cold run past the warm-hit consult.
+    ///
+    /// It must be this rail and not the post-success compile tick: a compile
+    /// that FAILS returns before that tick, so a burst of malformed revisions
+    /// could run a cold compile per keystroke while a tick-based counter
+    /// reported zero.
+    fn cold_compile_runs(host: &verter_session::VerterHost) -> u64 {
+        host.provenance_snapshot().compile_cold_runs
+    }
+
+    fn carrier_revision(marker: &str) -> String {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    }
+
+    /// A commit owes the document's TEXT, not its IDE TSX.
+    ///
+    /// The compile runs inside the server's global document-commit mutex on the
+    /// serve thread, where `tower-lsp-server` polls notification handlers inline
+    /// and a handler runs from entry through commit without pending — so a
+    /// per-keystroke compile there is a strictly serialized queue as long as the
+    /// typing burst (https://github.com/pikax/verter/issues/96). Every consumer
+    /// that needs the TSX drives `ensure_ide_compiled` itself.
+    #[test]
+    fn committing_an_edit_does_not_compile_the_ide_tsx() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri = "file:///x/Committed.vue".parse().expect("uri");
+        let canonical_id = uri_to_canonical_id(&uri);
+
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: carrier_revision("v1"),
+        });
+        assert!(
+            registry
+                .get(&uri)
+                .and_then(|document| document.projection.clone())
+                .is_some(),
+            "precondition: the OPEN must establish the carrier's projection, so the \
+             edits below are steady-state commits"
+        );
+
+        let before = cold_compile_runs(&host);
+        for (version, marker) in [(2, "v2"), (3, "v3"), (4, "v4")] {
+            let result = registry.did_change(&uri, version, &carrier_revision(marker));
+            assert!(result.changed, "revision {marker} must commit its text");
+        }
+        let compiles = cold_compile_runs(&host) - before;
+
+        assert_eq!(
+            compiles, 0,
+            "three committed edits started {compiles} cold compile run(s); the commit \
+             path must not compile at all"
+        );
+        assert_eq!(
+            registry
+                .get(&uri)
+                .map(|document| document.source.to_string())
+                .as_deref(),
+            Some(carrier_revision("v4").as_str()),
+            "the registry must hold the newest text — only the DERIVED TSX is deferred"
+        );
+        assert!(
+            registry
+                .get(&uri)
+                .and_then(|document| document.projection.clone())
+                .is_some(),
+            "the prior position mapper must be CARRIED OVER, not dropped"
+        );
+
+        // Positive control: the rail is live and the deferred work is genuinely
+        // still owed.
+        let before_control = cold_compile_runs(&host);
+        let profile = registry.tsx_profile.read().clone();
+        assert!(
+            host.ensure_ide_compiled(&canonical_id, &profile)
+                .expect("the carrier must have an IDE surface"),
+            "a .vue carrier projects an IDE surface"
+        );
+        assert!(
+            cold_compile_runs(&host) > before_control,
+            "compiling the committed revision must start a cold run — otherwise the \
+             zero above is vacuous"
+        );
+    }
+
+    /// The case issue #96 is actually about: a carrier with NO projection, edited
+    /// repeatedly with revisions that do not compile.
+    ///
+    /// A commit that compiled "only until the first projection exists" is not
+    /// bounded by document. A failed compile installs no projection, so the next
+    /// edit compiles again — and a malformed intermediate revision is the
+    /// ordinary state of a file being typed. That reinstates the serialized
+    /// per-keystroke queue exactly.
+    ///
+    /// Measured on the COLD-RUN rail rather than the post-success compile tick,
+    /// which a failing compile never reaches: on that tick this burst reads zero
+    /// whether it compiled twelve times or none.
+    #[test]
+    fn repeated_invalid_edits_on_a_projectionless_carrier_never_compile() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri = "file:///x/Invalid.vue".parse().expect("uri");
+
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+        });
+        assert!(
+            registry
+                .get(&uri)
+                .and_then(|document| document.projection.clone())
+                .is_none(),
+            "precondition: this fixture must fail to project, or the projection-less \
+             path under test is never entered"
+        );
+
+        // Keep typing, every revision still malformed — the normal mid-edit state.
+        const BURST: usize = 12;
+        let before = cold_compile_runs(&host);
+        for index in 0..BURST {
+            let _ = registry.did_change(
+                &uri,
+                2 + index as i32,
+                &format!("<script setup lang=\"ts\">\nconst broken{index} = (((\n"),
+            );
+        }
+        let compiles = cold_compile_runs(&host) - before;
+
+        assert_eq!(
+            compiles, 0,
+            "{BURST} malformed edits on a projection-less carrier started {compiles} \
+             cold compile run(s). A commit that compiles while no projection exists \
+             never stops: the compile fails, no projection is installed, and the next \
+             keystroke repeats it — the serialized queue of issue #96, reachable by \
+             ordinary typing"
+        );
+
+        // The projection is still missing — which is exactly why recovery belongs
+        // to the paths that already compile for open documents. See
+        // `the_coordinator_installs_a_projection_the_failed_open_compile_never_built`
+        // and `a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot`.
+        assert!(
+            registry
+                .get(&uri)
+                .and_then(|document| document.projection.clone())
+                .is_none(),
+            "the fixture must still have no projection, or this asserts nothing about \
+             the projection-less path"
+        );
+
+        // Positive control: the rail moves for this document when a compile is
+        // actually demanded, so the zero above is not a dead counter.
+        let before_control = cold_compile_runs(&host);
+        let _ = registry.did_change(&uri, 99, &carrier_revision("repaired"));
+        let _ = registry.recompile_and_refresh_mapper(&uri);
+        assert!(
+            cold_compile_runs(&host) > before_control,
+            "the demand-side rebuild must start a cold run — otherwise the zero above \
+             is vacuous"
         );
     }
 }

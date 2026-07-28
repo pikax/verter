@@ -4150,6 +4150,7 @@ async fn sync_coordinator_channel_coalesces_signals_per_document() {
         handle.signal(
             "C:/project/src/App.vue".to_string(),
             "file:///C:/project/src/App.vue".to_string(),
+            std::time::Instant::now(),
         );
     }
 

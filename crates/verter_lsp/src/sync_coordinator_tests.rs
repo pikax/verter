@@ -57,6 +57,7 @@ async fn sync_coordinator_coalesces_rapid_changes() {
         handle.signal(
             "C:/project/src/App.vue".to_string(),
             format!("file:///C:/project/src/App.vue?v={version}"),
+            std::time::Instant::now(),
         );
     }
 
@@ -70,39 +71,6 @@ async fn sync_coordinator_coalesces_rapid_changes() {
     assert_eq!(
         pending.get("C:/project/src/App.vue").map(String::as_str),
         Some("file:///C:/project/src/App.vue?v=9")
-    );
-}
-
-#[tokio::test]
-async fn coordinator_debounces_to_single_sync() {
-    // Test the actual debounce logic using an in-process coordinator.
-    // We use a mock deps that tracks sync calls via a shared counter.
-
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
-
-    // Simulate: 10 signals at 10ms intervals for the same file
-    let mut last_change = Instant::now();
-    for _ in 0..10 {
-        last_change = Instant::now();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    // At this point, the last change was just now.
-    // The debounce should NOT have fired yet.
-    let elapsed = Instant::now().duration_since(last_change);
-    assert!(
-        elapsed < debounce,
-        "debounce should not fire during rapid changes (elapsed: {:?})",
-        elapsed
-    );
-
-    // Wait for the debounce interval to pass
-    tokio::time::sleep(debounce).await;
-    let elapsed = Instant::now().duration_since(last_change);
-    assert!(
-        elapsed >= debounce,
-        "debounce should fire after silence (elapsed: {:?})",
-        elapsed
     );
 }
 
@@ -2050,7 +2018,11 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     };
 
     let handle = spawn_sync_coordinator(deps);
-    handle.signal(canonical_id.clone(), uri.as_str().to_string());
+    handle.signal(
+        canonical_id.clone(),
+        uri.as_str().to_string(),
+        std::time::Instant::now(),
+    );
 
     // Debounce is 300ms; poll for the publish's recomputed verter cache entry.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -2367,4 +2339,649 @@ async fn coordinator_publishes_carrier_provider_unavailable_for_an_unpreparable_
         !unavailable(&recovered),
         "the explanation must clear once the surface can be prepared, got {recovered:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reproduction: https://github.com/pikax/verter/issues/96
+//
+// `coordinator_loop` stamps the start of a signal's debounce quiet window with
+// `Instant::now()` taken at the moment it DRAINS the inbox (the
+// `wake = wake_rx.recv()` arm of the select), not at the moment
+// `SyncCoordinatorHandle::signal` deposited that signal. Every millisecond a
+// signal spends waiting in the inbox — because `did_change` handlers are
+// serialized on `did_change_mutex` and each one commits its document before it
+// signals, and because the coordinator's own `sync_file(..).await` is inline in
+// the loop and blocks the drain — is therefore charged to the user as fresh
+// quiet time, and the full 300ms window restarts from zero no matter how long
+// the file has actually been quiet.
+//
+// These tests are deliberately structured so that NO assertion depends on how
+// fast this machine is:
+//
+//   * The stall is produced by `std::thread::sleep` on the single-threaded test
+//     runtime. That blocks the one worker thread, so the spawned coordinator
+//     task provably cannot be polled during it — the drain is late by
+//     construction, not by scheduling luck.
+//   * The failing assertion is "a file quiet for 4x the debounce interval was
+//     NOT dispatched on the coordinator's first look". On `main` this cannot
+//     pass: the drain schedules `sleep_until(drain_instant + 300ms)`, which is
+//     300ms in the future. Machine load can only push that later.
+//   * The passing direction is equally robust: once the window is measured from
+//     signal receipt, the file's window has demonstrably elapsed (real time
+//     only ever grows), so it dispatches on the first look.
+
+/// Build the minimum deps for driving a real `coordinator_loop` with no
+/// provider I/O at all. `project_sync: None` makes `sync_file` return at its
+/// first line — so nothing calls `tokio::task::block_in_place`, which would
+/// panic on the current-thread runtime these tests need — and
+/// `type_provider: None` keeps the publish half out of the picture.
+///
+/// The observable is `needs_provider_sync`: the coordinator's deadline arm
+/// removes the canonical id from that set exactly when the debounce fires for
+/// it, so membership is a precise "has this file been dispatched yet" probe.
+fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let needs_provider_sync = Arc::new(DashSet::new());
+    let deps = SyncCoordinatorDeps {
+        documents,
+        project_sync: None,
+        needs_provider_sync: Arc::clone(&needs_provider_sync),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    };
+    (deps, needs_provider_sync)
+}
+
+/// A settle budget far below `DEBOUNCE_MS`, so letting the coordinator run can
+/// never be mistaken for the debounce elapsing.
+const SETTLE_MS: u64 = 20;
+
+/// Hand the runtime to the coordinator long enough for it to drain its inbox
+/// and re-arm its timer. The `sleep` parks the time driver (a `yield_now` loop
+/// alone never does, so an already-elapsed `sleep_until` would not fire); the
+/// yields then let the loop run its remaining iterations.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// REPRODUCES https://github.com/pikax/verter/issues/96.
+///
+/// EXPECTED TO FAIL on `main`. It passes once the quiet window is measured
+/// from the instant `signal()` deposited the signal instead of the instant the
+/// coordinator got around to draining it.
+///
+/// `App.vue` is signalled and then sits in the inbox for 4x the debounce
+/// interval while the runtime thread is blocked — exactly the shape of the
+/// `did_change` backlog in the issue, where 50 serialized handlers push the
+/// coordinator's first look seconds past the last keystroke. By the time the
+/// coordinator looks, the file has been quiet for far longer than the quiet
+/// window, so the sync is already overdue and must fire on that first look.
+#[tokio::test]
+async fn debounce_window_restarts_at_inbox_drain_instead_of_signal_receipt() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let quiet_id = "/workspace/src/App.vue".to_string();
+    let just_typed_id = "/workspace/src/Sidebar.vue".to_string();
+    needs_provider_sync.insert(quiet_id.clone());
+    needs_provider_sync.insert(just_typed_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+
+    // The keystroke for App.vue lands here. Nothing has awaited yet, so the
+    // spawned coordinator task has not been polled and the signal is sitting
+    // in the inbox, unseen.
+    let signalled_at = Instant::now();
+    handle.signal(
+        quiet_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        signalled_at,
+    );
+
+    // The backlog. `std::thread::sleep` on the current-thread runtime blocks
+    // the ONE worker, so the coordinator provably cannot drain during it.
+    let backlog = Duration::from_millis(DEBOUNCE_MS * 4);
+    std::thread::sleep(backlog);
+    let inbox_wait = signalled_at.elapsed();
+    assert!(
+        inbox_wait >= backlog,
+        "test setup: the signal must have waited at least {backlog:?} in the inbox, waited {inbox_wait:?}"
+    );
+
+    // A second file is signalled immediately before the drain. It has NOT been
+    // quiet and must still be debounced — it is what keeps the fix honest.
+    handle.signal(
+        just_typed_id.clone(),
+        "file:///workspace/src/Sidebar.vue".to_string(),
+        std::time::Instant::now(),
+    );
+
+    // Hand the coordinator the thread. Both signals drain in one batch.
+    settle().await;
+
+    assert!(
+        !needs_provider_sync.contains(&quiet_id),
+        "issue #96: {quiet_id} was signalled {inbox_wait:?} ago — {}x the \
+         {DEBOUNCE_MS}ms debounce interval — and has been quiet that entire \
+         time, so its sync is overdue and must fire on the coordinator's first \
+         look at the inbox. It has not fired. The coordinator stamped the quiet \
+         window with the instant it DRAINED the inbox instead of the instant \
+         the signal was received, discarding the {inbox_wait:?} the signal \
+         already waited and restarting the full {DEBOUNCE_MS}ms wait.",
+        inbox_wait.as_millis() / u128::from(DEBOUNCE_MS)
+    );
+    assert!(
+        needs_provider_sync.contains(&just_typed_id),
+        "{just_typed_id} was signalled immediately before the drain and has not \
+         been quiet for {DEBOUNCE_MS}ms — measuring the window from signal \
+         receipt must not turn the debounce into an unconditional immediate \
+         dispatch"
+    );
+}
+
+/// Positive control for the fix to #96: the debounce must still debounce.
+/// Passes on `main` and must keep passing after the fix — it is what fails if
+/// the fix degenerates into "dispatch on every drain".
+#[tokio::test]
+async fn debounce_still_waits_for_quiet_before_dispatching() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let canonical_id = "/workspace/src/App.vue".to_string();
+    needs_provider_sync.insert(canonical_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+    handle.signal(
+        canonical_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        std::time::Instant::now(),
+    );
+
+    // Well inside the quiet window.
+    settle().await;
+    assert!(
+        needs_provider_sync.contains(&canonical_id),
+        "a file quiet for only ~{SETTLE_MS}ms must not have synced yet — the \
+         {DEBOUNCE_MS}ms debounce is what stops rapid typing from flooding the \
+         type provider"
+    );
+
+    // Past it. `tokio::time::sleep` (not `std::thread::sleep`) so the
+    // coordinator keeps the thread and its timer can fire.
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+    settle().await;
+    assert!(
+        !needs_provider_sync.contains(&canonical_id),
+        "a file quiet for longer than {DEBOUNCE_MS}ms must have synced"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The other half of the fix for https://github.com/pikax/verter/issues/96.
+//
+// Measuring the quiet window from RECEIPT is what makes an overdue sync fire
+// promptly, but on its own it converts the stall into a flood: with 50
+// `did_change` handlers serialized behind the global commit mutex, each one
+// deposits a signal whose receipt instant is ALREADY older than the debounce,
+// so the coordinator would dispatch once per handler — one provider sync per
+// keystroke, exactly what `sync_coordinator`'s module documentation says the
+// debounce exists to prevent.
+//
+// A change is therefore not merely "signalled at time T": it is IN FLIGHT from
+// the moment its handler is entered until that handler is done. A document with
+// a change in flight is not quiet, whatever its last receipt says.
+
+/// The coordinator PARKS on a gated canonical id — it arms no timer for it at
+/// all — so the ticket release is the only thing that can wake it. A handler
+/// that returns WITHOUT signalling (a virtual document, a style-only edit) must
+/// therefore still wake it, or an already-overdue sync waits forever.
+#[tokio::test]
+async fn releasing_a_ticket_without_signalling_wakes_the_gated_coordinator() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let canonical_id = "/workspace/src/App.vue".to_string();
+    needs_provider_sync.insert(canonical_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+    let signalled_at = Instant::now();
+    handle.signal(
+        canonical_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        signalled_at,
+    );
+
+    // Make the receipt genuinely overdue. `std::thread::sleep` on the
+    // single-threaded runtime blocks the one worker, so the coordinator provably
+    // cannot look at the inbox during it.
+    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 4));
+
+    // A later change arrives and takes a ticket, then its handler returns
+    // without ever signalling.
+    let ticket = handle.change_received(canonical_id.clone());
+    settle().await;
+    assert!(
+        needs_provider_sync.contains(&canonical_id),
+        "a document with a change in flight is not quiet, however overdue its \
+         last receipt is — dispatching here is the per-keystroke sync flood"
+    );
+
+    drop(ticket);
+    settle().await;
+    assert!(
+        !needs_provider_sync.contains(&canonical_id),
+        "releasing the last in-flight ticket must wake the coordinator: it holds \
+         no armed timer for a gated canonical id, so without that wake the \
+         overdue sync never fires at all"
+    );
+}
+
+/// Count the provider file-sync calls a dispatched `sync_file` delivered for
+/// the carrier `canonical_id`. Derived from the mock's recorded call log, never
+/// assumed.
+///
+/// Matched by prefix because a carrier's provider companions live in the
+/// source's own namespace (`{canonical}.tsx`, `{carrier}.ts`), so the prefix
+/// names exactly this carrier's surfaces and nothing else.
+fn provider_syncs_for(provider: &MockTypeProvider, canonical_id: &str) -> usize {
+    provider
+        .calls()
+        .iter()
+        .filter(|call| match call {
+            MockCall::OpenFile { path, .. }
+            | MockCall::OpenFileBackground { path, .. }
+            | MockCall::LoadFile { path, .. }
+            | MockCall::UpdateFile { path, .. } => path.starts_with(canonical_id),
+            _ => false,
+        })
+        .count()
+}
+
+/// PROPERTY (b) for https://github.com/pikax/verter/issues/96: a backlog of
+/// received changes still collapses to ONE provider sync.
+///
+/// This is what fails if the receipt-time window ships without the in-flight
+/// gate. Each handler in a backlog deposits a signal whose receipt is already
+/// older than the debounce, so an ungated coordinator dispatches on its very
+/// next look — once per handler, for the whole backlog, each dispatch
+/// compiling and pushing a fresh TSX buffer.
+///
+/// No assertion is a wall-clock threshold, and none is a hardcoded count:
+///
+///   * The per-dispatch cost is MEASURED first, from a single change, as a
+///     pre/post delta on the mock's recorded call log.
+///   * The burst assertion is `== that measured unit`. A storm shows up as
+///     dispatches DURING the burst, which are already counted before the final
+///     wait begins — so waiting longer can only make a storm more visible,
+///     never less.
+///   * `Sidebar.vue` is an UNGATED document with an equally overdue receipt. It
+///     must sync during the burst, which is what proves the coordinator was
+///     awake and dispatching the whole time — so `App.vue` staying at zero is
+///     the gate working, not the coordinator merely never being scheduled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
+    let (documents, _states, provider, canonical_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let revision = |marker: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst msg = '{marker}'\n</script>\n\
+             <template><div>{{{{ msg }}}}</div></template>\n"
+        )
+    };
+
+    // The ungated liveness control: a second open carrier under the same
+    // workspace root, so it resolves the same owner and takes the same
+    // `sync_file` path.
+    let control_uri: Uri = "file:///workspace/src/Sidebar.vue"
+        .parse()
+        .expect("control uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: control_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: revision("sidebar"),
+    });
+    let control_id = documents
+        .get_canonical_id(&control_uri)
+        .expect("the control document must be open");
+
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    // The control's receipt, taken here so it ages by REAL elapsed time across
+    // the calibration below. `Instant::now() - d` would be simpler but panics on
+    // underflow on a machine that booted moments ago.
+    let control_received_at = Instant::now();
+
+    // ---- Calibrate: what does ONE dispatched sync of this document cost?
+    let baseline = provider_syncs_for(&provider, &canonical_id);
+    needs_provider_sync.insert(canonical_id.clone());
+    {
+        let change = handle.change_received(canonical_id.clone());
+        let _ = documents.did_change(&uri, 2, &revision("v2"));
+        change.signal(uri.as_str().to_string());
+    }
+    let unit = wait_for_provider_syncs(&provider, &canonical_id, baseline + 1).await - baseline;
+    assert!(
+        unit > 0,
+        "calibration must observe a real dispatch, otherwise the burst assertion \
+         below compares zero against zero and cannot fail"
+    );
+
+    // ---- The backlog. Every handler is entered (ticket taken) before any of
+    // them finishes, which is the shape a typing burst produces: the tickets
+    // are the changes the server has RECEIVED and not yet processed.
+    const BURST: usize = 12;
+    let burst_baseline = provider_syncs_for(&provider, &canonical_id);
+    let control_baseline = provider_syncs_for(&provider, &control_id);
+    let mut tickets: Vec<ChangeInFlight> = (0..BURST)
+        .map(|_| handle.change_received(canonical_id.clone()))
+        .collect();
+
+    // The ungated control is signalled with an equally overdue receipt. The
+    // calibration above sleeps for at least `DEBOUNCE_MS * 2` inside
+    // `wait_for_provider_syncs`, so this receipt is already expired; load can
+    // only make it more so.
+    let control_age = control_received_at.elapsed();
+    assert!(
+        control_age >= Duration::from_millis(DEBOUNCE_MS),
+        "test setup: the control's receipt must already be overdue, aged {control_age:?}"
+    );
+    needs_provider_sync.insert(control_id.clone());
+    handle.signal(
+        control_id.clone(),
+        control_uri.as_str().to_string(),
+        control_received_at,
+    );
+
+    // Each handler commits and signals in turn, yielding the runtime in between
+    // exactly as a serialized backlog does.
+    for (index, ticket) in tickets.iter().enumerate() {
+        let version = 3 + index as i32;
+        needs_provider_sync.insert(canonical_id.clone());
+        let _ = documents.did_change(&uri, version, &revision(&format!("v{version}")));
+        ticket.signal(uri.as_str().to_string());
+        settle().await;
+    }
+
+    let control_during_burst =
+        wait_for_provider_syncs(&provider, &control_id, control_baseline + 1).await
+            - control_baseline;
+    assert!(
+        control_during_burst > 0,
+        "the ungated control must sync while the backlog is in flight — without \
+         it, App.vue's zero below would prove nothing about the gate"
+    );
+    let during_burst = provider_syncs_for(&provider, &canonical_id) - burst_baseline;
+    assert_eq!(
+        during_burst, 0,
+        "no sync may dispatch for a document whose changes are still in flight. \
+         {during_burst} dispatched: measuring the quiet window from receipt \
+         without the in-flight gate makes every backlogged handler's already-\
+         expired receipt fire its own sync — one provider sync per keystroke"
+    );
+
+    // ---- The backlog drains. Exactly one sync, for the newest revision.
+    tickets.clear();
+    let after_burst = wait_for_provider_syncs(&provider, &canonical_id, burst_baseline + unit)
+        .await
+        - burst_baseline;
+    assert_eq!(
+        after_burst, unit,
+        "a backlog of {BURST} received changes must cost exactly what ONE change \
+         costs ({unit} provider file-sync call(s)), not {BURST}x it"
+    );
+    assert!(
+        documents
+            .host()
+            .get_ide(&canonical_id, &documents.tsx_profile.read())
+            .is_some_and(|ide| ide.code.contains(&format!("'v{}'", 2 + BURST))),
+        "the one sync that does run must carry the NEWEST revision — coalescing \
+         that publishes a superseded buffer is worse than the flood it replaced"
+    );
+}
+
+/// Poll until `provider` has recorded at least `want` file-sync calls for
+/// `canonical_id`, then keep watching for a further debounce interval so an extra
+/// dispatch cannot hide behind the return. Bounded by a generous deadline; a
+/// caller asserts on the returned count, never on how long this took.
+async fn wait_for_provider_syncs(
+    provider: &MockTypeProvider,
+    canonical_id: &str,
+    want: usize,
+) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while provider_syncs_for(provider, canonical_id) < want && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 2)).await;
+    settle().await;
+    provider_syncs_for(provider, canonical_id)
+}
+
+/// LSP notification handlers are dispatched concurrently, so an OLDER change
+/// can deposit its signal after a newer one has already deposited its own. The
+/// quiet window must take the LATEST receipt, never simply the last deposit —
+/// otherwise a straggler walks the window backwards into the past and fires a
+/// sync while the user is still typing, which is the flood the debounce exists
+/// to prevent.
+///
+/// Both coalescing points are covered: the inbox (`signal`, when the two
+/// deposits land between the same pair of drains) and the coordinator's pending
+/// map (the drain arm, when they land in different drains).
+#[tokio::test]
+async fn a_late_arriving_older_receipt_does_not_walk_the_quiet_window_backwards() {
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let same_drain = "/workspace/src/SameDrain.vue".to_string();
+    let later_drain = "/workspace/src/LaterDrain.vue".to_string();
+    needs_provider_sync.insert(same_drain.clone());
+    needs_provider_sync.insert(later_drain.clone());
+
+    // An instant that is genuinely older than the debounce window. The blocking
+    // sleep runs before the coordinator is spawned, so nothing is starved.
+    let stale = Instant::now();
+    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 4));
+
+    let handle = spawn_sync_coordinator(deps);
+
+    // Case A — both deposits land before the coordinator's first drain, so the
+    // INBOX coalesces them.
+    handle.signal(
+        same_drain.clone(),
+        "file:///workspace/src/SameDrain.vue".to_string(),
+        Instant::now(),
+    );
+    handle.signal(
+        same_drain.clone(),
+        "file:///workspace/src/SameDrain.vue".to_string(),
+        stale,
+    );
+
+    // Case B — the newer deposit is drained first, so the coordinator's PENDING
+    // map is what has to reject the straggler.
+    handle.signal(
+        later_drain.clone(),
+        "file:///workspace/src/LaterDrain.vue".to_string(),
+        Instant::now(),
+    );
+    settle().await;
+    handle.signal(
+        later_drain.clone(),
+        "file:///workspace/src/LaterDrain.vue".to_string(),
+        stale,
+    );
+    settle().await;
+
+    assert!(
+        needs_provider_sync.contains(&same_drain),
+        "the inbox must keep the LATEST receipt: a straggler carrying a receipt \
+         {}x the {DEBOUNCE_MS}ms window old must not restart the window in the \
+         past and dispatch a sync the user's newest keystroke has not earned",
+        (DEBOUNCE_MS * 4) / DEBOUNCE_MS
+    );
+    assert!(
+        needs_provider_sync.contains(&later_drain),
+        "the coordinator's pending map must keep the LATEST receipt for the same \
+         reason — the straggler arrived in a later drain, but it is still older"
+    );
+}
+
+/// A carrier whose open-time compile FAILED has no provider projection, and a
+/// document with no projection fails closed downstream forever
+/// (`capture_provider_request_surface` returns `None`, and
+/// `current_file_needs_inline_type_provider_sync` reads that absence as "not a
+/// carrier, nothing to repair").
+///
+/// The document commit deliberately does not compile — doing so per keystroke is
+/// https://github.com/pikax/verter/issues/96, and a compile that FAILS installs
+/// no projection, so "compile until one exists" never terminates on a file being
+/// typed. Recovery therefore belongs to the debounced coordinator, which already
+/// compiles the IDE surface once per quiet window.
+///
+/// Drives the real `sync_file`, so it fails if the install is not wired into it —
+/// not merely if the method is wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_coordinator_installs_a_projection_the_failed_open_compile_never_built() {
+    let (documents, _states, _provider, _canonical_id, _ide_path, deps) =
+        make_carrier_diagnostics_fixture().await;
+    let uri: Uri = "file:///workspace/src/Recovered.vue".parse().expect("uri");
+
+    // Open malformed: no IDE surface, so no projection.
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+    });
+    let recovered_id = documents
+        .get_canonical_id(&uri)
+        .expect("the open document has a canonical id");
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less, or \
+         this test exercises nothing"
+    );
+
+    // The user fixes it. The commit stores the text and compiles nothing, so the
+    // document is STILL projection-less — the state the coordinator must recover.
+    let _ = documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+         <template><div>{{ fixed }}</div></template>\n",
+    );
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "the commit must not have compiled — if it did, this asserts nothing about \
+         the coordinator and the per-keystroke compile is back"
+    );
+
+    sync_file(&deps, &recovered_id, uri.as_str()).await;
+
+    assert!(
+        documents.get_projection(&uri).is_some(),
+        "the debounced sync must install the projection the failed open never built; \
+         without it the document fails closed downstream forever"
+    );
+}
+
+/// Recovery must not depend on the provider-sync arm being reachable.
+///
+/// `sync_file` returns early on a provider-less route (`project_sync: None`) and
+/// again before a resolver snapshot is published — the ordinary state of a
+/// workspace that is still settling, and of every editor-owned-tsserver /
+/// verter-only session. A carrier whose open-time compile failed has no provider
+/// projection, the commit never compiles one, and the foreground repair declines
+/// projection-less documents by design, so if the debounced tick also skips it
+/// the document is stranded with NO IDE features at all — worse than the latency
+/// bug this change is about.
+///
+/// Both early-return paths are covered here because they are different gates:
+/// the previous fixture always supplied a provider AND a published VFS, so it
+/// could not reach either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
+    let fixed = "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+                 <template><div>{{ fixed }}</div></template>\n";
+
+    for (case, deps_for) in [
+        (
+            "no provider (project_sync: None)",
+            0usize, // provider-less: deps built below with project_sync None
+        ),
+        ("no published resolver snapshot", 1usize),
+    ] {
+        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+            HostConfig::default(),
+        ))));
+        let uri: Uri = "file:///workspace/src/Stranded.vue".parse().expect("uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the open document has a canonical id");
+        assert!(
+            documents.get_projection(&uri).is_none(),
+            "{case} precondition: the malformed open must leave the carrier \
+             projection-less"
+        );
+
+        // The user fixes the file. The commit stores text and compiles nothing.
+        let _ = documents.did_change(&uri, 2, fixed);
+        assert!(
+            documents.get_projection(&uri).is_none(),
+            "{case}: the commit must not compile — if it did, the per-keystroke \
+             compile is back and this asserts nothing about recovery"
+        );
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let mut deps = SyncCoordinatorDeps {
+            documents: Arc::clone(&documents),
+            project_sync: None,
+            needs_provider_sync: Arc::new(DashSet::new()),
+            pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+            client: make_test_client(),
+            type_provider: None,
+            cached_verter_diags: Arc::new(DashMap::new()),
+            position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+            provider_sync_states: Arc::new(DashMap::new()),
+            // No published resolver snapshot for EITHER case; the second case
+            // additionally has a provider, so it reaches the snapshot gate.
+            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+            type_provider_kind: crate::TypeProviderKind::Tsgo,
+            carrier_publish_coordinator: None,
+            carrier_transaction_coordinator: std::sync::Arc::new(
+                crate::external_ts::CarrierTransactionCoordinator::new(),
+            ),
+        };
+        if deps_for == 1 {
+            deps.project_sync = Some(ProjectSync::new(
+                provider.clone(),
+                ProjectSyncMode::FullProject,
+            ));
+        }
+
+        sync_file(&deps, &canonical_id, uri.as_str()).await;
+
+        assert!(
+            documents.get_projection(&uri).is_some(),
+            "{case}: the debounced tick must recover the projection even though the \
+             provider-sync arm returns early — otherwise the document is stranded \
+             with no IDE features until an unrelated later edit happens to fix it"
+        );
+    }
 }

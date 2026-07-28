@@ -658,9 +658,15 @@ pub(super) async fn handle_did_open(
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.needs_ide_sync.insert(canonical_id.clone());
         server.needs_deferred_sync.insert(canonical_id.clone());
-        server
-            .sync_coordinator
-            .signal(canonical_id.clone(), uri.as_str().to_string());
+        // Deliberately stamped `now` rather than at handler entry. An open is
+        // not a keystroke: this handler has already synced the file eagerly
+        // above, so the debounced pass is a follow-up whose quiet window
+        // legitimately starts once that work is done.
+        server.sync_coordinator.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            std::time::Instant::now(),
+        );
         // Background import-dependency publication (imported carrier APIs +
         // the barrel re-export walk) for the freshly opened document. This —
         // not any interactive request — is what mints the DependencyReady
@@ -702,13 +708,36 @@ pub(super) async fn handle_did_change(
 
     let is_virtual = server.documents.get_virtual_source_uri(&uri).is_some();
 
+    // Take the in-flight ticket at handler ENTRY — before the global commit
+    // mutex, before the document commit, before the debounce signal. Two things
+    // depend on this being the FIRST thing that happens to a received change:
+    //
+    // * The ticket owns the receipt instant the debounce quiet window is
+    //   measured from. `sync_coordinator.signal(..)` is the LAST statement of
+    //   this handler, so a receipt taken there — or, worse, at the coordinator's
+    //   inbox drain — is already however long the mutex wait and the commit took.
+    //   That is the whole of https://github.com/pikax/verter/issues/96.
+    // * While the ticket is alive the coordinator treats this document as still
+    //   moving and will not dispatch a sync for it, so the coalescing invariant
+    //   holds whatever a single commit costs — a receipt that is already older
+    //   than the debounce cannot fire a sync out from under a commit that is
+    //   still running.
+    //
+    // A virtual document never reaches the commit or the signal, so it takes no
+    // ticket and cannot gate its source's canonical id.
+    let change_in_flight = (!is_virtual)
+        .then(|| server.documents.get_canonical_id(&uri))
+        .flatten()
+        .map(|canonical_id| server.sync_coordinator.change_received(canonical_id));
+
     // CRITICAL: Serialize the synchronous document commit/upsert via a
     // tokio::sync::Mutex.
     //
-    // tower-lsp dispatches did_change notifications CONCURRENTLY. Each handler calls
-    // host.upsert() + host.ensure_compiled() which acquire std::sync::RwLock (blocking).
-    // With N concurrent handlers on M worker threads, if N >= M all threads are blocked
-    // on the RwLock, starving the runtime (no timers, heartbeats, or responses fire).
+    // Each handler calls host.upsert(), which acquires std::sync::RwLock
+    // (blocking). With N handlers contending, every thread that holds one blocks
+    // the runtime (no timers, heartbeats, or responses fire). The commit does NOT
+    // compile the IDE TSX — that is deferred to the demand side precisely because
+    // this section is serialized.
     //
     // By serializing through a tokio::sync::Mutex, waiting handlers YIELD their worker
     // thread instead of blocking it. Only one handler holds the blocking lock at a time.
@@ -822,9 +851,12 @@ pub(super) async fn handle_did_change(
 
             server.needs_ide_sync.insert(canonical_id.clone());
             server.needs_deferred_sync.insert(canonical_id.clone());
-            server
-                .sync_coordinator
-                .signal(canonical_id.clone(), uri.as_str().to_string());
+            // Signalled through the entry ticket, so the quiet window is stamped
+            // with when this change REACHED the server rather than with now —
+            // the mutex wait and the commit have already run at this point.
+            if let Some(change) = change_in_flight.as_ref() {
+                change.signal(uri.as_str().to_string());
+            }
             // Re-publish the import-dependency closure after edit silence: the
             // content-generation bump already invalidated the DependencyReady
             // receipt (its key embeds the generation), and this debounced

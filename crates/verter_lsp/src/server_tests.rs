@@ -29251,3 +29251,471 @@ async fn css_class_rename_still_serves_without_any_provider_locations() {
     drain_handle.abort();
     drop(service);
 }
+
+// ---------------------------------------------------------------------------
+// https://github.com/pikax/verter/issues/96 — the PRODUCTION ingress.
+//
+// `tower-lsp-server` does not spawn a task per notification. `Server::serve`
+// pushes handler futures into an mpsc channel and polls them through
+// `buffer_unordered` INLINE on the serve thread (documented on
+// `SERVE_THREAD_STACK_BYTES` in `lib.rs`). `BufferUnordered` fills its queue
+// from the channel WITHOUT polling, then polls the queued futures one at a
+// time — and `handle_did_change` runs from entry through commit without
+// pending (an uncontended `did_change_mutex.lock()` completes in the current
+// poll, and the commit itself is a synchronous `block_in_place_if_available`).
+//
+// So handler k runs to completion before handler k+1 is polled at all. Any
+// coalescing scheme that depends on later notifications having ANNOUNCED
+// themselves before an earlier one commits is inert here: at commit time,
+// handler k is the only handler that has ever been entered.
+//
+// That is why the document commit must not compile at all.
+
+/// Frame `count` full-document `textDocument/didChange` notifications for
+/// `uri`, versions `first_version..`, each carrying a distinguishable source.
+fn did_change_burst_frames(uri: &Uri, first_version: i32, count: usize) -> (Vec<u8>, String) {
+    let revision = |marker: i32| {
+        format!(
+            "<script setup lang=\"ts\">\nconst count = {marker}\n</script>\n\
+             <template><div>{{{{ count }}}}</div></template>\n"
+        )
+    };
+    let mut bytes = Vec::new();
+    let mut last = String::new();
+    for index in 0..count {
+        let version = first_version + index as i32;
+        last = revision(version);
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.as_str(), "version": version },
+                "contentChanges": [ { "text": last } ],
+            },
+        }))
+        .expect("didChange frame serializes");
+        bytes.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes(),
+        );
+    }
+    (bytes, last)
+}
+
+/// Drive an LSP session over duplex pipes through a REAL `Server::serve` loop.
+///
+/// Returns the client-side write half (frames written here reach the server the
+/// way a client's stdin does, through `FramedRead` → the serve loop's mpsc
+/// channel → `buffer_unordered`) once the session is initialized, so a caller
+/// can measure from a settled baseline.
+async fn serve_over_duplex_initialized(
+    service: tower_lsp_server::LspService<VerterLanguageServer>,
+    socket: tower_lsp_server::ClientSocket,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (server_stdin, mut client_to_server) = tokio::io::duplex(1 << 20);
+    let (server_stdout, mut client_from_server) = tokio::io::duplex(1 << 20);
+    let serve = tokio::spawn(async move {
+        tower_lsp_server::Server::new(server_stdin, server_stdout, socket)
+            .concurrency_level(crate::LSP_MAX_CONCURRENCY)
+            .serve(service)
+            .await;
+    });
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "processId": null, "rootUri": null, "capabilities": {} },
+    }))
+    .expect("initialize frame serializes");
+    client_to_server
+        .write_all(format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes())
+        .await
+        .expect("initialize frame reaches the server");
+    client_to_server.flush().await.expect("flush initialize");
+
+    // Read until the initialize RESPONSE appears. This is the fence that proves
+    // the serve loop is live and the session has left `Uninitialized`, where
+    // ordinary notifications would be discarded rather than handled.
+    let mut seen = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client_from_server.read(&mut chunk),
+        )
+        .await
+        .expect("the server must answer initialize")
+        .expect("server stdout must stay readable");
+        assert!(
+            read > 0,
+            "the server closed stdout before answering initialize"
+        );
+        seen.extend_from_slice(&chunk[..read]);
+        if String::from_utf8_lossy(&seen).contains("\"id\":1") {
+            break;
+        }
+    }
+
+    (client_to_server, serve)
+}
+
+/// Cold compile RUNS this host has started — the feature-independent rail
+/// bumped once per cold run past the warm-hit consult.
+///
+/// It must be this rail and not the post-success compile tick: a compile that
+/// FAILS returns before that tick, so a burst of malformed revisions could
+/// execute a cold compile per keystroke while a tick-based counter reported
+/// zero. A malformed intermediate revision is the ordinary state of a file
+/// being typed, so the instrument has to see it.
+fn cold_compile_runs(host: &Arc<VerterHost>) -> u64 {
+    host.provenance_snapshot().compile_cold_runs
+}
+
+/// Build a provider-less server for the ingress measurement.
+///
+/// `type_provider: None` makes the coordinator's `project_sync` `None`, and
+/// `sync_file` returns at its first statement in that case — so the debounced
+/// coordinator can contribute NO compiles to the measurement however long the
+/// serve loop takes. Semantic analysis stays off (its analyses run on a
+/// separate host anyway). The document has no imports, so the background
+/// import-dependency publication has nothing to walk.
+fn ingress_measurement_server(
+    host: &Arc<VerterHost>,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tower_lsp_server::ClientSocket,
+) {
+    let host_for_server = Arc::clone(host);
+    tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::None,
+                type_provider_topology: crate::TypeProviderTopology::implied_by(
+                    crate::TypeProviderKind::None,
+                ),
+                mcp_port: None,
+                type_provider_reason: None,
+                type_provider_advisory: None,
+                suppress_imported_carrier_prewarm: true,
+            },
+        )
+    })
+}
+
+/// A burst of `didChange` notifications arriving on the wire must not cost one
+/// IDE compile per notification.
+///
+/// This is the discriminating test for https://github.com/pikax/verter/issues/96.
+/// It drives the real `LspService` + `Server::serve` ingress, stages nothing by
+/// hand, and counts COLD COMPILE RUNS (a warm `ensure_compile_artifacts` hit
+/// does not move the rail, and a FAILED compile does) rather than provider
+/// updates.
+///
+/// The count is a pre/post delta around the serve loop. The positive control at
+/// the end is what stops zero from passing vacuously: it proves the counter
+/// moves when a compile runs, and — because it compiles the exact revision the
+/// burst just committed — proves the burst genuinely left that work undone
+/// rather than having quietly done it.
+///
+/// Nothing here is a wall-clock threshold. The fence is the LAST revision's text
+/// being committed, polled with a generous deadline — the client stream stays
+/// open for the whole test, so `serve` never sees EOF and is aborted at the end.
+/// Waiting longer can only let MORE compiles land, so the fence can never turn a
+/// real per-notification compile into a pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notification() {
+    const BURST: usize = 24;
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+                  <template><div>{{ count }}</div></template>\n";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let (service, socket) = ingress_measurement_server(&host);
+    let uri = open_test_vue(service.inner(), "/workspace/src/App.vue", source);
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let profile = service.inner().documents.tsx_profile.read().clone();
+    assert!(
+        host.get_ide(&canonical_id, &profile).is_some(),
+        "precondition: the OPEN must have produced the carrier's IDE TSX, so the \
+         burst below starts from an established projection rather than bootstrapping one"
+    );
+
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+
+    // Baseline taken AFTER the session is initialized, so nothing the handshake
+    // does is attributed to the burst.
+    let before = cold_compile_runs(&host);
+    let (frames, final_source) = did_change_burst_frames(&uri, 2, BURST);
+    {
+        use tokio::io::AsyncWriteExt;
+        client_to_server
+            .write_all(&frames)
+            .await
+            .expect("the burst must reach the server");
+        client_to_server.flush().await.expect("flush the burst");
+    }
+
+    // Fence on the LAST revision being committed. Waiting longer can only let
+    // MORE compiles land, so this can never turn a real per-notification
+    // compile into a pass.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "precondition: every queued notification must be committed; the document \
+             is still at {:?}",
+            host.get_source(&canonical_id)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let burst = cold_compile_runs(&host) - before;
+
+    assert_eq!(
+        burst, 0,
+        "{BURST} didChange notifications started {burst} cold compile run(s) on the \
+         notification-handling path. `tower-lsp-server` polls handler futures inline \
+         and each one runs from entry through commit without pending, so a compile in \
+         the commit is a serialized queue as long as the user's typing burst — the ~9s \
+         of issue #96. The commit owes the document's TEXT; the TSX is owed by whoever \
+         demands it"
+    );
+
+    // Positive control + proof the burst left the work undone.
+    let before_control = cold_compile_runs(&host);
+    let served = host
+        .ensure_ide_compiled(&canonical_id, &profile)
+        .expect("the committed carrier must have an IDE surface");
+    let control = cold_compile_runs(&host) - before_control;
+    assert!(served, "a .vue carrier must project an IDE surface");
+    assert!(
+        control > 0,
+        "compiling the burst's final revision must start a cold run: the rail has to \
+         be live (or the zero above is vacuous), and the ingress must not have already \
+         produced this TSX"
+    );
+    serve.abort();
+}
+
+/// Frame `count` full-document `didChange` notifications carrying revisions that
+/// do NOT compile — the ordinary mid-edit state of a file being typed.
+fn invalid_did_change_burst_frames(
+    uri: &Uri,
+    first_version: i32,
+    count: usize,
+) -> (Vec<u8>, String) {
+    let mut bytes = Vec::new();
+    let mut last = String::new();
+    for index in 0..count {
+        let version = first_version + index as i32;
+        last = format!("<script setup lang=\"ts\">\nconst broken{version} = (((\n");
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.as_str(), "version": version },
+                "contentChanges": [ { "text": last } ],
+            },
+        }))
+        .expect("didChange frame serializes");
+        bytes.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes(),
+        );
+    }
+    (bytes, last)
+}
+
+/// The case https://github.com/pikax/verter/issues/96 is actually about, at the
+/// real ingress: a carrier with NO projection, typed into with revisions that do
+/// not compile.
+///
+/// A commit that compiles "only until the first projection exists" sounds
+/// bounded by document. It is not: a failed compile installs no projection, so
+/// the next notification compiles again. Malformed intermediate revisions are
+/// the normal state of typing, so that reinstates the serialized per-keystroke
+/// compile queue in full — reachable without any unusual input.
+///
+/// Measured on the COLD-RUN rail. The post-success compile tick cannot see this
+/// at all: a failing compile returns before that tick, so this burst reads zero
+/// there whether it compiled once per notification or never. The companion test
+/// `a_burst_of_did_change_notifications_does_not_compile_once_per_notification`
+/// covers the established-projection burst.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notification() {
+    const BURST: usize = 24;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let (service, socket) = ingress_measurement_server(&host);
+
+    // Open in a state whose IDE projection cannot be built, so every commit
+    // below takes the projection-less path.
+    let uri = open_test_vue(
+        service.inner(),
+        "/workspace/src/Invalid.vue",
+        "<script setup lang=\"ts\">\nconst broken = (((\n",
+    );
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    assert!(
+        service.inner().documents.get_projection(&uri).is_none(),
+        "precondition: the fixture must fail to project, or this burst runs the \
+         established-projection path the sibling test already covers"
+    );
+
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    let before = cold_compile_runs(&host);
+    let (frames, final_source) = invalid_did_change_burst_frames(&uri, 2, BURST);
+    {
+        use tokio::io::AsyncWriteExt;
+        client_to_server
+            .write_all(&frames)
+            .await
+            .expect("the burst must reach the server");
+        client_to_server.flush().await.expect("flush the burst");
+    }
+
+    // Fence on the LAST revision being committed. Waiting longer can only let
+    // more compiles land, so it cannot turn a real per-notification compile into
+    // a pass.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "precondition: every queued notification must be committed; the document \
+             is still at {:?}",
+            host.get_source(&canonical_id)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let burst = cold_compile_runs(&host) - before;
+
+    assert_eq!(
+        burst, 0,
+        "{BURST} malformed didChange notifications on a projection-less carrier \
+         started {burst} cold compile run(s). Compiling while no projection exists \
+         never terminates — the compile fails, no projection is installed, and the \
+         next keystroke repeats it. That is the serialized queue of issue #96, \
+         reachable by ordinary typing"
+    );
+    assert!(
+        service_projection_still_absent(&host, &canonical_id),
+        "the malformed carrier must still have no IDE surface — if one appeared, a \
+         compile ran somewhere the rail did not attribute to this burst"
+    );
+
+    // Positive control: the rail moves for this document once a valid revision is
+    // compiled on demand, so the zero above is not a dead counter.
+    let before_control = cold_compile_runs(&host);
+    let _ = host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some(canonical_id.clone()),
+        input_id: canonical_id.clone(),
+        source: Arc::from(
+            "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+             <template><div>{{ fixed }}</div></template>\n",
+        ),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let profile = verter_session::CompileProfile::default();
+    let _ = host.ensure_ide_compiled(&canonical_id, &profile);
+    assert!(
+        cold_compile_runs(&host) > before_control,
+        "compiling this document on demand must start a cold run — otherwise the zero \
+         above is vacuous"
+    );
+    serve.abort();
+}
+
+/// Whether the host still has no IDE TSX for `canonical_id` (a pure cached read).
+fn service_projection_still_absent(host: &Arc<VerterHost>, canonical_id: &str) -> bool {
+    host.get_ide(canonical_id, &verter_session::CompileProfile::default())
+        .is_none()
+}
+
+/// The pending-snapshot drain is the OTHER path that compiles a carrier's IDE
+/// surface for an open document, and it must recover a projection-less document
+/// too.
+///
+/// A carrier whose open-time compile failed has no provider projection; the
+/// document commit never compiles one, and the foreground repair declines
+/// projection-less documents by design. If the path that DOES compile here does
+/// not install the projection, the document is stranded with no IDE features.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(workspace.join("tsconfig.app.json"), "{}").expect("write tsconfig");
+
+    let workspace_id = crate::test_utils::canonical_test_path(&workspace);
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+
+    // Opened malformed: no IDE surface, so no projection.
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst broken = (((\n".to_string(),
+    });
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "precondition: the malformed open must leave the carrier projection-less"
+    );
+
+    // Fixed by a later edit. The commit stores text and compiles nothing.
+    let _ = documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nconst fixed = 1\n</script>\n\
+         <template><div>{{ fixed }}</div></template>\n",
+    );
+    assert!(
+        documents.get_projection(&uri).is_none(),
+        "the commit must not compile — if it did, this asserts nothing about the drain"
+    );
+
+    let tsconfig = format!("{workspace_id}/tsconfig.app.json");
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_id.clone(),
+                workspace_id.clone(),
+                Some(tsconfig.clone()),
+            ),
+        ]),
+        ownership_ready: true,
+    };
+    let owner_vfs = configured_owner_vfs(&workspace_id, &tsconfig);
+    let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
+        coordinator: None,
+        provider_delivery: crate::external_ts::CarrierProviderDelivery::DirectOpen,
+        vfs: Arc::clone(&owner_vfs),
+        ownership_ready: true,
+    };
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+
+    let _ = sync_pending_carrier_provider_file(
+        Some(&sync),
+        &documents,
+        &snapshot,
+        &provider_sync_states,
+        &app_id,
+        Some(&carrier_publish),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    assert!(
+        documents.get_projection(&uri).is_some(),
+        "the drain compiles the carrier's IDE surface, so it must also install the \
+         projection the failed open never built — otherwise this path leaves the \
+         document stranded with no IDE features"
+    );
+}

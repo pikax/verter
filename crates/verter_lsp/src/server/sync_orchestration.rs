@@ -1460,6 +1460,14 @@ impl VerterLanguageServer {
         // This foreground repair owns carrier IDE projections. Plain scripts have
         // no source→provider projection, while rune self-files use the separate
         // own-buffer sync path.
+        //
+        // A CARRIER that has no projection is NOT repaired here. This repair
+        // loads the document's dependency closure, so running it for a carrier
+        // whose compile is currently failing would cold-load children on an
+        // ordinary interactive request. That recovery belongs to the debounced
+        // coordinator, which already compiles the IDE surface once per quiet
+        // window and installs the projection from it
+        // (`DocumentRegistry::install_missing_carrier_projection`).
         let Some(projection) = self.documents.get_projection(uri) else {
             return false;
         };

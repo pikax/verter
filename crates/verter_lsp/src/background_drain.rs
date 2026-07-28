@@ -662,6 +662,11 @@ pub(super) async fn sync_pending_carrier_provider_file(
     let _ =
         block_in_place_if_available(|| documents.host.ensure_ide_compiled(canonical_id, &profile));
     let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
+    // The drain's compile is the OTHER path that can recover a carrier left
+    // without a provider projection (the document commit never compiles). Cache
+    // read only — the compile just above already ran — and a no-op once a
+    // projection exists.
+    documents.install_missing_carrier_projection(canonical_id);
     // Route through the SINGLE carrier-sync gateway: tsserver PUBLISHES the carrier
     // companions into the on-disk store the plugin reads (the configured-project
     // membership), tsgo opens the companions directly, and an owner loss RETRACTS the

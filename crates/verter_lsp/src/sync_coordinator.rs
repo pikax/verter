@@ -29,6 +29,24 @@ use crate::type_provider::merge;
 use crate::type_provider::project_sync::ProjectSync;
 use crate::type_provider::traits::TypeProvider;
 
+/// Per-canonical bookkeeping for changes the server has RECEIVED but has not
+/// finished processing.
+///
+/// A change is "in flight" from the instant its `did_change` handler is entered
+/// — before the global document-commit mutex, before the document is committed,
+/// before the debounce signal is deposited — until that handler is done. A
+/// document with a change in flight is not quiet, whatever the receipt on its
+/// last signal says, so the coordinator will not dispatch a sync for it.
+#[derive(Default)]
+struct CanonicalChangeState {
+    /// Live [`ChangeInFlight`] tickets for this canonical id.
+    tickets: u32,
+}
+
+/// Shared "changes received but not yet processed" map, read by the coordinator
+/// loop and written by the `did_change` handlers.
+type ChangeTracker = Arc<parking_lot::Mutex<HashMap<String, CanonicalChangeState>>>;
+
 /// Handle for sending signals to the coordinator.
 #[derive(Clone)]
 pub struct SyncCoordinatorHandle {
@@ -37,6 +55,8 @@ pub struct SyncCoordinatorHandle {
     /// Latest URI per canonical document. Replacements coalesce while the actor
     /// is busy synchronizing another file or waiting on a provider commit.
     pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    /// Changes received but not yet processed. See [`CanonicalChangeState`].
+    changes: ChangeTracker,
 }
 
 #[derive(Clone, Debug)]
@@ -44,26 +64,65 @@ struct PendingSignal {
     uri: String,
     requires_sync: bool,
     force_diagnostics: bool,
+    /// When the change this signal describes REACHED the server, not when the
+    /// coordinator got round to draining it out of the inbox.
+    ///
+    /// A signal can sit in the inbox for seconds: `did_change` handlers commit
+    /// their document under one global mutex before they signal, and the
+    /// coordinator's own `sync_file(..).await` is inline in its loop. Stamping
+    /// at drain charges all of that waiting to the user as fresh quiet time and
+    /// restarts the full debounce window from zero.
+    received_at: Instant,
 }
 
 impl SyncCoordinatorHandle {
     /// Signal that a file has changed and needs a debounced sync.
-    pub fn signal(&self, canonical_id: String, uri_str: String) {
+    ///
+    /// `received_at` is when the change REACHED the server — the caller's own
+    /// entry instant, never `Instant::now()` taken at some later point on the
+    /// path. The debounce window is measured from it.
+    pub fn signal(&self, canonical_id: String, uri_str: String, received_at: Instant) {
         self.pending
             .lock()
             .entry(canonical_id)
             .and_modify(|pending| {
                 pending.uri = uri_str.clone();
                 pending.requires_sync = true;
+                // Newest receipt wins, and `max` rather than assignment: LSP
+                // notification handlers run concurrently, so an older change can
+                // deposit its signal after a newer one has already deposited
+                // its own. Assigning would walk the window backwards and fire
+                // the sync while the user is still typing.
+                pending.received_at = pending.received_at.max(received_at);
             })
             .or_insert(PendingSignal {
                 uri: uri_str,
                 requires_sync: true,
                 force_diagnostics: false,
+                received_at,
             });
         // Full means a wake is already queued, which is exactly the desired
         // coalescing behavior. Closed means the server is shutting down.
         let _ = self.wake_tx.try_send(());
+    }
+
+    /// Record that a change to `canonical_id` has been RECEIVED.
+    ///
+    /// Call this at `did_change` handler ENTRY, before the global commit mutex
+    /// and before any document work. The returned ticket stamps the receipt
+    /// instant the debounce window is measured from and holds the coordinator
+    /// off this canonical id until the change has been processed.
+    pub fn change_received(&self, canonical_id: String) -> ChangeInFlight {
+        self.changes
+            .lock()
+            .entry(canonical_id.clone())
+            .or_default()
+            .tickets += 1;
+        ChangeInFlight {
+            handle: self.clone(),
+            canonical_id,
+            received_at: Instant::now(),
+        }
     }
 
     /// Create an isolated handle/inbox pair for testing the coalescing contract.
@@ -74,6 +133,7 @@ impl SyncCoordinatorHandle {
             Self {
                 wake_tx,
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             },
             wake_rx,
         )
@@ -85,6 +145,50 @@ impl SyncCoordinatorHandle {
             .into_iter()
             .map(|(canonical_id, pending)| (canonical_id, pending.uri))
             .collect()
+    }
+}
+
+/// A `did_change` handler's ticket for one received change to one document.
+///
+/// Created at handler entry; dropped when the handler is done. It owns the
+/// receipt instant so no caller can substitute a later one by accident.
+pub struct ChangeInFlight {
+    handle: SyncCoordinatorHandle,
+    canonical_id: String,
+    received_at: Instant,
+}
+
+impl ChangeInFlight {
+    /// Deposit this change's debounce signal, stamped with the instant the
+    /// change was received rather than any later instant on the path.
+    pub fn signal(&self, uri_str: String) {
+        self.handle
+            .signal(self.canonical_id.clone(), uri_str, self.received_at);
+    }
+}
+
+impl Drop for ChangeInFlight {
+    fn drop(&mut self) {
+        {
+            let mut changes = self.handle.changes.lock();
+            if let Some(state) = changes.get_mut(&self.canonical_id) {
+                state.tickets = state.tickets.saturating_sub(1);
+                if state.tickets == 0 {
+                    changes.remove(&self.canonical_id);
+                }
+            }
+        }
+        // Releasing a ticket is what makes a document quiescent again, and the
+        // coordinator PARKS on a canonical id whose change is in flight (it is
+        // excluded from the deadline computation, so an all-gated inbox leaves
+        // no timer armed at all). Wake unconditionally so the release is always
+        // observed — including on the handler paths that return without ever
+        // signalling (a virtual document, a style-only edit).
+        //
+        // No wakeup is lost when the channel is already full: a queued wake is
+        // one the coordinator has not consumed yet, so it will re-read this map
+        // after this decrement.
+        let _ = self.handle.wake_tx.try_send(());
     }
 }
 
@@ -135,21 +239,28 @@ const DEBOUNCE_MS: u64 = 300;
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
     tokio::spawn(coordinator_loop(
         wake_rx,
         semantic_ready_rx,
         Arc::clone(&pending),
+        Arc::clone(&changes),
         Arc::new(deps),
     ));
-    SyncCoordinatorHandle { wake_tx, pending }
+    SyncCoordinatorHandle {
+        wake_tx,
+        pending,
+        changes,
+    }
 }
 
 async fn coordinator_loop(
     mut wake_rx: mpsc::Receiver<()>,
     mut semantic_ready_rx: tokio::sync::broadcast::Receiver<crate::documents::SemanticReady>,
     inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    changes: ChangeTracker,
     deps: Arc<SyncCoordinatorDeps>,
 ) {
     let debounce = Duration::from_millis(DEBOUNCE_MS);
@@ -160,26 +271,45 @@ async fn coordinator_loop(
     // diagnostic task without risking a half-committed provider surface.
     let mut diagnostic_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
 
+    // A canonical id whose change is still in flight is NOT quiet, so it is
+    // excluded from BOTH the deadline computation and the dispatch set. It is
+    // deliberately excluded from the deadline too: with no timer armed for it
+    // the loop parks on the wake channel instead of spinning on an already-
+    // elapsed `sleep_until`. `ChangeInFlight::drop` always wakes the loop, so
+    // the file is re-examined the instant it becomes quiescent.
+    let quiescent = |canonical_id: &str| !changes.lock().contains_key(canonical_id);
+
     loop {
         // Calculate next deadline from pending files
-        let next_deadline = pending_files.values().map(|(t, _)| *t + debounce).min();
+        let next_deadline = pending_files
+            .iter()
+            .filter(|(canonical_id, _)| quiescent(canonical_id))
+            .map(|(_, (t, _))| *t + debounce)
+            .min();
 
         tokio::select! {
             wake = wake_rx.recv() => {
                 match wake {
                     Some(()) => {
                         let signals = std::mem::take(&mut *inbox.lock());
-                        let received_at = Instant::now();
                         for (canonical_id, signal) in signals {
                             tracing::debug!("sync_coordinator: signal {canonical_id}");
                             if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
                                 stale.abort();
                             }
-                            // Reset the quiet window for the latest edit only.
+                            // Reset the quiet window for the latest edit only —
+                            // measured from when that edit REACHED the server,
+                            // which the signal carries, NOT from now. Time spent
+                            // waiting in the inbox is time the file was already
+                            // quiet, and must not be charged to the user again.
+                            // `max` for the same reason `signal` uses it: a
+                            // concurrently-dispatched older handler can deposit
+                            // after a newer one.
+                            let received_at = signal.received_at;
                             pending_files
                                 .entry(canonical_id)
                                 .and_modify(|(changed_at, pending)| {
-                                    *changed_at = received_at;
+                                    *changed_at = (*changed_at).max(received_at);
                                     pending.uri = signal.uri.clone();
                                     pending.requires_sync |= signal.requires_sync;
                                     pending.force_diagnostics |= signal.force_diagnostics;
@@ -214,6 +344,10 @@ async fn coordinator_loop(
                             if let Some(stale) = diagnostic_tasks.remove(&ready.canonical_id) {
                                 stale.abort();
                             }
+                            // Deliberately `Instant::now()`: unlike a keystroke
+                            // signal, a semantic-ready event has no earlier
+                            // receipt to honour — the reason to republish arose
+                            // exactly here, so the quiet window starts here.
                             let received_at = Instant::now();
                             pending_files
                                 .entry(ready.canonical_id)
@@ -228,6 +362,7 @@ async fn coordinator_loop(
                                         uri: ready.uri,
                                         requires_sync: false,
                                         force_diagnostics: true,
+                                        received_at,
                                     },
                                 ));
                         }
@@ -235,6 +370,9 @@ async fn coordinator_loop(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // Recover from a burst by invalidating and scheduling every
                         // open document. These are diagnostics-only passes.
+                        // Deliberately `Instant::now()`: the recovery sweep is
+                        // its own reason to republish and carries no earlier
+                        // per-document receipt.
                         let received_at = Instant::now();
                         for uri in deps.documents.open_uris() {
                             let Ok(parsed) = uri.parse::<Uri>() else { continue; };
@@ -248,6 +386,7 @@ async fn coordinator_loop(
                                         uri,
                                         requires_sync: false,
                                         force_diagnostics: true,
+                                        received_at,
                                     },
                                 ),
                             );
@@ -271,11 +410,16 @@ async fn coordinator_loop(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                // Find files that have been quiet for >= debounce_ms
+                // Find files that have been quiet for >= debounce_ms. A file
+                // whose change is still in flight is NOT quiet however old its
+                // last receipt is: without this gate, receipt-time stamping
+                // would dispatch once per handler for the whole backlog — one
+                // provider sync per keystroke, the exact flood the debounce
+                // exists to prevent.
                 let now = Instant::now();
                 let ready: Vec<(String, PendingSignal)> = pending_files
                     .iter()
-                    .filter(|(_, (t, _))| now.duration_since(*t) >= debounce)
+                    .filter(|(id, (t, _))| now.duration_since(*t) >= debounce && quiescent(id))
                     .map(|(id, (_, signal))| (id.clone(), signal.clone()))
                     .collect();
 
@@ -335,6 +479,15 @@ async fn coordinator_loop(
 /// A provider-less route (`deps.project_sync == None`) has nothing to sync —
 /// the caller still publishes Verter-owned diagnostics afterwards.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
+    // BEFORE every early return below. A carrier whose open-time compile failed
+    // has no provider projection and fails closed downstream forever, and this
+    // debounced tick is one of the few paths that runs for it at all — but the
+    // provider-sync arm returns early on a provider-less route and before a
+    // resolver snapshot is published, which is exactly when a fresh workspace is
+    // still settling. The recovery needs neither: it compiles and reads the host
+    // cache, and it is a no-op once a projection exists.
+    deps.documents
+        .recover_missing_carrier_projection(canonical_id);
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return;
     };
