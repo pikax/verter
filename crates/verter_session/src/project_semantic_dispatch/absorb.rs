@@ -40,7 +40,7 @@ use std::sync::Arc;
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{
     IndexKey, IndexSignature, PathSegment, PrimitiveKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+    SemanticNodeData, SemanticNodeId, SurfaceMember,
 };
 
 use super::ProjectSemanticDispatch;
@@ -141,13 +141,14 @@ impl ProjectSemanticDispatch<'_> {
                 declaration_origin: None,
             })
             .collect();
-        let surface = SurfaceView {
+        let surface = crate::semantic_query::surface_view! {
             members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace: None,
             has_index_signature: true,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         };
         self.graph().intern_node(SemanticNodeData::Object(surface))
     }
@@ -556,7 +557,7 @@ impl ProjectSemanticDispatch<'_> {
                     stack.extend(contributors.iter().copied());
                 }
                 SemanticNodeData::Object(surface) => {
-                    stack.extend(surface.members.iter().map(|m| m.value));
+                    stack.extend(surface.positive_members().iter().map(|m| m.value));
                     stack.extend(surface.call_signatures.iter().copied());
                     stack.extend(surface.construct_signatures.iter().copied());
                     for sig in surface.index_signatures.iter() {
@@ -564,6 +565,9 @@ impl ProjectSemanticDispatch<'_> {
                         stack.push(sig.value_type);
                     }
                     stack.extend(surface.keyspace);
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().copied());
+                    }
                 }
                 SemanticNodeData::Array { element, .. } => stack.push(*element),
                 SemanticNodeData::Tuple { elements, .. } => {

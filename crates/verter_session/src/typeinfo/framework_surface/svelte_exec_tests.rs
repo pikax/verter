@@ -2132,9 +2132,7 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
     use crate::resolver_core::FactReadSetFinalise;
-    use crate::semantic_query::{
-        PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
-    };
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember};
     use crate::VerterHost;
     use std::sync::Arc;
 
@@ -2148,28 +2146,32 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
     // Degraded output: an object whose member value is unraisable degrades
     // (typed `UnrepresentableSurfaceMember` leaf) — the terminal unwrap must
     // observe the sidecar into the admission scope BEFORE discarding it.
-    let broken_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: Arc::from(
-            vec![SurfaceMember {
-                visibility: verter_type_expr::MemberVisibility::Public,
-                name: Arc::from("broken"),
-                value: absent,
-                optional: false,
-                readonly: false,
-                is_method: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                spans: Default::default(),
-                declaration_origin: None,
-            }]
-            .into_boxed_slice(),
-        ),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let broken_obj = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    name: Arc::from("broken"),
+                    value: absent,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
     let _scope = ColdComputeCompletenessScope::enter();
     let (_raised, facts) = host.with_fact_tracer(|| {
         let sealed = cap

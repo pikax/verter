@@ -256,7 +256,17 @@ interface NativeTupleElement {
 }
 
 interface NativeObjectMember {
-  memberKind: "property" | "indexSignature" | "callSignature" | "constructSignature" | "method";
+  memberKind:
+    | "property"
+    | "indexSignature"
+    | "callSignature"
+    | "constructSignature"
+    | "method"
+    // Raised open surfaces reconstruct their ordered concrete writes and
+    // residual operands as spread members. This bridge treats a spread as an
+    // operand contribution rather than a named member; exact key and absence
+    // decisions remain in the Rust surface domain.
+    | "spread";
   // Property fields
   name?: string;
   ty?: NativeTypeExpr;

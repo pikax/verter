@@ -1337,14 +1337,16 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 // re-exporting only `macro_type_arg_hot_ref` + `MacroHotMirror`. A second
 // structural-carrier producer is therefore UNREPRESENTABLE BY CONSTRUCTION: no
 // foreign module can name the private builders (a compile error), and the
-// producer is collapsed into one module so no same-owner file can name them
-// either (a third caller is a compile error). The set is six guards: the PRIMARY
+// producer-capable code is collapsed into one child module. The only non-test
+// sibling is a typed-IR-only binder walker, which cannot name that child's
+// private builders. The set is six guards: the PRIMARY
 // module-private lowerer guard
 // (`structural_carrier_producer_lowerer_is_module_private` — the raw lowerer is
 // a bare module-private fn in `macro_arg_producer.rs`, not re-exported), the
 // PARENT-SHAPE narrowness guard (`structural_carrier_producer_module_is_narrow` —
-// the owner directory contains ONLY `mod.rs`, `macro_arg_producer.rs`, and test
-// modules), together the compiler-enforced make-unrepresentable layer; plus the
+// the owner directory contains ONLY `mod.rs`, `macro_arg_producer.rs`, the
+// non-producer `infer_binder_names.rs` walker, and test modules), together the
+// compiler-enforced make-unrepresentable layer; plus the
 // SMALL no-reintroduce-a-surface backstop
 // (`macro_arg_producer_has_no_production_expansion_surface` — no production
 // macro / `macro_rules!` / `include!` / proc-macro attribute / `#[derive]` on a
@@ -1382,8 +1384,8 @@ fn structural_carrier_producer_guards_remain_registered() {
         (
             "structural_carrier_producer_module_is_narrow",
             "the PARENT-SHAPE guard: the owner directory contains ONLY the single producer module \
-             `macro_arg_producer.rs`, mod.rs, and test modules — so there is no other file that \
-             could name the module-private lowering builders",
+             `macro_arg_producer.rs`, the typed-IR-only `infer_binder_names.rs` sibling, mod.rs, \
+             and test modules — the sibling cannot name the child-private lowering builders",
         ),
         (
             "macro_arg_producer_has_no_production_expansion_surface",

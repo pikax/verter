@@ -326,8 +326,8 @@ fn hash_node_rec<H: std::hash::Hasher>(
         }
         SemanticNodeData::Object(surface) => {
             hasher.write_u8(7);
-            hasher.write_u64(surface.members.len() as u64);
-            for member in surface.members.iter() {
+            hasher.write_u64(surface.positive_members().len() as u64);
+            for member in surface.positive_members().iter() {
                 hasher.write(member.name.as_bytes());
                 hasher.write_u8(u8::from(member.optional));
                 hasher.write_u8(u8::from(member.readonly));
@@ -346,6 +346,16 @@ fn hash_node_rec<H: std::hash::Hasher>(
             for signature in surface.index_signatures.iter() {
                 hash_node_rec(ctx, signature.key_type, hasher, seen, depth + 1);
                 hash_node_rec(ctx, signature.value_type, hasher, seen, depth + 1);
+            }
+            match surface.open_spread_operands() {
+                None => hasher.write_u8(0),
+                Some(operands) => {
+                    hasher.write_u8(1);
+                    hasher.write_u64(operands.len() as u64);
+                    for operand in operands.as_slice() {
+                        hash_node_rec(ctx, *operand, hasher, seen, depth + 1);
+                    }
+                }
             }
         }
         SemanticNodeData::Union(arms) => {
@@ -659,13 +669,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn node_structural_hash_discriminates_open_operand_identity() {
+        use crate::semantic_query::{
+            MacroOwnBodyStamp, MemberSurfaceCompleteness, MergeRoleStamp, OpenSpreadOperands,
+            SemanticNodeData, SurfaceMember,
+        };
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let graph = host.project_type_store().semantic_graph();
+        let value = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let member = SurfaceMember {
+            name: Arc::from("a"),
+            value,
+            optional: true,
+            readonly: false,
+            is_method: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+            merge_role: MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
+        };
+        let other_operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("U"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("U"),
+        });
+        let object = |operand| {
+            graph.intern_node(SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from([member.clone()]),
+                    call_signatures: Arc::from([]),
+                    construct_signatures: Arc::from([]),
+                    index_signatures: Arc::from([]),
+                    keyspace: None,
+                    has_index_signature: false,
+                    completeness: MemberSurfaceCompleteness::OpenSpread(
+                        OpenSpreadOperands::new(Arc::from([operand])),
+                    ),
+                },
+            ))
+        };
+        assert_ne!(
+            digest(&host, object(operand)),
+            digest(&host, object(other_operand)),
+            "open operand identity is part of the cycle-guard structural fingerprint"
+        );
+    }
+
     /// A self-referential node graph terminates deterministically: the
     /// back-reference encoding closes the cycle instead of recursing, and
     /// the digest is stable across walks.
     #[test]
     fn node_structural_hash_terminates_on_cyclic_graph() {
         use crate::semantic_query::{
-            MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember, SurfaceView,
+            MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
@@ -680,6 +751,7 @@ mod tests {
             scope(),
         );
         let member = |name: &str| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             name: Arc::from(name),
             value: leaf,
             optional: false,
@@ -692,13 +764,14 @@ mod tests {
             merge_role: MergeRoleStamp::NEUTRAL,
         };
         let object = graph.intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from([member("a"), member("b")]),
                 call_signatures: Arc::from([]),
                 construct_signatures: Arc::from([]),
                 index_signatures: Arc::from([]),
                 keyspace: None,
                 has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             scope(),
         );

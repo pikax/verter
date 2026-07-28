@@ -981,6 +981,9 @@ fn member_value_expr(member: ObjectMember) -> Result<TypeExpr, LocatorBodyDerefE
         ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
             Ok(TypeExpr::Function(std::sync::Arc::new(func)))
         }
+        // A spread member's VALUE slot is its operand type (mirrors the
+        // `SpreadMemberFact.ty` locator minted by `object_shape_fact`).
+        ObjectMember::Spread(spread) => Ok(spread.ty),
         ObjectMember::IndexSignature(_) => Err(LocatorBodyDerefError::PathUnresolved),
     }
 }
@@ -993,7 +996,7 @@ fn member_function_expr(member: ObjectMember) -> Result<FunctionExpr, LocatorBod
     match member {
         ObjectMember::Method(method) => Ok(method.function),
         ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => Ok(func),
-        ObjectMember::Property(_) | ObjectMember::IndexSignature(_) => {
+        ObjectMember::Property(_) | ObjectMember::IndexSignature(_) | ObjectMember::Spread(_) => {
             Err(LocatorBodyDerefError::PathUnresolved)
         }
     }

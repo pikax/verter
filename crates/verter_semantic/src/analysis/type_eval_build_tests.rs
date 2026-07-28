@@ -2537,53 +2537,56 @@ fn satisfies_does_not_use_annotation_type() {
 // =============================================================================
 
 #[test]
-fn object_spread_identifier_produces_intersection() {
+fn object_spread_identifier_keeps_operand_as_ordered_entry() {
     let parts = lowered(r#"const extended = { ...base, extra: true }"#);
     let decl = parts.value_decl("extended").expect("lowered extended");
 
-    // Should not lose the spread source — at minimum, the explicit props must be present
-    // AND the spread source should be represented (as typeof base in an intersection)
-    match decl.type_annotation.as_ref() {
-        Some(TypeExpr::Intersection(members)) => {
-            assert!(
-                members.iter().any(|m| matches!(m, TypeExpr::TypeOf(_))),
-                "spread identifier should produce a typeof reference in the intersection"
-            );
-            assert!(
-                members.iter().any(|m| matches!(m, TypeExpr::Object(_))),
-                "explicit properties should be present in the intersection"
-            );
-        }
-        Some(TypeExpr::Object(obj)) => {
-            // At minimum, if we flatten, the explicit property must exist
-            assert!(
-                obj.properties.iter().any(|member| matches!(
-                    member,
-                    ObjectMember::Property(p) if p.name == "extra"
-                )),
-                "explicit property 'extra' must be present"
-            );
-            panic!(
-                "spread source was lost — expected intersection with typeof base, got plain object"
-            );
-        }
-        other => panic!("expected intersection or object, got {other:?}"),
-    }
-}
-
-#[test]
-fn object_spread_object_literal_merges_properties() {
-    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
-    let decl = parts.value_decl("merged").expect("lowered merged");
-
+    // The spread source is never lost: it rides an ordered `Spread` entry
+    // holding `typeof base`, BEFORE the direct member `extra`.
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
-            "expected object type for merged spread, got {:?}",
+            "expected the ordered spread-bearing Object IR, got {:?}",
             decl.type_annotation
         );
     };
+    assert_eq!(obj.properties.len(), 2);
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Spread(s) if matches!(&s.ty, TypeExpr::TypeOf(_))),
+        "entry 0 must carry the spread operand as `typeof base`, got {:?}",
+        obj.properties[0]
+    );
+    assert!(
+        matches!(&obj.properties[1], ObjectMember::Property(p) if p.name == "extra"),
+        "entry 1 must be the direct member `extra`, got {:?}",
+        obj.properties[1]
+    );
+}
 
-    let names: Vec<&str> = obj
+#[test]
+fn object_spread_inline_literal_stays_a_pre_fold_entry() {
+    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
+
+    // The producer does NOT fold: the inline operand's members stay on the
+    // operand's own object inside the ordered `Spread` entry (the shared
+    // spread materializer merges at graph-lowering time).
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected the ordered spread-bearing Object IR, got {:?}",
+            decl.type_annotation
+        );
+    };
+    assert_eq!(obj.properties.len(), 2, "spread entry + direct member `c`");
+    let ObjectMember::Spread(spread) = &obj.properties[0] else {
+        panic!(
+            "entry 0 must be the inline spread, got {:?}",
+            obj.properties[0]
+        );
+    };
+    let TypeExpr::Object(operand) = &spread.ty else {
+        panic!("operand keeps its own object type, got {:?}", spread.ty);
+    };
+    let operand_names: Vec<&str> = operand
         .properties
         .iter()
         .filter_map(|m| match m {
@@ -2591,23 +2594,14 @@ fn object_spread_object_literal_merges_properties() {
             _ => None,
         })
         .collect();
-
-    assert!(
-        names.contains(&"a"),
-        "spread object literal property 'a' should be merged"
-    );
-    assert!(
-        names.contains(&"b"),
-        "spread object literal property 'b' should be merged"
-    );
-    assert!(
-        names.contains(&"c"),
-        "explicit property 'c' should be present"
-    );
     assert_eq!(
-        names.len(),
-        3,
-        "should have exactly 3 properties after merge"
+        operand_names,
+        ["a", "b"],
+        "operand members preserved on the operand"
+    );
+    assert!(
+        matches!(&obj.properties[1], ObjectMember::Property(p) if p.name == "c"),
+        "the direct member `c` follows the spread in source order"
     );
 }
 
@@ -2646,37 +2640,40 @@ fn object_spread_later_property_overrides_spread_property() {
 }
 
 #[test]
-fn object_spread_later_spread_overrides_earlier_property() {
+fn object_spread_later_spread_override_is_the_folds_decision() {
     let parts = lowered(r#"const merged = { a: 1, ...{ a: "override" } }"#);
     let decl = parts.value_decl("merged").expect("lowered merged");
 
+    // The producer preserves BOTH sides in source order — the direct `a`
+    // BEFORE the overriding spread — so the fold (not the producer) applies
+    // the required-spread-wins rule with the operand's `string`.
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
-            "expected object type for merged spread override, got {:?}",
+            "expected the ordered spread-bearing Object IR, got {:?}",
             decl.type_annotation
         );
     };
-
-    let props: Vec<_> = obj
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(
-        props.len(),
-        1,
-        "later spread properties should replace earlier explicit properties"
+    assert_eq!(obj.properties.len(), 2);
+    assert!(
+        matches!(&obj.properties[0], ObjectMember::Property(p) if p.name == "a"
+            && p.ty == TypeExpr::Primitive(PrimitiveName::Number)),
+        "entry 0 is the direct `a: number`, got {:?}",
+        obj.properties[0]
     );
-    // The later spread's `a: "override"` wins (a STRING, not the earlier
-    // explicit number `a: 1`) and — as a fresh object-literal property with no
-    // `as const` — widens to its primitive `string` (TS object-literal
-    // widening). The string-vs-number discrimination still proves override
-    // precedence.
-    assert_eq!(props[0], &TypeExpr::Primitive(PrimitiveName::String));
+    let ObjectMember::Spread(spread) = &obj.properties[1] else {
+        panic!(
+            "entry 1 must be the overriding spread, got {:?}",
+            obj.properties[1]
+        );
+    };
+    let TypeExpr::Object(operand) = &spread.ty else {
+        panic!("operand keeps its own object type, got {:?}", spread.ty);
+    };
+    assert!(
+        matches!(&operand.properties[0], ObjectMember::Property(p) if p.name == "a"
+            && p.ty == TypeExpr::Primitive(PrimitiveName::String)),
+        "the operand's `a: string` is preserved for the fold to apply"
+    );
 }
 
 // =============================================================================
@@ -4119,4 +4116,177 @@ fn const_assertion_recognition_is_typed_and_behavior_preserving() {
     };
     assert_eq!(prop.ty, TypeExpr::Primitive(PrimitiveName::String));
     assert!(!prop.readonly);
+}
+
+// =============================================================================
+// Ordered object-literal spread IR (the pre-fold producer contract)
+// =============================================================================
+
+/// `{ a: 1, ...base, b: "x" }` — the producer emits the ORDERED pre-fold IR:
+/// every direct member and every spread entry survives in source order, direct
+/// members are minted `FreshOwn`, and the spread operand rides an
+/// `ObjectMember::Spread` entry (never an intersection synthesis, never an
+/// inline flatten).
+#[test]
+fn object_literal_producer_emits_ordered_spread_ir_with_fresh_own_members() {
+    let parts = lowered(r#"const mixed = { a: 1, ...base, b: "x" }"#);
+    let decl = parts.value_decl("mixed").expect("lowered mixed");
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected the ordered spread-bearing Object IR, got {:?}",
+            decl.type_annotation
+        );
+    };
+    assert_eq!(
+        obj.properties.len(),
+        3,
+        "every direct member and the spread entry survive in source order"
+    );
+    match &obj.properties[0] {
+        ObjectMember::Property(p) => {
+            assert_eq!(p.name, "a");
+            assert_eq!(
+                p.excess_origin,
+                ExcessPropertyOrigin::FreshOwn,
+                "a direct literal member is FreshOwn"
+            );
+        }
+        other => panic!("entry 0 must be the direct member `a`, got {other:?}"),
+    }
+    match &obj.properties[1] {
+        ObjectMember::Spread(s) => assert!(
+            matches!(&s.ty, TypeExpr::TypeOf(_)),
+            "the spread operand rides the entry as `typeof base`, got {:?}",
+            s.ty
+        ),
+        other => panic!("entry 1 must be the spread of `base` BETWEEN the members, got {other:?}"),
+    }
+    match &obj.properties[2] {
+        ObjectMember::Property(p) => {
+            assert_eq!(p.name, "b");
+            assert_eq!(p.excess_origin, ExcessPropertyOrigin::FreshOwn);
+        }
+        other => panic!("entry 2 must be the direct member `b` AFTER the spread, got {other:?}"),
+    }
+}
+
+/// An inline-literal spread operand stays an ENTRY holding the operand's own
+/// object type (whose members are that literal's `FreshOwn` — the fold, not
+/// the producer, decides taint), and nested literal VALUES of direct members
+/// are recursively `FreshOwn`.
+#[test]
+fn object_literal_producer_keeps_inline_spread_operands_and_nested_freshness() {
+    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: { d: 3 } }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected the ordered spread-bearing Object IR, got {:?}",
+            decl.type_annotation
+        );
+    };
+    assert_eq!(obj.properties.len(), 2, "spread entry + direct member `c`");
+    match &obj.properties[0] {
+        ObjectMember::Spread(s) => {
+            let TypeExpr::Object(operand) = &s.ty else {
+                panic!("inline operand keeps its object type, got {:?}", s.ty);
+            };
+            assert_eq!(operand.properties.len(), 2);
+            for member in operand.properties.iter() {
+                let ObjectMember::Property(p) = member else {
+                    panic!("operand member must be a property, got {member:?}");
+                };
+                assert_eq!(
+                    p.excess_origin,
+                    ExcessPropertyOrigin::FreshOwn,
+                    "the operand literal's OWN members are its FreshOwn — taint \
+                     is the FOLD's decision, not the producer's"
+                );
+            }
+        }
+        other => panic!("entry 0 must be the inline spread, got {other:?}"),
+    }
+    match &obj.properties[1] {
+        ObjectMember::Property(p) => {
+            assert_eq!(p.name, "c");
+            assert_eq!(p.excess_origin, ExcessPropertyOrigin::FreshOwn);
+            let TypeExpr::Object(nested) = &p.ty else {
+                panic!("nested literal value stays an object, got {:?}", p.ty);
+            };
+            let ObjectMember::Property(d) = &nested.properties[0] else {
+                panic!("nested member must be a property");
+            };
+            assert_eq!(
+                d.excess_origin,
+                ExcessPropertyOrigin::FreshOwn,
+                "an inline NESTED literal's members are FreshOwn (nested freshness)"
+            );
+        }
+        other => panic!("entry 1 must be the direct member `c`, got {other:?}"),
+    }
+}
+
+/// The transient `object_shape` of a spread-bearing initializer keeps the
+/// spread entry in source order — never a silently spread-less shape.
+#[test]
+fn object_shape_preserves_spread_entries_in_order() {
+    let parts = lowered(r#"const extended = { ...base, extra: true }"#);
+    let decl = parts.value_decl("extended").expect("lowered extended");
+    let shape = decl.object_shape.as_ref().expect("object shape recorded");
+    assert_eq!(shape.properties.len(), 2);
+    assert!(
+        matches!(&shape.properties[0], ObjectMember::Spread(_)),
+        "shape entry 0 must be the spread, got {:?}",
+        shape.properties[0]
+    );
+    assert!(
+        matches!(&shape.properties[1], ObjectMember::Property(p) if p.name == "extra"),
+        "shape entry 1 must be `extra`, got {:?}",
+        shape.properties[1]
+    );
+}
+
+/// Getter / setter / method / shorthand members of a literal are all direct
+/// `FreshOwn` members in the ordered IR — every authored member form is an
+/// excess candidate until a spread overlaps it.
+#[test]
+fn object_literal_accessor_method_and_shorthand_members_are_fresh_own() {
+    let parts = lowered(
+        r#"const o = { m() { return 1 }, get g() { return 1 }, set s(v: number) {}, short }"#,
+    );
+    let decl = parts.value_decl("o").expect("lowered o");
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!("expected the object IR, got {:?}", decl.type_annotation);
+    };
+    let mut names: Vec<&str> = Vec::new();
+    for member in obj.properties.iter() {
+        match member {
+            ObjectMember::Property(p) => {
+                assert_eq!(
+                    p.excess_origin,
+                    ExcessPropertyOrigin::FreshOwn,
+                    "member `{}` must be FreshOwn",
+                    p.name
+                );
+                names.push(p.name.as_str());
+            }
+            ObjectMember::Method(m) => {
+                assert_eq!(
+                    m.excess_origin,
+                    ExcessPropertyOrigin::FreshOwn,
+                    "method `{}` must be FreshOwn",
+                    m.name
+                );
+                names.push(m.name.as_str());
+            }
+            other => panic!("unexpected member form {other:?}"),
+        }
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        ["g", "m", "s", "short"],
+        "method, getter, setter, and shorthand members all survive as direct members"
+    );
 }

@@ -197,6 +197,7 @@ fn count_type_expr_nodes(ty: &TypeExpr) -> usize {
                                 walk(rt, n);
                             }
                         }
+                        ObjectMember::Spread(spread) => walk(&spread.ty, n),
                     }
                 }
             }

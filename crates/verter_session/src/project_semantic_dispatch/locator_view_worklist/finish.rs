@@ -235,7 +235,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(view) => {
                 let member_context = context.into_structural_provenance();
                 let members: Vec<_> = view
-                    .members
+                    .positive_members()
                     .iter()
                     .map(|member| SurfaceMember {
                         name: Arc::clone(&member.name),
@@ -244,6 +244,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         readonly: member.readonly,
                         is_method: member.is_method,
                         visibility: member.visibility,
+                        // Projection preserves the member's excess-property
+                        // provenance verbatim (structure-preserving rewrite).
+                        excess_origin: member.excess_origin,
                         spans: member.spans,
                         declaration_origin: member.declaration_origin.clone(),
                         declared_in_macro_type_arg: context.own_body_stamp(),
@@ -271,19 +274,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         declaration_origin: signature.declaration_origin.clone(),
                     })
                     .collect();
-                graph.intern_preserving_scope(
-                    node,
-                    SemanticNodeData::Object(SurfaceView {
-                        members: Arc::from(members.into_boxed_slice()),
-                        call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                        construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                        index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                        keyspace: view
-                            .keyspace
-                            .map(|keyspace| projected(memo, keyspace, context)),
-                        has_index_signature: view.has_index_signature,
+                let projected_view = crate::semantic_query::surface_view! {
+                    members: Arc::from(members.into_boxed_slice()),
+                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+                    keyspace: view
+                        .keyspace
+                        .map(|keyspace| projected(memo, keyspace, context)),
+                    has_index_signature: view.has_known_index_signature(),
+                    completeness: view.completeness_with_mapped_operands(|operand| {
+                        projected(memo, operand, member_context)
                     }),
-                )
+                };
+                graph.intern_preserving_scope(node, SemanticNodeData::Object(projected_view))
             }
             SemanticNodeData::Signature {
                 kind,

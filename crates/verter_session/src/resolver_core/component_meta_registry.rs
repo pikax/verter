@@ -1623,7 +1623,7 @@ fn collect_registry_refs_node_inner(
         // through the member-surface walker under the same G2 path-precision
         // cursor gates as the `TypeExpr` sibling.
         SemanticNodeData::Object(surface) => {
-            for member in surface.members.iter() {
+            for member in surface.positive_members().iter() {
                 if !cursor.admits_key(member.name.as_ref()) {
                     continue;
                 }
@@ -1676,6 +1676,20 @@ fn collect_registry_refs_node_inner(
                         member_ref_policy,
                         visited,
                     );
+                }
+                if let Some(operands) = surface.open_spread_operands() {
+                    for operand in operands.as_slice() {
+                        collect_registry_member_surface_refs_node(
+                            ctx,
+                            *operand,
+                            published_names,
+                            queued_names,
+                            output,
+                            producer_scope,
+                            member_ref_policy,
+                            visited,
+                        );
+                    }
                 }
             }
         }
@@ -1967,7 +1981,7 @@ fn collect_registry_member_surface_refs_node(
             );
         }
         SemanticNodeData::Object(surface) => {
-            for member in surface.members.iter() {
+            for member in surface.positive_members().iter() {
                 recurse(
                     ctx,
                     member.value,
@@ -2008,6 +2022,18 @@ fn collect_registry_member_surface_refs_node(
                     member_ref_policy,
                     visited,
                 );
+            }
+            if let Some(operands) = surface.open_spread_operands() {
+                for operand in operands.as_slice() {
+                    recurse(
+                        ctx,
+                        *operand,
+                        queued_names,
+                        output,
+                        member_ref_policy,
+                        visited,
+                    );
+                }
             }
         }
         _ => {}
@@ -2051,12 +2077,15 @@ pub(crate) fn collect_node_ref_names(
                 worklist.extend(expressions.iter().copied());
             }
             SemanticNodeData::Object(surface) => {
-                worklist.extend(surface.members.iter().map(|member| member.value));
+                worklist.extend(surface.positive_members().iter().map(|member| member.value));
                 worklist.extend(surface.call_signatures.iter().copied());
                 worklist.extend(surface.construct_signatures.iter().copied());
                 for signature in surface.index_signatures.iter() {
                     worklist.push(signature.key_type);
                     worklist.push(signature.value_type);
+                }
+                if let Some(operands) = surface.open_spread_operands() {
+                    worklist.extend(operands.as_slice().iter().copied());
                 }
             }
             SemanticNodeData::Signature {

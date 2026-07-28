@@ -323,17 +323,38 @@ fn member_visibility_from_json(v: &serde_json::Value) -> MemberVisibility {
     }
 }
 
+/// The wire string for a member's excess-property origin (serialized only for
+/// non-`NonLiteral` values; absence parses back as `NonLiteral`).
+fn excess_origin_wire_str(origin: ExcessPropertyOrigin) -> &'static str {
+    match origin {
+        ExcessPropertyOrigin::FreshOwn => "freshOwn",
+        ExcessPropertyOrigin::SpreadTainted => "spreadTainted",
+        ExcessPropertyOrigin::NonLiteral => "nonLiteral",
+    }
+}
+
+fn excess_origin_from_json(v: &serde_json::Value) -> ExcessPropertyOrigin {
+    match v.get("excessOrigin").and_then(|o| o.as_str()) {
+        Some("freshOwn") => ExcessPropertyOrigin::FreshOwn,
+        Some("spreadTainted") => ExcessPropertyOrigin::SpreadTainted,
+        _ => ExcessPropertyOrigin::NonLiteral,
+    }
+}
+
 fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
     let mk = v.get("memberKind")?.as_str()?;
     match mk {
-        "property" => Some(ObjectMember::Property(ObjectProperty::with_visibility(
-            v.get("name")?.as_str()?.to_string(),
-            type_expr_from_json(v.get("ty")?)?,
-            v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-            v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
-            member_visibility_from_json(v),
-            MemberSpans::default(),
-        ))),
+        "property" => Some(ObjectMember::Property(
+            ObjectProperty::with_visibility(
+                v.get("name")?.as_str()?.to_string(),
+                type_expr_from_json(v.get("ty")?)?,
+                v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+                v.get("readonly").and_then(|o| o.as_bool()).unwrap_or(false),
+                member_visibility_from_json(v),
+                MemberSpans::default(),
+            )
+            .with_excess_origin(excess_origin_from_json(v)),
+        )),
         "indexSignature" => Some(ObjectMember::IndexSignature(IndexSignature::synthetic(
             v.get("keyName")?.as_str()?.to_string(),
             type_expr_from_json(v.get("keyType")?)?,
@@ -346,12 +367,18 @@ fn json_to_object_member(v: &serde_json::Value) -> Option<ObjectMember> {
         "constructSignature" => Some(ObjectMember::ConstructSignature(json_to_function_expr(
             v.get("function")?,
         )?)),
-        "method" => Some(ObjectMember::Method(MethodSignature::with_visibility(
-            v.get("name")?.as_str()?.to_string(),
-            json_to_function_expr(v.get("function")?)?,
-            v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
-            member_visibility_from_json(v),
-            MemberSpans::default(),
+        "method" => Some(ObjectMember::Method(
+            MethodSignature::with_visibility(
+                v.get("name")?.as_str()?.to_string(),
+                json_to_function_expr(v.get("function")?)?,
+                v.get("optional").and_then(|o| o.as_bool()).unwrap_or(false),
+                member_visibility_from_json(v),
+                MemberSpans::default(),
+            )
+            .with_excess_origin(excess_origin_from_json(v)),
+        )),
+        "spread" => Some(ObjectMember::Spread(SpreadMember::new(
+            type_expr_from_json(v.get("ty")?)?,
         ))),
         _ => None,
     }
@@ -505,6 +532,12 @@ impl TypeExpr {
                         if !p.visibility.is_public() {
                             member["visibility"] = json!(p.visibility.as_wire_str());
                         }
+                        // Serialize `excessOrigin` ONLY when non-NonLiteral so
+                        // pre-freshness JSON is byte-unchanged and a missing
+                        // field parses back as `NonLiteral`.
+                        if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                            member["excessOrigin"] = json!(excess_origin_wire_str(p.excess_origin));
+                        }
                         member
                     }
                     ObjectMember::IndexSignature(idx) => json!({
@@ -532,8 +565,15 @@ impl TypeExpr {
                         if !m.visibility.is_public() {
                             member["visibility"] = json!(m.visibility.as_wire_str());
                         }
+                        if m.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                            member["excessOrigin"] = json!(excess_origin_wire_str(m.excess_origin));
+                        }
                         member
                     }
+                    ObjectMember::Spread(s) => json!({
+                        "memberKind": "spread",
+                        "ty": s.ty.to_json_value()
+                    }),
                 }).collect::<Vec<_>>()
             }),
             Self::Function(func) => {

@@ -3443,17 +3443,20 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 /// across a scope edit and the only shifting fact is the scope's
 /// `FileWholeHash`).
 fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNodeId {
-    use crate::semantic_query::{SemanticNodeData, SurfaceView};
+    use crate::semantic_query::SemanticNodeData;
     host.project_type_store()
         .semantic_graph()
-        .intern_node(SemanticNodeData::Object(SurfaceView {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }))
+        .intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ))
 }
 
 /// `MaterializeStructureDb::peek` runs its self-root canonicals
@@ -5398,6 +5401,7 @@ fn shape_member(
     value: crate::semantic_query::SemanticNodeId,
 ) -> crate::semantic_query::SurfaceMember {
     crate::semantic_query::SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,

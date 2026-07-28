@@ -5131,6 +5131,14 @@ fn type_def_source_files() -> Vec<(String, String)> {
             "../verter_type_expr/src/facts.rs",
             "verter_type_expr::facts",
         ),
+        // `ExcessPropertyOrigin` (taken by the raise materialize algebra's
+        // `member_property` / `member_method` sinks) is the fieldless
+        // excess-provenance enum (`NoTypeExpr`-derived); reading its home
+        // lets the closure classify it as non-bearing.
+        (
+            "../verter_type_expr/src/member_origin.rs",
+            "verter_type_expr::member_origin",
+        ),
     ];
     for (rel, module_base) in EXTERNAL {
         let path = crate_root().join(rel);
@@ -12675,9 +12683,7 @@ struct AliasFrame {
 }
 
 /// A lexical stack of `use`-alias frames for the hot-materialize syntactic
-/// tripwire (the Unknown-control-flow fence it was once shared with is
-/// DELETED — the typed-degradation cutover removed the sentinel control-flow
-/// shape that fence scanned for). Resolution walks
+/// tripwire. Resolution walks
 /// innermost-first so an inner `use … as TE` shadows an outer binding and a
 /// block-local alias is invisible to sibling scopes. The canonical `TypeExpr`
 /// ident is seeded in a permanent base frame. The merged current sets

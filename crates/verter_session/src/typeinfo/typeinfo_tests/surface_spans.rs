@@ -572,7 +572,7 @@ fn member_with_unresolved_value_type_keeps_real_declaration_spans() {
 
 #[test]
 fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
-    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceView};
+    use crate::semantic_query::{IndexSignature, SemanticNodeData};
     use verter_span::Span;
 
     const FILE: &str = "/src/idx_decl.ts";
@@ -622,13 +622,14 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         // at production time; the only correct span anchor.
         declaration_origin: Some(std::sync::Arc::from(FILE)),
     };
-    let view = SurfaceView {
+    let view = crate::semantic_query::surface_view! {
         members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         index_signatures: std::sync::Arc::from(vec![sig].into_boxed_slice()),
         keyspace: None,
         has_index_signature: true,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
 
     let surface = TypeInfoSurface::build(graph, &view);
@@ -676,7 +677,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
 
 #[test]
 fn member_build_uses_declaration_origin_for_scopeless_value() {
-    use crate::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember};
     use verter_span::Span;
 
     const FILE: &str = "/src/member_decl.ts";
@@ -707,6 +708,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     );
 
     let built_member = SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
         name: std::sync::Arc::from("present"),
         value: value_node,
@@ -727,13 +729,14 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         )
         .stamp_role(MemberMergeRole::OwnBody),
     };
-    let view = SurfaceView {
+    let view = crate::semantic_query::surface_view! {
         members: std::sync::Arc::from(vec![built_member].into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
 
     let surface = TypeInfoSurface::build(graph, &view);

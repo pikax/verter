@@ -258,7 +258,11 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
     let graph = host.project_type_store().semantic_graph();
     match graph.node_data(surface).as_deref() {
         Some(crate::semantic_query::SemanticNodeData::Object(view)) => {
-            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            let names: Vec<&str> = view
+                .positive_members()
+                .iter()
+                .map(|m| m.name.as_ref())
+                .collect();
             assert!(
                 names.contains(&"default") && names.contains(&"prepend"),
                 "the re-resolved ButtonSlots surface must expose `default` and `prepend`, \

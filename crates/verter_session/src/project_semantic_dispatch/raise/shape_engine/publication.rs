@@ -616,6 +616,7 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
         _optional: bool,
         _readonly: bool,
         _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
     ) -> MemberScore {
         MemberScore {
@@ -629,11 +630,18 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
         function: FnScore,
         _optional: bool,
         _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
     ) -> MemberScore {
         MemberScore {
             symbolic_carriers: function.symbolic_carriers,
             generic_detail: function.generic_detail,
+        }
+    }
+    fn member_spread(&mut self, ty: ScoredOut) -> MemberScore {
+        MemberScore {
+            symbolic_carriers: ty.score.symbolic_carriers,
+            generic_detail: ty.score.generic_detail,
         }
     }
     fn member_call_signature(&mut self, function: FnScore) -> MemberScore {
@@ -802,6 +810,10 @@ fn object_member_score(member: &verter_type_expr::ObjectMember) -> (usize, usize
     match member {
         ObjectMember::Property(property) => {
             let score = type_expr_publication_score(&property.ty);
+            (score.symbolic_carriers, score.generic_detail)
+        }
+        ObjectMember::Spread(spread) => {
+            let score = type_expr_publication_score(&spread.ty);
             (score.symbolic_carriers, score.generic_detail)
         }
         ObjectMember::Method(method) => {

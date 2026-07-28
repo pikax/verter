@@ -504,7 +504,7 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
         SemanticNodeData::Object(view) => {
-            assert!(view.members.is_empty(), "no plain members");
+            assert!(view.positive_members().is_empty(), "no plain members");
             assert_eq!(
                 view.construct_signatures.len(),
                 1,
@@ -983,8 +983,8 @@ fn conditional_binds_object_member_infer_in_true_branch() {
         } => {
             let member_infer = match &*node(&graph, *extends) {
                 SemanticNodeData::Object(view) => {
-                    assert_eq!(view.members.len(), 1);
-                    view.members[0].value
+                    assert_eq!(view.positive_members().len(), 1);
+                    view.positive_members()[0].value
                 }
                 other => panic!("expected Object extends, got {other:?}"),
             };
@@ -1202,8 +1202,8 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     }
     match &*node(&graph, arms[1]) {
         SemanticNodeData::Object(view) => {
-            assert_eq!(view.members.len(), 1);
-            let m = &view.members[0];
+            assert_eq!(view.positive_members().len(), 1);
+            let m = &view.positive_members()[0];
             assert_eq!(m.name.as_ref(), "own");
             assert_eq!(
                 m.merge_role,
@@ -1549,7 +1549,7 @@ fn structural_equivalence_for_object_with_members() {
     }));
     let (graph, root) = assert_paths_agree(&host, &expr);
     assert!(
-        matches!(&*node(&graph, root), SemanticNodeData::Object(view) if view.members.len() == 2),
+        matches!(&*node(&graph, root), SemanticNodeData::Object(view) if view.positive_members().len() == 2),
         "the agreed root is the structural object with both members"
     );
 }

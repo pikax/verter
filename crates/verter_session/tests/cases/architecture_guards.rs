@@ -21409,16 +21409,15 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
 
 /// PARENT-SHAPE guard (load-bearing): the `structural_carrier_producer/`
 /// owner directory contains ONLY the sanctioned members — the single producer
-/// module (`macro_arg_producer.rs`), the module root (`mod.rs`), and test
-/// modules (`*_tests.rs`). This stops the owner module's boundary silently
-/// growing a SECOND producer surface (a new non-test, non-sanctioned `.rs`
-/// module that could open another path to the module-private lowerer). The
-/// collapse to ONE producer module is what makes a third caller a compile
-/// error — there is no other file that could name the private lowerer.
+/// module (`macro_arg_producer.rs`), the typed-IR-only binder walker
+/// (`infer_binder_names.rs`), the module root (`mod.rs`), and test modules
+/// (`*_tests.rs`). This stops the owner module's boundary silently growing a
+/// SECOND producer surface. The binder walker has no producer inputs and, as a
+/// sibling, cannot name the child-private lowering builders.
 #[test]
 fn structural_carrier_producer_module_is_narrow() {
     let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
-    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs"];
+    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs", "infer_binder_names.rs"];
     let mut found_modules: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
         let path = entry.expect("dir entry").path();
@@ -21457,9 +21456,9 @@ fn structural_carrier_producer_module_is_narrow() {
     assert!(
         extra.is_empty(),
         "owner-module narrowness violation: `structural_carrier_producer/` may contain ONLY the \
-         single producer module (`macro_arg_producer.rs`), `mod.rs`, and test modules \
-         (`*_tests.rs`). A new non-test module here could open a SECOND producer surface or name \
-         the module-private lowerer. Found extra modules: {extra:#?}"
+         single producer module (`macro_arg_producer.rs`), the typed-IR-only binder walker \
+         (`infer_binder_names.rs`), `mod.rs`, and test modules (`*_tests.rs`). A new non-test \
+         module here could open a SECOND producer surface. Found extra modules: {extra:#?}"
     );
 }
 
@@ -21471,7 +21470,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     // Reuse the SAME sanctioned-set membership predicate the live guard uses by
     // re-stating it here over an in-memory file list, so a divergence in the
     // allowlist reddens.
-    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs"];
+    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs", "infer_binder_names.rs"];
     let classify = |names: &[&str]| -> Vec<String> {
         names
             .iter()
@@ -21484,6 +21483,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     let genuine = [
         "mod.rs",
         "macro_arg_producer.rs",
+        "infer_binder_names.rs",
         "structural_lower_tests.rs",
         "macro_hot_mirror_tests.rs",
         "script_setup_binder_tests.rs",
@@ -21493,7 +21493,12 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
         "the genuine owner member set (sanctioned production + `*_tests.rs`) must have NO extras"
     );
     // A planted extra non-test module IS reported.
-    let with_extra = ["mod.rs", "macro_arg_producer.rs", "second_producer.rs"];
+    let with_extra = [
+        "mod.rs",
+        "macro_arg_producer.rs",
+        "infer_binder_names.rs",
+        "second_producer.rs",
+    ];
     assert_eq!(
         classify(&with_extra),
         vec!["second_producer.rs".to_string()],
@@ -21503,6 +21508,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     let only_test = [
         "mod.rs",
         "macro_arg_producer.rs",
+        "infer_binder_names.rs",
         "extra_invariant_tests.rs",
     ];
     assert!(
@@ -22961,23 +22967,52 @@ fn type_path_last_segment(ty: &syn::Type) -> Option<String> {
 }
 
 /// The EXACT sanctioned shape of `structural_carrier_producer/mod.rs`: it must
-/// declare the producer module as a PRIVATE `mod macro_arg_producer;` (no
-/// visibility) and re-export EXACTLY
+/// declare the typed-IR helper as a PRIVATE `mod infer_binder_names;`, declare
+/// the producer module as a PRIVATE `mod macro_arg_producer;` (no visibility),
+/// and re-export EXACTLY
 /// `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`
 /// — no aliases, no globs, no extra leaves, no re-exported restricted
-/// helpers/traits/consts, no `pub`-widened module decl. Returns the list of
-/// violations (empty on the genuine `mod.rs`). A `syn` walk over the file's items
-/// enforces the shape structurally (not a substring scan).
+/// helpers/traits/consts, no `pub`-widened module decl. The helper is a sibling,
+/// so it cannot name the producer child's private builders. Returns the list of
+/// violations (empty on the genuine `mod.rs`). A `syn` walk over the file's
+/// items enforces the shape structurally (not a substring scan).
 fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
     let file = match syn::parse_file(src) {
         Ok(f) => f,
         Err(e) => return vec![format!("parse error: {e}")],
     };
     let mut out: Vec<String> = Vec::new();
+    let mut saw_helper_decl = false;
     let mut saw_mod_decl = false;
     let mut saw_sanctioned_reexport = false;
     for item in &file.items {
         match item {
+            // The typed-IR walker is the one sanctioned non-producer sibling.
+            // It must stay private, attribute-free, and out-of-line.
+            syn::Item::Mod(m) if m.ident == "infer_binder_names" => {
+                saw_helper_decl = true;
+                if !matches!(m.vis, syn::Visibility::Inherited) {
+                    out.push(
+                        "`mod infer_binder_names;` must be PRIVATE — widening it is outside the \
+                         sanctioned typed-IR helper boundary"
+                            .to_string(),
+                    );
+                }
+                if !m.attrs.is_empty() {
+                    out.push(
+                        "`mod infer_binder_names;` must carry no attributes — `#[path]` or an \
+                         attribute macro could substitute a producer-capable implementation"
+                            .to_string(),
+                    );
+                }
+                if m.content.is_some() {
+                    out.push(
+                        "`mod infer_binder_names` must be an out-of-line declaration \
+                         (`mod infer_binder_names;`)"
+                            .to_string(),
+                    );
+                }
+            }
             // The `mod macro_arg_producer;` declaration must be PRIVATE and
             // body-less (out-of-line into the sibling file).
             syn::Item::Mod(m) if m.ident == "macro_arg_producer" => {
@@ -23029,7 +23064,7 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
             syn::Item::Mod(m) => {
                 out.push(format!(
                     "mod.rs declares an unexpected module `mod {}` — the owner root must declare \
-                     ONLY the private `mod macro_arg_producer;`",
+                     ONLY the private typed-IR helper and producer modules",
                     m.ident
                 ));
             }
@@ -23047,12 +23082,15 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
             other => {
                 out.push(format!(
                     "mod.rs contains an unexpected item ({}) — the owner root must hold ONLY the \
-                     private `mod macro_arg_producer;` declaration and the one sanctioned \
-                     `pub(crate) use macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};`",
+                     private helper/producer module declarations and the one sanctioned \
+                     producer re-export",
                     describe_item_kind(other)
                 ));
             }
         }
+    }
+    if !saw_helper_decl {
+        out.push("mod.rs must declare `mod infer_binder_names;`".to_string());
     }
     if !saw_mod_decl {
         out.push("mod.rs must declare `mod macro_arg_producer;`".to_string());
@@ -23241,12 +23279,13 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     }
     // Anti-vacuity: the module must exist and the scan must have found the
     // sanctioned entry — its absence means the producer-entry move regressed. The
-    // owner module is now narrow (`mod.rs` + `macro_arg_producer.rs`), so at least
-    // one production file is scanned.
+    // owner module is narrow (`mod.rs` + producer + typed-IR helper), so at
+    // least one production file is scanned.
     assert!(
         scanned_mirror_files >= 1,
         "anti-vacuity: expected at least the owner module's production files \
-         (`mod.rs` + `macro_arg_producer.rs`), found {scanned_mirror_files}"
+         (`mod.rs` + `macro_arg_producer.rs` + `infer_binder_names.rs`), found \
+         {scanned_mirror_files}"
     );
     for sanctioned in MIRROR_SANCTIONED_PRODUCER_ENTRIES {
         assert!(
@@ -23305,18 +23344,16 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         trait_violations.join("\n  ")
     );
 
-    // PIN mod.rs EXACTLY — a PRIVATE `mod macro_arg_producer;` plus EXACTLY
-    // `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`
-    // (no aliases, globs, extra leaves, re-exported restricted helpers, or a
-    // `pub`-widened module decl).
+    // PIN mod.rs EXACTLY — PRIVATE typed-IR-helper and producer module
+    // declarations plus EXACTLY the sanctioned producer re-export.
     let mod_rel = "crates/verter_session/src/structural_carrier_producer/mod.rs";
     let mod_src = std::fs::read_to_string(workspace_path(mod_rel))
         .unwrap_or_else(|e| panic!("guard could not read {mod_rel}: {e}"));
     let mod_violations = mod_rs_reexport_shape_violations(&mod_src);
     assert!(
         mod_violations.is_empty(),
-        "mod.rs shape violation: `structural_carrier_producer/mod.rs` must declare a PRIVATE \
-         `mod macro_arg_producer;` and re-export EXACTLY `pub(crate) use \
+        "mod.rs shape violation: `structural_carrier_producer/mod.rs` must declare PRIVATE \
+         `mod infer_binder_names;` + `mod macro_arg_producer;` and re-export EXACTLY `pub(crate) use \
          macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};` — no aliases, globs, \
          extra leaves, re-exported restricted helpers, or a `pub`-widened module decl. \
          Violations:\n  {}",
@@ -23590,21 +23627,19 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a `#[cfg_attr(feature = \"x\", inline)] pub(crate) fn` is compiled in every build and MUST \
          be counted — cfg_attr never gates the item out"
     );
-    // CONVERSELY, the strict `#[cfg(test)]` item gate is UNAFFECTED by the fix: a
-    // genuine `#[cfg(test)] pub(crate) fn` is still EXCLUDED (test-only). This
-    // confirms the cfg_attr split did not regress real test-wiring exclusion.
+    // The strict `#[cfg(test)]` item gate excludes a genuine test-only entry.
     assert!(
         crate_visible_producer_fn_names("#[cfg(test)]\npub(crate) fn test_wired() {}\n").is_empty(),
         "a genuine `#[cfg(test)] pub(crate) fn` stays EXCLUDED after the cfg_attr split — the \
          `cfg(test)` item gate is unaffected"
     );
-    // The REAL owner source exposes EXACTLY the single sanctioned producer entry
-    // (revert proof: the production tree is pristine — free + associated coverage
-    // across the owner module's two production files).
+    // The real owner source exposes exactly the single sanctioned producer
+    // entry, with free + associated coverage across every production file.
     let mut real: Vec<String> = Vec::new();
     for rel in [
         "crates/verter_session/src/structural_carrier_producer/mod.rs",
         "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_session/src/structural_carrier_producer/infer_binder_names.rs",
     ] {
         let src = std::fs::read_to_string(workspace_path(rel))
             .unwrap_or_else(|e| panic!("could not read {rel}: {e}"));
@@ -23624,9 +23659,9 @@ fn mirror_entry_surface_classifier_discriminates() {
     );
 }
 
-/// Self-test for the FIX-B value-exposure / trait-exposure / mod.rs-pin
-/// collectors: the genuine `macro_arg_producer.rs` + `mod.rs` pass; a planted
-/// crate-visible const/static fn-pointer of a builder, a non-allowlisted trait
+/// Self-test for the value-exposure / trait-exposure / mod.rs-pin collectors:
+/// the genuine producer, helper, and `mod.rs` pass; a planted crate-visible
+/// const/static fn-pointer of a builder, a non-allowlisted trait
 /// impl, a trait def, an allowlisted impl naming a builder, and a deviating
 /// mod.rs re-export (extra leaf / alias / glob / `pub` module decl) each redden;
 /// `#[cfg(test)]`-gated shapes do not.
@@ -23764,43 +23799,44 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
 
     // ── mod.rs PIN ─────────────────────────────────────────────────────────
     // The EXACT sanctioned shape passes.
-    let ok_mod = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let ok_mod = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         mod_rs_reexport_shape_violations(ok_mod).is_empty(),
         "the exact sanctioned mod.rs shape must pass"
     );
     // An EXTRA re-exported leaf reddens.
-    let extra_leaf = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, lower_type_expr_structural};\n";
+    let extra_leaf = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, lower_type_expr_structural};\n";
     assert!(
         !mod_rs_reexport_shape_violations(extra_leaf).is_empty(),
         "an extra re-exported leaf (`lower_type_expr_structural`) in mod.rs must redden"
     );
     // A SECOND `pub(crate) use` re-exporting a restricted helper reddens.
-    let extra_use = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\npub(crate) use macro_arg_producer::rogue;\n";
+    let extra_use = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\npub(crate) use macro_arg_producer::rogue;\n";
     assert!(
         !mod_rs_reexport_shape_violations(extra_use).is_empty(),
         "a second `pub(crate) use macro_arg_producer::rogue;` in mod.rs must redden"
     );
     // An ALIAS reddens.
-    let aliased = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref as hot, MacroHotMirror};\n";
+    let aliased = "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref as hot, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(aliased).is_empty(),
         "an aliased re-export leaf in mod.rs must redden"
     );
     // A GLOB reddens.
-    let glob = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::*;\n";
+    let glob =
+        "mod infer_binder_names;\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::*;\n";
     assert!(
         !mod_rs_reexport_shape_violations(glob).is_empty(),
         "a glob re-export in mod.rs must redden"
     );
     // A `pub` (not `pub(crate)`) module decl reddens (foreign-nameable).
-    let pub_mod = "pub mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let pub_mod = "mod infer_binder_names;\npub mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(pub_mod).is_empty(),
         "a `pub mod macro_arg_producer;` decl in mod.rs must redden (foreign-nameable)"
     );
     // A `pub` (not `pub(crate)`) re-export visibility reddens.
-    let pub_use = "mod macro_arg_producer;\npub use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let pub_use = "mod infer_binder_names;\nmod macro_arg_producer;\npub use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(pub_use).is_empty(),
         "a `pub use` (wider than `pub(crate)`) re-export in mod.rs must redden"
@@ -23810,7 +23846,7 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
     // build-substitution route) while keeping the inherited visibility +
     // out-of-line shape — it MUST redden. The decl must carry NO attribute other
     // than a strict `#[cfg(test)]`.
-    let path_attr = "#[path = \"../evil.rs\"]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let path_attr = "mod infer_binder_names;\n#[path = \"../evil.rs\"]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(path_attr).is_empty(),
         "a `#[path = \"../evil.rs\"] mod macro_arg_producer;` must redden — a `#[path]` re-roots the \
@@ -23818,7 +23854,7 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
     );
     // A proc-macro / non-inert ATTRIBUTE on the decl likewise reddens (it could
     // rewrite the module).
-    let proc_attr = "#[some_proc_macro]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    let proc_attr = "mod infer_binder_names;\n#[some_proc_macro]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
     assert!(
         !mod_rs_reexport_shape_violations(proc_attr).is_empty(),
         "a `#[some_proc_macro] mod macro_arg_producer;` decl must redden — a non-cfg-test attribute \

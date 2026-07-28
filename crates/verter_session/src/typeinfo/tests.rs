@@ -936,7 +936,7 @@ fn collect_surface_member_names(
 ) {
     match store.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
-            for m in view.members.iter() {
+            for m in view.positive_members().iter() {
                 out.push(m.name.to_string());
             }
         }

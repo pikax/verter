@@ -103,6 +103,7 @@ fn assert_no_unresolved_ref(type_expr: &verter_type_expr::TypeExpr, forbidden_na
                 for member in object.properties.iter() {
                     match member {
                         ObjectMember::Property(prop) => walk(&prop.ty, forbidden, hits),
+                        ObjectMember::Spread(spread) => walk(&spread.ty, forbidden, hits),
                         ObjectMember::IndexSignature(sig) => {
                             walk(&sig.value_type, forbidden, hits);
                             walk(&sig.key_type, forbidden, hits);

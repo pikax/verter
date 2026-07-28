@@ -319,7 +319,10 @@ fn error_any_never_propagation_lattice() {
     );
     match kind(m) {
         Some(SemanticNodeData::Object(view)) => {
-            assert!(view.members.is_empty(), "mapped over never = {{}}");
+            assert!(
+                view.positive_members().is_empty(),
+                "mapped over never = {{}}"
+            );
         }
         other => panic!("mapped over never must be an empty Object, got {other:?}"),
     }
@@ -434,7 +437,7 @@ fn conditional_any_check_unions_both_branches() {
 /// infer-binding path (`absorb_conditional` returns `None`).
 #[test]
 fn conditional_any_check_detects_nested_infer_patterns() {
-    use crate::semantic_query::{DeclIdentity, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{DeclIdentity, SurfaceMember};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -462,9 +465,10 @@ fn conditional_any_check_detects_nested_infer_patterns() {
 
     // (2) infer nested inside an `Object` property value:
     //     `any extends { x: infer U } ? U : Y`.
-    let obj_surface = SurfaceView {
+    let obj_surface = crate::semantic_query::surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
                 name: Arc::from("x"),
                 value: infer_u,
@@ -483,6 +487,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
     let obj = graph.intern_node(SemanticNodeData::Object(obj_surface));
     assert!(

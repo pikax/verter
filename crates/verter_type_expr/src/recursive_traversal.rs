@@ -248,6 +248,7 @@ fn drain_object_member(member: ObjectMember, worklist: &mut Vec<TypeExpr>) {
             drain_function_expr(f, worklist);
         }
         ObjectMember::Method(m) => drain_function_expr(m.function, worklist),
+        ObjectMember::Spread(mut s) => worklist.push(std::mem::replace(&mut s.ty, drop_leaf())),
     }
 }
 
@@ -323,6 +324,12 @@ enum HashStep<'a> {
     /// all-public surface's byte stream is identical to the pre-visibility
     /// stream. `Protected` / `Private` each fold a distinct marker.
     Visibility(MemberVisibility),
+    /// Emit a trailing non-`NonLiteral` `ExcessPropertyOrigin` marker (a
+    /// property's / method's excess-property provenance, emitted between the
+    /// visibility marker slot and `spans`). Pushed ONLY for `FreshOwn` /
+    /// `SpreadTainted` members — a `NonLiteral` member emits no origin bytes,
+    /// so every pre-freshness surface's byte stream is unchanged.
+    ExcessOrigin(ExcessPropertyOrigin),
     /// Emit a trailing `MappedModifier` field.
     Modifier(MappedModifier),
     /// Emit a trailing `MemberSpans` field.
@@ -365,6 +372,7 @@ impl Hash for TypeExpr {
                 HashStep::Usize(n) => n.hash(state),
                 HashStep::Bool(b) => b.hash(state),
                 HashStep::Visibility(v) => v.hash(state),
+                HashStep::ExcessOrigin(o) => o.hash(state),
                 HashStep::Modifier(m) => m.hash(state),
                 HashStep::MemberSpans(s) => s.hash(state),
                 HashStep::IndexSpans(s) => s.hash(state),
@@ -606,11 +614,16 @@ fn hash_object_member_step<'a, H: Hasher>(
             0isize.hash(state);
             p.name.hash(state);
             // ty, optional, readonly, [visibility marker ONLY if non-public],
-            // spans. Push reverse. A `Public` member emits NO visibility bytes,
-            // so an all-public surface hashes byte-identically to the pre-
-            // visibility stream (zero cache-identity churn); a non-public member
-            // folds a distinguishing marker (`Protected` / `Private`).
+            // [excess-origin marker ONLY if non-NonLiteral], spans. Push
+            // reverse. A `Public` member emits NO visibility bytes and a
+            // `NonLiteral` member emits NO origin bytes, so a pre-existing
+            // surface hashes byte-identically to the pre-visibility /
+            // pre-freshness stream (zero cache-identity churn); a non-default
+            // value folds a distinguishing marker.
             stack.push(HashStep::MemberSpans(p.spans));
+            if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                stack.push(HashStep::ExcessOrigin(p.excess_origin));
+            }
             if !p.visibility.is_public() {
                 stack.push(HashStep::Visibility(p.visibility));
             }
@@ -638,15 +651,26 @@ fn hash_object_member_step<'a, H: Hasher>(
         ObjectMember::Method(m) => {
             4isize.hash(state);
             m.name.hash(state);
-            // function, optional, [visibility marker ONLY if non-public], spans.
-            // Push reverse. `Public` emits no visibility bytes (pre-visibility
-            // byte stream preserved); a non-public method folds a marker.
+            // function, optional, [visibility marker ONLY if non-public],
+            // [excess-origin marker ONLY if non-NonLiteral], spans. Push
+            // reverse. `Public` emits no visibility bytes and `NonLiteral` no
+            // origin bytes (pre-existing byte stream preserved); a non-default
+            // value folds a marker.
             stack.push(HashStep::MemberSpans(m.spans));
+            if m.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                stack.push(HashStep::ExcessOrigin(m.excess_origin));
+            }
             if !m.visibility.is_public() {
                 stack.push(HashStep::Visibility(m.visibility));
             }
             stack.push(HashStep::Bool(m.optional));
             stack.push(HashStep::Func(&m.function));
+        }
+        ObjectMember::Spread(s) => {
+            // New member variant: takes the next free discriminant (5) so the
+            // existing member streams 0..=4 stay frozen.
+            5isize.hash(state);
+            stack.push(HashStep::Node(&s.ty));
         }
     }
 }

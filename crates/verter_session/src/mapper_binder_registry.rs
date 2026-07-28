@@ -468,6 +468,10 @@ fn hash_object_member<'a, H: Hasher>(
             hash_member_visibility(m.visibility, hasher);
             hash_function_expr(&m.function, hasher, worklist);
         }
+        ObjectMember::Spread(s) => {
+            5u8.hash(hasher);
+            worklist.push(&s.ty);
+        }
     }
 }
 

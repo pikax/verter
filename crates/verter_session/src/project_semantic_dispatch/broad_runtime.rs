@@ -157,10 +157,11 @@ impl ProjectSemanticDispatch<'_> {
                         kinds.push(BroadRuntimeKind::Function);
                     }
                     if !callable
-                        || !surface.members.is_empty()
+                        || !surface.positive_members().is_empty()
                         || !surface.index_signatures.is_empty()
                         || surface.keyspace.is_some()
-                        || surface.has_index_signature
+                        || surface.has_known_index_signature()
+                        || surface.is_open_spread()
                     {
                         kinds.push(BroadRuntimeKind::Object);
                     }
@@ -447,16 +448,24 @@ impl ProjectSemanticDispatch<'_> {
                         }
                         Some(data) => match data.as_ref() {
                             SemanticNodeData::Object(surface) => {
-                                if let Some(member) =
-                                    surface.members.iter().find(|member| member.name == *name)
-                                {
-                                    node = member.value;
-                                } else {
-                                    self.fold_local_partial_completeness(
-                                        PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                                    );
-                                    result_is_partial = true;
-                                    node = self.opaque(QueryError::UnrepresentableSurfaceMember);
+                                match surface.project_known_key(name.as_ref()) {
+                                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                                        node = member.value;
+                                    }
+                                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                                    | crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(
+                                        _,
+                                    ) => {
+                                        self.fold_local_partial_completeness(
+                                            PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                                        );
+                                        result_is_partial = true;
+                                        node = self.opaque(if surface.is_open_spread() {
+                                            QueryError::OpenSurface
+                                        } else {
+                                            QueryError::UnrepresentableSurfaceMember
+                                        });
+                                    }
                                 }
                             }
                             _ => {

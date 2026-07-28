@@ -418,16 +418,16 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// `Some(_)` ⇒ the caller may publish or short-circuit WITHOUT
 /// triggering reduction. `None` ⇒ the cache is cold; the caller must
 /// reduce (or publish the Ref shallow per the shallow-by-default rule).
-/// Read the [`SurfaceView`] members backing `node`, if `node` resolves
-/// to a `SemanticNodeData::Object` shell. Empty for any other variant
-/// — callers treat the empty surface as "no enumerable members".
+/// Read the positive member evidence backing `node`, if `node` resolves to a
+/// `SemanticNodeData::Object` shell. An empty result does not prove that an
+/// open-spread surface has no additional members.
 ///
-pub(crate) fn read_surface_members(
+pub(crate) fn read_positive_surface_members(
     ctx: &dyn ResolverContext,
     surface_node: SemanticNodeId,
 ) -> Vec<SurfaceMember> {
     match crate::project_semantic_dispatch::node_data_for(ctx, surface_node).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.members.iter().cloned().collect(),
+        Some(SemanticNodeData::Object(view)) => view.positive_members().to_vec(),
         _ => Vec::new(),
     }
 }
@@ -640,10 +640,7 @@ pub(crate) fn resolve_macro_payload(
     let payload_is_empty_surface = matches!(
         payload_data.as_deref(),
         Some(SemanticNodeData::Object(view))
-            if view.members.is_empty()
-                && view.call_signatures.is_empty()
-                && view.construct_signatures.is_empty()
-                && view.index_signatures.is_empty()
+            if view.closed().is_some_and(|closed| closed.is_empty())
     );
     let payload_is_decl_ref_carrier = matches!(
         payload_data.as_deref(),

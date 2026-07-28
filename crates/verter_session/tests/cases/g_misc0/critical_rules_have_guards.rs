@@ -501,11 +501,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `macro_type_arg_hot_ref` + `MacroHotMirror`, so a SECOND
             // structural-carrier producer is UNREPRESENTABLE BY CONSTRUCTION: no
             // foreign module can NAME the private builders (a compile error, E0603 /
-            // E0433), and the producer is COLLAPSED into one module so no same-owner
-            // file can name them either (a third caller is a compile error). The
-            // MODULE-PRIVATE lowerer guard + the PARENT-SHAPE narrowness guard (the
-            // owner directory holds ONLY `macro_arg_producer.rs`, mod.rs, and tests —
-            // so there is no other file that could name the private builders) together
+            // E0433), and producer-capable code is COLLAPSED into one child module.
+            // The only non-test sibling is the typed-IR-only
+            // `infer_binder_names.rs` walker, which cannot name that child's private
+            // builders. The MODULE-PRIVATE lowerer guard + the PARENT-SHAPE
+            // narrowness guard (the
+            // owner directory holds ONLY `macro_arg_producer.rs`, the non-producer
+            // binder walker, mod.rs, and tests) together
             // are the compiler-enforced LOAD-BEARING confinement. The SMALL
             // EXPANSION-SURFACE backstop (`macro_arg_producer.rs` declares NO
             // production item-position/expr/statement macro / `macro_rules!` /

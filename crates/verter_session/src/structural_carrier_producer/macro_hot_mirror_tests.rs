@@ -288,7 +288,11 @@ fn inline_props_macro_arg_mirrors_to_object_with_macro_own_body_provenance() {
     let root = node_data(&dispatch, handle.node());
     match root {
         Some(SemanticNodeData::Object(view)) => {
-            let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+            let names: Vec<&str> = view
+                .positive_members()
+                .iter()
+                .map(|m| m.name.as_ref())
+                .collect();
             assert!(
                 names.contains(&"a") && names.contains(&"b"),
                 "inline props object must carry both members, got {names:?}"
@@ -296,7 +300,7 @@ fn inline_props_macro_arg_mirrors_to_object_with_macro_own_body_provenance() {
             // Provenance survives the mirror path: DefineProps requests the
             // macro-T own-body provenance on its direct members.
             assert!(
-                view.members
+                view.positive_members()
                     .iter()
                     .all(|m| m.declared_in_macro_type_arg.get()),
                 "inline DefineProps members must carry `declared_in_macro_type_arg = true` \

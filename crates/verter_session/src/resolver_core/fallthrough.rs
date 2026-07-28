@@ -1630,7 +1630,9 @@ fn known_spread_keys_from_object(object: &verter_type_expr::ObjectExpr) -> Known
             }
             verter_type_expr::ObjectMember::IndexSignature(_)
             | verter_type_expr::ObjectMember::CallSignature(_)
-            | verter_type_expr::ObjectMember::ConstructSignature(_) => {
+            | verter_type_expr::ObjectMember::ConstructSignature(_)
+            // An unfolded spread entry contributes an open key set.
+            | verter_type_expr::ObjectMember::Spread(_) => {
                 result.exact = false;
             }
         }

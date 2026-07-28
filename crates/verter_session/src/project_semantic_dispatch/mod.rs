@@ -104,11 +104,13 @@ mod output_materialization_guards;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod relation;
+pub(crate) mod relation_excess;
 pub(crate) mod relation_predicates;
 pub(crate) mod relation_txn;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
+pub(crate) mod spread_materializer;
 pub(crate) mod substitute;
 pub(crate) mod walk;
 

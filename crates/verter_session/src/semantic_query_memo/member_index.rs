@@ -50,6 +50,7 @@ pub(super) const MEMBER_ORDINAL_INDEX_RETENTION_CAP: usize = 16_384;
 /// name lookups faster by scanning than through the sidecar (hash + lock
 /// overhead dominates below it). Callers consult the sidecar only ABOVE
 /// this count.
+#[allow(dead_code)]
 pub const MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX: usize = 16;
 
 impl SemanticGraphStore {
@@ -72,8 +73,8 @@ impl SemanticGraphStore {
         if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
             return Arc::clone(existing.value());
         }
-        let mut index = MemberOrdinalIndex::with_capacity(view.members.len());
-        for (ordinal, member) in view.members.iter().enumerate() {
+        let mut index = MemberOrdinalIndex::with_capacity(view.positive_members().len());
+        for (ordinal, member) in view.positive_members().iter().enumerate() {
             // First occurrence wins — `or_insert` keeps the earliest
             // ordinal for a duplicated name, matching linear-scan `find`.
             index
@@ -113,6 +114,7 @@ mod tests {
 
     fn member(name: &str, value: SemanticNodeId) -> SurfaceMember {
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from(name),
             value,
@@ -127,13 +129,14 @@ mod tests {
     }
 
     fn object_view(members: Vec<SurfaceMember>) -> SurfaceView {
-        SurfaceView {
+        crate::semantic_query::surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     }
 

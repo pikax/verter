@@ -162,6 +162,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         match data.as_ref() {
             SemanticNodeData::Object(surface) => {
+                if surface.is_open_spread() {
+                    results.push(None);
+                    return;
+                }
                 // `keyof ClassType` yields only public keys (TS semantics):
                 // private/protected members are not part of the keyspace, so
                 // mapped types (`{ [K in keyof T]: V }`, `Partial<T>`) and
@@ -169,7 +173,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // key-name-enumeration chokepoint; native_props reads the
                 // surface directly and is unaffected.
                 let names = surface
-                    .members
+                    .positive_members()
                     .iter()
                     .filter(|member| member.visibility.is_public())
                     .map(|member| Arc::clone(&member.name))
@@ -747,11 +751,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // A protected/private class member is NOT part of `keyof`, so it is
             // not an admissible key — admit a name only when it matches a PUBLIC
             // member. The full member set stays recorded for `native_props`.
-            SemanticNodeData::Object(view) => Some(
-                view.members
-                    .iter()
-                    .any(|m| m.visibility.is_public() && m.name.as_ref() == needle),
-            ),
+            SemanticNodeData::Object(view) => match view.project_known_key(needle) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                    Some(member.visibility.is_public())
+                }
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => Some(false),
+                crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => None,
+            },
             // Consult the parse-fact `MemberPresence` substrate for
             // `DeclRef` / `InstantiationRef` bases.
             //

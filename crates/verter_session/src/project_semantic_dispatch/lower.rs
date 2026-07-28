@@ -30,7 +30,7 @@ use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
     ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
-    SurfaceView, TupleElement, ValueRootKey,
+    TupleElement, ValueRootKey,
 };
 
 /// The scalar → projected-`TypeExpr` mapping for a stored enum member fact —
@@ -553,6 +553,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             TypeExpr::Object(obj) => {
+                // A spread-bearing object literal folds through the shared
+                // spread materializer (ordered left fold over direct members
+                // and spread operands) instead of the plain member loop below.
+                if obj
+                    .properties
+                    .iter()
+                    .any(|m| matches!(m, ObjectMember::Spread(_)))
+                {
+                    return self.lower_spread_object_literal(
+                        obj,
+                        env,
+                        scope,
+                        name_resolution,
+                        scope_payload,
+                        shadowing,
+                        substitutions,
+                        reduction_context,
+                    );
+                }
                 let mut members: Vec<SurfaceMember> = Vec::new();
                 let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
                 let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
@@ -600,6 +619,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // verbatim onto the graph payload (Public for
                                 // every non-class origin).
                                 visibility: prop.visibility,
+                                // Carry the IR member's excess-property
+                                // provenance verbatim (`FreshOwn` only from
+                                // direct object-literal materialization).
+                                excess_origin: prop.excess_origin,
                                 // Carry the IR member's OXC declaration-site
                                 // spans verbatim onto the graph payload.
                                 spans: prop.spans,
@@ -662,6 +685,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // Carry the IR method's declared accessibility
                                 // (Public for every non-class origin).
                                 visibility: method.visibility,
+                                // Carry the IR method's excess-property
+                                // provenance verbatim.
+                                excess_origin: method.excess_origin,
                                 // Carry the IR method's OXC member spans.
                                 spans: method.spans,
                                 // Declaration file of THIS method (see the
@@ -712,6 +738,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             );
                             construct_signatures.push(fn_id);
                         }
+                        // Unreachable by construction: the spread-bearing
+                        // branch above routes the whole object through the
+                        // spread lowering before this member loop runs.
+                        ObjectMember::Spread(_) => {}
                         ObjectMember::IndexSignature(sig) => {
                             let key_type = self.shallow_lower_type_expr_with_context(
                                 &sig.key_type,
@@ -748,13 +778,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 let has_index_signature = !index_signatures.is_empty();
-                let view = SurfaceView {
+                let view = crate::semantic_query::surface_view! {
                     members: Arc::from(members.into_boxed_slice()),
                     call_signatures: Arc::from(call_signatures.into_boxed_slice()),
                     construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
                     index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                     keyspace: None,
                     has_index_signature,
+                    completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                 };
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
@@ -1955,7 +1986,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Object(surface) => {
                 let surface = surface.clone();
                 drop(data);
-                for member in surface.members.iter() {
+                for member in surface.positive_members().iter() {
                     self.collect_infer_bindings_into_env(member.value, env, visited);
                 }
                 for sig in surface.call_signatures.iter() {
@@ -1967,6 +1998,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 for sig in surface.index_signatures.iter() {
                     self.collect_infer_bindings_into_env(sig.key_type, env, visited);
                     self.collect_infer_bindings_into_env(sig.value_type, env, visited);
+                }
+                if let Some(operands) = surface.open_spread_operands() {
+                    for operand in operands.as_slice() {
+                        self.collect_infer_bindings_into_env(*operand, env, visited);
+                    }
                 }
             }
             SemanticNodeData::IndexedAccess { object, index } => {

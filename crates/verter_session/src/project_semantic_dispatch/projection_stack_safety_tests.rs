@@ -339,6 +339,60 @@ fn projection_inputs<'a>(
 }
 
 #[test]
+fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let array = graph.intern_node(SemanticNodeData::Array {
+        element: number,
+        readonly: false,
+    });
+    let member = |value| crate::semantic_query::SurfaceMember {
+        name: Arc::from("a"),
+        value,
+        optional: false,
+        readonly: false,
+        is_method: false,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        spans: Default::default(),
+        declaration_origin: None,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
+    };
+    let root = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::SurfaceView::new(
+            Arc::from([member(number)]),
+            Arc::from([]),
+            Arc::from([]),
+            Arc::from([]),
+            None,
+            false,
+            crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from([array])),
+            ),
+        ),
+    ));
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let env = rustc_hash::FxHashMap::default();
+    let names = rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::Global;
+    let shadowing = ScopeShadowing::empty();
+    let inputs = projection_inputs(&env, &scope, &names, &shadowing);
+    let mut substitutions = Vec::new();
+    let mut memo = ViewMemo::default();
+
+    let outcome =
+        dispatch.project_view_node_worklist(root, context, &inputs, &mut substitutions, &mut memo);
+    assert_eq!(outcome.completeness, ResultCompleteness::Complete);
+    assert!(matches!(
+        graph.node_data(outcome.node).as_deref(),
+        Some(SemanticNodeData::Object(view)) if view.is_open_spread()
+    ));
+}
+
+#[test]
 fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing_root() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);

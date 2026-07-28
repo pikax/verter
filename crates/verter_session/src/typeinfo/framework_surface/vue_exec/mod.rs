@@ -1214,9 +1214,10 @@ mod partial_admission_tests {
     use crate::VerterHost;
 
     fn surface_with_broken_member(value: SemanticNodeId) -> SurfaceView {
-        SurfaceView {
+        crate::semantic_query::surface_view! {
             members: Arc::from(
                 vec![SurfaceMember {
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
                     name: Arc::from("broken"),
                     value,
@@ -1235,6 +1236,7 @@ mod partial_admission_tests {
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     }
 

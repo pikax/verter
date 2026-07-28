@@ -305,10 +305,7 @@ pub(super) fn compound_root_surface_view_via_dispatch(
 /// signature carries nothing to publish (never a COMPLETE compound-root
 /// projection). Node-domain — no materialisation feeds this decision.
 pub(super) fn surface_view_is_empty(surface: &SurfaceView) -> bool {
-    surface.members.is_empty()
-        && surface.call_signatures.is_empty()
-        && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
+    surface.closed().is_some_and(|closed| closed.is_empty())
 }
 
 #[cfg_attr(
@@ -339,6 +336,9 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
         TypeExpr::Object(object) => object.properties.iter().all(|member| match member {
             verter_type_expr::ObjectMember::Property(property) => {
                 dispatch_route_expr_is_materialized(&property.ty)
+            }
+            verter_type_expr::ObjectMember::Spread(spread) => {
+                dispatch_route_expr_is_materialized(&spread.ty)
             }
             verter_type_expr::ObjectMember::Method(method) => {
                 method

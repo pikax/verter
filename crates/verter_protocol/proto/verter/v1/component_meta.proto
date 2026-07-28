@@ -723,6 +723,9 @@ enum ObjectMemberKind {
   OBJECT_MEMBER_KIND_CALL_SIGNATURE = 3;
   OBJECT_MEMBER_KIND_CONSTRUCT_SIGNATURE = 4;
   OBJECT_MEMBER_KIND_METHOD = 5;
+  // Object-literal spread entry (pre-fold ordered IR): the spread OPERAND
+  // rides the member's type_node_id slot. Additive — tags 0..=5 are frozen.
+  OBJECT_MEMBER_KIND_SPREAD = 6;
 }
 
 enum MappedModifier {

@@ -7899,7 +7899,7 @@ defineEmits<ConditionalEmits>()
         "the emits branch-merge must resolve the aliased-conditional \
          payload surface by following the DeclRef carrier to the Conditional root",
     );
-    let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface);
     let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
 
     for required in ["itemEdited", "itemViewed"] {
@@ -8027,7 +8027,7 @@ defineEmits<EmitChain0>()
          to the Conditional root — identity-bounded termination reaches it; the \
          retired depth-8 cap returned None before hop 12 and lost the merge",
     );
-    let members = crate::meta_resolve::projectors::read_surface_members(host, surface);
+    let members = crate::meta_resolve::projectors::read_positive_surface_members(host, surface);
     let event_names: Vec<String> = members.iter().map(|m| m.name.to_string()).collect();
 
     for required in ["itemEdited", "itemViewed"] {
@@ -8162,13 +8162,14 @@ mod node_predicates_tests {
     use verter_type_expr::LiteralValue;
 
     fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
-        SurfaceView {
+        crate::semantic_query::surface_view! {
             members: StdArc::from(members.into_boxed_slice()),
             call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     }
 

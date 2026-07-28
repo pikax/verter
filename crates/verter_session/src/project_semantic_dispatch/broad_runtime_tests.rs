@@ -6,7 +6,6 @@ use crate::semantic_query::{
     BroadRuntimeClassification, BroadRuntimeKind, DeclIdentity, HashValue, LiteralValue,
     NodeScopeId, PartialReasonSet, PrimitiveKind, QueryError, QueryResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue, SurfaceMember,
-    SurfaceView,
 };
 use crate::{FileLanguage, UpsertRequest, VerterHost};
 
@@ -149,6 +148,7 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     });
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             name: Arc::from(format!("nested{index}")),
             value: crate::semantic_query::SemanticNodeId(u64::MAX - index),
             optional: false,
@@ -161,14 +161,17 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         })
         .collect();
-    let object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: Arc::from(explosive_members.into_boxed_slice()),
-        call_signatures: Arc::from([]),
-        construct_signatures: Arc::from([crate::semantic_query::SemanticNodeId(u64::MAX - 1)]),
-        index_signatures: Arc::from([]),
-        keyspace: Some(array),
-        has_index_signature: true,
-    }));
+    let object = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(explosive_members.into_boxed_slice()),
+            call_signatures: Arc::from([]),
+            construct_signatures: Arc::from([crate::semantic_query::SemanticNodeId(u64::MAX - 1)]),
+            index_signatures: Arc::from([]),
+            keyspace: Some(array),
+            has_index_signature: true,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
     assert_eq!(
         classify(&ProjectSemanticDispatch::new(&host), object).kinds(),
         &[BroadRuntimeKind::Function, BroadRuntimeKind::Object],

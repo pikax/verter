@@ -1368,7 +1368,7 @@ impl VerterHost {
             }
             match crate::project_semantic_dispatch::node_data_for(ctx, node).as_deref() {
                 Some(crate::semantic_query::SemanticNodeData::Object(surface)) => {
-                    for member in surface.members.iter() {
+                    for member in surface.positive_members().iter() {
                         collect_one_filtered_node(
                             ctx,
                             member.value,
@@ -1413,6 +1413,19 @@ impl VerterHost {
                             producer_scope,
                             cursor,
                         );
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        for operand in operands.as_slice() {
+                            collect_one_filtered_node(
+                                ctx,
+                                *operand,
+                                published_names,
+                                queued_names,
+                                output,
+                                producer_scope,
+                                cursor,
+                            );
+                        }
                     }
                 }
                 _ => {

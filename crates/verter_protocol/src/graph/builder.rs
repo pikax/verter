@@ -172,7 +172,8 @@ fn object_member_is_public(member: &ObjectMember) -> bool {
         ObjectMember::Method(method) => method.visibility.is_public(),
         ObjectMember::IndexSignature(_)
         | ObjectMember::CallSignature(_)
-        | ObjectMember::ConstructSignature(_) => true,
+        | ObjectMember::ConstructSignature(_)
+        | ObjectMember::Spread(_) => true,
     }
 }
 
@@ -1066,6 +1067,22 @@ impl GraphBuilder {
                 self.signature_member(schema::MEMBER_CONSTRUCT_SIGNATURE, function)
             }
             ObjectMember::Method(method) => self.method_member(method),
+            ObjectMember::Spread(spread) => self.spread_member(spread),
+        }
+    }
+
+    fn spread_member(&mut self, spread: &verter_type_expr::SpreadMember) -> GraphObjectMember {
+        GraphObjectMember {
+            kind: schema::MEMBER_SPREAD,
+            name: 0,
+            // The spread OPERAND rides the member's `ty` slot.
+            ty: self.node_id(&spread.ty),
+            optional: false,
+            readonly: false,
+            key_name: 0,
+            key_type: 0,
+            value_type: 0,
+            function: 0,
         }
     }
 

@@ -898,6 +898,23 @@ impl<'a> Walker<'a> {
 
     fn walk_object(&mut self, obj: &ObjectExpr) {
         self.buf.push(0x50);
+        // A spread-bearing object literal is ORDER-SENSITIVE: the fold's
+        // member surface depends on where each spread sits between the direct
+        // members (`{ a, ...s }` != `{ ...s, a }`), so alpha-normalising the
+        // order would collide semantically-distinct literals onto one fact
+        // identity. Hash spread-bearing objects in declaration order.
+        if obj
+            .properties
+            .iter()
+            .any(|m| matches!(m, ObjectMember::Spread(_)))
+        {
+            self.buf
+                .extend_from_slice(&(obj.properties.len() as u32).to_le_bytes());
+            for member in &obj.properties {
+                self.write_object_member(member);
+            }
+            return;
+        }
         // Members sorted lexicographically by name (alpha-
         // normalisation R16 — declaration order does not affect the
         // hash).
@@ -917,6 +934,9 @@ impl<'a> Walker<'a> {
             ObjectMember::IndexSignature(_) => "index".to_string(),
             ObjectMember::CallSignature(_) => "call".to_string(),
             ObjectMember::ConstructSignature(_) => "construct".to_string(),
+            // Unreachable through `walk_object` (spread-bearing objects hash in
+            // declaration order); a lone key keeps the match total.
+            ObjectMember::Spread(_) => "spread".to_string(),
         }
     }
 
@@ -935,9 +955,24 @@ impl<'a> Walker<'a> {
                 self.walk_function(func);
                 self.buf.push(0xFD);
             }
+            ObjectMember::Spread(spread) => {
+                self.buf.push(0x66);
+                self.walk_node(&spread.ty);
+                self.buf.push(0xFD);
+            }
         }
     }
 
+    // RECORDED asymmetry: `excess_origin` is NOT folded here (nor in
+    // `write_method`), while the `TypeExpr` interning identity hash DOES
+    // carry it (marker-only-for-non-`NonLiteral`, pinned by
+    // `hash_byte_stream_contract`). Two bodies differing only in member
+    // origin therefore share a FACT hash. Graph interning identity is the
+    // excess-checking authority, so no false-accept path exists through
+    // this. A visibility-style marker was deliberately NOT added: literal-
+    // initialized value-decl object shapes carry `FreshOwn` members into
+    // this hasher, so the marker would re-key existing fact signatures —
+    // adopt it only with a deliberate fact-identity migration.
     fn write_property(&mut self, prop: &ObjectProperty) {
         self.emit_property(
             &prop.name,

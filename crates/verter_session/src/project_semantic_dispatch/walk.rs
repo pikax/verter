@@ -421,6 +421,9 @@ pub struct ShallowSurface {
     /// Keyspace node when the surface is a mapped/keyspace carrier; `None`
     /// for an ordinary object surface.
     pub keyspace: Option<SemanticNodeId>,
+    /// Identity-bearing typed remainder for an object-literal spread whose
+    /// complete member set is not enumerable yet.
+    pub completeness: crate::semantic_query::MemberSurfaceCompleteness,
 }
 
 /// One member contribution while the walker is merging arms. Carries the
@@ -461,6 +464,14 @@ pub struct ShallowSurfaceMember {
     /// the member's spans with its real declaration file (not its value-node
     /// scope).
     pub declaration_origin: Option<Arc<str>>,
+    /// Excess-property provenance, carried verbatim from
+    /// [`SurfaceMember::excess_origin`] through the walker's intermediate
+    /// state so shallow projections round-trip it losslessly. A member
+    /// SYNTHESIZED from multiple contributors (union common-member,
+    /// intersection merge) is `NonLiteral` — merge synthesis is not a literal
+    /// materialization; a verbatim single-source carry preserves the source
+    /// origin.
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
 }
 
 impl ShallowSurface {
@@ -485,7 +496,7 @@ impl ShallowSurface {
     pub fn from_object(view: &SurfaceView) -> Self {
         Self {
             members: view
-                .members
+                .positive_members()
                 .iter()
                 .map(|m| ShallowSurfaceMember {
                     name: Arc::clone(&m.name),
@@ -501,12 +512,16 @@ impl ShallowSurface {
                     spans: m.spans,
                     // Carry the source member's declaration file verbatim.
                     declaration_origin: m.declaration_origin.clone(),
+                    // Carry the source member's excess-property provenance
+                    // verbatim (lossless shallow round-trip).
+                    excess_origin: m.excess_origin,
                 })
                 .collect(),
             call_signatures: view.call_signatures.to_vec(),
             construct_signatures: view.construct_signatures.to_vec(),
             index_signatures: view.index_signatures.to_vec(),
             keyspace: view.keyspace,
+            completeness: view.completeness().clone(),
         }
     }
 }
@@ -1385,28 +1400,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // therefore treated as a miss (the member is not on the
                     // public surface this walker projects).
                     //
-                    // Wide surfaces resolve the name through the store-side
-                    // member-ordinal sidecar (name → FIRST-occurrence
-                    // ordinal, identical to the linear `find`); the
-                    // visibility gate applies AFTER selection either way, so
-                    // a non-public first occurrence misses even when a later
-                    // public duplicate exists.
-                    let matched = if surface.members.len()
-                        > crate::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX
-                    {
-                        self.graph()
-                            .member_ordinal_index(current, surface)
-                            .get(needle.as_ref())
-                            .map(|&ordinal| &surface.members[ordinal as usize])
-                    } else {
-                        surface
-                            .members
-                            .iter()
-                            .find(|m| m.name.as_ref() == needle.as_ref())
+                    let member = match surface.project_known_key(needle.as_ref()) {
+                        crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                            if member.visibility.is_public() =>
+                        {
+                            Some(member.value)
+                        }
+                        crate::semantic_query::SurfaceKeyProjection::Exact(_)
+                        | crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                        | crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(
+                            _,
+                        ) => None,
                     };
-                    let member = matched
-                        .filter(|m| m.visibility.is_public())
-                        .map(|m| m.value);
+                    if member.is_none() && surface.is_open_spread() {
+                        results.push(self.dispatch.opaque(QueryError::OpenSurface));
+                        return;
+                    }
                     match member {
                         Some(member_value) => {
                             let meta = match segment {
@@ -1870,10 +1879,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         if let Some(SemanticNodeData::Object(view)) =
                             self.graph().node_data(*source).as_deref()
                         {
-                            return view
-                                .members
-                                .iter()
-                                .any(|m| m.visibility.is_public() && m.name.as_ref() == needle);
+                            match view.project_known_key(needle) {
+                                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                                    return member.visibility.is_public();
+                                }
+                                crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
+                                    return false;
+                                }
+                                crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(
+                                    _,
+                                ) => {}
+                            }
                         }
                         // Tier 2: **non-emitting** key-domain
                         // membership predicate.
@@ -2747,8 +2763,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             _ => return node,
         };
         let mut changed = false;
-        let mut members: Vec<SurfaceMember> = Vec::with_capacity(view.members.len());
-        for member in view.members.iter() {
+        let mut members: Vec<SurfaceMember> = Vec::with_capacity(view.positive_members().len());
+        for member in view.positive_members().iter() {
             let value = self.present_terminal_member_value(member.value, visited, depth);
             if value != member.value {
                 changed = true;
@@ -2763,10 +2779,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
         self.graph().intern_preserving_scope(
             node,
-            SemanticNodeData::Object(SurfaceView {
-                members: Arc::from(members.into_boxed_slice()),
-                ..view
-            }),
+            SemanticNodeData::Object(
+                view.with_positive_members(Arc::from(members.into_boxed_slice())),
+            ),
         )
     }
 
@@ -3366,7 +3381,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // Flag-consistency gate, minimised per clippy: `flag !=
                 // is_empty()` ⇔ `flag == !is_empty()` — i.e. the stored
                 // flag already equals what the rebuild would derive.
-                if view.has_index_signature != view.index_signatures.is_empty() {
+                if view.has_known_index_signature() != view.index_signatures.is_empty() {
                     // Keep the frame-depth probe truthful: this walk
                     // consumed the equivalent of the single root frame.
                     LAST_SHALLOW_WALKER_MAX_FRAMES.store(1, Ordering::Relaxed);
@@ -4502,12 +4517,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .filter(|m| m.visibility.is_public())
             .filter(|m| key_set.contains(m.name.as_ref()))
             .collect();
+        let completeness = filtered_shallow_completeness(&surface.completeness, &members);
         ShallowSurface {
             members,
             call_signatures: Vec::new(),
             construct_signatures: Vec::new(),
             index_signatures: Vec::new(),
             keyspace: None,
+            completeness,
         }
     }
 
@@ -5010,6 +5027,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     optional,
                     readonly,
                     is_method: false,
+                    // Mapped-type synthesis is never a literal origin.
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     // Mapped-produced member. The key domain is already
                     // public-only (non-public class members are filtered out of
                     // the keyspace at `source_members_for_published_projection` /
@@ -5048,6 +5067,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             construct_signatures: Vec::new(),
             index_signatures: Vec::new(),
             keyspace: None,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         })
     }
 }
@@ -5254,6 +5274,7 @@ fn merge_declaration_surfaces(
             }
         })
         .collect();
+    let completeness = conservative_merged_completeness(contributor_surfaces.iter(), &members);
 
     ShallowSurface {
         members,
@@ -5261,6 +5282,7 @@ fn merge_declaration_surfaces(
         construct_signatures: core.construct_signatures,
         index_signatures: core.index_signatures,
         keyspace: core.keyspace,
+        completeness,
     }
 }
 
@@ -5323,12 +5345,14 @@ fn merge_intersection_surfaces_with_graph(
         }
     }
 
+    let completeness = conservative_merged_completeness(live.iter().copied(), &members);
     Some(ShallowSurface {
         members,
         call_signatures,
         construct_signatures,
         index_signatures,
         keyspace,
+        completeness,
     })
 }
 
@@ -5377,6 +5401,12 @@ struct MergedMemberAccum {
     /// MOST-RESTRICTIVE visibility across ALL `Heritage` / `Authored`
     /// contributors. `None` until the first such contributor is absorbed.
     other_visibility_agg: Option<verter_type_expr::MemberVisibility>,
+    /// Excess-property provenance fold: the SOLE contributor's origin when
+    /// exactly one contributor absorbed (verbatim single-source carry);
+    /// demoted to `NonLiteral` as soon as a second contributor arrives —
+    /// merge synthesis is not a literal materialization, and an overlapped
+    /// member never retains `FreshOwn`.
+    excess_origin: Option<verter_type_expr::ExcessPropertyOrigin>,
 }
 
 impl MergedMemberAccum {
@@ -5399,6 +5429,7 @@ impl MergedMemberAccum {
             first_origin: None,
             own_body_visibility_agg: None,
             other_visibility_agg: None,
+            excess_origin: None,
         }
     }
 
@@ -5407,6 +5438,12 @@ impl MergedMemberAccum {
         self.optional = self.optional && member.optional;
         self.readonly = self.readonly || member.readonly;
         self.is_method = self.is_method || member.is_method;
+        // Single-contributor verbatim carry; any second contributor demotes
+        // to `NonLiteral` (merge synthesis is never a literal origin).
+        self.excess_origin = Some(match self.excess_origin {
+            None => member.excess_origin,
+            Some(_) => verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        });
         self.declared_in_macro_type_arg = self
             .declared_in_macro_type_arg
             .merged_with(member.declared_in_macro_type_arg);
@@ -5547,6 +5584,9 @@ impl MergedMemberAccum {
             readonly: self.readonly,
             is_method: self.is_method,
             visibility,
+            excess_origin: self
+                .excess_origin
+                .unwrap_or(verter_type_expr::ExcessPropertyOrigin::NonLiteral),
             declared_in_macro_type_arg: self.declared_in_macro_type_arg,
             merge_role: role,
             spans,
@@ -5662,6 +5702,8 @@ pub(super) fn merge_union_surfaces(
             optional: accum.optional_in_any,
             readonly: accum.readonly_in_all,
             is_method: false,
+            // Union common-member synthesis is never a literal origin.
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
             // accessibility across the per-arm contributors via the shared
             // fold, so a member non-public in any arm is never synthesized
@@ -5678,12 +5720,14 @@ pub(super) fn merge_union_surfaces(
             declaration_origin: None,
         });
     }
+    let completeness = conservative_merged_completeness(live.iter().copied(), &members);
     Some(ShallowSurface {
         members,
         call_signatures: Vec::new(),
         construct_signatures: Vec::new(),
         index_signatures: Vec::new(),
         keyspace: None,
+        completeness,
     })
 }
 
@@ -5848,6 +5892,8 @@ pub(super) fn merge_union_surfaces_for_macro(
             optional,
             readonly: accum.readonly_in_all,
             is_method: false,
+            // Union-arm merge synthesis is never a literal origin.
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             // Most-restrictive accessibility across all DECLARING arms via
             // the shared fold: `Public` only when Public in every declaring
             // arm; a member non-public in any arm stays non-public (never
@@ -5862,13 +5908,34 @@ pub(super) fn merge_union_surfaces_for_macro(
             declaration_origin: None,
         });
     }
+    let completeness = conservative_merged_completeness(
+        arm_surfaces.iter().filter_map(|surface| surface.as_ref()),
+        &members,
+    );
     Some(ShallowSurface {
         members,
         call_signatures: Vec::new(),
         construct_signatures: Vec::new(),
         index_signatures: Vec::new(),
         keyspace: None,
+        completeness,
     })
+}
+
+fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
+    SurfaceMember {
+        name: Arc::clone(&member.name),
+        value: member.value,
+        optional: member.optional,
+        readonly: member.readonly,
+        is_method: member.is_method,
+        visibility: member.visibility,
+        excess_origin: member.excess_origin,
+        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+        merge_role: member.merge_role,
+        spans: member.spans,
+        declaration_origin: member.declaration_origin.clone(),
+    }
 }
 
 fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
@@ -5885,37 +5952,51 @@ fn surface_view_from_shallow(surface: &ShallowSurface) -> SurfaceView {
     let members: Vec<SurfaceMember> = surface
         .members
         .iter()
-        .map(|m| SurfaceMember {
-            name: Arc::clone(&m.name),
-            value: m.value,
-            optional: m.optional,
-            readonly: m.readonly,
-            is_method: m.is_method,
-            // Carry the walker's preserved declared accessibility back onto the
-            // graph member (round-trip through ShallowSurface is lossless).
-            visibility: m.visibility,
-            declared_in_macro_type_arg: m.declared_in_macro_type_arg,
-            merge_role: m.merge_role,
-            // Carry the walker's preserved OXC spans back onto the graph member.
-            spans: m.spans,
-            // Carry the preserved declaration file back onto the graph member.
-            declaration_origin: m.declaration_origin.clone(),
-        })
+        .map(surface_member_from_shallow)
         .collect();
-    SurfaceView {
+    crate::semantic_query::surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(surface.call_signatures.clone().into_boxed_slice()),
         construct_signatures: Arc::from(surface.construct_signatures.clone().into_boxed_slice()),
         index_signatures: Arc::from(surface.index_signatures.clone().into_boxed_slice()),
         keyspace: surface.keyspace,
         has_index_signature: !surface.index_signatures.is_empty(),
+        completeness: surface.completeness.clone(),
     }
+}
+
+fn conservative_merged_completeness<'a>(
+    surfaces: impl IntoIterator<Item = &'a ShallowSurface>,
+    _members: &[ShallowSurfaceMember],
+) -> crate::semantic_query::MemberSurfaceCompleteness {
+    let mut operands = Vec::new();
+    for surface in surfaces {
+        let crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(open) =
+            &surface.completeness
+        else {
+            continue;
+        };
+        operands.extend(open.as_slice().iter().copied());
+    }
+    if operands.is_empty() {
+        return crate::semantic_query::MemberSurfaceCompleteness::Closed;
+    }
+    crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+        crate::semantic_query::OpenSpreadOperands::new(Arc::from(operands.into_boxed_slice())),
+    )
+}
+
+fn filtered_shallow_completeness(
+    completeness: &crate::semantic_query::MemberSurfaceCompleteness,
+    _members: &[ShallowSurfaceMember],
+) -> crate::semantic_query::MemberSurfaceCompleteness {
+    completeness.clone()
 }
 
 /// Empty `SurfaceView` used when the synthesiser has nothing to
 /// contribute (e.g., open conditional with no branch chosen).
 pub(crate) fn empty_surface_view() -> SurfaceView {
-    SurfaceView {
+    crate::semantic_query::surface_view! {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -5924,6 +6005,7 @@ pub(crate) fn empty_surface_view() -> SurfaceView {
         ),
         keyspace: None,
         has_index_signature: false,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     }
 }
 
@@ -6032,6 +6114,7 @@ mod m1_merge_visibility_tests {
         value_prim: PrimitiveKind,
     ) -> ShallowSurfaceMember {
         ShallowSurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             name: Arc::from(name),
             value: graph.intern_node(SemanticNodeData::Primitive(value_prim)),
             optional: false,
@@ -6055,6 +6138,7 @@ mod m1_merge_visibility_tests {
             construct_signatures: Vec::new(),
             index_signatures: Vec::new(),
             keyspace: None,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         }
     }
 
@@ -6290,5 +6374,143 @@ mod m1_merge_visibility_tests {
             merged_member_visibility(&merged, "only_b"),
             MemberVisibility::Public,
         );
+    }
+}
+
+#[cfg(test)]
+mod excess_origin_carrier_tests {
+    //! Lossless `excess_origin` carriage through the walker's intermediate
+    //! `ShallowSurface` state (the shallow-projection round trip) and the
+    //! merge-synthesis demotion rule (a member absorbed from more than one
+    //! contributor never retains `FreshOwn`).
+
+    use std::sync::Arc;
+
+    use verter_type_expr::ExcessPropertyOrigin;
+
+    use super::{conservative_merged_completeness, surface_view_from_shallow, ShallowSurface};
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SurfaceMember};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    fn member_with_origin(
+        graph: &SemanticGraphStore,
+        name: &str,
+        origin: ExcessPropertyOrigin,
+    ) -> SurfaceMember {
+        SurfaceMember {
+            name: Arc::from(name),
+            value: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+            optional: false,
+            readonly: false,
+            is_method: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            excess_origin: origin,
+            spans: Default::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        }
+    }
+
+    /// The shallow round trip (`SurfaceView` → `ShallowSurface` →
+    /// `SurfaceView`) preserves each member's `excess_origin` verbatim —
+    /// `FreshOwn`, `SpreadTainted`, and `NonLiteral` all survive.
+    #[test]
+    fn shallow_round_trip_preserves_excess_origin() {
+        let graph = SemanticGraphStore::new();
+        let operand = graph.intern_node(SemanticNodeData::Array {
+            element: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            readonly: false,
+        });
+        let view = crate::semantic_query::surface_view! {
+            members: Arc::from(
+                vec![
+                    member_with_origin(&graph, "fresh", ExcessPropertyOrigin::FreshOwn),
+                    member_with_origin(&graph, "tainted", ExcessPropertyOrigin::SpreadTainted),
+                    member_with_origin(&graph, "plain", ExcessPropertyOrigin::NonLiteral),
+                ]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from([operand])),
+            ),
+        };
+
+        let round = surface_view_from_shallow(&ShallowSurface::from_object(&view));
+        let origin_of = |name: &str| {
+            round
+                .positive_members()
+                .iter()
+                .find(|m| m.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("member `{name}` survives the round trip"))
+                .excess_origin
+        };
+        assert_eq!(origin_of("fresh"), ExcessPropertyOrigin::FreshOwn);
+        assert_eq!(origin_of("tainted"), ExcessPropertyOrigin::SpreadTainted);
+        assert_eq!(origin_of("plain"), ExcessPropertyOrigin::NonLiteral);
+        assert_eq!(round.completeness(), view.completeness());
+    }
+
+    #[test]
+    fn conservative_surface_merge_preserves_repeated_open_operands() {
+        let graph = SemanticGraphStore::new();
+        let operand = graph.intern_node(SemanticNodeData::Array {
+            element: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            readonly: false,
+        });
+        let view = crate::semantic_query::surface_view! {
+            members: Arc::from([]),
+            call_signatures: Arc::from([]),
+            construct_signatures: Arc::from([]),
+            index_signatures: Arc::from([]),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from([operand])),
+            ),
+        };
+        let shallow = ShallowSurface::from_object(&view);
+
+        let completeness = conservative_merged_completeness([&shallow, &shallow], &[]);
+        let crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(operands) = completeness
+        else {
+            panic!("merged surface must remain open");
+        };
+        assert_eq!(operands.as_slice(), [operand, operand]);
+    }
+
+    #[test]
+    fn conservative_surface_merge_preserves_positive_member_state() {
+        let graph = SemanticGraphStore::new();
+        let operand = graph.intern_node(SemanticNodeData::Array {
+            element: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
+            readonly: false,
+        });
+        let member = member_with_origin(&graph, "x", ExcessPropertyOrigin::FreshOwn);
+        let view = crate::semantic_query::surface_view! {
+            members: Arc::from([member.clone()]),
+            call_signatures: Arc::from([]),
+            construct_signatures: Arc::from([]),
+            index_signatures: Arc::from([]),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from([operand])),
+            ),
+        };
+        let shallow = ShallowSurface::from_object(&view);
+        let completeness = conservative_merged_completeness([&shallow, &shallow], &shallow.members);
+        let merged = surface_view_from_shallow(&ShallowSurface {
+            completeness,
+            ..shallow
+        });
+        assert_eq!(merged.positive_members().len(), 1);
+        assert_eq!(merged.positive_members()[0].name.as_ref(), "x");
+        assert!(merged.is_open_spread());
     }
 }

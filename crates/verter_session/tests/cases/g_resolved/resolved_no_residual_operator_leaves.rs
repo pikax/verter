@@ -107,6 +107,7 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
         }
         TypeExpr::Object(obj) => obj.properties.iter().any(|m| match m {
             ObjectMember::Property(prop) => contains_free_type_parameter(&prop.ty),
+            ObjectMember::Spread(spread) => contains_free_type_parameter(&spread.ty),
             ObjectMember::Method(method) => {
                 method
                     .function
@@ -295,6 +296,9 @@ fn walk(expr: &TypeExpr, path: &str, out: &mut Vec<String>) {
                 match m {
                     ObjectMember::Property(prop) => {
                         walk(&prop.ty, &format!("{path}.{}", prop.name), out);
+                    }
+                    ObjectMember::Spread(spread) => {
+                        walk(&spread.ty, &format!("{path}[spread{i}]"), out);
                     }
                     ObjectMember::Method(method) => {
                         for (j, p) in method.function.parameters.iter().enumerate() {

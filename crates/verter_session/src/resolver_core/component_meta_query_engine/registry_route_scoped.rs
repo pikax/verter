@@ -149,10 +149,11 @@ impl ComponentMetaQueryEngine<'_> {
         // The one-level view through the shared empty-path Shallow surface
         // walker (member values stay shallow nodes).
         let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
+        let closed = view.closed()?;
         if !view.call_signatures.is_empty()
             || !view.construct_signatures.is_empty()
             || !view.index_signatures.is_empty()
-            || view.has_index_signature
+            || view.has_known_index_signature()
         {
             return None;
         }
@@ -163,7 +164,7 @@ impl ComponentMetaQueryEngine<'_> {
             }
         };
         let mut members: Vec<ProjectedMemberFact> = Vec::new();
-        for member in view.members.iter() {
+        for member in closed.complete_members() {
             if !selected(member.name.as_ref()) {
                 continue;
             }

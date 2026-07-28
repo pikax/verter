@@ -208,6 +208,7 @@ enum RaisedObjectMember {
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     },
     Method {
@@ -215,7 +216,13 @@ enum RaisedObjectMember {
         function: RaisedFunction,
         optional: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
+    },
+    /// Object-literal spread entry (pre-fold ordered IR) — carried so a
+    /// raised spread-bearing shape keys distinctly from a spread-less one.
+    Spread {
+        ty: RaisedShapeKey,
     },
     CallSignature(RaisedFunction),
     ConstructSignature(RaisedFunction),
@@ -748,6 +755,7 @@ trait RaisedShapeAlgebra {
     fn out_as_constructor(&self, out: &Self::Out) -> Option<Self::Fn>;
 
     // -- Object surface members --
+    #[allow(clippy::too_many_arguments)]
     fn member_property(
         &mut self,
         name: String,
@@ -755,6 +763,7 @@ trait RaisedShapeAlgebra {
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> Self::Member;
     fn member_method(
@@ -763,8 +772,10 @@ trait RaisedShapeAlgebra {
         function: Self::Fn,
         optional: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> Self::Member;
+    fn member_spread(&mut self, ty: Self::Out) -> Self::Member;
     fn member_call_signature(&mut self, function: Self::Fn) -> Self::Member;
     fn member_construct_signature(&mut self, function: Self::Fn) -> Self::Member;
     fn member_index_signature(

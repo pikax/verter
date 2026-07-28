@@ -470,9 +470,11 @@ pub(crate) fn resolve_payload_surface_with_scope(
     let true_surface = project_branch(true_branch);
     let false_surface = project_branch(false_branch);
 
-    let read_members = |surface: SemanticNodeId| -> Option<Arc<[SurfaceMember]>> {
+    let read_members = |surface: SemanticNodeId| -> Option<Vec<SurfaceMember>> {
         match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, surface).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(Arc::clone(&view.members)),
+            Some(SemanticNodeData::Object(view)) => view
+                .closed()
+                .map(|closed| closed.complete_members().to_vec()),
             _ => None,
         }
     };
@@ -519,7 +521,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     }
                 }
             }
-            let view = crate::semantic_query::SurfaceView {
+            let view = crate::semantic_query::surface_view! {
                 members: Arc::from(merged.into_boxed_slice()),
                 call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -528,6 +530,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 ),
                 keyspace: None,
                 has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             };
             Some(
                 dispatch

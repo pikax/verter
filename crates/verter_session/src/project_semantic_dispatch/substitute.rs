@@ -32,7 +32,7 @@ use super::ProjectSemanticDispatch;
 use crate::request_context::RecursiveSubstituteIdentity;
 use crate::semantic_query::{
     FunctionParam, IndexKey, IndexSignature, MapperKey, QueryError, SemanticNodeData,
-    SemanticNodeId, SurfaceMember, SurfaceView, TypeParamDecl,
+    SemanticNodeId, SurfaceMember, TypeParamDecl,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -371,8 +371,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::Object(surface) => {
                 let mut any_changed = false;
-                let mut new_members = Vec::with_capacity(surface.members.len());
-                for member in surface.members.iter() {
+                let mut new_members = Vec::with_capacity(surface.positive_members().len());
+                for member in surface.positive_members().iter() {
                     let (sub_value, c) =
                         self.substitute_with_change_tracking(member.value, parameter_node, arg);
                     any_changed |= c;
@@ -383,9 +383,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         readonly: member.readonly,
                         is_method: member.is_method,
                         // Type-parameter substitution preserves the source
-                        // member's declared accessibility (substitution changes
-                        // only the value's type-param occurrences).
+                        // member's declared accessibility and excess-property
+                        // provenance (substitution changes only the value's
+                        // type-param occurrences).
                         visibility: member.visibility,
+                        excess_origin: member.excess_origin,
                         // Type-parameter substitution preserves the
                         // source member's structural shape — only the
                         // value's type-param occurrences change.
@@ -445,13 +447,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     None => None,
                 };
+                let new_completeness = surface.completeness_with_mapped_operands(|operand| {
+                    let (operand, changed) =
+                        self.substitute_with_change_tracking(operand, parameter_node, arg);
+                    any_changed |= changed;
+                    operand
+                });
                 if !any_changed {
                     return (node, false);
                 }
                 (
                     self.graph().intern_preserving_scope(
                         node,
-                        SemanticNodeData::Object(SurfaceView {
+                        SemanticNodeData::Object(crate::semantic_query::surface_view! {
                             members: Arc::from(new_members.into_boxed_slice()),
                             call_signatures: Arc::from(new_call_signatures.into_boxed_slice()),
                             construct_signatures: Arc::from(
@@ -459,7 +467,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             ),
                             index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
                             keyspace: new_keyspace,
-                            has_index_signature: surface.has_index_signature,
+                            has_index_signature: surface.has_known_index_signature(),
+                            completeness: new_completeness,
                         }),
                     ),
                     true,
@@ -960,7 +969,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Object(surface) => {
-                    for member in surface.members.iter() {
+                    for member in surface.positive_members().iter() {
                         stack.push(member.value);
                     }
                     for signature in surface.call_signatures.iter() {
@@ -975,6 +984,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(k) = surface.keyspace {
                         stack.push(k);
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().copied());
                     }
                 }
                 SemanticNodeData::Signature {
@@ -1146,7 +1158,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Object(surface) => {
-                    for member in surface.members.iter() {
+                    for member in surface.positive_members().iter() {
                         stack.push(member.value);
                     }
                     for signature in surface.call_signatures.iter() {
@@ -1161,6 +1173,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(k) = surface.keyspace {
                         stack.push(k);
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().copied());
                     }
                 }
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {

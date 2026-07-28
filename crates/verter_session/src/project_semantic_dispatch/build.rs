@@ -898,7 +898,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         )
                     })
                     .collect();
-            let surface = crate::semantic_query::SurfaceView {
+            let surface = crate::semantic_query::surface_view! {
                 members: Arc::from(Vec::new().into_boxed_slice()),
                 call_signatures: if is_class {
                     Arc::from(Vec::new().into_boxed_slice())
@@ -921,6 +921,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             };
             self.graph()
                 .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
@@ -1102,6 +1103,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 readonly: false,
                 is_method: false,
                 visibility: verter_type_expr::MemberVisibility::Public,
+                // Synthesised namespace member — never a literal member.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 // Synthesised namespace member — no single source decl site;
                 // its declaration lives in the dependency module.
                 spans: verter_type_expr::MemberSpans::default(),
@@ -1112,13 +1115,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             dep_scope,
         )
@@ -1385,13 +1389,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Constructor-like value type: an Object carrying exactly that one
         // construct signature — the same shape `typeof <class>` produces, so
         // `InstanceType<typeof Foo>` extracts the construct return generically.
-        let view = SurfaceView {
+        let view = crate::semantic_query::surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(vec![ctor_fn].into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         };
         self.graph()
             .intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
@@ -1812,16 +1817,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // A lone instantiated signature IS the group node — no
                 // synthetic surface wrapper for the single-candidate case.
                 ([lone], []) | ([], [lone]) => *lone,
-                _ => self
-                    .graph()
-                    .intern_node(SemanticNodeData::Object(SurfaceView {
+                _ => self.graph().intern_node(SemanticNodeData::Object(
+                    crate::semantic_query::surface_view! {
                         members: Arc::from(Vec::new().into_boxed_slice()),
                         call_signatures: Arc::from(instantiated_calls.into_boxed_slice()),
                         construct_signatures: Arc::from(instantiated_constructs.into_boxed_slice()),
                         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         keyspace: None,
                         has_index_signature: false,
-                    })),
+                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+                    },
+                )),
             }
         };
 
@@ -2151,8 +2157,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let base_view = base_view.clone();
         drop(base_data);
 
-        let mut members: Vec<SurfaceMember> = own_view.members.to_vec();
-        for base_member in base_view.members.iter() {
+        let mut members: Vec<SurfaceMember> = own_view.positive_members().to_vec();
+        for base_member in base_view.positive_members().iter() {
             if !members
                 .iter()
                 .any(|own_member| own_member.name == base_member.name)
@@ -2244,15 +2250,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         let has_index_signature = !index_signatures.is_empty();
-        self.graph()
-            .intern_node(SemanticNodeData::Object(SurfaceView {
+        let open_operands = base_view
+            .open_spread_operands()
+            .into_iter()
+            .flat_map(|operands| operands.as_slice().iter().copied())
+            .chain(
+                own_view
+                    .open_spread_operands()
+                    .into_iter()
+                    .flat_map(|operands| operands.as_slice().iter().copied()),
+            )
+            .collect::<Vec<_>>();
+        let completeness = if open_operands.is_empty() {
+            crate::semantic_query::MemberSurfaceCompleteness::Closed
+        } else {
+            crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from(
+                    open_operands.into_boxed_slice(),
+                )),
+            )
+        };
+        self.graph().intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::from(call_signatures.into_boxed_slice()),
                 construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
                 index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                 keyspace: None,
                 has_index_signature,
-            }))
+                completeness,
+            },
+        ))
     }
 
     /// Generic instantiation.
@@ -4098,7 +4126,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `declared_in_macro_type_arg = true`.
         let own_body_bit = context.is_macro_type_arg_own_body();
         let existing: FxHashSet<Arc<str>> = surface
-            .members
+            .positive_members()
             .iter()
             .map(|member| Arc::clone(&member.name))
             .collect();
@@ -4113,7 +4141,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // would leave own members `false` after structural body lowering.
         let mut restamped_any = false;
         let mut members: Vec<SurfaceMember> = surface
-            .members
+            .positive_members()
             .iter()
             .map(|member| {
                 if own_body_bit
@@ -4175,6 +4203,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
+                    // Declaration-domain member (prepared-decl own body):
+                    // declaration materialization is never a literal origin.
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     // The `PreparedMemberFact` carries the IR member's declared
                     // accessibility verbatim, so the overlay append preserves
                     // it (Public for every non-class origin).
@@ -4214,14 +4245,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         added.sort_unstable_by(|left, right| left.name.as_ref().cmp(right.name.as_ref()));
         members.extend(added);
+        let completeness = surface.completeness_for_members(&members);
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::clone(&surface.call_signatures),
                 construct_signatures: Arc::clone(&surface.construct_signatures),
                 index_signatures: Arc::clone(&surface.index_signatures),
                 keyspace: surface.keyspace,
-                has_index_signature: surface.has_index_signature,
+                has_index_signature: surface.has_known_index_signature(),
+                completeness,
             }),
             scope.clone(),
         )
@@ -4900,6 +4933,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             readonly: false,
                             is_method: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
+                            // Synthetic mapped-produced members are never a
+                            // literal origin.
+                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                             // Synthetic mapped-produced members: no single
                             // source declaration site.
                             spans: verter_type_expr::MemberSpans::default(),
@@ -4909,7 +4945,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                         })
                         .collect();
-                    let result_surface = SurfaceView {
+                    let result_surface = crate::semantic_query::surface_view! {
                         members: Arc::from(members.into_boxed_slice()),
                         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         construct_signatures: Arc::from(
@@ -4920,6 +4956,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ),
                         keyspace: None,
                         has_index_signature: false,
+                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                     };
                     let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                     record_utility_edges(result);
@@ -4945,13 +4982,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // stays recorded on the source surface for the keep-all
                 // `native_props` carrier; only this DERIVATION is gated.
                 let picked: Vec<SurfaceMember> = surface
-                    .members
+                    .positive_members()
                     .iter()
                     .filter(|m| m.visibility.is_public())
                     .filter(|m| pick_set.contains(m.name.as_ref()))
                     .cloned()
                     .collect();
-                let result_surface = SurfaceView {
+                let completeness = surface.completeness_for_members(&picked);
+                let result_surface = crate::semantic_query::surface_view! {
                     members: Arc::from(picked.into_boxed_slice()),
                     call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     construct_signatures: Arc::from(
@@ -4960,6 +4998,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
                     keyspace: None,
                     has_index_signature: false,
+                    completeness,
                 };
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
@@ -5017,12 +5056,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // source surface for the keep-all `native_props` carrier; only
                 // this derivation is gated.
                 let kept: Vec<SurfaceMember> = surface
-                    .members
+                    .positive_members()
                     .iter()
                     .filter(|m| m.visibility.is_public())
                     .filter(|m| !omit_set.contains(m.name.as_ref()))
                     .cloned()
                     .collect();
+                let completeness = surface.completeness_for_members(&kept);
                 // `Omit<T, K>` over a property surface leaves call/construct
                 // signatures intact (TS mapped-type semantics touch only named
                 // properties). For a Vue EMIT interface the events are call
@@ -5035,13 +5075,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.filter_omitted_event_signatures(&surface.call_signatures, &omit_set);
                 let kept_construct_signatures =
                     self.filter_omitted_event_signatures(&surface.construct_signatures, &omit_set);
-                let result_surface = SurfaceView {
+                let result_surface = crate::semantic_query::surface_view! {
                     members: Arc::from(kept.into_boxed_slice()),
                     call_signatures: kept_call_signatures,
                     construct_signatures: kept_construct_signatures,
                     index_signatures: Arc::clone(&surface.index_signatures),
                     keyspace: surface.keyspace,
-                    has_index_signature: surface.has_index_signature,
+                    has_index_signature: surface.has_known_index_signature(),
+                    completeness,
                 };
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
@@ -5472,10 +5513,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // thenable (out of scope), so it defers instead of passing
             // through a wrong answer.
             SemanticNodeData::Object(surface) => {
-                if surface
-                    .members
-                    .iter()
-                    .any(|member| member.name.as_ref() == "then")
+                if surface.is_open_spread()
+                    || surface
+                        .positive_members()
+                        .iter()
+                        .any(|member| member.name.as_ref() == "then")
                 {
                     self.opaque(QueryError::Miss)
                 } else {
@@ -5824,7 +5866,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     stack.extend(elements.iter().map(|element| element.value));
                 }
                 SemanticNodeData::Object(surface) => {
-                    stack.extend(surface.members.iter().map(|member| member.value));
+                    stack.extend(surface.positive_members().iter().map(|member| member.value));
                     stack.extend(surface.call_signatures.iter().copied());
                     stack.extend(surface.construct_signatures.iter().copied());
                     for signature in surface.index_signatures.iter() {
@@ -5833,6 +5875,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(keyspace) = surface.keyspace {
                         stack.push(keyspace);
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().copied());
                     }
                 }
                 SemanticNodeData::Signature {
@@ -6495,10 +6540,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
             // non-public members out here, the direct-Object keyof chokepoint.
+            Some(SemanticNodeData::Object(surface)) if surface.is_open_spread() => {
+                self.graph().intern_node(SemanticNodeData::KeyOf { base })
+            }
             Some(SemanticNodeData::Object(surface)) => self.intern_keyspace_names(
                 base,
                 surface
-                    .members
+                    .positive_members()
                     .iter()
                     .filter(|member| member.visibility.is_public())
                     .map(|member| Arc::clone(&member.name)),
@@ -6675,7 +6723,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         if let Some(SemanticNodeData::Object(view)) = self.graph().node_data(source).as_deref() {
-            return Some((public_members(&view.members), false));
+            if view.is_open_spread() {
+                return None;
+            }
+            return Some((public_members(view.positive_members()), false));
         }
 
         // Mapped/keyof source enumeration retains ordinary TypeScript
@@ -6698,8 +6749,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => {
-                Some((public_members(&view.members), read_is_partial))
+            Some(SemanticNodeData::Object(view)) if !view.is_open_spread() => {
+                Some((public_members(view.positive_members()), read_is_partial))
             }
             _ => None,
         }
@@ -7209,6 +7260,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // synthesized member is `Public`.
                     visibility: source_member
                         .map_or(verter_type_expr::MemberVisibility::Public, |m| m.visibility),
+                    // Mapped-type synthesis is never a literal origin.
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                     // Mapped-type produced members are synthesized by the mapped
                     // construction, never an interface/class heritage overlay —
@@ -7246,13 +7299,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return deferred_output;
         }
 
-        let view = SurfaceView {
+        let view = crate::semantic_query::surface_view! {
             members: Arc::from(produced.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: Some(mapper.key_space),
             has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
         };
         let node = graph.intern_node(SemanticNodeData::Object(view));
 
@@ -8202,7 +8256,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Infer { .. } => ConditionalInferRoute::Bare,
             SemanticNodeData::Object(view) => {
                 let mut direct = false;
-                for member in view.members.iter() {
+                for member in view.positive_members().iter() {
                     if matches!(
                         graph.node_data(member.value).as_deref(),
                         Some(SemanticNodeData::Infer { .. })
@@ -8337,7 +8391,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::Object(surface) => {
-                    for member in surface.members.iter() {
+                    for member in surface.positive_members().iter() {
                         stack.push(member.value);
                     }
                     for signature in surface.call_signatures.iter() {
@@ -8352,6 +8406,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(k) = surface.keyspace {
                         stack.push(k);
+                    }
+                    if let Some(operands) = surface.open_spread_operands() {
+                        stack.extend(operands.as_slice().iter().copied());
                     }
                 }
                 SemanticNodeData::Signature {

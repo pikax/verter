@@ -76,7 +76,7 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MacroOwnBodyStamp, MapperKey,
     MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
     QueryResult, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 /// The anchor declaration's prepared source, held so its
@@ -683,6 +683,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
             // -- Object surface: ROLE-FREE member stamps --
             TypeExpr::Object(obj) => {
+                // Spread-bearing locator shapes use the same ordered fold as
+                // ordinary lowering. Non-enumerable operands remain typed
+                // residuals inside one open Object.
+                if obj
+                    .properties
+                    .iter()
+                    .any(|m| matches!(m, ObjectMember::Spread(_)))
+                {
+                    let mut parts: Vec<(
+                        crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind,
+                        SemanticNodeId,
+                    )> = Vec::new();
+                    let mut run: Vec<ObjectMember> = Vec::new();
+                    let flush = |run: &mut Vec<ObjectMember>,
+                                 parts: &mut Vec<(
+                        crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind,
+                        SemanticNodeId,
+                    )>| {
+                        if run.is_empty() {
+                            return;
+                        }
+                        let run_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                            properties: std::mem::take(run),
+                        }));
+                        parts.push((
+                            crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::DirectRun,
+                            self.lower_locator_shape_node(&run_obj, ctx),
+                        ));
+                    };
+                    for member in &obj.properties {
+                        match member {
+                            ObjectMember::Spread(spread) => {
+                                flush(&mut run, &mut parts);
+                                let operand = self.lower_locator_shape_node(&spread.ty, ctx);
+                                parts.push((
+                                    crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::SpreadOperand,
+                                    self.taint_spread_node(operand),
+                                ));
+                            }
+                            other => run.push(other.clone()),
+                        }
+                    }
+                    flush(&mut run, &mut parts);
+                    return self.fold_spread_segments(parts, scope);
+                }
                 let declaration_origin = scope.canonical_file();
                 let mut members: Vec<SurfaceMember> = Vec::new();
                 let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
@@ -697,6 +742,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             readonly: prop.readonly,
                             is_method: false,
                             visibility: prop.visibility,
+                            // The locator path materializes DECLARATION
+                            // bodies: a member reached through a
+                            // variable/declaration deref is `NonLiteral`
+                            // regardless of the origin the producer recorded
+                            // on the authored literal — freshness never
+                            // survives declaration materialization.
+                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                             spans: prop.spans,
                             declaration_origin: declaration_origin.clone(),
                             // ROLE-FREE shape identity: the locator shape
@@ -721,6 +773,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 readonly: false,
                                 is_method: true,
                                 visibility: method.visibility,
+                                // Declaration materialization is never a
+                                // literal origin (see the Property arm).
+                                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                                 spans: method.spans,
                                 declaration_origin: declaration_origin.clone(),
                                 declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
@@ -746,16 +801,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 declaration_origin: declaration_origin.clone(),
                             })
                         }
+                        // Unreachable by construction: the spread-bearing
+                        // check above fails the whole object closed before
+                        // this member loop runs.
+                        ObjectMember::Spread(_) => {}
                     }
                 }
                 let has_index_signature = !index_signatures.is_empty();
-                let view = SurfaceView {
+                let view = crate::semantic_query::surface_view! {
                     members: Arc::from(members.into_boxed_slice()),
                     call_signatures: Arc::from(call_signatures.into_boxed_slice()),
                     construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
                     index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                     keyspace: None,
                     has_index_signature,
+                    completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                 };
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }

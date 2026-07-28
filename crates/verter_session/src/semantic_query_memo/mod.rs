@@ -79,6 +79,7 @@ pub use test_support::{
 pub use interner::DepSignatureInterner;
 #[cfg(test)]
 use interner::SWEEP_INTERVAL;
+#[cfg(test)]
 pub use member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX;
 
 use crate::semantic_query::demand::{

@@ -20,7 +20,7 @@ use super::semantic_source::{absolutize_locator, SourceRaiseContext};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HotTypeRef, IndexKey, IndexSignature, NodeScopeId, QueryError, QueryResult, SemanticNodeData,
-    SemanticNodeId, SurfaceMember, SurfaceView, TupleElement,
+    SemanticNodeId, SurfaceMember, TupleElement,
 };
 
 impl ProjectSemanticDispatch<'_> {
@@ -186,6 +186,9 @@ impl ProjectSemanticDispatch<'_> {
                         readonly: false,
                         is_method: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
@@ -194,13 +197,14 @@ impl ProjectSemanticDispatch<'_> {
                     })
                     .collect();
                 self.graph().intern_node_with_scope(
-                    SemanticNodeData::Object(SurfaceView {
+                    SemanticNodeData::Object(crate::semantic_query::surface_view! {
                         members: Arc::from(members.into_boxed_slice()),
                         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         keyspace: None,
                         has_index_signature: false,
+                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                     }),
                     scope.clone(),
                 )
@@ -232,6 +236,9 @@ impl ProjectSemanticDispatch<'_> {
                         readonly: false,
                         is_method: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
@@ -240,13 +247,14 @@ impl ProjectSemanticDispatch<'_> {
                     })
                     .collect();
                 HotTypeRef::new(self.graph().intern_node_with_scope(
-                    SemanticNodeData::Object(SurfaceView {
+                    SemanticNodeData::Object(crate::semantic_query::surface_view! {
                         members: Arc::from(members.into_boxed_slice()),
                         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                         keyspace: None,
                         has_index_signature: false,
+                        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
                     }),
                     scope,
                 ))
@@ -288,12 +296,27 @@ impl ProjectSemanticDispatch<'_> {
         ctx: &SourceRaiseContext<'_>,
     ) -> HotTypeRef {
         let scope = self.raise_scope(ctx);
+        // A spread-bearing shape materializes through the shared spread
+        // materializer's fold: direct runs compose as plain shapes, spread
+        // operands raise through their body slots — never a silently
+        // spread-less surface.
+        if object
+            .members
+            .iter()
+            .any(|m| matches!(m, ObjectMemberFact::Spread(_)))
+        {
+            return self.compose_spread_object_fact_node(object, ctx, &scope);
+        }
         let mut members: Vec<SurfaceMember> = Vec::new();
         let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
         let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
         let mut index_signatures: Vec<IndexSignature> = Vec::new();
         for member in object.members.iter() {
             match member {
+                // Unreachable by construction: the spread-bearing check above
+                // routes the whole object through the spread fold before this
+                // plain member loop runs.
+                ObjectMemberFact::Spread(_) => {}
                 ObjectMemberFact::Property(property) => members.push(SurfaceMember {
                     name: Arc::from(property.name.as_str()),
                     value: self.raise_required_interior(
@@ -308,6 +331,9 @@ impl ProjectSemanticDispatch<'_> {
                     readonly: property.readonly,
                     is_method: false,
                     visibility: property.visibility,
+                    // Fact rehydration (declaration domain) is never a
+                    // literal origin.
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     spans: verter_type_expr::MemberSpans::default(),
                     declaration_origin: scope.canonical_file(),
                     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
@@ -327,6 +353,9 @@ impl ProjectSemanticDispatch<'_> {
                         readonly: false,
                         is_method: true,
                         visibility: method.visibility,
+                        // Fact rehydration (declaration domain) is never a
+                        // literal origin.
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                         spans: verter_type_expr::MemberSpans::default(),
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg:
@@ -378,16 +407,66 @@ impl ProjectSemanticDispatch<'_> {
         }
         let has_index_signature = !index_signatures.is_empty();
         HotTypeRef::new(self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::from(call_signatures.into_boxed_slice()),
                 construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
                 index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                 keyspace: None,
                 has_index_signature,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             scope,
         ))
+    }
+
+    /// Compose a SPREAD-BEARING object-shape fact through the shared spread
+    /// materializer: split the ordered member facts into direct runs (each
+    /// composed as a plain spread-less shape) and spread operands (raised
+    /// through their body slots, pre-tainted), then left-fold.
+    fn compose_spread_object_fact_node(
+        &self,
+        object: &ObjectShapeFact,
+        ctx: &SourceRaiseContext<'_>,
+        scope: &NodeScopeId,
+    ) -> HotTypeRef {
+        use crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind;
+        let mut segments: Vec<(FoldSegmentKind, SemanticNodeId)> = Vec::new();
+        let mut run: Vec<ObjectMemberFact> = Vec::new();
+        let flush_run =
+            |run: &mut Vec<ObjectMemberFact>,
+             segments: &mut Vec<(FoldSegmentKind, SemanticNodeId)>| {
+                if run.is_empty() {
+                    return;
+                }
+                let run_fact = ObjectShapeFact {
+                    members: Arc::from(std::mem::take(run).into_boxed_slice()),
+                };
+                segments.push((
+                    FoldSegmentKind::DirectRun,
+                    self.compose_object_fact_node(&run_fact, ctx).node(),
+                ));
+            };
+        for member in object.members.iter() {
+            match member {
+                ObjectMemberFact::Spread(spread) => {
+                    flush_run(&mut run, &mut segments);
+                    let operand = match self.raise_body_slot(&spread.ty, ctx.scope_canonical_id) {
+                        Some(hot) => hot.node(),
+                        // An unresolvable operand fails the whole shape
+                        // closed — never a silently spread-less surface.
+                        None => return HotTypeRef::new(self.miss_node(scope)),
+                    };
+                    segments.push((
+                        FoldSegmentKind::SpreadOperand,
+                        self.taint_spread_node(operand),
+                    ));
+                }
+                other => run.push(other.clone()),
+            }
+        }
+        flush_run(&mut run, &mut segments);
+        HotTypeRef::new(self.fold_spread_segments(segments, scope))
     }
 
     /// Compose a projected whole-surface fact into an `Object` carrier node.
@@ -414,6 +493,9 @@ impl ProjectSemanticDispatch<'_> {
                 readonly: member.readonly,
                 is_method: member.is_method,
                 visibility: member.visibility,
+                // Fact rehydration (declaration domain) is never a literal
+                // origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 spans: verter_type_expr::MemberSpans::default(),
                 declaration_origin: declaration_origin_file(&member.declaration_origin),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
@@ -474,13 +556,14 @@ impl ProjectSemanticDispatch<'_> {
             .collect();
         let has_index_signature = surface.has_index_signature || !index_signatures.is_empty();
         HotTypeRef::new(self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView {
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::from(call_signatures.into_boxed_slice()),
                 construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
                 index_signatures: Arc::from(index_signatures.into_boxed_slice()),
                 keyspace: None,
                 has_index_signature,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
             }),
             scope,
         ))

@@ -146,6 +146,9 @@ impl ObjectExpr {
                     method.spans.shift(delta);
                     method.function.shift_spans(delta);
                 }
+                ObjectMember::Spread(spread) => {
+                    spread.ty.shift_spans(delta);
+                }
             }
         }
     }
@@ -169,6 +172,9 @@ impl ObjectExpr {
                 ObjectMember::Method(method) => {
                     method.spans.clear();
                     method.function.clear_spans();
+                }
+                ObjectMember::Spread(spread) => {
+                    spread.ty.clear_spans();
                 }
             }
         }

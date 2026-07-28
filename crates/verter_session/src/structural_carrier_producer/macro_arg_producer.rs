@@ -19,8 +19,8 @@
 //! not a lint, so a second producer in a foreign module is unrepresentable by
 //! construction. (2) The SAME-MODULE case is NOT compiler-confined: Rust
 //! privacy is module-scoped, so a SECOND producer written INSIDE this file CAN
-//! name the module-private builders, and the owner module's collapse to one
-//! file does not make that a compile error. That same-module residual is
+//! name the module-private builders; keeping producer-capable code in one file
+//! does not make that a compile error. That same-module residual is
 //! POLICED by the strengthened single-producer architecture guards
 //! (cfg-satisfiability classification + crate-visible producer-exposure
 //! collector covering fn / value / trait entries + the no-codegen-surface
@@ -125,13 +125,13 @@ use std::sync::{Arc, OnceLock};
 use rustc_hash::FxHashMap;
 use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember, TypeExpr};
 
+use super::infer_binder_names::collect_extends_infer_binder_names;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod,
     PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
-    SignatureKind, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl,
-    ValueRootKey,
+    SignatureKind, SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -691,6 +691,7 @@ fn lower_node(
                         readonly: prop.readonly,
                         is_method: false,
                         visibility: prop.visibility,
+                        excess_origin: prop.excess_origin,
                         spans: prop.spans,
                         declaration_origin: declaration_origin.clone(),
                         declared_in_macro_type_arg: ctx.macro_own_body,
@@ -705,6 +706,7 @@ fn lower_node(
                             readonly: false,
                             is_method: true,
                             visibility: method.visibility,
+                            excess_origin: method.excess_origin,
                             spans: method.spans,
                             declaration_origin: declaration_origin.clone(),
                             declared_in_macro_type_arg: ctx.macro_own_body,
@@ -726,17 +728,28 @@ fn lower_node(
                         spans: sig.spans,
                         declaration_origin: declaration_origin.clone(),
                     }),
+                    // A spread-bearing literal needs the dispatch-owned
+                    // spread materializer's fold; this query-free lowerer
+                    // fails closed — never a silently spread-less surface.
+                    ObjectMember::Spread(_) => {
+                        return Err(StructuralLowerError::UnsupportedWithoutResolution {
+                            shape: "object-literal spread",
+                        })
+                    }
                 }
             }
             let has_index_signature = !index_signatures.is_empty();
-            let view = SurfaceView {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                keyspace: None,
-                has_index_signature,
-            };
+            let view = crate::semantic_query::SurfaceView::from_init(
+                crate::semantic_query::SurfaceViewInit {
+                    members: Arc::from(members.into_boxed_slice()),
+                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature,
+                    completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+                },
+            );
             Ok(graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone()))
         }
 
@@ -823,149 +836,6 @@ fn lower_node(
         }
     }
 }
-
-/// Collect the `infer` binder names introduced by a conditional's `extends`
-/// clause (at any structural depth) into `out`, so the conditional's TRUE
-/// branch can bind each to the matching `Infer` carrier. Purely syntactic
-/// typed-IR walk — no resolution, allocation-free except the de-duplicated
-/// name push.
-///
-/// This descends EVERY `TypeExpr` child position where an `infer` is
-/// syntactically valid inside an `extends` clause, reaching at least the
-/// composite coverage of the eager binder
-/// [`ProjectSemanticDispatch::collect_infer_bindings_into_env`] (`Function` /
-/// `Object` param/return/member positions) so the dormant carrier binds the
-/// same names the eager path would: `Function` / `ConstructorType`
-/// (parameters, return, own type-parameter constraint/default), `Object`
-/// (property values, index-signature key/value, call/construct/method
-/// signatures), `TemplateLiteral` interpolations, `Ref` / `ImportType` type
-/// arguments, `TypeOf` instantiation arguments, and `Mapped` source / value /
-/// `as`-remap name-type.
-///
-/// ONE deliberate non-descent: it does NOT recurse into a nested
-/// `Conditional`, because an `infer` in an inner conditional's `extends` is
-/// scoped to THAT conditional's true branch, not this one's — matching the
-/// eager binder, which likewise has no `Conditional` arm.
-fn collect_extends_infer_binder_names(expr: &TypeExpr, out: &mut Vec<Arc<str>>) {
-    match expr {
-        TypeExpr::Infer { name } => {
-            if !out.iter().any(|n| n.as_ref() == name.as_str()) {
-                out.push(Arc::from(name.as_str()));
-            }
-        }
-        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) | TypeExpr::KeyOf(inner) => {
-            collect_extends_infer_binder_names(inner, out)
-        }
-        TypeExpr::Array { element, .. } => collect_extends_infer_binder_names(element, out),
-        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => arms
-            .iter()
-            .for_each(|a| collect_extends_infer_binder_names(a, out)),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .for_each(|e| collect_extends_infer_binder_names(&e.ty, out)),
-        // A generic reference (`Box<infer U>`) and an import-type reference
-        // (`import("m").Box<infer U>`) carry their `infer`s in the identical
-        // `type_arguments` slice.
-        TypeExpr::Ref { type_arguments, .. } | TypeExpr::ImportType { type_arguments, .. } => {
-            type_arguments
-                .iter()
-                .for_each(|a| collect_extends_infer_binder_names(a, out))
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_extends_infer_binder_names(object, out);
-            collect_extends_infer_binder_names(index, out);
-        }
-        // `infer` is valid in any parameter / return / own-type-parameter
-        // position of a function or constructor type written inside the
-        // `extends` clause (`T extends (x: infer P) => any ? P : …`,
-        // `T extends new (x: infer P) => any ? P : …`).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            collect_function_infer_binder_names(func, out)
-        }
-        // Object type literal: each property value, index-signature key/value,
-        // and call / construct / method signature can carry an extends-clause
-        // `infer` (`T extends { a: infer P } ? P : …`).
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_extends_infer_binder_names(&prop.ty, out)
-                    }
-                    ObjectMember::IndexSignature(sig) => {
-                        collect_extends_infer_binder_names(&sig.key_type, out);
-                        collect_extends_infer_binder_names(&sig.value_type, out);
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        collect_function_infer_binder_names(func, out)
-                    }
-                    ObjectMember::Method(method) => {
-                        collect_function_infer_binder_names(&method.function, out)
-                    }
-                }
-            }
-        }
-        // Template-literal interpolations:
-        // `` T extends `${infer Head}${string}` ? Head : … ``.
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .for_each(|e| collect_extends_infer_binder_names(e, out)),
-        // `typeof` instantiation-expression type arguments
-        // (`typeof make<infer P>`) carry extends-clause infer binders.
-        TypeExpr::TypeOf(value_ref) => value_ref
-            .type_args
-            .iter()
-            .for_each(|a| collect_extends_infer_binder_names(a, out)),
-        // Mapped type: the `in` source (the constraint), the value type, AND
-        // the `as` remap (`name_type`) can each carry an extends-clause
-        // `infer` (`T extends { [K in S as infer R]: V } ? R : …`). The mapper
-        // parameter name itself is not an `infer` binder. Descending the
-        // `name_type` keeps the collector's Mapped coverage a SUPERSET of the
-        // eager binder's — the correct structural fidelity for the carrier
-        // graph; an `infer` in the remap must bind for the true branch instead
-        // of leaking as a `BareRef`.
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            collect_extends_infer_binder_names(source, out);
-            collect_extends_infer_binder_names(value, out);
-            if let Some(name_type) = name_type {
-                collect_extends_infer_binder_names(name_type, out);
-            }
-        }
-        // A nested conditional's `infer`s belong to ITS OWN true branch — do
-        // not descend (TS scoping). The remaining terminals (`Primitive`,
-        // `Literal`, `TypeParameter`, `RecursiveRef`, `SyntheticSlotBinding`,
-        // `Unknown`) introduce no extends-clause infer binder here.
-        _ => {}
-    }
-}
-
-/// Collect extends-clause `infer` binder names appearing in any parameter
-/// type, the return type, or any own type-parameter constraint / default of a
-/// function or constructor signature. Shared by the `Function` /
-/// `ConstructorType` arm and the object call / construct / method-signature
-/// members of [`collect_extends_infer_binder_names`]. Purely syntactic — no
-/// resolution.
-fn collect_function_infer_binder_names(func: &FunctionExpr, out: &mut Vec<Arc<str>>) {
-    for param in &func.parameters {
-        collect_extends_infer_binder_names(&param.ty, out);
-    }
-    if let Some(return_type) = &func.return_type {
-        collect_extends_infer_binder_names(return_type, out);
-    }
-    for tp in &func.type_parameters {
-        if let Some(constraint) = &tp.constraint {
-            collect_extends_infer_binder_names(constraint, out);
-        }
-        if let Some(default) = &tp.default {
-            collect_extends_infer_binder_names(default, out);
-        }
-    }
-}
-
 /// The value-root [`ScopeId`] for a `typeof` carrier — the owner file scope
 /// with no inner local scope (mirroring the eager value-root construction).
 /// A `typeof` in a scope-less (`Global`) context has no canonical file to

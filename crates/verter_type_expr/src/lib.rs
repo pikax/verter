@@ -51,6 +51,8 @@ pub use unknown::{UnknownProvenance, UnknownValue};
 /// Content-free authored-body locators — the keyable inverse of a session
 /// `HotTypeRef` (the cross-boundary escape a closed fact routes through).
 pub mod locators;
+mod member_origin;
+pub use member_origin::{ExcessPropertyOrigin, SpreadMember};
 
 /// Producer-emitted span-recovery origin locators (one per identity-participating
 /// span class) + the `SourceSynthetic` marker.
@@ -569,6 +571,13 @@ pub enum ObjectMember {
     ConstructSignature(FunctionExpr),
     /// Method signature: `method(x: T): R`.
     Method(MethodSignature),
+    /// Object-literal spread entry: `{ ...operand }`, carried IN SOURCE ORDER
+    /// among the other members. Only the object-literal expression producer
+    /// emits this variant (type annotations have no spread syntax); the shared
+    /// spread materializer folds the ordered entry list left-to-right into the
+    /// final member surface, so the pre-fold IR preserves both spread position
+    /// and per-property provenance.
+    Spread(SpreadMember),
 }
 
 /// OXC-derived declaration-site spans for a named member (property or method).
@@ -754,6 +763,15 @@ pub struct ObjectProperty {
     /// field deserializes as `Public`.
     #[serde(default)]
     pub visibility: MemberVisibility,
+    /// Excess-property provenance (see [`ExcessPropertyOrigin`]). Participates
+    /// in node identity (Eq / Hash); read only by excess-property candidate
+    /// selection. `NonLiteral` for every annotation / synthetic origin (the
+    /// constructors' choice — annotations have no literal syntax); the
+    /// object-literal producer and the spread materializer mint `FreshOwn` /
+    /// `SpreadTainted` via [`Self::with_excess_origin`]. Serialized with
+    /// `#[serde(default)]` for wire compatibility.
+    #[serde(default)]
+    pub excess_origin: ExcessPropertyOrigin,
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
@@ -777,6 +795,7 @@ impl ObjectProperty {
             optional,
             readonly,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -800,6 +819,7 @@ impl ObjectProperty {
             optional,
             readonly,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -823,6 +843,7 @@ impl ObjectProperty {
             optional,
             readonly,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
     }
@@ -845,8 +866,20 @@ impl ObjectProperty {
             optional,
             readonly,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
+    }
+
+    /// Re-stamp this property's excess-property provenance. The ONLY producers
+    /// of a non-`NonLiteral` origin are direct object-literal materialization
+    /// (`FreshOwn`) and the shared spread materializer (`SpreadTainted` /
+    /// `FreshOwn` re-mint on later-direct overwrite) — plus the graph raise
+    /// boundary, which threads an existing member's recorded origin verbatim.
+    #[must_use]
+    pub fn with_excess_origin(mut self, excess_origin: ExcessPropertyOrigin) -> Self {
+        self.excess_origin = excess_origin;
+        self
     }
 }
 
@@ -926,6 +959,13 @@ pub struct MethodSignature {
     /// field deserializes as `Public`.
     #[serde(default)]
     pub visibility: MemberVisibility,
+    /// Excess-property provenance (see [`ExcessPropertyOrigin`]). `NonLiteral`
+    /// for every annotation / synthetic origin; an object-literal method /
+    /// accessor is `FreshOwn` via [`Self::with_excess_origin`]. Participates in
+    /// node identity (Eq / Hash); read only by excess-property candidate
+    /// selection.
+    #[serde(default)]
+    pub excess_origin: ExcessPropertyOrigin,
     /// OXC declaration-site spans (in-memory provenance; not serialized).
     #[serde(skip)]
     pub spans: MemberSpans,
@@ -958,6 +998,7 @@ impl MethodSignature {
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -980,6 +1021,7 @@ impl MethodSignature {
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans: MemberSpans::default(),
         }
     }
@@ -1003,6 +1045,7 @@ impl MethodSignature {
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility: MemberVisibility::Public,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
     }
@@ -1025,8 +1068,19 @@ impl MethodSignature {
             method_kind: ObjectMethodKind::Method,
             has_implementation_body: false,
             visibility,
+            excess_origin: ExcessPropertyOrigin::NonLiteral,
             spans,
         }
+    }
+
+    /// Re-stamp this method's excess-property provenance. Mirrors
+    /// [`ObjectProperty::with_excess_origin`]: only direct object-literal
+    /// materialization, the shared spread materializer, and the graph raise
+    /// boundary (verbatim thread-through) produce a non-`NonLiteral` value.
+    #[must_use]
+    pub fn with_excess_origin(mut self, excess_origin: ExcessPropertyOrigin) -> Self {
+        self.excess_origin = excess_origin;
+        self
     }
 }
 

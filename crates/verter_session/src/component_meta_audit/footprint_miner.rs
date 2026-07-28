@@ -895,8 +895,8 @@ impl StructuralEncoder<'_> {
             SemanticNodeData::Object(surface) => {
                 self.buf.push(VariantTag::Object as u8);
                 self.buf
-                    .extend_from_slice(&(surface.members.len() as u64).to_le_bytes());
-                for m in surface.members.iter() {
+                    .extend_from_slice(&(surface.positive_members().len() as u64).to_le_bytes());
+                for m in surface.positive_members().iter() {
                     self.encode_surface_member(m, depth);
                 }
                 self.encode_child_slice(&surface.call_signatures, depth);
@@ -907,7 +907,18 @@ impl StructuralEncoder<'_> {
                     self.encode_index_signature(sig, depth);
                 }
                 self.encode_child_opt(surface.keyspace, depth);
-                self.buf.push(u8::from(surface.has_index_signature));
+                self.buf.push(u8::from(surface.has_known_index_signature()));
+                match surface.open_spread_operands() {
+                    None => self.push_present(false),
+                    Some(operands) => {
+                        self.push_present(true);
+                        self.buf
+                            .extend_from_slice(&(operands.len() as u64).to_le_bytes());
+                        for operand in operands.as_slice() {
+                            self.encode_child(*operand, depth);
+                        }
+                    }
+                }
             }
             SemanticNodeData::Tuple { elements, readonly } => {
                 self.buf.push(VariantTag::Tuple as u8);

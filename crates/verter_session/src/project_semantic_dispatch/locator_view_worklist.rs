@@ -500,7 +500,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         let Some((child, child_context)) =
                             self.projection_child_from_plan(&child_plan, cursor)
                         else {
-                            let synchronize = projection_finish_may_dispatch(data.as_ref());
+                            let synchronize =
+                                projection_finish_may_dispatch(data.as_ref(), context);
                             if synchronize {
                                 work_credit.settle();
                             }
@@ -1024,7 +1025,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
 
-        let synchronize = projection_finish_may_dispatch(data.as_ref());
+        let synchronize = projection_finish_may_dispatch(data.as_ref(), context);
         if synchronize {
             work_credit.settle();
         }
@@ -1226,10 +1227,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .map(|expression| (*expression, context)),
             SemanticNodeData::Object(view) => {
                 let mut remaining = index;
-                if let Some(member) = view.members.get(remaining) {
+                if let Some(member) = view.positive_members().get(remaining) {
                     return Some((member.value, context.into_structural_provenance()));
                 }
-                remaining = remaining.saturating_sub(view.members.len());
+                remaining = remaining.saturating_sub(view.positive_members().len());
                 if let Some(signature) = view.call_signatures.get(remaining) {
                     return Some((*signature, context));
                 }
@@ -1247,9 +1248,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     });
                 }
                 remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
-                view.keyspace
-                    .filter(|_| remaining == 0)
-                    .map(|keyspace| (keyspace, context))
+                if let Some(keyspace) = view.keyspace {
+                    if remaining == 0 {
+                        return Some((keyspace, context));
+                    }
+                    remaining -= 1;
+                }
+                view.open_spread_operands().and_then(|operands| {
+                    operands
+                        .as_slice()
+                        .get(remaining)
+                        .map(|operand| (*operand, context.into_structural_provenance()))
+                })
             }
             SemanticNodeData::Signature {
                 params,
@@ -1371,10 +1381,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             ProjectionChildPlan::Object { view, context } => {
                 let mut remaining = index;
-                if let Some(member) = view.members.get(remaining) {
+                if let Some(member) = view.positive_members().get(remaining) {
                     return Some((member.value, context.into_structural_provenance()));
                 }
-                remaining = remaining.saturating_sub(view.members.len());
+                remaining = remaining.saturating_sub(view.positive_members().len());
                 if let Some(signature) = view.call_signatures.get(remaining) {
                     return Some((*signature, *context));
                 }
@@ -1392,9 +1402,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     });
                 }
                 remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
-                view.keyspace
-                    .filter(|_| remaining == 0)
-                    .map(|keyspace| (keyspace, *context))
+                if let Some(keyspace) = view.keyspace {
+                    if remaining == 0 {
+                        return Some((keyspace, *context));
+                    }
+                    remaining -= 1;
+                }
+                view.open_spread_operands().and_then(|operands| {
+                    operands
+                        .as_slice()
+                        .get(remaining)
+                        .map(|operand| (*operand, context.into_structural_provenance()))
+                })
             }
             ProjectionChildPlan::Function {
                 params,
@@ -1435,7 +1454,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
 }
 
 mod finish;
-fn projection_finish_may_dispatch(data: &SemanticNodeData) -> bool {
+fn projection_finish_may_dispatch(
+    data: &SemanticNodeData,
+    context: ProjectionReductionContext,
+) -> bool {
+    let _ = context;
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }

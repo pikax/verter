@@ -439,6 +439,7 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> RaisedMember {
         RaisedMember {
@@ -449,6 +450,7 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
                 optional,
                 readonly,
                 visibility,
+                excess_origin,
                 spans,
             },
         }
@@ -459,6 +461,7 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
         function: (RaisedFunction, bool),
         optional: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> RaisedMember {
         let (function, materialized) = function;
@@ -469,8 +472,15 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
                 function,
                 optional,
                 visibility,
+                excess_origin,
                 spans,
             },
+        }
+    }
+    fn member_spread(&mut self, ty: RaisedShapeResult) -> RaisedMember {
+        RaisedMember {
+            materialized: ty.summary.facts.materialized,
+            member: RaisedObjectMember::Spread { ty: ty.key },
         }
     }
     fn member_call_signature(&mut self, function: (RaisedFunction, bool)) -> RaisedMember {
@@ -729,6 +739,7 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
         _optional: bool,
         _readonly: bool,
         _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
     ) -> FactsMember {
         FactsMember {
@@ -741,10 +752,16 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
         function: FactsFunction,
         _optional: bool,
         _visibility: MemberVisibility,
+        _excess_origin: verter_type_expr::ExcessPropertyOrigin,
         _spans: verter_type_expr::MemberSpans,
     ) -> FactsMember {
         FactsMember {
             materialized: function.materialized,
+        }
+    }
+    fn member_spread(&mut self, ty: RaisedShapeSummary) -> FactsMember {
+        FactsMember {
+            materialized: ty.facts.materialized,
         }
     }
     fn member_call_signature(&mut self, function: FactsFunction) -> FactsMember {
@@ -971,6 +988,7 @@ fn object_member_to_raised(
             optional: property.optional,
             readonly: property.readonly,
             visibility: property.visibility,
+            excess_origin: property.excess_origin,
             spans: property.spans,
         },
         ObjectMember::Method(method) => RaisedObjectMember::Method {
@@ -978,7 +996,11 @@ fn object_member_to_raised(
             function: function_expr_to_raised(interner, &method.function),
             optional: method.optional,
             visibility: method.visibility,
+            excess_origin: method.excess_origin,
             spans: method.spans,
+        },
+        ObjectMember::Spread(spread) => RaisedObjectMember::Spread {
+            ty: type_expr_to_key(interner, &spread.ty),
         },
         ObjectMember::CallSignature(function) => {
             RaisedObjectMember::CallSignature(function_expr_to_raised(interner, function))
@@ -1277,15 +1299,12 @@ pub(super) fn project_root_summary(
             ))
         }
         SemanticNodeData::Object(surface) => {
-            if surface.members.is_empty()
-                && surface.call_signatures.is_empty()
-                && surface.construct_signatures.is_empty()
-                && !surface.has_index_signature
-            {
+            if surface.closed().is_some_and(|closed| closed.is_empty()) {
                 RootOnlySummary::from_summary(summary::empty_object())
-            } else if surface.members.is_empty()
+            } else if surface.closed().is_some()
+                && surface.positive_members().is_empty()
                 && surface.construct_signatures.is_empty()
-                && !surface.has_index_signature
+                && !surface.has_known_index_signature()
                 && surface.call_signatures.len() == 1
             {
                 // Single-call-signature surface IS that signature's value
@@ -1309,9 +1328,10 @@ pub(super) fn project_root_summary(
                 // `UnrepresentableSurface` sentinel (tag `ObjectSurfaceSentinel`,
                 // root `Other`). The signature scan runs ONLY when a property /
                 // index has not already settled it (short-circuit `||`).
-                let has_member = !surface.members.is_empty()
+                let has_member = !surface.positive_members().is_empty()
                     || !surface.index_signatures.is_empty()
-                    || surface.has_index_signature
+                    || surface.has_known_index_signature()
+                    || surface.is_open_spread()
                     || surface
                         .call_signatures
                         .iter()

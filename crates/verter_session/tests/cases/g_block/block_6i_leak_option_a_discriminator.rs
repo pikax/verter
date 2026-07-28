@@ -254,14 +254,14 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
 
     // Locate the `badge` member on the synthesised surface.
     let badge_member = view
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "badge")
         .unwrap_or_else(|| {
             panic!(
                 "synthesised surface MUST publish `badge` member after Mapped enumeration; \
                  got member names: {:?}",
-                view.members
+                view.positive_members()
                     .iter()
                     .map(|m| m.name.as_ref())
                     .collect::<Vec<_>>()
@@ -320,7 +320,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     // discriminate identically — proves the substitution loop fires
     // for EVERY enumerated key, not just the first one.
     let title_member = view
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "title")
         .expect("synthesised surface MUST publish `title` member alongside `badge`");

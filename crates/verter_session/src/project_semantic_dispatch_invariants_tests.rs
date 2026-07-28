@@ -401,7 +401,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         panic!("mapped with enumerable key space must produce Object; got {data:?}");
     };
     let member_names: Vec<String> = surface
-        .members
+        .positive_members()
         .iter()
         .map(|m| m.name.as_ref().to_string())
         .collect();
@@ -413,7 +413,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     // Per-key value: substituting K → Literal(name) into TypeParam(K)
     // yields Literal(name). This proves the substitution path runs for
     // the non-Object-source case.
-    for member in surface.members.iter() {
+    for member in surface.positive_members().iter() {
         let value_data = graph.node_data(member.value).expect("value interned");
         let expected = member.name.as_ref().to_string();
         match &*value_data {
@@ -503,8 +503,8 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
     let SemanticNodeData::Object(surface) = &*data else {
         panic!("mapped with enumerable key space must produce Object; got {data:?}");
     };
-    assert_eq!(surface.members.len(), 1);
-    let member = &surface.members[0];
+    assert_eq!(surface.positive_members().len(), 1);
+    let member = &surface.positive_members()[0];
     assert_eq!(member.name.as_ref(), "a");
     let value_data = graph.node_data(member.value).expect("value interned");
     // Discriminating check: the value must NOT be `Opaque(_)` — the
@@ -942,18 +942,20 @@ fn host_for_relation_tests() -> VerterHost {
 }
 
 fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
-    SurfaceView {
+    crate::semantic_query::surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     }
 }
 
 fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> SurfaceMember {
     SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,
@@ -969,6 +971,7 @@ fn required_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> 
 
 fn optional_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> SurfaceMember {
     SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,
@@ -1001,6 +1004,7 @@ fn surface_member_visibility_participates_in_node_identity() {
 
     let node = crate::semantic_query::SemanticNodeId(7);
     let with_visibility = |vis: MemberVisibility| SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: vis,
         name: Arc::from("a"),
         value: node,
@@ -1029,6 +1033,55 @@ fn surface_member_visibility_participates_in_node_identity() {
     let public2 = with_visibility(MemberVisibility::Public);
     assert_eq!(public, public2);
     assert_eq!(hash_one(&public), hash_one(&public2));
+}
+
+/// NODE-IDENTITY: `SurfaceMember::excess_origin` participates in graph node
+/// identity — two Object surfaces identical in every other axis but differing
+/// in one member's excess-property origin INTERN TO DISTINCT NODES. An
+/// origin sidecar keyed by node id could not represent this: the same id
+/// would carry two different assignability outcomes.
+#[test]
+fn surfaces_differing_only_in_excess_origin_intern_distinctly() {
+    use verter_type_expr::ExcessPropertyOrigin;
+
+    let host = host_for_relation_tests();
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    let surface_with = |origin: ExcessPropertyOrigin| {
+        let mut member = required_member("a", number);
+        member.excess_origin = origin;
+        empty_surface(vec![member])
+    };
+
+    let fresh = graph.intern_node(SemanticNodeData::Object(surface_with(
+        ExcessPropertyOrigin::FreshOwn,
+    )));
+    let tainted = graph.intern_node(SemanticNodeData::Object(surface_with(
+        ExcessPropertyOrigin::SpreadTainted,
+    )));
+    let non_literal = graph.intern_node(SemanticNodeData::Object(surface_with(
+        ExcessPropertyOrigin::NonLiteral,
+    )));
+
+    assert_ne!(
+        fresh, tainted,
+        "FreshOwn vs SpreadTainted member => distinct interned nodes"
+    );
+    assert_ne!(
+        fresh, non_literal,
+        "FreshOwn vs NonLiteral member => distinct interned nodes"
+    );
+    assert_ne!(
+        tainted, non_literal,
+        "SpreadTainted vs NonLiteral member => distinct interned nodes"
+    );
+
+    // Sanity (non-vacuous): the same origin re-interns to the SAME node.
+    let fresh_again = graph.intern_node(SemanticNodeData::Object(surface_with(
+        ExcessPropertyOrigin::FreshOwn,
+    )));
+    assert_eq!(fresh, fresh_again, "identical surfaces intern to one node");
 }
 
 /// Object source with all required target members (via a shared inner
@@ -2885,11 +2938,11 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
             let data = graph.node_data(id).expect("projection result interned");
             if let SemanticNodeData::Object(surf) = &*data {
                 assert_eq!(
-                    surf.members.len(),
+                    surf.positive_members().len(),
                     1,
                     "Shallow projection preserves one member"
                 );
-                assert_eq!(surf.members[0].name.as_ref(), "label");
+                assert_eq!(surf.positive_members()[0].name.as_ref(), "label");
             } else {
                 panic!("expected Object shape after Shallow projection, got {data:?}");
             }
@@ -3079,6 +3132,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
     let b_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("a"),
             value: a_value,
@@ -3091,6 +3145,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
             declaration_origin: None,
         },
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("b"),
             value: b_value,
@@ -3171,6 +3226,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
     let b_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("a"),
             value: a_value,
@@ -3183,6 +3239,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
             declaration_origin: None,
         },
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("b"),
             value: b_value,
@@ -3297,6 +3354,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
     let a_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from("a"),
             value: a_value,
@@ -4395,16 +4453,18 @@ fn contravariant_infer_candidates_intersect_not_union() {
 }
 
 /// Axis refusal: a relation key on a NOT-YET-IMPLEMENTED axis (a
-/// non-`Assignable` relation kind, a `Fresh` source, or an
-/// excess-property policy) must REFUSE — undecided, ReturnOnly, zero
-/// admission — never a silent assignability answer. `Identity(string,
-/// unknown)` through the assignability reducer would hit the
-/// `(_, Unknown) => Assignable` prefilter arm and PUBLISH a false
-/// `Assignable` for an identity judgement.
+/// non-`Assignable` relation kind, a non-default overload-selection
+/// policy) must REFUSE — undecided, ReturnOnly, zero admission — never a
+/// silent assignability answer. `Identity(string, unknown)` through the
+/// assignability reducer would hit the `(_, Unknown) => Assignable`
+/// prefilter arm and PUBLISH a false `Assignable` for an identity
+/// judgement. The `Fresh` freshness axis and the excess-property policy
+/// are IMPLEMENTED (the fresh excess prepass) and no longer refuse — see
+/// `fresh_excess_property_checking`.
 #[test]
 fn non_default_relation_axes_refuse_instead_of_answering_assignability() {
     use crate::semantic_query::{
-        FreshnessKey, QueryResult, RelateMemoKey, RelationKind, SemanticQueryApi,
+        OverloadSelectionPolicy, QueryResult, RelateMemoKey, RelationKind, SemanticQueryApi,
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -4418,21 +4478,16 @@ fn non_default_relation_axes_refuse_instead_of_answering_assignability() {
         relation: RelationKind::Identity,
         ..base.clone()
     };
-    let fresh_key = RelateMemoKey {
-        source_freshness: FreshnessKey::Fresh,
-        ..base.clone()
-    };
-    let excess_key = {
+    let overload_key = {
         let mut key = base.clone();
-        key.policy.excess_property_check = true;
+        key.policy.overload_selection = OverloadSelectionPolicy::FirstApplicable;
         key
     };
 
     let before = graph.relation_memo_count();
     for (name, key) in [
         ("Identity", identity_key),
-        ("Fresh source", fresh_key),
-        ("excess-property policy", excess_key),
+        ("FirstApplicable overloads", overload_key),
     ] {
         let result = dispatch.execute(key.to_query_key());
         assert!(
@@ -4855,7 +4910,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
         match graph.node_data(node).as_deref() {
             Some(SemanticNodeData::Union(arms)) => stack.extend(arms.iter().copied()),
             Some(SemanticNodeData::Object(view)) => {
-                for m in view.members.iter() {
+                for m in view.positive_members().iter() {
                     names.insert(m.name.as_ref().to_string());
                 }
             }
@@ -5056,15 +5111,15 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let Some(SemanticNodeData::Object(view)) = surface_data.as_deref() else {
         panic!("mapped surface must materialise an Object, got {surface_data:?}");
     };
-    assert_eq!(view.members.len(), 1);
-    assert_eq!(view.members[0].name.as_ref(), "a");
+    assert_eq!(view.positive_members().len(), 1);
+    assert_eq!(view.positive_members()[0].name.as_ref(), "a");
     assert!(
         matches!(
-            graph.node_data(view.members[0].value).as_deref(),
+            graph.node_data(view.positive_members()[0].value).as_deref(),
             Some(SemanticNodeData::Literal(LiteralValue::String(s))) if s == "a"
         ),
         "member `a` must be the per-key bound `\"a\"`, got {:?}",
-        graph.node_data(view.members[0].value)
+        graph.node_data(view.positive_members()[0].value)
     );
 }
 
@@ -5199,17 +5254,17 @@ fn constructor_type_relates_and_binds_infer_return() {
         panic!("the selected branch must be an Object, got {data:?}");
     };
     assert_eq!(
-        view.members[0].name.as_ref(),
+        view.positive_members()[0].name.as_ref(),
         "value",
         "constructor-vs-constructor must relate through the signatures and \
          select TRUE (`value: R`) — the `bad` member means the relation fell \
          through to a kind-mismatch NotAssignable"
     );
     assert_eq!(
-        view.members[0].value,
+        view.positive_members()[0].value,
         number_node,
         "R must bind to the constructor's return (`number`); got {:?}",
-        graph.node_data(view.members[0].value)
+        graph.node_data(view.positive_members()[0].value)
     );
 }
 
@@ -5277,7 +5332,7 @@ fn mapped_constructor_value_substitutes_per_key() {
     let Some(SemanticNodeData::Object(view)) = surface_data.as_deref() else {
         panic!("mapped surface must materialise an Object, got {surface_data:?}");
     };
-    let member_value = view.members[0].value;
+    let member_value = view.positive_members()[0].value;
     let sig_data = graph.node_data(member_value);
     let Some(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Construct,
@@ -5450,23 +5505,29 @@ fn call_and_construct_object_forms_relate_by_kind() {
     let (call_fn, ctor) = signature_fixture_nodes(graph, None, number);
 
     // `{ new(): number }` — a construct-ONLY object.
-    let construct_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(vec![ctor].into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let construct_obj = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(vec![ctor].into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
     // `{ (): number }` — a call-ONLY object.
-    let call_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(vec![call_fn].into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let call_obj = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(vec![call_fn].into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
 
     let relate = |s, t| dispatch.execute_relate_pair_as_result_for_tests(s, t);
     // Call fn vs construct-only object: FALSE both directions.
@@ -5642,14 +5703,17 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             return_type_span: None,
         })
     };
-    let construct_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(vec![ctor].into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let construct_obj = graph.intern_node(SemanticNodeData::Object(
+        crate::semantic_query::surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(vec![ctor].into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        },
+    ));
     match dispatch.execute_relate_pair(construct_obj, ctor_infer) {
         crate::project_semantic_dispatch::relation_txn::RelationStep::Assignable { bindings } => {
             assert_eq!(bindings.len(), 1, "the construct-pattern session binds R");
@@ -5661,5 +5725,2588 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             );
         }
         other => panic!("`{{ new(): number }}` must match `new () => infer R`, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// Shared spread materializer (the ordered object-literal left fold)
+// ============================================================================
+//
+// Behavioral contract of `lower_spread_object_literal` + `spread_fold` (TS
+// 5.4.5 `getSpreadType`): origin minting (FreshOwn survives only where the
+// fold proves the member untouched), required/optional overlap semantics,
+// top/bottom lattice, bounded union distribution, structured index-info
+// composition, and typed open-spread object surfaces.
+
+mod spread_materializer_behavior {
+    use std::sync::Arc;
+
+    use verter_type_expr::{
+        ExcessPropertyOrigin, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+        SpreadMember, TupleElement, TypeExpr,
+    };
+
+    use super::host_for_relation_tests;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        DeclIdentity, MemberSurfaceCompleteness, NodeScopeId, PrimitiveKind, ProjectionMode,
+        QueryResult, RelationResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+        SemanticQueryKey, SemanticQueryOutput, SurfaceView,
+    };
+    use crate::VerterHost;
+
+    fn lower(host: &VerterHost, expr: &TypeExpr) -> SemanticNodeId {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
+        let name_resolution: rustc_hash::FxHashMap<
+            std::sync::Arc<str>,
+            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+        > = rustc_hash::FxHashMap::default();
+        let scope = spread_scope();
+        let shadowing =
+            crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let context =
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+        dispatch.shallow_lower_type_expr_with_context(
+            expr,
+            &env,
+            &scope,
+            &name_resolution,
+            None,
+            &shadowing,
+            &mut substitutions,
+            context,
+        )
+    }
+
+    fn spread_scope() -> NodeScopeId {
+        NodeScopeId::File {
+            canonical_id: Arc::from("/spread-fold.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [0u8; 16],
+            local_scope: None,
+        }
+    }
+
+    fn fresh_prop(name: &str, ty: TypeExpr) -> ObjectMember {
+        ObjectMember::Property(
+            ObjectProperty::synthetic_public(name.into(), ty, false, false)
+                .with_excess_origin(ExcessPropertyOrigin::FreshOwn),
+        )
+    }
+
+    fn optional_prop(name: &str, ty: TypeExpr) -> ObjectMember {
+        ObjectMember::Property(ObjectProperty::synthetic_public(
+            name.into(),
+            ty,
+            true,
+            false,
+        ))
+    }
+
+    fn plain_prop(name: &str, ty: TypeExpr) -> ObjectMember {
+        ObjectMember::Property(ObjectProperty::synthetic_public(
+            name.into(),
+            ty,
+            false,
+            false,
+        ))
+    }
+
+    fn literal_obj(members: Vec<ObjectMember>) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: members,
+        }))
+    }
+
+    fn spread_of(ty: TypeExpr) -> ObjectMember {
+        ObjectMember::Spread(SpreadMember::new(ty))
+    }
+
+    fn string_ty() -> TypeExpr {
+        TypeExpr::Primitive(PrimitiveName::String)
+    }
+
+    fn number_ty() -> TypeExpr {
+        TypeExpr::Primitive(PrimitiveName::Number)
+    }
+
+    fn record_ty(key: TypeExpr, value: TypeExpr) -> TypeExpr {
+        TypeExpr::Ref {
+            name: Arc::from("Record"),
+            type_arguments: Arc::from([key, value]),
+        }
+    }
+
+    fn surface_of(host: &VerterHost, node: SemanticNodeId) -> SurfaceView {
+        let graph = host.project_type_store().semantic_graph();
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => view.clone(),
+            other => panic!("expected a folded Object surface, got {other:?}"),
+        }
+    }
+
+    fn relate(host: &VerterHost, source: TypeExpr, target: TypeExpr) -> RelationResult {
+        ProjectSemanticDispatch::new(host)
+            .execute_relate_pair_as_result_for_tests(lower(host, &source), lower(host, &target))
+    }
+
+    fn member_origin(view: &SurfaceView, name: &str) -> ExcessPropertyOrigin {
+        view.positive_members()
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("member `{name}` present on the folded surface"))
+            .excess_origin
+    }
+
+    /// `{ a: string, ...{ b: string } }` — the direct member `a` (never
+    /// overlapped) stays `FreshOwn`; the spread-introduced `b` arrives
+    /// `SpreadTainted` — even though the INLINE operand's own members were
+    /// minted `FreshOwn` (a spread never leaks freshness out of its operand).
+    #[test]
+    fn direct_before_nonoverlapping_spread_remains_fresh_and_spread_members_taint() {
+        let host = host_for_relation_tests();
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(literal_obj(vec![fresh_prop("b", string_ty())])),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(
+            view.positive_members().len(),
+            2,
+            "both members survive the fold"
+        );
+        assert_eq!(member_origin(&view, "a"), ExcessPropertyOrigin::FreshOwn);
+        assert_eq!(
+            member_origin(&view, "b"),
+            ExcessPropertyOrigin::SpreadTainted
+        );
+    }
+
+    /// `{ a: number, ...{ a: string } }` — a REQUIRED right spread member
+    /// wins completely: the surviving `a` is `SpreadTainted` and carries the
+    /// OPERAND's value type.
+    #[test]
+    fn required_spread_override_is_tainted_and_takes_operand_value() {
+        let host = host_for_relation_tests();
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", number_ty()),
+                spread_of(literal_obj(vec![fresh_prop("a", string_ty())])),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(view.positive_members().len(), 1);
+        assert_eq!(
+            member_origin(&view, "a"),
+            ExcessPropertyOrigin::SpreadTainted
+        );
+        let graph = host.project_type_store().semantic_graph();
+        assert!(
+            matches!(
+                graph.node_data(view.positive_members()[0].value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "required spread override takes the operand's value type"
+        );
+    }
+
+    /// `{ ...{ a: string }, a: number }` — a LATER direct member overwrites
+    /// the spread-introduced one and RESETS it to `FreshOwn` with the direct
+    /// value.
+    #[test]
+    fn direct_after_spread_becomes_fresh() {
+        let host = host_for_relation_tests();
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                spread_of(literal_obj(vec![fresh_prop("a", string_ty())])),
+                fresh_prop("a", number_ty()),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(view.positive_members().len(), 1);
+        assert_eq!(member_origin(&view, "a"), ExcessPropertyOrigin::FreshOwn);
+        let graph = host.project_type_store().semantic_graph();
+        assert!(
+            matches!(
+                graph.node_data(view.positive_members()[0].value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+            ),
+            "the later direct member's value wins"
+        );
+    }
+
+    /// Optional overlap, SAME present type: `{ a: string, ...{ a?: string } }`
+    /// keeps the LEFT member's type and optionality (required), tainted.
+    #[test]
+    fn optional_overlap_same_present_type_keeps_left_type_and_optionality() {
+        let host = host_for_relation_tests();
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(literal_obj(vec![optional_prop("a", string_ty())])),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(view.positive_members().len(), 1);
+        let member = &view.positive_members()[0];
+        assert!(!member.optional, "result keeps L.optional (required)");
+        assert_eq!(member.excess_origin, ExcessPropertyOrigin::SpreadTainted);
+        let graph = host.project_type_store().semantic_graph();
+        assert!(
+            matches!(
+                graph.node_data(member.value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "identical present types keep L.type — no union wrapper"
+        );
+    }
+
+    /// Optional overlap, DIFFERENT present types:
+    /// `{ a: string, ...{ a?: number } }` unions the present types
+    /// (`string | number`), keeps L's optionality, and taints. An explicitly
+    /// authored `undefined` arm in the operand's value type is PRESERVED
+    /// (the flag-based optionality model never strips authored `undefined`).
+    #[test]
+    fn optional_overlap_different_present_types_unions_and_preserves_authored_undefined() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+
+        // string ∪ number.
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(literal_obj(vec![optional_prop("a", number_ty())])),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        let member = &view.positive_members()[0];
+        assert!(!member.optional);
+        assert_eq!(member.excess_origin, ExcessPropertyOrigin::SpreadTainted);
+        let arms: Vec<PrimitiveKind> = match graph.node_data(member.value).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms
+                .iter()
+                .filter_map(|arm| match graph.node_data(*arm).as_deref() {
+                    Some(SemanticNodeData::Primitive(k)) => Some(*k),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected the present-type union, got {other:?}"),
+        };
+        assert!(arms.contains(&PrimitiveKind::String) && arms.contains(&PrimitiveKind::Number));
+        assert_eq!(
+            arms.len(),
+            2,
+            "exactly the two present types — nothing fabricated"
+        );
+
+        // Authored `undefined` in the operand's value type survives.
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(literal_obj(vec![optional_prop(
+                    "a",
+                    TypeExpr::Union(Arc::from(
+                        vec![number_ty(), TypeExpr::Primitive(PrimitiveName::Undefined)]
+                            .into_boxed_slice(),
+                    )),
+                )])),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        let member = &view.positive_members()[0];
+        let arms: Vec<PrimitiveKind> = match graph.node_data(member.value).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms
+                .iter()
+                .filter_map(|arm| match graph.node_data(*arm).as_deref() {
+                    Some(SemanticNodeData::Primitive(k)) => Some(*k),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected a union with the authored undefined, got {other:?}"),
+        };
+        assert!(
+            arms.contains(&PrimitiveKind::Undefined),
+            "explicitly authored `undefined` must be preserved, got {arms:?}"
+        );
+        assert!(arms.contains(&PrimitiveKind::String) && arms.contains(&PrimitiveKind::Number));
+    }
+
+    /// Non-enumerable top operands retain an open Object; `...null` /
+    /// `...undefined` contribute nothing.
+    #[test]
+    fn spread_lattice_any_unknown_null_undefined() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+
+        let any_node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(TypeExpr::Primitive(PrimitiveName::Any)),
+            ]),
+        );
+        let any_view = surface_of(&host, any_node);
+        assert!(matches!(
+            any_view.open_spread_operands().map(|operands| operands.as_slice()),
+            Some([operand])
+                if matches!(
+                    graph.node_data(*operand).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                )
+        ));
+
+        let unknown_node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(TypeExpr::Primitive(PrimitiveName::Unknown)),
+            ]),
+        );
+        let unknown_view = surface_of(&host, unknown_node);
+        assert!(matches!(
+            unknown_view
+                .open_spread_operands()
+                .map(|operands| operands.as_slice()),
+            Some([operand])
+                if matches!(
+                    graph.node_data(*operand).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                )
+        ));
+
+        for nothing in [PrimitiveName::Null, PrimitiveName::Undefined] {
+            let node = lower(
+                &host,
+                &literal_obj(vec![
+                    fresh_prop("a", string_ty()),
+                    spread_of(TypeExpr::Primitive(nothing)),
+                ]),
+            );
+            let view = surface_of(&host, node);
+            assert_eq!(
+                view.positive_members().len(),
+                1,
+                "{nothing:?} spread contributes nothing"
+            );
+            assert_eq!(member_origin(&view, "a"), ExcessPropertyOrigin::FreshOwn);
+        }
+    }
+
+    /// An unresolved / generic operand is retained inside one open Object.
+    /// Known members remain on that same surface and an earlier direct member
+    /// loses `FreshOwn` because the later open operand may overlap it.
+    #[test]
+    fn generic_spread_is_one_object_and_demotes_preceding_fresh_own() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let unresolved = TypeExpr::Ref {
+            name: Arc::from("SomeUnresolvedOperand"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let bare_spread = lower(&host, &literal_obj(vec![spread_of(unresolved.clone())]));
+        let bare_view = surface_of(&host, bare_spread);
+        assert!(
+            bare_view.positive_members().is_empty(),
+            "an unresolved-only spread has no fabricated known members"
+        );
+        let MemberSurfaceCompleteness::OpenSpread(open_operands) = &bare_view.completeness() else {
+            panic!("an unresolved operand must be retained on the open object");
+        };
+        assert_eq!(open_operands.len(), 1);
+        assert!(matches!(
+            graph.node_data(open_operands.as_slice()[0]).as_deref(),
+            Some(SemanticNodeData::BareRef(_))
+        ));
+
+        let node = lower(
+            &host,
+            &literal_obj(vec![fresh_prop("a", number_ty()), spread_of(unresolved)]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(
+            member_origin(&view, "a"),
+            ExcessPropertyOrigin::SpreadTainted,
+            "open overlap never retains FreshOwn"
+        );
+        assert!(
+            !matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Intersection(_))
+            ),
+            "a spread fallback never mints a source-side intersection"
+        );
+
+        let public_surface = crate::typeinfo::TypeInfoSurface::build(&graph, &view);
+        assert!(
+            !public_surface.members_complete,
+            "public TypeInfo marks the positive member list incomplete"
+        );
+        assert!(
+            !public_surface.has_index_signature,
+            "openness is not evidence of an index signature"
+        );
+    }
+
+    /// A union operand distributes under the bounded policy:
+    /// `{ ...(A | B) }` folds per arm into a union of tainted surfaces.
+    #[test]
+    fn union_spread_distributes_per_arm() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let node = lower(
+            &host,
+            &literal_obj(vec![spread_of(TypeExpr::Union(Arc::from(
+                vec![
+                    literal_obj(vec![plain_prop("a", string_ty())]),
+                    literal_obj(vec![plain_prop("b", number_ty())]),
+                ]
+                .into_boxed_slice(),
+            )))]),
+        );
+        let arms = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms.clone(),
+            other => panic!("expected the distributed union, got {other:?}"),
+        };
+        assert_eq!(arms.len(), 2);
+        let mut names: Vec<String> = Vec::new();
+        for arm in arms.iter() {
+            let view = match graph.node_data(*arm).as_deref() {
+                Some(SemanticNodeData::Object(view)) => view.clone(),
+                other => panic!("distributed arm must be a surface, got {other:?}"),
+            };
+            assert_eq!(view.positive_members().len(), 1);
+            assert_eq!(
+                view.positive_members()[0].excess_origin,
+                ExcessPropertyOrigin::SpreadTainted,
+                "distributed spread members taint per arm"
+            );
+            names.push(view.positive_members()[0].name.as_ref().to_string());
+        }
+        names.sort();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    /// Index-info composition: the initial-empty accumulator adopts the
+    /// operand's index signature; a later merge keeps a key domain only when
+    /// BOTH sides carry it (value types union, readonly ORs).
+    #[test]
+    fn index_signatures_compose_through_structured_key_semantics() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let index_obj = |value: TypeExpr, readonly: bool| {
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::IndexSignature(
+                    verter_type_expr::IndexSignature::synthetic(
+                        "k".into(),
+                        string_ty(),
+                        value,
+                        readonly,
+                    ),
+                )],
+            }))
+        };
+
+        // `{ ...{ [k: string]: number } }` — the empty accumulator adopts the
+        // operand's info verbatim.
+        let node = lower(
+            &host,
+            &literal_obj(vec![spread_of(index_obj(number_ty(), false))]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(
+            view.index_signatures.len(),
+            1,
+            "info adopted from the operand"
+        );
+
+        // `{ ...{[k: string]: number}, ...{readonly [k: string]: string} }` —
+        // both sides carry the string key: values union, readonly ORs.
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                spread_of(index_obj(number_ty(), false)),
+                spread_of(index_obj(string_ty(), true)),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert_eq!(view.index_signatures.len(), 1);
+        let info = &view.index_signatures[0];
+        assert!(info.readonly, "readonly ORs across the sides");
+        match graph.node_data(info.value_type).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => assert_eq!(arms.len(), 2),
+            other => panic!("index value types must union, got {other:?}"),
+        }
+
+        // `{ a: 1, ...{[k: string]: number} }` — the left side carries NO
+        // string-key info, so no info survives (the both-sides rule; a
+        // blanket has-index bit would wrongly keep it).
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", number_ty()),
+                spread_of(index_obj(number_ty(), false)),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert!(
+            view.index_signatures.is_empty(),
+            "a key domain survives only when BOTH sides carry it"
+        );
+    }
+
+    #[test]
+    fn no_op_initial_spread_preserves_index_signature_adoption() {
+        let host = host_for_relation_tests();
+        let index_obj = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::IndexSignature(
+                verter_type_expr::IndexSignature::synthetic(
+                    "k".into(),
+                    string_ty(),
+                    number_ty(),
+                    false,
+                ),
+            )],
+        }));
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                spread_of(TypeExpr::Primitive(PrimitiveName::Null)),
+                spread_of(index_obj),
+            ]),
+        );
+        let view = surface_of(&host, node);
+
+        assert_eq!(
+            view.index_signatures.len(),
+            1,
+            "the no-op `...null` segment must leave the accumulator initial \
+             so the following dictionary adopts its index signature"
+        );
+    }
+
+    /// A bare array/tuple spread is one Object with no fabricated members.
+    /// A later direct run remains on that same surface.
+    #[test]
+    fn bare_array_and_tuple_spreads_are_single_object_surfaces() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let tuple_ty = TypeExpr::Tuple {
+            elements: Arc::from(
+                vec![TupleElement {
+                    label: None,
+                    ty: number_ty(),
+                    optional: false,
+                    rest: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            readonly: false,
+        };
+
+        for (label, operand) in [("array", array_ty.clone()), ("tuple", tuple_ty)] {
+            let node = lower(&host, &literal_obj(vec![spread_of(operand)]));
+            let view = surface_of(&host, node);
+            assert!(
+                view.positive_members().is_empty()
+                    && view.call_signatures.is_empty()
+                    && view.construct_signatures.is_empty()
+                    && view.index_signatures.is_empty(),
+                "bare {label} spread keeps an open object with no fabricated surface"
+            );
+            let MemberSurfaceCompleteness::OpenSpread(open_operands) = &view.completeness() else {
+                panic!("bare {label} spread must be open");
+            };
+            assert_eq!(open_operands.len(), 1);
+            assert!(match (
+                label,
+                graph.node_data(open_operands.as_slice()[0]).as_deref()
+            ) {
+                ("array", Some(SemanticNodeData::Array { .. }))
+                | ("tuple", Some(SemanticNodeData::Tuple { .. })) => true,
+                _ => false,
+            });
+        }
+
+        let with_later_direct = lower(
+            &host,
+            &literal_obj(vec![spread_of(array_ty), fresh_prop("x", number_ty())]),
+        );
+        let view = surface_of(&host, with_later_direct);
+        assert_eq!(view.positive_members().len(), 1);
+        assert_eq!(view.positive_members()[0].name.as_ref(), "x");
+        assert!(!matches!(
+            graph.node_data(with_later_direct).as_deref(),
+            Some(SemanticNodeData::Intersection(_))
+        ));
+    }
+
+    #[test]
+    fn aliased_array_spread_nests_decl_ref_inside_one_object() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let alias = graph.intern_node_with_scope(
+            SemanticNodeData::DeclRef {
+                identity: DeclIdentity {
+                    canonical_id: Arc::from("/spread-fold.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: [0u8; 16],
+                    decl_name: Arc::from("AliasedArray"),
+                },
+            },
+            spread_scope(),
+        );
+        let spread = dispatch.fold_spread_segments(
+            vec![(
+                crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::SpreadOperand,
+                alias,
+            )],
+            &spread_scope(),
+        );
+        let array_target = lower(
+            &host,
+            &TypeExpr::Array {
+                element: Arc::new(number_ty()),
+                readonly: false,
+            },
+        );
+
+        let view = surface_of(&host, spread);
+        assert!(view.positive_members().is_empty());
+        let MemberSurfaceCompleteness::OpenSpread(open_operands) = &view.completeness() else {
+            panic!("the alias must remain inside an open object");
+        };
+        assert_eq!(open_operands.as_slice(), &[alias]);
+        assert_eq!(
+            dispatch.execute_relate_pair_as_result_for_tests(spread, array_target),
+            RelationResult::Unknown,
+            "the DeclRef is metadata inside an open Object"
+        );
+    }
+
+    #[test]
+    fn open_operand_identities_are_canonical_node_identity() {
+        let host = host_for_relation_tests();
+        let string_source = lower(
+            &host,
+            &literal_obj(vec![spread_of(TypeExpr::Array {
+                element: Arc::new(string_ty()),
+                readonly: false,
+            })]),
+        );
+        let number_source = lower(
+            &host,
+            &literal_obj(vec![spread_of(TypeExpr::Array {
+                element: Arc::new(number_ty()),
+                readonly: false,
+            })]),
+        );
+        assert_ne!(
+            number_source, string_source,
+            "the typed open operand participates in node identity"
+        );
+    }
+
+    #[test]
+    fn substitution_rewrites_typed_open_operands() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let array = graph.intern_node(SemanticNodeData::Array {
+            element: parameter,
+            readonly: false,
+        });
+        let spread = dispatch.fold_spread_segments(
+            vec![(
+                crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::SpreadOperand,
+                array,
+            )],
+            &spread_scope(),
+        );
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let substituted =
+            dispatch.substitute_semantic_type_param_for_tests(spread, parameter, number);
+        let view = surface_of(&host, substituted);
+        let MemberSurfaceCompleteness::OpenSpread(open_operands) = &view.completeness() else {
+            panic!("substitution must preserve the open object");
+        };
+        assert!(matches!(
+            graph.node_data(open_operands.as_slice()[0]).as_deref(),
+            Some(SemanticNodeData::Array { element, .. }) if *element == number
+        ));
+    }
+
+    #[test]
+    fn union_cap_exhaustion_retains_one_open_object_not_an_intersection() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let arms = (0..=crate::project_semantic_dispatch::spread_materializer::SPREAD_UNION_DISTRIBUTION_CAP)
+            .map(|index| {
+                graph.intern_node(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Other(Arc::from(format!(
+                        "spread-arm-{index}"
+                    ))),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let union = graph.intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())));
+        let spread = dispatch.fold_spread_segments(
+            vec![(
+                crate::project_semantic_dispatch::spread_materializer::FoldSegmentKind::SpreadOperand,
+                union,
+            )],
+            &spread_scope(),
+        );
+        let view = surface_of(&host, spread);
+        let MemberSurfaceCompleteness::OpenSpread(open_operands) = &view.completeness() else {
+            panic!("cap exhaustion must retain an open object");
+        };
+        assert_eq!(open_operands.as_slice(), &[union]);
+    }
+
+    #[test]
+    fn array_spread_length_obligation_is_unknown_without_array_facts() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let before = graph.relation_memo_count();
+        assert_eq!(
+            relate(
+                &host,
+                literal_obj(vec![spread_of(array_ty.clone())]),
+                literal_obj(vec![plain_prop("length", number_ty())]),
+            ),
+            RelationResult::Unknown,
+            "without array/lib member facts, length presence and value are unknown"
+        );
+        assert_eq!(
+            graph.relation_memo_count(),
+            before,
+            "an open relation is ReturnOnly"
+        );
+    }
+
+    #[test]
+    fn direct_write_after_open_operand_remains_exact_positive_evidence() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let source_expr = literal_obj(vec![
+            spread_of(array_ty.clone()),
+            fresh_prop("x", number_ty()),
+        ]);
+        let source = lower(&host, &source_expr);
+        let view = surface_of(&host, source);
+        let MemberSurfaceCompleteness::OpenSpread(open_operands) = &view.completeness() else {
+            panic!("the array operand must remain open");
+        };
+        assert_eq!(open_operands.len(), 1);
+        let x = view
+            .positive_members()
+            .iter()
+            .find(|member| member.name.as_ref() == "x")
+            .expect("later direct member remains positive");
+        assert!(matches!(
+            graph.node_data(x.value).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ));
+        assert_eq!(
+            relate(
+                &host,
+                source_expr,
+                literal_obj(vec![plain_prop("x", number_ty())])
+            ),
+            RelationResult::Unknown,
+            "the root-open guard deliberately precedes exact member reasoning"
+        );
+    }
+
+    #[test]
+    fn open_operand_between_known_writes_taints_only_the_earlier_member_state() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let source_expr = literal_obj(vec![
+            fresh_prop("a", number_ty()),
+            spread_of(array_ty),
+            fresh_prop("x", number_ty()),
+        ]);
+        let source = lower(&host, &source_expr);
+        let view = surface_of(&host, source);
+        let a = view
+            .positive_members()
+            .iter()
+            .find(|member| member.name.as_ref() == "a")
+            .expect("earlier member remains positive");
+        let x = view
+            .positive_members()
+            .iter()
+            .find(|member| member.name.as_ref() == "x")
+            .expect("later member remains positive");
+        assert!(matches!(
+            graph.node_data(a.value).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+        ));
+        assert_eq!(a.excess_origin, ExcessPropertyOrigin::SpreadTainted);
+        assert!(matches!(
+            graph.node_data(x.value).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ));
+        assert_eq!(x.excess_origin, ExcessPropertyOrigin::FreshOwn);
+        assert_eq!(
+            relate(
+                &host,
+                source_expr,
+                literal_obj(vec![
+                    plain_prop("a", number_ty()),
+                    plain_prop("x", number_ty()),
+                ]),
+            ),
+            RelationResult::Unknown,
+            "the open root remains relation-unknown despite positive facts"
+        );
+    }
+
+    #[test]
+    fn optional_spread_write_after_open_operand_remains_conservative() {
+        let host = host_for_relation_tests();
+        let unresolved = TypeExpr::Ref {
+            name: Arc::from("T"),
+            type_arguments: Arc::from([]),
+        };
+        let source = literal_obj(vec![
+            spread_of(unresolved),
+            spread_of(literal_obj(vec![optional_prop("a", string_ty())])),
+        ]);
+        let target = literal_obj(vec![optional_prop("a", string_ty())]);
+
+        assert_eq!(
+            relate(&host, source, target),
+            RelationResult::Unknown,
+            "an optional spread write does not erase the earlier open operand \
+             when that operand may supply the same key"
+        );
+    }
+
+    #[test]
+    fn open_spread_source_cannot_satisfy_all_keys_record_obligation() {
+        let host = host_for_relation_tests();
+        let source = literal_obj(vec![spread_of(TypeExpr::Ref {
+            name: Arc::from("T"),
+            type_arguments: Arc::from([]),
+        })]);
+        let target = record_ty(string_ty(), number_ty());
+
+        assert_eq!(
+            relate(&host, source, target),
+            RelationResult::Unknown,
+            "an open source cannot satisfy Record<string, number> from an \
+             empty visible-member loop"
+        );
+    }
+
+    #[test]
+    fn open_source_guard_precedes_record_and_index_member_walks() {
+        let host = host_for_relation_tests();
+        let source = literal_obj(vec![
+            fresh_prop("a", string_ty()),
+            spread_of(TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            }),
+        ]);
+        let indexed_target = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::IndexSignature(
+                verter_type_expr::IndexSignature::synthetic(
+                    "k".into(),
+                    string_ty(),
+                    number_ty(),
+                    false,
+                ),
+            )],
+        }));
+
+        assert_eq!(
+            relate(&host, source.clone(), record_ty(string_ty(), number_ty())),
+            RelationResult::Unknown,
+            "Record reasoning must not reject the visible string member"
+        );
+        assert_eq!(
+            relate(&host, source, indexed_target),
+            RelationResult::Unknown,
+            "index-signature reasoning must not reject the visible string member"
+        );
+    }
+
+    #[test]
+    fn expanded_open_projection_never_requests_an_overwritten_write_value() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let source = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", string_ty()),
+                spread_of(TypeExpr::Array {
+                    element: Arc::new(number_ty()),
+                    readonly: false,
+                }),
+                fresh_prop("a", number_ty()),
+            ]),
+        );
+
+        let QueryResult::Value(SemanticQueryOutput { value, .. }) =
+            dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+                base: source,
+                path: Arc::from([]),
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+            })
+        else {
+            panic!("Expanded projection must preserve the open object");
+        };
+        assert!(matches!(
+            graph.node_data(value).as_deref(),
+            Some(SemanticNodeData::Object(view)) if view.is_open_spread()
+        ));
+    }
+
+    #[test]
+    fn nested_open_surface_keeps_only_conservative_member_facts() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let method = ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
+            "method".into(),
+            verter_type_expr::FunctionExpr::synthetic(
+                Vec::new(),
+                Some(Arc::new(string_ty())),
+                Vec::new(),
+            ),
+            false,
+        ));
+        let readonly = ObjectMember::Property(
+            ObjectProperty::synthetic_public("readonly".into(), string_ty(), false, true)
+                .with_excess_origin(ExcessPropertyOrigin::FreshOwn),
+        );
+        let inner = literal_obj(vec![
+            fresh_prop("value", string_ty()),
+            readonly,
+            method,
+            spread_of(TypeExpr::Array {
+                element: Arc::new(number_ty()),
+                readonly: false,
+            }),
+        ]);
+        let outer = lower(&host, &literal_obj(vec![spread_of(inner)]));
+        let view = surface_of(&host, outer);
+
+        for member in view.positive_members() {
+            assert!(matches!(
+                graph.node_data(member.value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+            ));
+            assert!(!member.is_method);
+            assert!(!member.readonly);
+            assert_eq!(member.excess_origin, ExcessPropertyOrigin::SpreadTainted);
+        }
+        assert_eq!(view.positive_members().len(), 3);
+    }
+
+    #[test]
+    fn aliases_and_identity_do_not_bypass_the_open_relation_guard() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let open = lower(
+            &host,
+            &literal_obj(vec![spread_of(TypeExpr::Array {
+                element: Arc::new(number_ty()),
+                readonly: false,
+            })]),
+        );
+        let alias = graph.intern_node(SemanticNodeData::Alias(open));
+        let closed = lower(&host, &literal_obj(Vec::new()));
+        let before = graph.relation_memo_count();
+
+        for (source, target) in [
+            (alias, closed),
+            (closed, alias),
+            (alias, alias),
+            (open, open),
+        ] {
+            assert_eq!(
+                dispatch.execute_relate_pair_as_result_for_tests(source, target),
+                RelationResult::Unknown
+            );
+        }
+        assert_eq!(
+            graph.relation_memo_count(),
+            before,
+            "Unknown open relations are return-only"
+        );
+        for (source, target) in [
+            (alias, closed),
+            (closed, alias),
+            (alias, alias),
+            (open, open),
+        ] {
+            assert!(
+                graph
+                    .get_relation_payload(&host, &dispatch.relate_key_for(source, target))
+                    .is_none(),
+                "Unknown relations never enter the warm relation cache"
+            );
+        }
+    }
+
+    #[test]
+    fn open_guard_precedes_inference_binding_and_publication() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let source = lower(&host, &literal_obj(vec![fresh_prop("value", number_ty())]));
+        let infer = graph.intern_node(SemanticNodeData::Infer {
+            name: Arc::from("V"),
+        });
+        let operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let mut target_view = surface_of(&host, source);
+        let mut target_member = target_view.positive_members()[0].clone();
+        target_member.value = infer;
+        target_view = target_view.with_positive_members(Arc::from([target_member]));
+        target_view.replace_completeness(MemberSurfaceCompleteness::OpenSpread(
+            crate::semantic_query::OpenSpreadOperands::new(Arc::from([operand])),
+        ));
+        let target = graph.intern_node(SemanticNodeData::Object(target_view));
+        let key = dispatch.relate_key_for(source, target);
+        let before = graph.relation_memo_count();
+
+        assert!(matches!(
+            dispatch.execute_relate(key.clone()),
+            crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
+        ));
+        assert_eq!(graph.relation_memo_count(), before);
+        assert!(graph.get_relation_payload(&host, &key).is_none());
+    }
+
+    #[test]
+    fn nested_open_member_inference_is_unknown_without_binding_or_cache() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let open = lower(
+            &host,
+            &literal_obj(vec![spread_of(TypeExpr::Array {
+                element: Arc::new(number_ty()),
+                readonly: false,
+            })]),
+        );
+        let alias_to_open = graph.intern_node(SemanticNodeData::Alias(open));
+        let infer = graph.intern_node(SemanticNodeData::Infer {
+            name: Arc::from("V"),
+        });
+
+        for candidate in [open, alias_to_open] {
+            let source = lower(&host, &literal_obj(vec![fresh_prop("p", number_ty())]));
+            let mut source_view = surface_of(&host, source);
+            let mut source_member = source_view.positive_members()[0].clone();
+            source_member.value = candidate;
+            source_view = source_view.with_positive_members(Arc::from([source_member]));
+            let source = graph.intern_node(SemanticNodeData::Object(source_view.clone()));
+
+            let mut target_member = source_view.positive_members()[0].clone();
+            target_member.value = infer;
+            let target_view = source_view.with_positive_members(Arc::from([target_member]));
+            let target = graph.intern_node(SemanticNodeData::Object(target_view));
+            let key = dispatch.relate_key_for(source, target);
+            let before = graph.relation_memo_count();
+            let actual = dispatch.execute_relate(key.clone());
+
+            assert!(
+                matches!(
+                    actual,
+                    crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
+                ),
+                "a nested open inference candidate must not bind V; got {actual:?}"
+            );
+            assert_eq!(
+                graph.relation_memo_count(),
+                before,
+                "the undecided outer relation must not publish"
+            );
+            assert!(
+                graph.get_relation_payload(&host, &key).is_none(),
+                "no decided outer relation may warm the relation cache"
+            );
+        }
+    }
+
+    #[test]
+    fn open_nested_signature_alternatives_propagate_unknown() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let open = lower(
+            &host,
+            &literal_obj(vec![spread_of(TypeExpr::Array {
+                element: Arc::new(number_ty()),
+                readonly: false,
+            })]),
+        );
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let (call_open_return, _) = super::signature_fixture_nodes(graph, None, open);
+        let (call_string_return, _) = super::signature_fixture_nodes(graph, None, string);
+        let (_, construct_open_param) =
+            super::signature_fixture_nodes(graph, Some(("value", open)), string);
+        let (_, construct_string_param) =
+            super::signature_fixture_nodes(graph, Some(("value", string)), string);
+
+        let object_with_signatures =
+            |call_signatures: Arc<[SemanticNodeId]>,
+             construct_signatures: Arc<[SemanticNodeId]>| {
+                graph.intern_node(SemanticNodeData::Object(
+                    crate::semantic_query::surface_view! {
+                        members: Arc::from([]),
+                        call_signatures,
+                        construct_signatures,
+                        index_signatures: Arc::from([]),
+                        keyspace: None,
+                        has_index_signature: false,
+                        completeness: MemberSurfaceCompleteness::Closed,
+                    },
+                ))
+            };
+        let cases = [
+            (
+                "call return",
+                object_with_signatures(Arc::from([call_open_return]), Arc::from([])),
+                object_with_signatures(Arc::from([call_string_return]), Arc::from([])),
+            ),
+            (
+                "construct parameter",
+                object_with_signatures(Arc::from([]), Arc::from([construct_open_param])),
+                object_with_signatures(Arc::from([]), Arc::from([construct_string_param])),
+            ),
+        ];
+
+        for (label, source, target) in cases {
+            let key = dispatch.relate_key_for(source, target);
+            let before = graph.relation_memo_count();
+            let actual = dispatch.execute_relate_pair_as_result_for_tests(source, target);
+            assert_eq!(
+                actual,
+                RelationResult::Unknown,
+                "{label}: an Unknown signature alternative must not become a decided rejection"
+            );
+            assert_eq!(
+                graph.relation_memo_count(),
+                before,
+                "{label}: Unknown must not publish"
+            );
+            assert!(
+                graph.get_relation_payload(&host, &key).is_none(),
+                "{label}: Unknown must not warm the relation cache"
+            );
+        }
+    }
+
+    #[test]
+    fn open_guard_precedes_fresh_excess_rejection() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let source = lower(
+            &host,
+            &literal_obj(vec![
+                spread_of(TypeExpr::Array {
+                    element: Arc::new(number_ty()),
+                    readonly: false,
+                }),
+                fresh_prop("extra", number_ty()),
+            ]),
+        );
+        let target = lower(&host, &literal_obj(Vec::new()));
+        let mut key = dispatch.relate_key_for(source, target);
+        key.source_freshness = crate::semantic_query::FreshnessKey::Fresh;
+        key.policy.excess_property_check = true;
+
+        assert!(matches!(
+            dispatch.execute_relate(key),
+            crate::project_semantic_dispatch::relation_txn::RelationStep::Unknown
+        ));
+    }
+
+    #[test]
+    fn open_targets_require_more_than_visible_member_satisfaction() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let open_target_expr = literal_obj(vec![
+            spread_of(array_ty.clone()),
+            fresh_prop("x", number_ty()),
+        ]);
+        let open_target = lower(&host, &open_target_expr);
+        let exact_source = lower(&host, &literal_obj(vec![fresh_prop("x", number_ty())]));
+        assert_eq!(
+            dispatch.execute_relate_pair_as_result_for_tests(exact_source, open_target),
+            RelationResult::Unknown,
+            "visible target satisfaction cannot prove an open target complete"
+        );
+
+        let empty_source = lower(&host, &literal_obj(Vec::new()));
+        assert_eq!(
+            dispatch.execute_relate_pair_as_result_for_tests(empty_source, open_target),
+            RelationResult::Unknown,
+            "open target detection precedes required-member reasoning"
+        );
+        assert_eq!(
+            dispatch.execute_relate_pair_as_result_for_tests(open_target, open_target),
+            RelationResult::Unknown,
+            "even identical open nodes are deliberately undecided"
+        );
+
+        let distinct_open = lower(
+            &host,
+            &literal_obj(vec![
+                spread_of(TypeExpr::Array {
+                    element: Arc::new(string_ty()),
+                    readonly: false,
+                }),
+                fresh_prop("x", number_ty()),
+            ]),
+        );
+        assert_eq!(
+            dispatch.execute_relate_pair_as_result_for_tests(open_target, distinct_open),
+            RelationResult::Unknown,
+            "distinct open objects remain undecided"
+        );
+    }
+
+    #[test]
+    fn demand_projection_keeps_open_surface_and_only_reads_final_writes_exactly() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let source = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", number_ty()),
+                spread_of(TypeExpr::Array {
+                    element: Arc::new(number_ty()),
+                    readonly: false,
+                }),
+                fresh_prop("x", number_ty()),
+            ]),
+        );
+        let project = |member: &str| {
+            dispatch.execute_type_node(SemanticQueryKey::ProjectMember {
+                base: source,
+                member: Arc::from(member),
+                mode: ProjectionMode::Navigate,
+            })
+        };
+        let QueryResult::Value(SemanticQueryOutput { value: a, .. }) = project("a") else {
+            panic!("open member projection returns a typed node");
+        };
+        assert!(matches!(
+            graph.node_data(a).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+        ));
+        let QueryResult::Value(SemanticQueryOutput { value: x, .. }) = project("x") else {
+            panic!("final member projection returns its exact node");
+        };
+        assert!(matches!(
+            graph.node_data(x).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ));
+
+        let QueryResult::Value(SemanticQueryOutput { value: whole, .. }) = dispatch
+            .execute_type_node(SemanticQueryKey::ProjectPath {
+                base: source,
+                path: Arc::from([]),
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            })
+        else {
+            panic!("whole-surface demand returns a node");
+        };
+        assert!(matches!(
+            graph.node_data(whole).as_deref(),
+            Some(SemanticNodeData::Object(view)) if view.is_open_spread()
+        ));
+        let QueryResult::Value(SemanticQueryOutput { value: keys, .. }) = dispatch
+            .execute_type_node(SemanticQueryKey::KeyOf {
+                base: source,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+            })
+        else {
+            panic!("keyof open spread returns a carrier");
+        };
+        assert!(matches!(
+            graph.node_data(keys).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == source
+        ));
+    }
+
+    #[test]
+    fn array_spread_relations_are_unknown_before_object_shortcuts() {
+        let host = host_for_relation_tests();
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        assert_eq!(
+            relate(
+                &host,
+                literal_obj(vec![spread_of(array_ty.clone())]),
+                literal_obj(Vec::new()),
+            ),
+            RelationResult::Unknown
+        );
+        assert_eq!(
+            relate(
+                &host,
+                literal_obj(vec![spread_of(array_ty)]),
+                TypeExpr::Primitive(PrimitiveName::Object),
+            ),
+            RelationResult::Unknown
+        );
+    }
+
+    /// Object spreading an array must never preserve array identity:
+    /// `{ ...arr }`, `{ a, ...arr }`, and `{ ...arr, x: 1 }` are object
+    /// types, while their open relation remains deliberately undecided.
+    #[test]
+    fn array_spread_objects_are_not_assignable_to_arrays() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let array_target = lower(&host, &array_ty);
+
+        let actual: Vec<(&str, RelationResult)> = [
+            ("bare", literal_obj(vec![spread_of(array_ty.clone())])),
+            (
+                "direct-before",
+                literal_obj(vec![
+                    fresh_prop("a", number_ty()),
+                    spread_of(array_ty.clone()),
+                ]),
+            ),
+            (
+                "direct-after",
+                literal_obj(vec![
+                    spread_of(array_ty.clone()),
+                    fresh_prop("x", number_ty()),
+                ]),
+            ),
+        ]
+        .into_iter()
+        .map(|(label, source)| {
+            let source = lower(&host, &source);
+            (
+                label,
+                dispatch.execute_relate_pair_as_result_for_tests(source, array_target),
+            )
+        })
+        .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("bare", RelationResult::Unknown),
+                ("direct-before", RelationResult::Unknown),
+                ("direct-after", RelationResult::Unknown),
+            ],
+            "every array spread object form reaches the root-open guard"
+        );
+    }
+
+    /// A bare CALLABLE operand contributes NOTHING (`{ ...fn }` is the
+    /// empty object — TS: a function has no own enumerable properties);
+    /// an ARRAY operand is NOT nothing, so its typed identity remains an
+    /// open operand inside the single object surface.
+    #[test]
+    fn function_spread_contributes_nothing_array_becomes_object_domain_carrier() {
+        let host = host_for_relation_tests();
+        let fn_ty = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(number_ty())),
+            Vec::new(),
+        )));
+
+        let alone = lower(&host, &literal_obj(vec![spread_of(fn_ty.clone())]));
+        let view = surface_of(&host, alone);
+        assert!(
+            view.positive_members().is_empty()
+                && view.call_signatures.is_empty()
+                && view.index_signatures.is_empty(),
+            "spreading a function yields the empty object, never the callable"
+        );
+
+        let with_member = lower(
+            &host,
+            &literal_obj(vec![fresh_prop("a", number_ty()), spread_of(fn_ty)]),
+        );
+        let view = surface_of(&host, with_member);
+        assert_eq!(view.positive_members().len(), 1);
+        assert_eq!(
+            member_origin(&view, "a"),
+            ExcessPropertyOrigin::FreshOwn,
+            "a function operand cannot overlap: the direct member stays FreshOwn"
+        );
+
+        let array_ty = TypeExpr::Array {
+            element: Arc::new(number_ty()),
+            readonly: false,
+        };
+        let with_array = lower(
+            &host,
+            &literal_obj(vec![fresh_prop("a", number_ty()), spread_of(array_ty)]),
+        );
+        let run_view = surface_of(&host, with_array);
+        assert_eq!(
+            member_origin(&run_view, "a"),
+            ExcessPropertyOrigin::SpreadTainted,
+            "the array operand's overlap is open — FreshOwn never survives it"
+        );
+        assert!(
+            matches!(
+                &run_view.completeness(),
+                MemberSurfaceCompleteness::OpenSpread(open_operands)
+                    if open_operands.len() == 1
+            ),
+            "the array is nested as one typed open operand"
+        );
+    }
+
+    /// A non-public spread member remains merge bookkeeping only. When an
+    /// an earlier open operand exists, the output surface still contains
+    /// only public spread copies.
+    #[test]
+    fn array_then_private_spread_does_not_publish_the_private_member() {
+        let host = host_for_relation_tests();
+        let private_operand = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                plain_prop("visible", number_ty()),
+                ObjectMember::Property(ObjectProperty::with_visibility(
+                    "secret".into(),
+                    number_ty(),
+                    false,
+                    false,
+                    verter_type_expr::MemberVisibility::Private,
+                    verter_type_expr::MemberSpans::default(),
+                )),
+            ],
+        }));
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                spread_of(TypeExpr::Array {
+                    element: Arc::new(number_ty()),
+                    readonly: false,
+                }),
+                spread_of(private_operand),
+            ]),
+        );
+        let output = surface_of(&host, node);
+        assert!(
+            matches!(
+                &output.completeness(),
+                MemberSurfaceCompleteness::OpenSpread(open_operands)
+                    if open_operands.len() == 1
+            ),
+            "the array remains nested in the single object surface"
+        );
+        assert_eq!(
+            output.positive_members().len(),
+            1,
+            "the public spread copy survives while bookkeeping-only members \
+             stay internal, got {:?}",
+            output.positive_members()
+        );
+        assert!(
+            output
+                .positive_members()
+                .iter()
+                .all(|member| member.visibility.is_public()),
+            "non-public members are bookkeeping-only and cannot escape into \
+             the output surface, got {:?}",
+            output.positive_members()
+        );
+    }
+
+    /// Index-info adoption is a property of the UNIQUE initial fold
+    /// accumulator, not of structural emptiness: `{ ...{}, ...dict }` folds
+    /// a non-initial empty left against the dict, so the both-sides rule
+    /// drops the index (TS: `getUnionIndexInfos([{}-literal, dict])` = []).
+    #[test]
+    fn index_adoption_is_initial_accumulator_only_not_structural_emptiness() {
+        let host = host_for_relation_tests();
+        let dict = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::IndexSignature(
+                verter_type_expr::IndexSignature::synthetic(
+                    "k".into(),
+                    string_ty(),
+                    number_ty(),
+                    false,
+                ),
+            )],
+        }));
+        let node = lower(
+            &host,
+            &literal_obj(vec![spread_of(literal_obj(Vec::new())), spread_of(dict)]),
+        );
+        let view = surface_of(&host, node);
+        assert!(
+            view.index_signatures.is_empty(),
+            "a structurally-empty NON-initial left must not adopt the right's index infos"
+        );
+    }
+
+    /// TS `isSpreadableProperty` in BOTH directions without class
+    /// provenance: a PUBLIC declaration-domain method (interface /
+    /// type-literal shape) DOES spread as a property-ized copy, and a
+    /// NON-PUBLIC method — never copied — still enters the
+    /// skipped-members set and SUPPRESSES a same-name left member.
+    #[test]
+    fn interface_methods_spread_and_private_methods_suppress_left_members() {
+        let host = host_for_relation_tests();
+        let fn_expr = verter_type_expr::FunctionExpr::synthetic(
+            Vec::new(),
+            Some(Arc::new(number_ty())),
+            Vec::new(),
+        );
+
+        // Direction A: a public declaration-domain method spreads.
+        let interface_like = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                plain_prop("field", number_ty()),
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
+                    "iface_method".into(),
+                    fn_expr.clone(),
+                    false,
+                )),
+            ],
+        }));
+        let node = lower(&host, &literal_obj(vec![spread_of(interface_like)]));
+        let view = surface_of(&host, node);
+        assert!(
+            view.positive_members()
+                .iter()
+                .any(|m| m.name.as_ref() == "field"),
+            "the field copies"
+        );
+        let iface = view
+            .positive_members()
+            .iter()
+            .find(|m| m.name.as_ref() == "iface_method")
+            .expect("a PUBLIC declaration-domain (interface) method spreads");
+        assert_eq!(iface.excess_origin, ExcessPropertyOrigin::SpreadTainted);
+        assert!(!iface.is_method, "the spread copy is property-ized");
+
+        // Direction B: a PRIVATE method never copies AND suppresses the
+        // same-name left member.
+        let private_method_operand = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Method(
+                verter_type_expr::MethodSignature::with_visibility(
+                    "secret".into(),
+                    fn_expr,
+                    false,
+                    verter_type_expr::MemberVisibility::Private,
+                    verter_type_expr::MemberSpans::default(),
+                ),
+            )],
+        }));
+        let node = lower(
+            &host,
+            &literal_obj(vec![
+                fresh_prop("a", number_ty()),
+                fresh_prop("secret", number_ty()),
+                spread_of(private_method_operand),
+            ]),
+        );
+        let view = surface_of(&host, node);
+        assert!(
+            view.positive_members()
+                .iter()
+                .any(|m| m.name.as_ref() == "a"),
+            "the non-overlapping left member survives"
+        );
+        assert!(
+            !view
+                .positive_members()
+                .iter()
+                .any(|m| m.name.as_ref() == "secret"),
+            "a non-public right method SUPPRESSES the same-name left member \
+             (the skipped-members rule) even though it never copies itself"
+        );
+    }
+}
+
+// ============================================================================
+// Fresh excess-property checking (the union excess prepass)
+// ============================================================================
+//
+// The relation authority's `Fresh + excess_property_check` axis: the excess
+// prepass runs once per relation frame before ordinary union-arm
+// distribution — gate, broad-target skips, discriminant reduction, primitive
+// filtering, FreshOwn-only candidate selection, structured known-name
+// checking, reduced-arm value checking, and three-valued outcomes.
+
+mod fresh_excess_property_checking {
+    use std::sync::Arc;
+
+    use verter_type_expr::ExcessPropertyOrigin;
+
+    use super::{empty_surface, host_for_relation_tests, optional_member, required_member};
+    use crate::project_semantic_dispatch::relation_txn::RelationStep;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        FreshnessKey, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
+    };
+    use crate::VerterHost;
+
+    fn fresh_member(name: &str, value: SemanticNodeId) -> SurfaceMember {
+        let mut member = required_member(name, value);
+        member.excess_origin = ExcessPropertyOrigin::FreshOwn;
+        member
+    }
+
+    fn tainted_member(name: &str, value: SemanticNodeId) -> SurfaceMember {
+        let mut member = required_member(name, value);
+        member.excess_origin = ExcessPropertyOrigin::SpreadTainted;
+        member
+    }
+
+    /// The FRESH excess-checking relation step for `(source, target)`.
+    fn relate_fresh_excess(
+        host: &VerterHost,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> RelationStep {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let mut key = dispatch.relate_key_for(source, target);
+        key.source_freshness = FreshnessKey::Fresh;
+        key.policy.excess_property_check = true;
+        dispatch.execute_relate(key)
+    }
+
+    /// The plain widened assignability step (regular source, no policy).
+    fn relate_regular(
+        host: &VerterHost,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> RelationStep {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        dispatch.execute_relate(dispatch.relate_key_for(source, target))
+    }
+
+    fn assert_assignable(step: &RelationStep, what: &str) {
+        assert!(
+            matches!(step, RelationStep::Assignable { .. }),
+            "{what}: expected Assignable, got {step:?}"
+        );
+    }
+
+    fn assert_not_assignable(step: &RelationStep, what: &str) {
+        assert!(
+            matches!(step, RelationStep::NotAssignable),
+            "{what}: expected NotAssignable, got {step:?}"
+        );
+    }
+
+    #[test]
+    fn open_excess_arm_does_not_prove_empty_or_key_absence() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let mut view = empty_surface(Vec::new());
+        view.replace_completeness(
+            crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from([operand])),
+            ),
+        );
+        let arm = graph.intern_node(SemanticNodeData::Object(view));
+
+        assert_eq!(
+            dispatch.open_surface_excess_facts_for_tests(arm, "hidden"),
+            (None, true, true),
+            "an open operand makes emptiness, known-name absence, and \
+             discriminant absence undecidable"
+        );
+    }
+
+    #[test]
+    fn union_excess_keeps_an_open_arm_undecided() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let operand = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let source =
+            graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
+                "extra", number,
+            )])));
+        let closed_arm = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("required", string),
+        ])));
+        let mut open_view = empty_surface(Vec::new());
+        open_view.replace_completeness(
+            crate::semantic_query::MemberSurfaceCompleteness::OpenSpread(
+                crate::semantic_query::OpenSpreadOperands::new(Arc::from([operand])),
+            ),
+        );
+        let open_arm = graph.intern_node(SemanticNodeData::Object(open_view));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from([closed_arm, open_arm])));
+
+        let actual = relate_fresh_excess(&host, source, target);
+        assert!(
+            matches!(actual, RelationStep::Unknown),
+            "open union arm must stay undecided, got {actual:?}"
+        );
+    }
+
+    /// A fresh literal with an unknown extra member is rejected against a
+    /// closed object target; the SAME shapes under a REGULAR (widened) source
+    /// — or fresh WITHOUT the excess policy — relate ordinarily (width
+    /// subtyping accepts).
+    #[test]
+    fn fresh_extra_member_rejected_and_regular_mode_skips_excess() {
+        let host = host_for_relation_tests();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("b", string),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+
+        assert_not_assignable(
+            &relate_fresh_excess(&host, source, target),
+            "fresh `{a, b}` vs `{a}`: `b` is excess",
+        );
+        assert_assignable(
+            &relate_regular(&host, source, target),
+            "the widened source relates by ordinary width subtyping",
+        );
+        // Fresh WITHOUT the excess policy: the prepass gate requires BOTH.
+        let mut fresh_only = dispatch.relate_key_for(source, target);
+        fresh_only.source_freshness = FreshnessKey::Fresh;
+        assert_assignable(
+            &dispatch.execute_relate(fresh_only),
+            "fresh without excess_property_check skips the prepass",
+        );
+    }
+
+    /// Discriminant reduction: `{ kind: "a", a: 1, b: "extra" }` narrows the
+    /// union to the `kind: "a"` arm, and `b` — known ONLY in the discarded
+    /// `kind: "b"` arm — is rejected after narrowing. WITHOUT reduction the
+    /// name would be known (arm 2) and its string value would fit, so this
+    /// discriminates the reduction from a flat known-name scan.
+    #[test]
+    fn discriminated_union_rejects_extra_after_narrowing() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        let lit_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "b".to_string(),
+        )));
+        let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+        let extra = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "extra".to_string(),
+        )));
+
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("kind", lit_a),
+            fresh_member("a", one),
+            fresh_member("b", extra),
+        ])));
+        let arm_a = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_a),
+            required_member("a", number),
+        ])));
+        let arm_b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_b),
+            required_member("b", string),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )));
+
+        assert_not_assignable(
+            &relate_fresh_excess(&host, source, target),
+            "after `kind: \"a\"` narrowing, `b` is excess in the surviving arm",
+        );
+    }
+
+    /// A property known only through a SURVIVING arm is accepted only when
+    /// its value fits the reduced-arm property union: `b?: string` in the
+    /// surviving arm accepts `"x"` and rejects `2`.
+    #[test]
+    fn surviving_arm_property_is_value_checked_against_reduced_union() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        let lit_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "b".to_string(),
+        )));
+        let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+        let two = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(2.0)));
+        let x = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "x".to_string(),
+        )));
+
+        let arm_a = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_a),
+            required_member("a", number),
+            optional_member("b", string),
+        ])));
+        let arm_b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_b),
+            required_member("c", number),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )));
+
+        let rejecting = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("kind", lit_a),
+            fresh_member("a", one),
+            fresh_member("b", two),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, rejecting, target),
+            "`b: 2` does not fit the surviving arm's `b?: string`",
+        );
+
+        let accepting = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("kind", lit_a),
+            fresh_member("a", one),
+            fresh_member("b", x),
+        ])));
+        assert_assignable(
+            &relate_fresh_excess(&host, accepting, target),
+            "`b: \"x\"` fits the surviving arm's `b?: string`",
+        );
+    }
+
+    /// An applicable index signature makes a name KNOWN and contributes its
+    /// value type: a compatible extra member is accepted, an incompatible one
+    /// rejected.
+    #[test]
+    fn applicable_index_signature_accepts_compatible_and_rejects_incompatible() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let two = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(2.0)));
+        let s = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "s".to_string(),
+        )));
+
+        let indexed = crate::semantic_query::surface_view! {
+            members: Arc::from(vec![required_member("a", number)].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(
+                vec![crate::semantic_query::IndexSignature {
+                    key_type: string,
+                    value_type: number,
+                    readonly: false,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice(),
+            ),
+            keyspace: None,
+            has_index_signature: true,
+            completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+        };
+        let target = graph.intern_node(SemanticNodeData::Object(indexed));
+
+        let compatible = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", two),
+            fresh_member("extra", two),
+        ])));
+        assert_assignable(
+            &relate_fresh_excess(&host, compatible, target),
+            "`extra: 2` is known through `[k: string]: number` and fits",
+        );
+
+        let incompatible = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", two),
+            fresh_member("extra", s),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, incompatible, target),
+            "`extra: \"s\"` is known but violates the index value type",
+        );
+    }
+
+    /// `{}`, `object`, and a global-`Object` reference target do not report
+    /// excess properties.
+    #[test]
+    fn empty_object_object_primitive_and_global_object_targets_skip_excess() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("b", number),
+        ])));
+
+        // Empty `{}` target: excess is SKIPPED and the ordinary relation
+        // accepts (every object satisfies the empty surface).
+        let empty = graph.intern_node(SemanticNodeData::Object(empty_surface(Vec::new())));
+        assert_assignable(
+            &relate_fresh_excess(&host, source, empty),
+            "the empty object target skips excess checking",
+        );
+
+        // The `object` nonprimitive and a global-`Object` reference: never an
+        // excess REJECTION (the ordinary relation may stay undecided for the
+        // unresolved reference — that is not an excess report).
+        let object_prim = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Object));
+        assert!(
+            !matches!(
+                relate_fresh_excess(&host, source, object_prim),
+                RelationStep::NotAssignable
+            ),
+            "the `object` nonprimitive target must not report excess properties"
+        );
+        // DISCRIMINATING `Object` skip: two RESOLVABLE named targets with
+        // IDENTICAL bodies — only the name differs. The `Object`-named one
+        // skips excess (accepted on width); the other resolves and rejects.
+        // This cannot pass through the not-a-target / unresolvable arms: an
+        // unresolvable reference would leave BOTH verdicts equal.
+        use crate::semantic_query::NodeScopeId;
+        use crate::{FileLanguage, UpsertRequest};
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/excess_object_skip.ts".to_string(),
+                source: Arc::from(
+                    "export type Object = { a: number };\nexport type NotObject = { a: number };\n",
+                ),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let shallow = dispatch
+            .ctx
+            .shallow_file_state("/excess_object_skip.ts")
+            .expect("fixture must index");
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from("/excess_object_skip.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: shallow.whole_hash,
+            local_scope: None,
+        };
+        let object_named = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("Object")),
+        });
+        let not_object = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity::from_scope(
+                &scope,
+                Arc::from("NotObject"),
+            ),
+        });
+        // A USERLAND `type Object = { a: number }` is NOT the global: TS
+        // still excess-checks against it — the spelling alone never grants
+        // the skip.
+        assert!(
+            matches!(
+                relate_fresh_excess(&host, source, object_named),
+                RelationStep::NotAssignable
+            ),
+            "a module-local `Object` declaration is excess-checked like any \
+             other named target — the skip is identity, not spelling"
+        );
+        assert!(
+            matches!(
+                relate_fresh_excess(&host, source, not_object),
+                RelationStep::NotAssignable
+            ),
+            "the identically-shaped non-`Object` target rejects too (sanity)"
+        );
+        // The GLOBAL `Object` identity (builtin/ambient namespace) DOES
+        // skip: never an excess rejection.
+        let builtin_object = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::from("Object"),
+            },
+        });
+        assert!(
+            !matches!(
+                relate_fresh_excess(&host, source, builtin_object),
+                RelationStep::NotAssignable
+            ),
+            "the builtin-identified global `Object` target must not report \
+             excess properties"
+        );
+    }
+
+    /// Direct, shorthand, method, getter, and setter members are all
+    /// `FreshOwn` excess candidates: a method-shaped fresh member is
+    /// rejected exactly like a plain property.
+    #[test]
+    fn method_and_accessor_shaped_fresh_members_are_excess_candidates() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let mut method = fresh_member("m", number);
+        method.is_method = true;
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            method,
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, source, target),
+            "a method-shaped FreshOwn member is an excess candidate",
+        );
+    }
+
+    /// Spread-only (`SpreadTainted`) members are NOT excess candidates — but
+    /// a tainted member whose name IS known still undergoes normal value
+    /// compatibility (taint never suppresses a value mismatch).
+    #[test]
+    fn spread_tainted_members_are_not_candidates_but_still_value_check() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        // `b` arrived through a spread: NOT an excess candidate.
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            tainted_member("b", string),
+        ])));
+        let narrow_target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+        assert_assignable(
+            &relate_fresh_excess(&host, source, narrow_target),
+            "a SpreadTainted extra member is exempt from excess reporting",
+        );
+
+        // But when the target DOES know `b`, the tainted member's value must
+        // still satisfy it.
+        let typed_target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+            required_member("b", number),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, source, typed_target),
+            "spread taint never suppresses a value incompatibility",
+        );
+    }
+
+    /// `excess_origin` does not change ORDINARY assignability: under a
+    /// regular key the same shapes yield the same verdict regardless of
+    /// member origins.
+    #[test]
+    fn origin_does_not_change_ordinary_assignability() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+        let fresh_source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("b", number),
+        ])));
+        let plain_source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+            required_member("b", number),
+        ])));
+
+        let fresh_step = relate_regular(&host, fresh_source, target);
+        let plain_step = relate_regular(&host, plain_source, target);
+        assert_assignable(&fresh_step, "FreshOwn-membered source, regular key");
+        assert_assignable(&plain_step, "NonLiteral-membered source, regular key");
+    }
+
+    /// Same-object union arms do not perform branch-local excess checks:
+    /// `{ a, b }` vs `{a} | {b}` — each name is known in SOME arm, so the
+    /// prepass passes and ordinary distribution accepts through the `{a}`
+    /// arm. A branch-local excess check would reject BOTH arms.
+    #[test]
+    fn union_arms_do_not_rerun_branch_local_excess() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("b", number),
+        ])));
+        let arm_a = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+        let arm_b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("b", number),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )));
+
+        assert_assignable(
+            &relate_fresh_excess(&host, source, target),
+            "no branch-local excess: names known across arms, ordinary \
+             distribution decides",
+        );
+    }
+
+    /// Nested freshness: an INLINE nested literal (FreshOwn members) is
+    /// excess-checked in its own sub-relation frame, while the equivalent
+    /// VARIABLE-SOURCED nested object (NonLiteral members) is accepted.
+    #[test]
+    fn nested_inline_excess_rejected_variable_sourced_nested_accepted() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let nested_target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("n", nested_target),
+        ])));
+
+        // Inline nested literal: FreshOwn members ⇒ nested excess rejection.
+        let inline_nested = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("extra", number),
+        ])));
+        let inline_source =
+            graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
+                "n",
+                inline_nested,
+            )])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, inline_source, target),
+            "an inline nested literal inherits freshness and rejects `extra`",
+        );
+
+        // Variable-sourced nested object: NonLiteral members ⇒ accepted.
+        let variable_nested = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+            required_member("extra", number),
+        ])));
+        let variable_source =
+            graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
+                "n",
+                variable_nested,
+            )])));
+        assert_assignable(
+            &relate_fresh_excess(&host, variable_source, target),
+            "a variable-sourced nested object does not regain freshness",
+        );
+    }
+
+    /// A union value check that cannot be decided propagates `Unknown` — it
+    /// is neither collapsed into a rejection nor an acceptance, and nothing
+    /// is admitted to the relation memo.
+    #[test]
+    fn union_value_check_unknown_stays_unknown() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        // The surviving arm's `b` type is an UNRESOLVABLE reference — the
+        // value check against it is undecidable.
+        let unresolved = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from("/missing-file.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::from("MissingType"),
+            },
+        });
+
+        let arm_a = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_a),
+            optional_member("b", unresolved),
+        ])));
+        // A second arm keeps the target a UNION (the value check is the
+        // union-target step).
+        let lit_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "b".to_string(),
+        )));
+        let arm_b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_b),
+            required_member("c", number),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )));
+
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("kind", lit_a),
+            fresh_member("b", number),
+        ])));
+
+        let before = graph.relation_memo_count();
+        let step = relate_fresh_excess(&host, source, target);
+        assert!(
+            matches!(step, RelationStep::Unknown),
+            "an undecidable union value check stays Unknown, got {step:?}"
+        );
+        assert_eq!(
+            graph.relation_memo_count(),
+            before,
+            "Unknown admits NOTHING to the relation memo"
+        );
+    }
+
+    /// A nested union value check stays undecided when one contributing arm
+    /// exhausts named-target resolution. The exhausted arm cannot stand in
+    /// for an absent property and contribute a fabricated `undefined`.
+    #[test]
+    fn nested_union_value_check_is_undecided_when_an_arm_resolution_exhausts() {
+        use crate::semantic_query::NodeScopeId;
+        use crate::{FileLanguage, UpsertRequest};
+
+        let host = host_for_relation_tests();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/excess_nested_exhaustion.ts".to_string(),
+                source: Arc::from(concat!(
+                    "export type Hop0 = Hop1;\n",
+                    "export type Hop1 = Hop2;\n",
+                    "export type Hop2 = Hop3;\n",
+                    "export type Hop3 = Hop4;\n",
+                    "export type Hop4 = Hop5;\n",
+                    "export type Hop5 = Hop6;\n",
+                    "export type Hop6 = Hop7;\n",
+                    "export type Hop7 = Hop8;\n",
+                    "export type Hop8 = Hop9;\n",
+                    "export type Hop9 = { q?: number };\n",
+                )),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let shallow = dispatch
+            .ctx
+            .shallow_file_state("/excess_nested_exhaustion.ts")
+            .expect("fixture must index");
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from("/excess_nested_exhaustion.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: shallow.whole_hash,
+            local_scope: None,
+        };
+        let exhausted_arm = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("Hop0")),
+        });
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let known_arm = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("p", number),
+        ])));
+        let nested = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![known_arm, exhausted_arm].into_boxed_slice(),
+        )));
+        // This outer arm makes the ordinary relation decidably assignable
+        // after a buggy prepass fabricates `undefined` for the exhausted
+        // nested arm. Without it, the ordinary relation independently sees
+        // the unresolved carrier and returns `Unknown`, masking the bug.
+        let accepting_arm = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            optional_member("p", number),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![accepting_arm, nested].into_boxed_slice(),
+        )));
+        let source =
+            graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
+                "p", number,
+            )])));
+
+        let step = relate_fresh_excess(&host, source, target);
+        assert!(
+            matches!(step, RelationStep::Unknown),
+            "resolution exhaustion in a nested expected-value arm must keep \
+             the value check undecided, got {step:?}"
+        );
+    }
+
+    /// A DEEP alias chain to an object target still excess-checks: hop
+    /// exhaustion must never silently skip the prepass while the ordinary
+    /// relation (which follows aliases unbounded) accepts on width — a
+    /// "gave up" must be fail-closed, never indistinguishable from
+    /// "no excess".
+    #[test]
+    fn deep_alias_chain_target_still_excess_checks() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let target_surface = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+        // 12 alias hops — beyond any small resolver hop cap.
+        let mut target = target_surface;
+        for _ in 0..12 {
+            target = graph.intern_node(SemanticNodeData::Alias(target));
+        }
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("extra", number),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, source, target),
+            "a 12-deep alias chain resolves and reports the excess member",
+        );
+    }
+
+    /// UMBRELLA: per-property freshness tracks spread taint end to end — the
+    /// per-member origin decides excess candidacy inside the sole relation
+    /// authority. A fresh direct member is reported excess; the same member
+    /// spread-tainted is exempt; taint never suppresses value checking; and
+    /// ordinary relation ignores the origin axis entirely.
+    #[test]
+    fn freshness_tracks_per_property_spread_taint() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        let target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+        ])));
+
+        // FreshOwn extra ⇒ rejected.
+        let fresh_extra = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("extra", string),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, fresh_extra, target),
+            "a FreshOwn extra member is excess",
+        );
+
+        // The SAME extra member spread-tainted ⇒ exempt.
+        let tainted_extra = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            tainted_member("extra", string),
+        ])));
+        assert_assignable(
+            &relate_fresh_excess(&host, tainted_extra, target),
+            "the same member spread-tainted is exempt from excess reporting",
+        );
+
+        // Taint never suppresses value incompatibility when the name is known.
+        let typed_target = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("a", number),
+            required_member("extra", number),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, tainted_extra, typed_target),
+            "a known tainted member still fails value compatibility",
+        );
+
+        // Ordinary relation ignores the origin axis.
+        assert_assignable(
+            &relate_regular(&host, fresh_extra, target),
+            "regular mode ignores per-property freshness entirely",
+        );
+    }
+
+    /// A NAMED (DeclRef) target resolves before classification: a fresh
+    /// literal with an extra member is rejected against `type Target =
+    /// { a: number }` reached through its reference carrier — the common
+    /// user-facing shape. DISCRIMINATES against a raw-node classifier that
+    /// treats reference carriers as not-a-target and passes.
+    #[test]
+    fn named_target_resolves_and_rejects_excess() {
+        use crate::semantic_query::NodeScopeId;
+        use crate::{FileLanguage, UpsertRequest};
+        let host = host_for_relation_tests();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/excess_named_target.ts".to_string(),
+                source: Arc::from("export type Target = { a: number };\n"),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let shallow = dispatch
+            .ctx
+            .shallow_file_state("/excess_named_target.ts")
+            .expect("fixture must index");
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from("/excess_named_target.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: shallow.whole_hash,
+            local_scope: None,
+        };
+        let target = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("Target")),
+        });
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("a", number),
+            fresh_member("extra", number),
+        ])));
+        assert_not_assignable(
+            &relate_fresh_excess(&host, source, target),
+            "a named target must resolve and report the excess member",
+        );
+        // Sanity (non-vacuous): without the extra member the same named
+        // target accepts.
+        let clean = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
+            "a", number,
+        )])));
+        assert_assignable(
+            &relate_fresh_excess(&host, clean, target),
+            "the same named target accepts the exact shape",
+        );
+    }
+
+    /// An UNDECIDABLE discriminant arm is never dropped by the reduction:
+    /// `{ kind: "a", b: 1 }` vs `{ kind: "a"; a?: number } | { kind:
+    /// <unresolvable>; b: number }` — arm B's discriminant relates Unknown,
+    /// so B must stay in the arm set (making `b` known) and the
+    /// contaminated reduction must surface `Unknown`, never a memoizable
+    /// false rejection.
+    #[test]
+    fn unknown_discriminant_arm_is_kept_not_dropped() {
+        let host = host_for_relation_tests();
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+        let unresolvable_kind = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from("/missing-kind.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::from("MissingKind"),
+            },
+        });
+
+        let arm_a = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", lit_a),
+            optional_member("a", number),
+        ])));
+        let arm_b = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            required_member("kind", unresolvable_kind),
+            required_member("b", number),
+        ])));
+        let target = graph.intern_node(SemanticNodeData::Union(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )));
+        let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+            fresh_member("kind", lit_a),
+            fresh_member("b", one),
+        ])));
+
+        let before = graph.relation_memo_count();
+        let step = relate_fresh_excess(&host, source, target);
+        assert!(
+            !matches!(step, RelationStep::NotAssignable),
+            "an Unknown discriminant must not drop its arm into a false \
+             rejection; got {step:?}"
+        );
+        assert!(
+            matches!(step, RelationStep::Unknown),
+            "a reduction contaminated by an undecidable discriminant stays \
+             Unknown; got {step:?}"
+        );
+        assert_eq!(
+            graph.relation_memo_count(),
+            before,
+            "a contaminated reduction admits NOTHING to the relation memo"
+        );
     }
 }

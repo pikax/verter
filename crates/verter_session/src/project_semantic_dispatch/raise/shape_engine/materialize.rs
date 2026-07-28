@@ -706,6 +706,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         optional: bool,
         readonly: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> MaterializedObjectMember {
         let degraded_leaves = ty
@@ -720,7 +721,10 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
             member: verter_type_expr::ObjectMember::Property(
                 verter_type_expr::ObjectProperty::with_visibility(
                     name, ty.expr, optional, readonly, visibility, spans,
-                ),
+                )
+                // Verbatim thread-through of the recorded provenance
+                // (lossless raise round-trip).
+                .with_excess_origin(excess_origin),
             ),
             degraded_leaves,
         }
@@ -731,6 +735,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         function: MaterializedFunction,
         optional: bool,
         visibility: MemberVisibility,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin,
         spans: verter_type_expr::MemberSpans,
     ) -> MaterializedObjectMember {
         let degraded_leaves = function
@@ -749,8 +754,25 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                     optional,
                     visibility,
                     spans,
-                ),
+                )
+                .with_excess_origin(excess_origin),
             ),
+            degraded_leaves,
+        }
+    }
+    fn member_spread(&mut self, ty: MaterializedTypeExpr) -> MaterializedObjectMember {
+        let degraded_leaves = ty
+            .degraded_leaves
+            .into_iter()
+            .map(|leaf| PendingMemberDegradation {
+                slot: ObjectMemberSlot::Value,
+                leaf,
+            })
+            .collect();
+        MaterializedObjectMember {
+            member: verter_type_expr::ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                ty.expr,
+            )),
             degraded_leaves,
         }
     }
@@ -1109,6 +1131,7 @@ mod tests {
             false,
             false,
             verter_type_expr::MemberVisibility::Public,
+            verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             verter_type_expr::MemberSpans::default(),
         );
         let degraded_value = alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember);
@@ -1118,6 +1141,7 @@ mod tests {
             false,
             false,
             verter_type_expr::MemberVisibility::Public,
+            verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             verter_type_expr::MemberSpans::default(),
         );
         let object = alg.object_from_members(vec![kept, broken]);

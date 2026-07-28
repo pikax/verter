@@ -469,6 +469,9 @@ fn write_type_expr(buf: &mut String, expr: &TypeExpr) {
             let mut other: Vec<String> = Vec::new();
             for member in &obj.properties {
                 match member {
+                    ObjectMember::Spread(spread) => {
+                        other.push(format!("...({})", render_type_signature(&spread.ty)));
+                    }
                     ObjectMember::Property(prop) => {
                         let key = prop.name.clone();
                         let value = render_type_signature(&prop.ty);

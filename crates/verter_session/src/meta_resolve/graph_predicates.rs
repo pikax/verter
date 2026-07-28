@@ -713,7 +713,7 @@ pub(crate) fn body_contains_recursive_ref_to_name(
                 }
             }
             SemanticNodeData::Object(surface) => {
-                for member in surface.members.iter() {
+                for member in surface.positive_members().iter() {
                     stack.push(member.value);
                 }
                 for sig in surface.index_signatures.iter() {
@@ -725,6 +725,9 @@ pub(crate) fn body_contains_recursive_ref_to_name(
                 }
                 for &cons in surface.construct_signatures.iter() {
                     stack.push(cons);
+                }
+                if let Some(operands) = surface.open_spread_operands() {
+                    stack.extend(operands.as_slice().iter().copied());
                 }
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),
@@ -899,7 +902,7 @@ pub(crate) fn collect_ref_identities_node(
             }
             SemanticNodeData::Object(surface) => {
                 // Members hold property/method bodies.
-                for member in surface.members.iter() {
+                for member in surface.positive_members().iter() {
                     stack.push(member.value);
                 }
                 // Index signatures expose key + value types.
@@ -913,6 +916,9 @@ pub(crate) fn collect_ref_identities_node(
                 }
                 for &cons in surface.construct_signatures.iter() {
                     stack.push(cons);
+                }
+                if let Some(operands) = surface.open_spread_operands() {
+                    stack.extend(operands.as_slice().iter().copied());
                 }
             }
             SemanticNodeData::Array { element, .. } => stack.push(*element),

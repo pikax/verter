@@ -2531,6 +2531,17 @@ pub struct SurfaceMember {
     /// non-neutral value exists only via the
     /// [`ProjectionReductionContext`] producers.
     pub merge_role: MergeRoleStamp,
+    /// Excess-property provenance, carried verbatim from the IR
+    /// ([`verter_type_expr::ExcessPropertyOrigin`]). Participates in node
+    /// interning / graph identity (eq + hash) — two surfaces differing only in
+    /// a member's origin intern to DISTINCT nodes. Semantically read ONLY by
+    /// excess-property candidate selection in the relation engine's fresh
+    /// prepass; ordinary property matching, value assignability, optionality,
+    /// index-signature checking, union relation, and signature relation ignore
+    /// it. `NonLiteral` for every annotation / declaration / synthesized
+    /// origin; only direct object-literal materialization mints `FreshOwn`,
+    /// and only the shared spread materializer mints `SpreadTainted`.
+    pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
 }
 
 /// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)
@@ -2560,18 +2571,242 @@ pub struct IndexSignature {
 /// One-level surface view of a semantic node. Members are ordered to keep
 /// hashing stable.
 ///
-/// The single node-native surface carrier: consumers read the full member +
-/// signature metadata directly off these fields; the one registry publication
-/// materialisation happens at the query-engine terminal sink
-/// (`surface_view_to_registry_type_expr`).
+/// The single node-native surface carrier. Named members are exposed only as
+/// positive evidence; complete-domain, emptiness, and absence operations
+/// require either a [`ClosedSurfaceView`] witness or [`SurfaceKeyProjection`].
+/// The one registry publication materialisation happens at the query-engine
+/// terminal sink (`surface_view_to_registry_type_expr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
+    members: Arc<[SurfaceMember]>,
+    pub call_signatures: Arc<[SemanticNodeId]>,
+    pub construct_signatures: Arc<[SemanticNodeId]>,
+    pub index_signatures: Arc<[IndexSignature]>,
+    pub keyspace: Option<SemanticNodeId>,
+    has_index_signature: bool,
+    /// Whether the visible surface is complete. Object-literal spreads whose
+    /// operand surface is not yet enumerable retain that operand here, inside
+    /// the Object node's structural identity.
+    completeness: MemberSurfaceCompleteness,
+}
+
+/// Construction-only carrier for [`SurfaceView`]. Semantic consumers receive
+/// `SurfaceView`, whose completeness-sensitive fields are private.
+#[doc(hidden)]
+pub(crate) struct SurfaceViewInit {
     pub members: Arc<[SurfaceMember]>,
     pub call_signatures: Arc<[SemanticNodeId]>,
     pub construct_signatures: Arc<[SemanticNodeId]>,
     pub index_signatures: Arc<[IndexSignature]>,
     pub keyspace: Option<SemanticNodeId>,
     pub has_index_signature: bool,
+    pub completeness: MemberSurfaceCompleteness,
+}
+
+macro_rules! surface_view {
+    ($($fields:tt)*) => {
+        $crate::semantic_query::SurfaceView::from_init(
+            $crate::semantic_query::SurfaceViewInit {
+                $($fields)*
+            }
+        )
+    };
+}
+pub(crate) use surface_view;
+
+/// Completeness of the known members carried by a [`SurfaceView`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum MemberSurfaceCompleteness {
+    /// Every member-producing operand was folded into the visible surface.
+    #[default]
+    Closed,
+    /// One or more spread operands could not be enumerated.
+    OpenSpread(OpenSpreadOperands),
+}
+
+/// Ordered identities of the non-enumerable operands in an open object spread.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpenSpreadOperands(Arc<[SemanticNodeId]>);
+
+impl OpenSpreadOperands {
+    #[must_use]
+    pub fn new(operands: Arc<[SemanticNodeId]>) -> Self {
+        Self(operands)
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Proof that a surface is a complete key domain.
+#[derive(Clone, Copy)]
+pub struct ClosedSurfaceView<'a> {
+    surface: &'a SurfaceView,
+}
+
+impl<'a> ClosedSurfaceView<'a> {
+    pub fn complete_members(self) -> &'a [SurfaceMember] {
+        &self.surface.members
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.surface.members.is_empty()
+            && self.surface.call_signatures.is_empty()
+            && self.surface.construct_signatures.is_empty()
+            && self.surface.index_signatures.is_empty()
+            && !self.surface.has_index_signature
+    }
+
+    pub fn has_index_signature(self) -> bool {
+        self.surface.has_index_signature
+    }
+}
+
+/// Key evidence available from the sole positive-member state.
+pub enum SurfaceKeyProjection<'a> {
+    Exact(&'a SurfaceMember),
+    AbsentProven,
+    UnknownOnOpenSurface(&'a OpenSpreadOperands),
+}
+
+impl SurfaceView {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        members: Arc<[SurfaceMember]>,
+        call_signatures: Arc<[SemanticNodeId]>,
+        construct_signatures: Arc<[SemanticNodeId]>,
+        index_signatures: Arc<[IndexSignature]>,
+        keyspace: Option<SemanticNodeId>,
+        has_index_signature: bool,
+        completeness: MemberSurfaceCompleteness,
+    ) -> Self {
+        Self {
+            members,
+            call_signatures,
+            construct_signatures,
+            index_signatures,
+            keyspace,
+            has_index_signature,
+            completeness,
+        }
+    }
+
+    pub(crate) fn from_init(init: SurfaceViewInit) -> Self {
+        Self::new(
+            init.members,
+            init.call_signatures,
+            init.construct_signatures,
+            init.index_signatures,
+            init.keyspace,
+            init.has_index_signature,
+            init.completeness,
+        )
+    }
+
+    /// Known members are positive evidence only. Their omission never proves
+    /// absence unless [`Self::closed`] succeeds.
+    pub fn positive_members(&self) -> &[SurfaceMember] {
+        &self.members
+    }
+
+    pub fn closed(&self) -> Option<ClosedSurfaceView<'_>> {
+        matches!(self.completeness, MemberSurfaceCompleteness::Closed)
+            .then_some(ClosedSurfaceView { surface: self })
+    }
+
+    pub fn project_known_key(&self, name: &str) -> SurfaceKeyProjection<'_> {
+        if let Some(known) = self
+            .members
+            .iter()
+            .find(|member| member.name.as_ref() == name)
+        {
+            return SurfaceKeyProjection::Exact(known);
+        }
+        match &self.completeness {
+            MemberSurfaceCompleteness::Closed => SurfaceKeyProjection::AbsentProven,
+            MemberSurfaceCompleteness::OpenSpread(operands) => {
+                SurfaceKeyProjection::UnknownOnOpenSurface(operands)
+            }
+        }
+    }
+
+    /// Positive evidence that some index/open-domain fact exists. A `false`
+    /// result is not proof that an open spread has no additional keys.
+    pub fn has_known_index_signature(&self) -> bool {
+        self.has_index_signature
+    }
+
+    pub fn completeness(&self) -> &MemberSurfaceCompleteness {
+        &self.completeness
+    }
+
+    pub(crate) fn replace_completeness(&mut self, completeness: MemberSurfaceCompleteness) {
+        self.completeness = completeness;
+    }
+
+    pub(crate) fn with_positive_members(mut self, members: Arc<[SurfaceMember]>) -> Self {
+        self.members = members;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_known_index_signature(mut self, has_index_signature: bool) -> Self {
+        self.has_index_signature = has_index_signature;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_call_signatures(mut self, call_signatures: Arc<[SemanticNodeId]>) -> Self {
+        self.call_signatures = call_signatures;
+        self
+    }
+
+    pub fn open_spread_operands(&self) -> Option<&OpenSpreadOperands> {
+        match &self.completeness {
+            MemberSurfaceCompleteness::Closed => None,
+            MemberSurfaceCompleteness::OpenSpread(operands) => Some(operands),
+        }
+    }
+
+    pub fn is_open_spread(&self) -> bool {
+        self.open_spread_operands().is_some()
+    }
+
+    pub fn completeness_for_members(
+        &self,
+        _members: &[SurfaceMember],
+    ) -> MemberSurfaceCompleteness {
+        self.completeness.clone()
+    }
+
+    pub fn completeness_with_mapped_operands(
+        &self,
+        mut map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
+    ) -> MemberSurfaceCompleteness {
+        let Some(open) = self.open_spread_operands() else {
+            return MemberSurfaceCompleteness::Closed;
+        };
+        let operands = open
+            .as_slice()
+            .iter()
+            .map(|operand| map(*operand))
+            .collect::<Vec<_>>();
+        MemberSurfaceCompleteness::OpenSpread(OpenSpreadOperands::new(Arc::from(
+            operands.into_boxed_slice(),
+        )))
+    }
 }
 
 impl std::hash::Hash for SurfaceView {
@@ -2584,6 +2819,7 @@ impl std::hash::Hash for SurfaceView {
         self.index_signatures.hash(state);
         self.keyspace.hash(state);
         self.has_index_signature.hash(state);
+        self.completeness.hash(state);
     }
 }
 

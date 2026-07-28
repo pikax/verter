@@ -55,7 +55,7 @@ pub(crate) fn project_props(
     //
     // Ref-carrier surfaces (cross-file generic payloads like
     // `defineProps<AccordionProps<T>>()`) lower to a `SemanticNodeData::Ref`
-    // shell where `read_surface_members` returns empty, so admission (and its
+    // shell where `read_positive_surface_members` returns empty, so admission (and its
     // edge record) fires ZERO times. That is the shallow-by-default (L1)
     // contract: the carrier is published symbolically and the consumer
     // re-resolves it on demand, so there are no eagerly-flattened members to

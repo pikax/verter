@@ -505,11 +505,14 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
                 // function-shaped, not role-bearing composition.
                 worklist.extend(
                     surface
-                        .members
+                        .positive_members()
                         .iter()
                         .filter(|member| !member.is_method)
                         .map(|member| member.value),
                 );
+                if let Some(operands) = surface.open_spread_operands() {
+                    worklist.extend(operands.as_slice().iter().copied());
+                }
             }
             // IndexedAccess is a value-extraction operation, not a
             // role-bearing reference — even the chain ROOT is not

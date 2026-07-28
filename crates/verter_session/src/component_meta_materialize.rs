@@ -1862,12 +1862,12 @@ fn materialize_object_surface(
     surface: &crate::semantic_query::SurfaceView,
     local_fence: &mut Vec<(Arc<str>, DepVersion)>,
 ) -> MaterializeOutcome {
-    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember};
     let graph = ctx.project_type_store().semantic_graph();
 
-    let mut new_members = Vec::with_capacity(surface.members.len());
+    let mut new_members = Vec::with_capacity(surface.positive_members().len());
     let mut any_changed = false;
-    for member in surface.members.iter() {
+    for member in surface.positive_members().iter() {
         let (sub_id, changed) = materialize_child_at_nested(ctx, key, member.value, local_fence);
         any_changed |= changed;
         new_members.push(SurfaceMember {
@@ -1877,9 +1877,11 @@ fn materialize_object_surface(
             readonly: member.readonly,
             is_method: member.is_method,
             // Materialisation preserves member structure — only the value is
-            // materialised; the member's declared accessibility is carried
-            // through unchanged from the upstream `SurfaceMember`.
+            // materialised; the member's declared accessibility and
+            // excess-property provenance are carried through unchanged from
+            // the upstream `SurfaceMember`.
             visibility: member.visibility,
+            excess_origin: member.excess_origin,
             // Materialisation preserves member structure — only the
             // value is materialised, the structural fact (the member's
             // OXC spans and its declaration file) is carried through
@@ -1928,18 +1930,24 @@ fn materialize_object_surface(
         }
         None => None,
     };
+    let new_completeness = surface.completeness_with_mapped_operands(|operand| {
+        let (sub_id, changed) = materialize_child_at_nested(ctx, key, operand, local_fence);
+        any_changed |= changed;
+        sub_id
+    });
 
     if !any_changed {
         return MaterializeOutcome::Value(key.base);
     }
 
-    let new_surface = SurfaceView {
+    let new_surface = crate::semantic_query::surface_view! {
         members: Arc::from(new_members.into_boxed_slice()),
         call_signatures: Arc::from(new_call_signatures.into_boxed_slice()),
         construct_signatures: Arc::from(new_construct_signatures.into_boxed_slice()),
         index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
         keyspace: new_keyspace,
-        has_index_signature: surface.has_index_signature,
+        has_index_signature: surface.has_known_index_signature(),
+        completeness: new_completeness,
     };
     let new_id = graph.intern_preserving_scope(key.base, SemanticNodeData::Object(new_surface));
     MaterializeOutcome::Value(new_id)

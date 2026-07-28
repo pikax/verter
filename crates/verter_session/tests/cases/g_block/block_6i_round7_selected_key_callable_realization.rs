@@ -149,13 +149,13 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     };
 
     let badge = view
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "badge")
         .unwrap_or_else(|| {
             panic!(
                 "synthesised surface MUST contain `badge`. Got: {:?}",
-                view.members
+                view.positive_members()
                     .iter()
                     .map(|m| m.name.as_ref())
                     .collect::<Vec<_>>(),
@@ -185,7 +185,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     // Symmetric assertion on `title` — verifies the helper fires for
     // EVERY enumerated key, not just the first.
     let title = view
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "title")
         .expect("synthesised surface must contain `title`");

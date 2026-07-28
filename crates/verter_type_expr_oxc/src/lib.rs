@@ -31,7 +31,7 @@ use std::sync::Arc;
 use verter_type_expr::{
     FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans,
     MappedModifier, MemberSpans, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
-    PrimitiveName, TupleElement, TypeExpr, TypeParam, UnknownValue, ValueRef,
+    PrimitiveName, SpreadMember, TupleElement, TypeExpr, TypeParam, UnknownValue, ValueRef,
 };
 
 mod dependency_facts;
@@ -941,14 +941,19 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         // via `with_visibility`. `with_spans` would default it to Public,
         // dropping a non-public class member's visibility when its generic
         // instance shape is normalized.
-        ObjectMember::Property(prop) => ObjectMember::Property(ObjectProperty::with_visibility(
-            prop.name.clone(),
-            normalize_type_parameter_refs(&prop.ty, scope),
-            prop.optional,
-            prop.readonly,
-            prop.visibility,
-            prop.spans,
-        )),
+        ObjectMember::Property(prop) => ObjectMember::Property(
+            ObjectProperty::with_visibility(
+                prop.name.clone(),
+                normalize_type_parameter_refs(&prop.ty, scope),
+                prop.optional,
+                prop.readonly,
+                prop.visibility,
+                prop.spans,
+            )
+            // Verbatim thread-through of the existing member's recorded
+            // excess-property provenance (lossless reconstruction).
+            .with_excess_origin(prop.excess_origin),
+        ),
         ObjectMember::IndexSignature(sig) => {
             ObjectMember::IndexSignature(IndexSignature::with_spans(
                 sig.key_name.clone(),
@@ -964,12 +969,18 @@ fn normalize_object_member_type_params(member: &ObjectMember, scope: &[TypeParam
         ObjectMember::ConstructSignature(func) => {
             ObjectMember::ConstructSignature(normalize_nested_function_type_params(func, scope))
         }
-        ObjectMember::Method(method) => ObjectMember::Method(MethodSignature::with_visibility(
-            method.name.clone(),
-            normalize_nested_function_type_params(&method.function, scope),
-            method.optional,
-            method.visibility,
-            method.spans,
+        ObjectMember::Method(method) => ObjectMember::Method(
+            MethodSignature::with_visibility(
+                method.name.clone(),
+                normalize_nested_function_type_params(&method.function, scope),
+                method.optional,
+                method.visibility,
+                method.spans,
+            )
+            .with_excess_origin(method.excess_origin),
+        ),
+        ObjectMember::Spread(spread) => ObjectMember::Spread(SpreadMember::new(
+            normalize_type_parameter_refs(&spread.ty, scope),
         )),
     }
 }

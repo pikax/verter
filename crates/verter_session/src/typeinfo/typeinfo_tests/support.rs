@@ -291,7 +291,8 @@ fn collect_object_props(expr: &TypeExpr, props: &mut BTreeMap<String, ObjectProp
                     }
                     ObjectMember::IndexSignature(_)
                     | ObjectMember::CallSignature(_)
-                    | ObjectMember::ConstructSignature(_) => {}
+                    | ObjectMember::ConstructSignature(_)
+                    | ObjectMember::Spread(_) => {}
                 }
             }
         }

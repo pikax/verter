@@ -400,11 +400,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .top_level_owner()?;
         let data = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())?;
         if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
-            return surface
-                .members
-                .iter()
-                .find(|member| member.name.as_ref() == field_name.as_ref())
-                .map(|member| crate::semantic_query::HotTypeRef::new(member.value));
+            return match surface.project_known_key(field_name.as_ref()) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                    Some(crate::semantic_query::HotTypeRef::new(member.value))
+                }
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                | crate::semantic_query::SurfaceKeyProjection::UnknownOnOpenSurface(_) => None,
+            };
         }
         let (name, _) = data.bare_ref_head()?;
         if !data.carrier_type_args().is_empty() {
@@ -526,7 +528,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 )
             }),
             SemanticNodeData::Object(surface) => {
-                surface.members.iter().any(|member| {
+                surface.positive_members().iter().any(|member| {
                     self.node_contains_imported_utility_route(
                         scope_canonical_id,
                         scope_owner,
@@ -559,6 +561,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         signature,
                         depth + 1,
                     )
+                }) || surface.open_spread_operands().is_some_and(|operands| {
+                    operands.as_slice().iter().any(|operand| {
+                        self.node_contains_imported_utility_route(
+                            scope_canonical_id,
+                            scope_owner,
+                            *operand,
+                            depth + 1,
+                        )
+                    })
                 })
             }
             SemanticNodeData::Signature {
@@ -944,13 +955,16 @@ fn node_references_type_param_names(
             contributors: members,
         } => members.iter().any(|&m| recur(m)),
         SemanticNodeData::Object(surface) => {
-            surface.members.iter().any(|m| recur(m.value))
+            surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
                     .index_signatures
                     .iter()
                     .any(|sig| recur(sig.key_type) || recur(sig.value_type))
                 || surface.call_signatures.iter().any(|&c| recur(c))
                 || surface.construct_signatures.iter().any(|&c| recur(c))
+                || surface.open_spread_operands().is_some_and(|operands| {
+                    operands.as_slice().iter().any(|operand| recur(*operand))
+                })
         }
         SemanticNodeData::Signature {
             params,

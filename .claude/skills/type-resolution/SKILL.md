@@ -591,6 +591,34 @@ a distinct responsibility:
 - **Node memo** — mode-erased `FamilyKey` → `FamilySlots` map for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
 - **Relation memo** — keyed by the full-identity `RelateMemoKey` (source / target / relation kind / policy / source freshness / inference context / env+substitution+projection-reduction context) for `Relate` judgements. Admission is decided-only: only the binary `Assignable { bindings }` / `NotAssignable` payloads publish (cache-with-fence); `Unknown`, `BudgetExceeded` (public payload, `cache_suppress`), session-local inference deltas, and abandoned sessions publish NOTHING — no memo entry, no fact signature, no reverse index.
 
+### Open object-literal spreads
+
+The expression producer preserves object literals as ordered pre-fold IR: every direct member and every `ObjectMember::Spread(SpreadMember)` occupies its source ordinal in `ObjectExpr.properties`; direct-member source spans stay attached to their entries. The producer never folds this list. The shared spread materializer owns the left-to-right fold, so overwrite and spread-taint decisions see the original entry order.
+
+`ExcessPropertyOrigin` is a property of the type and participates in the canonical node identity (`Eq` / `Hash`), not request-local metadata. Direct literal writes are `FreshOwn`; spread-introduced or spread-overlapped members are `SpreadTainted`; all other origins are `NonLiteral`. There is deliberately no sidecar: a sidecar could attach different provenance to two occurrences of the same node id, allowing the same canonical type identity to produce different excess-property assignability outcomes.
+
+The fresh excess-property prepass is a dormant engine capability. No production caller constructs a relation ask with `excess_property_check: true`; non-test policy and oracle plumbing default the flag to `false`. Direct relation-level tests exercise the capability, but only a future production caller explicitly setting `excess_property_check: true` on a fresh-source relation activates it in production.
+
+Proven-enumerable spread operands fold left-to-right. A concrete union operand distributes the fold across its alternatives: each surviving alternative produces its own `SemanticNodeData::Object`, and multiple surviving alternatives return a normalized `Union`. A single Object result is reserved for a single surviving fold state, including the conservative path where a non-enumerable operand or the union-distribution cap prevents enumeration. On that conservative path, completeness becomes `MemberSurfaceCompleteness::OpenSpread(OpenSpreadOperands)`, where `OpenSpreadOperands` contains only operand node identities in encounter order. It contains no member copies, write positions, or direct-vs-spread tags. Array, tuple, generic, unresolved-reference, missing-node, top-type, and cap-exhausted union operands stay inside this marker. They never become relation arms, an `Intersection`, the accumulator root, or an object-domain primitive.
+
+`SurfaceView.members` is the sole member state. On an open operand, existing positive members retain required/optional presence but conservatively lose any value or metadata that operand could overwrite: the value widens to `unknown`, method and readonly flags clear, declaration metadata clears, and excess origin becomes `SpreadTainted`. A later exact direct write or required proven-enumerable spread write replaces an overlapping entry. A later optional spread write does not erase uncertainty from an earlier open operand and remains conservative. Missing keys on an open surface remain unknown. Expanded projection maps the positive members and operand identities and re-interns an open Object; it never refolds operands or reconstructs write history. Raising and display use one canonical conservative order: typed open operands first, then the authoritative positive member map. This preserves exact later writes and keeps pre-open members conservative without claiming to reconstruct the original literal order.
+
+Completeness-sensitive `SurfaceView` fields are private. `positive_members()` exposes facts but never a complete key domain; emptiness and complete-key iteration require the typed `ClosedSurfaceView` witness returned by `closed()`. Per-key consumers start at `project_known_key`, whose result is `Exact`, `AbsentProven`, or `UnknownOnOpenSurface`; only the closed branch can prove absence. Public `TypeInfoSurface` carries `members_complete`; openness does not set `has_index_signature`.
+
+After transparent alias and identity-carrier normalization, relation detects a root open Object before inference deposits, fresh/excess checks, identity equality, Record shortcuts, member/index/signature walks, or binary memo publication. An open source or target returns `RelationResult::Unknown`, including an open node related to itself. `Unknown` is ReturnOnly, poisons the current relation SCC, creates no public binary decision or inference fact, and is absent from decided/warm relation caches and reverse indexes. A union is not root-open: ordinary distribution proceeds and the three-valued AND/OR lattice combines open arms. Union excess checking treats an open arm as undecided and only closed-surface witnesses can prove excess or absence.
+
+The root-open guard gives up **all relation reasoning for the entire mixed open Object**, not merely reasoning about the non-enumerable operand. The accepted under-approximations are exactly:
+
+1. exact positive-member reasoning, including requirements or value mismatches decidable from exact later direct/required-spread writes;
+2. `Record` and index-signature obligations decidable from visible exact members;
+3. identity equality, including an open node related to itself;
+4. inference deposits available from exact known positions;
+5. call/construct signature relations when an open Object occurs at a nested parameter or return position;
+6. fresh excess-property rejection available from exact later `FreshOwn` writes; and
+7. broad object-category and empty-object shortcuts.
+
+Those cases return `Unknown` even when the retained facts could decide them. This precision loss is the accepted cost of keeping one structurally authoritative member state. The operand-only marker must not gain a synchronized replay/write-history side representation.
+
 **Canonical deferred forms** (plan §2 — only these variants cross any cache boundary):
 
 - `SemanticNodeData::Mapped { source, mapper }` — deferred mapped type

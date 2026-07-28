@@ -469,6 +469,13 @@ pub fn render_type_expr_display(
                     }
                     work.push(Frame::MemberName(&method.name));
                 }
+                ObjectMember::Spread(spread) => {
+                    // Diagnostic-only spelling: TS type syntax has no spread
+                    // member; render the pre-fold operand as `...(T)`.
+                    work.push(Frame::Text(")"));
+                    work.push(Frame::Expr(&spread.ty, Precedence::Lowest));
+                    work.push(Frame::Text("...("));
+                }
             },
             Frame::Function(function, style) => {
                 let Some(return_type) = function.return_type.as_deref() else {

@@ -689,10 +689,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // The one-level MERGED view through the shared empty-path Shallow
         // surface walker (arm roots only; member values stay shallow nodes).
         let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
+        let closed = view.closed()?;
         if !view.call_signatures.is_empty()
             || !view.construct_signatures.is_empty()
             || !view.index_signatures.is_empty()
-            || view.has_index_signature
+            || view.has_known_index_signature()
         {
             return None;
         }
@@ -713,8 +714,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if heritage_prepared.len() != heritage.len() {
             return None;
         }
-        let mut members: Vec<ProjectedMemberFact> = Vec::with_capacity(view.members.len());
-        for member in view.members.iter() {
+        let mut members: Vec<ProjectedMemberFact> =
+            Vec::with_capacity(closed.complete_members().len());
+        for member in closed.complete_members() {
             let fact = own_prepared
                 .as_ref()
                 .and_then(|prepared| prepared.member_index.get(member.name.as_ref()))

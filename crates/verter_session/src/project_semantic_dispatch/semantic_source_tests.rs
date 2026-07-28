@@ -475,10 +475,14 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
         panic!("a synthesized object must compose an Object node, got {data:?}");
     };
-    assert_eq!(surface.members.len(), 2, "both members must survive");
+    assert_eq!(
+        surface.positive_members().len(),
+        2,
+        "both members must survive"
+    );
 
     let flag = surface
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "flag")
         .expect("the leaf member must be present");
@@ -492,7 +496,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     assert!(!flag.optional, "the leaf member is required");
 
     let base = surface
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "base")
         .expect("the locator member must be present");

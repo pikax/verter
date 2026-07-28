@@ -279,7 +279,7 @@ fn first_member_primitive_of_object(
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
-    let member = view.members.first()?;
+    let member = view.positive_members().first()?;
     let value = dispatch.graph().node_data(member.value)?;
     match value.as_ref() {
         SemanticNodeData::Primitive(k) => Some((member.name.as_ref().to_string(), *k)),
@@ -866,7 +866,11 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
             data.as_ref()
         );
     };
-    let member_names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+    let member_names: Vec<&str> = view
+        .positive_members()
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
     assert!(
         member_names.contains(&"a"),
         "nested `BareRef(A)` must resolve so its member `a` surfaces; members: {member_names:?}"
@@ -1594,7 +1598,7 @@ fn eager_resolvable_ref_head_still_lowers_and_applies_args() {
         );
     };
     let member = view
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == "v")
         .expect("`Box`'s `v` member must be present");
@@ -1807,7 +1811,7 @@ defineProps<Copy<ImportedProps>>()
         };
         assert_eq!(
             payload_view
-                .members
+                .positive_members()
                 .iter()
                 .map(|member| member.name.as_ref())
                 .collect::<Vec<_>>(),
@@ -1873,7 +1877,7 @@ defineProps<{ setupOnly: string }>()
         matches!(
             parent_surface.as_ref(),
             SemanticNodeData::Object(view)
-                if view.members.iter().any(|member| member.name.as_ref() == "moduleOnly")
+                if view.positive_members().iter().any(|member| member.name.as_ref() == "moduleOnly")
         ),
         "the sole validated Module companion must remain visible from setup"
     );

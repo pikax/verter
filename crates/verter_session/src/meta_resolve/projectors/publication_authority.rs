@@ -398,15 +398,15 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// MOVING each [`SurfaceMember`] out of the enumerated vector.
 ///
 /// AUTHORITY-PRIVATE enumeration: wraps the single shared
-/// [`super::read_surface_members`] node→members reader (this is NOT a second
-/// `read_surface_members` definition — it is the candidate-tokenising wrapper
+/// [`super::read_positive_surface_members`] node→members reader (this is NOT a
+/// second reader — it is the candidate-tokenising wrapper
 /// over that one reader). Each candidate carries the surface's derived kind so
 /// admission can compare against the cursor's surface kind.
 pub(crate) fn read_surface_member_candidates(
     ctx: &dyn ResolverContext,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
-    let members = super::read_surface_members(ctx, surface.node);
+    let members = super::read_positive_surface_members(ctx, surface.node);
     members
         .into_iter()
         .map(|member| SurfaceMemberCandidate {
@@ -502,6 +502,7 @@ mod tests {
     /// (both gates short-circuit before any node materialisation).
     fn member_with_visibility(visibility: MemberVisibility) -> SurfaceMember {
         SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             name: Arc::from("foo"),
             value: SemanticNodeId(0),
             optional: false,

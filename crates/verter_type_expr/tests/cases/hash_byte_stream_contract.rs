@@ -46,11 +46,11 @@ use std::sync::Arc;
 
 use verter_span::Span;
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
-    MappedModifier, MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
-    ObjectProperty, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
-    SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam,
-    UnknownValue, ValueRef,
+    ExcessPropertyOrigin, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
+    IndexSignatureSpans, LiteralValue, MappedModifier, MemberSpans, MemberVisibility,
+    MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+    RecursiveConditionalBranch, RecursiveConditionalFrame, SyntheticCarrierKey,
+    SyntheticCarrierSurfaceKind, TupleElement, TypeExpr, TypeParam, UnknownValue, ValueRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -329,6 +329,12 @@ fn ref_hash_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
             if !p.visibility.is_public() {
                 p.visibility.hash(h);
             }
+            // Marker-only-for-non-NonLiteral: a `NonLiteral` property emits NO
+            // excess-origin bytes (pre-freshness stream preserved); a
+            // `FreshOwn` / `SpreadTainted` property folds its discriminant.
+            if p.excess_origin != ExcessPropertyOrigin::NonLiteral {
+                p.excess_origin.hash(h);
+            }
             p.spans.hash(h);
         }
         ObjectMember::IndexSignature(s) => {
@@ -351,6 +357,10 @@ fn ref_hash_object_member<H: Hasher>(member: &ObjectMember, h: &mut H) {
             4isize.hash(h);
             ref_hash_method(m, h);
         }
+        ObjectMember::Spread(s) => {
+            5isize.hash(h);
+            ref_hash(&s.ty, h);
+        }
     }
 }
 
@@ -361,6 +371,9 @@ fn ref_hash_method<H: Hasher>(m: &MethodSignature, h: &mut H) {
     // Marker-only-for-non-public (see `ref_hash_object_member`).
     if !m.visibility.is_public() {
         m.visibility.hash(h);
+    }
+    if m.excess_origin != ExcessPropertyOrigin::NonLiteral {
+        m.excess_origin.hash(h);
     }
     m.spans.hash(h);
 }

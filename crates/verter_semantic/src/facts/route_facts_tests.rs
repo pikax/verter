@@ -633,6 +633,9 @@ mod golden {
                             ObjectMember::IndexSignature(sig) => {
                                 self.collect_whole_route_refs(&sig.value_type, Ctx::LeafProperty)
                             }
+                            ObjectMember::Spread(spread) => {
+                                self.collect_whole_route_refs(&spread.ty, Ctx::LeafProperty)
+                            }
                             ObjectMember::CallSignature(func)
                             | ObjectMember::ConstructSignature(func) => {
                                 self.collect_whole_route_function_refs(func)

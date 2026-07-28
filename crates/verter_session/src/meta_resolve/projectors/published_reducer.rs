@@ -131,13 +131,19 @@ pub(crate) fn node_contains_reducible_operator(
             contributors: members,
         } => members.iter().any(|&m| recur(m)),
         SemanticNodeData::Object(surface) => {
-            surface.members.iter().any(|m| recur(m.value))
+            surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
                     .index_signatures
                     .iter()
                     .any(|sig| recur(sig.key_type) || recur(sig.value_type))
                 || surface.call_signatures.iter().any(|&c| recur(c))
                 || surface.construct_signatures.iter().any(|&c| recur(c))
+                || surface.open_spread_operands().is_some_and(|operands| {
+                    operands
+                        .as_slice()
+                        .iter()
+                        .any(|operand| recur(*operand))
+                })
         }
         SemanticNodeData::Signature {
             params,

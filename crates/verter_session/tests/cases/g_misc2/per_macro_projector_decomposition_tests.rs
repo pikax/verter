@@ -471,8 +471,11 @@ fn props_emits_slots_share_path_independent_cache() {
         .expect("resolved node must be interned");
     let typeinfo_names: Vec<String> = match data.as_ref() {
         SemanticNodeData::Object(surface) => {
-            let mut names: Vec<String> =
-                surface.members.iter().map(|m| m.name.to_string()).collect();
+            let mut names: Vec<String> = surface
+                .positive_members()
+                .iter()
+                .map(|m| m.name.to_string())
+                .collect();
             names.sort();
             names
         }
@@ -568,9 +571,11 @@ fn evaluate_type_expression_for_vue_default_export_matches_props() {
         .expect("evaluated node must be interned");
 
     let typeinfo_prop_names: Vec<String> = match data.as_ref() {
-        SemanticNodeData::Object(surface) => {
-            surface.members.iter().map(|m| m.name.to_string()).collect()
-        }
+        SemanticNodeData::Object(surface) => surface
+            .positive_members()
+            .iter()
+            .map(|m| m.name.to_string())
+            .collect(),
         other => panic!(
             "typeinfo result for `$props` must be an Object \
              surface; got {other:?}"

@@ -590,6 +590,16 @@ impl RouteFactProducer<'_> {
                 ObjectMember::Method(method) => {
                     self.walk_function_refs(&method.function, guard, out);
                 }
+                ObjectMember::Spread(spread) => {
+                    // The spread operand's type refs contribute exactly like a
+                    // property value: the fold reads the operand's surface.
+                    self.walk_whole_route(
+                        &spread.ty,
+                        WholeRouteContextFact::LeafProperty,
+                        guard,
+                        out,
+                    );
+                }
             }
         }
     }

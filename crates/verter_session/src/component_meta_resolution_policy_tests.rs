@@ -267,7 +267,7 @@ fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNode
 fn object_member_names(host: &VerterHost, node: SemanticNodeId) -> Vec<String> {
     match node_data(host, node).as_deref() {
         Some(SemanticNodeData::Object(surface)) => surface
-            .members
+            .positive_members()
             .iter()
             .map(|member| member.name.to_string())
             .collect(),
@@ -463,14 +463,14 @@ fn rule3_publishes_nested_refs_shallow() {
         Some(SemanticNodeData::Object(surface)) => {
             assert_eq!(
                 surface
-                    .members
+                    .positive_members()
                     .iter()
                     .map(|m| m.name.to_string())
                     .collect::<Vec<_>>(),
                 vec!["first".to_string()],
                 "Container's body must surface the `first` member",
             );
-            surface.members[0].value
+            surface.positive_members()[0].value
         }
         other => panic!("published body must raise to Container's object; got {other:?}"),
     };

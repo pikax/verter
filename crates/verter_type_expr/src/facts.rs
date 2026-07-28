@@ -1873,7 +1873,27 @@ pub struct IndexSignatureFact {
     pub span_origin: IndexSignatureSpansOrigin,
 }
 
-/// One narrowed object member over all five `ObjectMember` variants.
+/// A narrowed object-literal spread entry (`{ ...operand }`), kept in source
+/// order among the other member facts — the fold's semantics depend on where
+/// the spread sits between the direct members.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct SpreadMemberFact {
+    /// The spread OPERAND's type body locator (content-free; the operand type
+    /// is recovered by re-lowering the declaration on demand).
+    pub ty: TypeBodySlot,
+}
+
+/// One narrowed object member over all six `ObjectMember` variants.
 #[derive(
     Debug,
     Clone,
@@ -1896,6 +1916,8 @@ pub enum ObjectMemberFact {
     ConstructSignature(FunctionSignatureFact),
     /// An index signature.
     IndexSignature(IndexSignatureFact),
+    /// An object-literal spread entry (source-order-significant).
+    Spread(SpreadMemberFact),
 }
 
 /// The `PreparedValueDecl.object_shape: Option<ObjectExpr>` narrowing — closed
@@ -3526,6 +3548,10 @@ impl ObjectMemberFact {
             ObjectMemberFact::ConstructSignature(signature) => signature
                 .absolutize(canonical_id)
                 .map(ObjectMemberFact::ConstructSignature),
+            ObjectMemberFact::Spread(spread) => spread
+                .ty
+                .absolutize(canonical_id)
+                .map(|ty| ObjectMemberFact::Spread(SpreadMemberFact { ty })),
             ObjectMemberFact::IndexSignature(signature) => {
                 let key_type = signature.key_type.absolutize(canonical_id);
                 let value_type = signature.value_type.absolutize(canonical_id);
@@ -3897,6 +3923,7 @@ fn object_member_scope_relative(member: &ObjectMemberFact) -> bool {
             key_shape_scope_relative(&signature.key_type)
                 || slot_scope_relative(&signature.value_type)
         }
+        ObjectMemberFact::Spread(spread) => slot_scope_relative(&spread.ty),
     }
 }
 

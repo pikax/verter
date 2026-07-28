@@ -242,23 +242,27 @@ impl HostComponentMetaResolver<'_> {
             | AnalyzedMacroKind::WithDefaults
             | AnalyzedMacroKind::DefineModel
             | AnalyzedMacroKind::DefineSlots => {
-                !view.members.is_empty()
+                !view.positive_members().is_empty()
                     || !view.call_signatures.is_empty()
                     || !view.construct_signatures.is_empty()
                     || !view.index_signatures.is_empty()
-                    || view.has_index_signature
+                    || view.has_known_index_signature()
+                    || view.is_open_spread()
             }
             // Emits surface comes from property-style members or callable events
             // (call signatures, or construct signatures folded alongside them).
             AnalyzedMacroKind::DefineEmits => {
-                !view.members.is_empty()
+                !view.positive_members().is_empty()
                     || !view.call_signatures.is_empty()
                     || !view.construct_signatures.is_empty()
+                    || view.is_open_spread()
             }
             // The exposed surface publishes named members only
             // (`exposed_from_typeinfo_surface`), so the presence gate is the
             // named-property surface.
-            AnalyzedMacroKind::DefineExpose => !view.members.is_empty(),
+            AnalyzedMacroKind::DefineExpose => {
+                !view.positive_members().is_empty() || view.is_open_spread()
+            }
             AnalyzedMacroKind::DefineOptions => false,
         }
     }

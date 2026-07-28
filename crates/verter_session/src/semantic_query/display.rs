@@ -162,6 +162,14 @@ pub(crate) fn display_type_node(
         }
         SemanticNodeData::Object(surface) => {
             let mut parts: Vec<String> = Vec::new();
+            if let Some(operands) = surface.open_spread_operands() {
+                for operand in operands.as_slice() {
+                    parts.push(format!(
+                        "...{}",
+                        display_type_node(store, *operand, needs, child_depth, visited).0
+                    ));
+                }
+            }
             for member in surface.members.iter() {
                 let mut s = String::new();
                 if member.readonly && needs.contains(DisplayFacet::IncludeReadonlyModifier) {
@@ -172,13 +180,6 @@ pub(crate) fn display_type_node(
                     s.push('?');
                 }
                 if member.is_method && resolves_to_function(store, member.value) {
-                    // Method shorthand `name(params): ret` — the signature is
-                    // rendered in type-literal (colon) position, NOT as a
-                    // property holding an arrow-function type. Only valid when
-                    // the value is actually a `Function`: after intersection
-                    // merging `is_method` can be ORed true over an
-                    // `Intersection` of overloads, which must fall through to
-                    // property style (a colon) below to stay valid TS.
                     s.push_str(&render_signature_colon(
                         store,
                         member.value,

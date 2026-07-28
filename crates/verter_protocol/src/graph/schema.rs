@@ -5,6 +5,9 @@ pub const MEMBER_INDEX_SIGNATURE: u32 = 2;
 pub const MEMBER_CALL_SIGNATURE: u32 = 3;
 pub const MEMBER_CONSTRUCT_SIGNATURE: u32 = 4;
 pub const MEMBER_METHOD: u32 = 5;
+/// Object-literal spread entry (`{ ...operand }`): pre-fold ordered IR only.
+/// Additive kind — existing codes 1..=5 are frozen.
+pub const MEMBER_SPREAD: u32 = 6;
 
 pub fn primitive_to_tag(name: PrimitiveName) -> u32 {
     match name {

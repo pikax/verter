@@ -21,7 +21,7 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, InstantiateKey, LiteralValue, PartialReasonSet,
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
     ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
-    SurfaceView, TupleElement,
+    TupleElement,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
@@ -105,6 +105,7 @@ fn object_surface(
     let members: Vec<SurfaceMember> = members
         .iter()
         .map(|(name, value)| SurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             name: Arc::from(*name),
             value: *value,
             optional: false,
@@ -117,13 +118,14 @@ fn object_surface(
             merge_role: Default::default(),
         })
         .collect();
-    let view = SurfaceView {
+    let view = crate::semantic_query::surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
         index_signatures: Arc::from(Vec::new().into_boxed_slice()),
         keyspace: None,
         has_index_signature: false,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     };
     graph.intern_node(SemanticNodeData::Object(view))
 }
@@ -1339,7 +1341,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     };
     assert!(
         instantiated_surface
-            .members
+            .positive_members()
             .iter()
             .any(|member| member.name.as_ref() == "row"),
         "ResolveDecl → Instantiate preserves the exact-owner `row` member"
@@ -1358,7 +1360,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     };
     assert!(
         surface
-            .members
+            .positive_members()
             .iter()
             .any(|member| member.name.as_ref() == "row"),
         "the exact-owner body locator preserves the `row` member"

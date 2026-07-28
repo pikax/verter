@@ -32,6 +32,7 @@ import {
   MEMBER_CONSTRUCT_SIGNATURE,
   MEMBER_INDEX_SIGNATURE,
   MEMBER_METHOD,
+  MEMBER_SPREAD,
   MEMBER_PROPERTY,
   MEMBER_PROVENANCE_DECLARED,
   MEMBER_PROVENANCE_INHERITED,
@@ -413,6 +414,10 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
                 graph.getString(member.nameId);
               }
               graph.getNode(member.functionNodeId);
+              break;
+            case MEMBER_SPREAD:
+              // Pre-fold spread entry: the operand rides the type slot.
+              graph.getNode(member.typeNodeId);
               break;
             default:
               throw graphError(

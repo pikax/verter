@@ -243,7 +243,7 @@ fn expanded_shape_from_surface_view(
 ) -> ExpandedObjectShape {
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let properties = surface
-        .members
+        .positive_members()
         .iter()
         .map(|member| ExpandedProperty {
             name: member.name.as_ref().to_string(),
@@ -296,7 +296,9 @@ fn expanded_shape_from_surface_view(
             .collect::<Vec<_>>();
     // Genuinely-open surface (flag set, no concrete payload) → open placeholder
     // (string keyspace, typed-degraded value).
-    if surface.has_index_signature && surface.index_signatures.is_empty() {
+    if (surface.has_known_index_signature() && surface.index_signatures.is_empty())
+        || surface.is_open_spread()
+    {
         index_signatures.push(ExpandedIndexSignature {
             key_type: verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
                 ClosedTypeFact::Leaf(LeafTypeFact::Primitive(

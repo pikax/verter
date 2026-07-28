@@ -32,7 +32,7 @@ use verter_type_expr::facts::{
     InferenceUnavailableReason, KeyTypeShape, LeafTypeFact, MemberHeaderFact,
     MemberReturnInferenceFact, NarrowTypeParam, ObjectMemberFact, ObjectMethodFact,
     ObjectPropertyFact, ObjectShapeFact, ReturnInferenceCompleteness, ReturnInferenceUnsupported,
-    SemanticTypeSource, TypeParamDeclFact,
+    SemanticTypeSource, SpreadMemberFact, TypeParamDeclFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
@@ -1142,6 +1142,18 @@ fn object_shape_fact(
                         },
                     })
                 }
+                ObjectMember::Spread(_) => ObjectMemberFact::Spread(SpreadMemberFact {
+                    // The spread OPERAND is the member's value slot: the deref
+                    // of `Member { ordinal } / MemberValue` over the re-lowered
+                    // shape yields the operand's type.
+                    ty: anchored_slot(
+                        anchor,
+                        vec![
+                            TypeBodyPathStep::Member { ordinal },
+                            TypeBodyPathStep::MemberValue,
+                        ],
+                    ),
+                }),
             })
         })
         .collect();
@@ -3316,6 +3328,11 @@ fn unavailable_function_signature(
     }
 }
 
+/// Extract an object literal EXPRESSION into the ordered pre-fold IR: every
+/// direct member is minted `FreshOwn` and every spread rides an
+/// [`ObjectMember::Spread`] entry holding the operand's inferred type — all in
+/// source order. The producer NEVER folds: taint/overlap semantics are the
+/// shared spread materializer's decision at graph-lowering time.
 fn extract_object_literal(
     obj: &ObjectExpression<'_>,
     source: &str,
@@ -3342,13 +3359,20 @@ fn extract_object_literal(
                         &mut members,
                         verter_type_expr::ObjectProperty::with_spans_public(
                             name, ty, false, readonly, spans,
-                        ),
+                        )
+                        // A member written directly in the literal is a fresh
+                        // excess-property candidate until a later spread
+                        // overlaps it (the fold's decision).
+                        .with_excess_origin(verter_type_expr::ExcessPropertyOrigin::FreshOwn),
                     );
                 }
             }
-            ObjectPropertyKind::SpreadProperty(_) => {
-                // This function returns ObjectExpr only — can't represent intersections.
-                // Use extract_object_literal_as_type() for spread-aware inference.
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                let spread_ty =
+                    infer_expression_type_ctx(&spread.argument, source, policy, budget, depth + 1)?;
+                members.push(ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                    spread_ty,
+                )));
             }
         }
     }
@@ -3357,8 +3381,7 @@ fn extract_object_literal(
     })
 }
 
-/// Like `extract_object_literal`, but returns a `TypeExpr` directly so it can
-/// represent intersections when the object contains spread of non-literal sources.
+/// Like `extract_object_literal`, but returns a `TypeExpr` directly.
 ///
 /// `policy` carries the enclosing object-literal context (see
 /// [`MemberLiteralPolicy`]): a property widens / preserves / preserves+readonly
@@ -3370,60 +3393,9 @@ fn extract_object_literal_as_type(
     budget: &mut InferenceBudget,
     depth: usize,
 ) -> InferenceResult<TypeExpr> {
-    budget.visit(depth)?;
-    let mut members = Vec::new();
-    let mut spread_types: Vec<TypeExpr> = Vec::new();
-    for prop in &obj.properties {
-        match prop {
-            ObjectPropertyKind::ObjectProperty(p) => {
-                if let Some(name) = property_key_name(&p.key) {
-                    let (ty, readonly) =
-                        object_member_value(&p.value, source, policy, budget, depth + 1)?;
-                    let spans = MemberSpans {
-                        declaration: Some(p.span.into()),
-                        name: Some(p.key.span().into()),
-                        // Value-inferred property: there is no source type
-                        // annotation to anchor.
-                        type_annotation: None,
-                    };
-                    push_object_property_with_override(
-                        &mut members,
-                        verter_type_expr::ObjectProperty::with_spans_public(
-                            name, ty, false, readonly, spans,
-                        ),
-                    );
-                }
-            }
-            ObjectPropertyKind::SpreadProperty(spread) => {
-                let spread_ty =
-                    infer_expression_type_ctx(&spread.argument, source, policy, budget, depth + 1)?;
-                match spread_ty {
-                    TypeExpr::Object(ref obj_expr) => {
-                        for member in &obj_expr.properties {
-                            push_object_member_with_override(&mut members, member.clone());
-                        }
-                    }
-                    ty if !matches!(ty, TypeExpr::Primitive(PrimitiveName::Any)) => {
-                        spread_types.push(ty);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let own_obj = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: members,
-    }));
-
-    if spread_types.is_empty() {
-        Ok(own_obj)
-    } else if matches!(&own_obj, TypeExpr::Object(obj) if obj.properties.is_empty()) {
-        Ok(TypeExpr::intersection(spread_types))
-    } else {
-        spread_types.push(own_obj);
-        Ok(TypeExpr::Intersection(spread_types.into()))
-    }
+    Ok(TypeExpr::Object(Arc::new(extract_object_literal(
+        obj, source, policy, budget, depth,
+    )?)))
 }
 
 fn push_object_property_with_override(
@@ -3437,13 +3409,6 @@ fn push_object_property_with_override(
         members.remove(existing_index);
     }
     members.push(ObjectMember::Property(property));
-}
-
-fn push_object_member_with_override(members: &mut Vec<ObjectMember>, member: ObjectMember) {
-    match member {
-        ObjectMember::Property(property) => push_object_property_with_override(members, property),
-        other => members.push(other),
-    }
 }
 
 #[derive(Debug)]
@@ -4351,6 +4316,13 @@ fn widen_object_member_with_budget(
         ObjectMember::Property(mut property) => {
             property.ty = widen_literal_type_with_budget(property.ty, budget, depth + 1)?;
             Ok(ObjectMember::Property(property))
+        }
+        ObjectMember::Spread(mut spread) => {
+            // Widening the pre-fold operand is the fold-equivalent of widening
+            // the spread-produced members: an inline literal operand's members
+            // widen recursively; a reference operand passes through unchanged.
+            spread.ty = widen_literal_type_with_budget(spread.ty, budget, depth + 1)?;
+            Ok(ObjectMember::Spread(spread))
         }
         ObjectMember::IndexSignature(mut signature) => {
             signature.value_type =

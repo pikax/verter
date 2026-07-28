@@ -573,10 +573,17 @@ fn node_contains_free_type_param(
         SemanticNodeData::Tuple { elements, .. } => elements
             .iter()
             .any(|e| node_contains_free_type_param(dispatch, e.value, depth + 1)),
-        SemanticNodeData::Object(view) => view
-            .members
-            .iter()
-            .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1)),
+        SemanticNodeData::Object(view) => {
+            view.positive_members()
+                .iter()
+                .any(|m| node_contains_free_type_param(dispatch, m.value, depth + 1))
+                || view.open_spread_operands().is_some_and(|operands| {
+                    operands
+                        .as_slice()
+                        .iter()
+                        .any(|operand| node_contains_free_type_param(dispatch, *operand, depth + 1))
+                })
+        }
         SemanticNodeData::KeyOf { base } => {
             node_contains_free_type_param(dispatch, *base, depth + 1)
         }
@@ -988,7 +995,7 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members = super::projectors::read_surface_members(ctx, slot_surface);
+    let slot_members = super::projectors::read_positive_surface_members(ctx, slot_surface);
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1109,7 +1116,7 @@ pub(crate) fn compute_bindings_via_graph(
                 continue;
             }
         };
-        let binding_members = super::projectors::read_surface_members(ctx, param_surface);
+        let binding_members = super::projectors::read_positive_surface_members(ctx, param_surface);
 
         for binding in binding_members.iter() {
             // Public-only publication: a navigated class param's `private` /
@@ -1480,13 +1487,16 @@ fn node_reaches_non_owner_ref(
             contributors: members,
         } => members.iter().copied().any(recur),
         SemanticNodeData::Object(surface) => {
-            surface.members.iter().any(|m| recur(m.value))
+            surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
                     .index_signatures
                     .iter()
                     .any(|sig| recur(sig.key_type) || recur(sig.value_type))
                 || surface.call_signatures.iter().copied().any(recur)
                 || surface.construct_signatures.iter().copied().any(recur)
+                || surface.open_spread_operands().is_some_and(|operands| {
+                    operands.as_slice().iter().any(|operand| recur(*operand))
+                })
         }
         SemanticNodeData::Signature {
             params,

@@ -776,6 +776,7 @@ fn retain_members(surface: &TypeInfoSurface, keep: &[String]) -> TypeInfoSurface
         .collect();
     TypeInfoSurface {
         members: Arc::from(members.into_boxed_slice()),
+        members_complete: surface.members_complete,
         call_signatures: Arc::clone(&surface.call_signatures),
         construct_signatures: Arc::clone(&surface.construct_signatures),
         index_signatures: Arc::clone(&surface.index_signatures),
@@ -1236,10 +1237,11 @@ fn instance_export_display_node(
 ) -> SemanticNodeId {
     let resolved = follow_alias_chain(store, node);
     if let Some(SemanticNodeData::Object(surface)) = store.node_data(resolved).as_deref() {
-        if surface.members.is_empty()
+        if surface.closed().is_some()
+            && surface.positive_members().is_empty()
             && surface.construct_signatures.is_empty()
             && surface.index_signatures.is_empty()
-            && !surface.has_index_signature
+            && !surface.has_known_index_signature()
             && surface.keyspace.is_none()
             && surface.call_signatures.len() == 1
         {

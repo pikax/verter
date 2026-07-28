@@ -30,7 +30,7 @@ use crate::instant::Instant;
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
+    SemanticNodeId, SemanticQueryKey, SurfaceMember, TupleElement,
 };
 // `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
 // harness wrapper below; the production reverse boundaries take a
@@ -779,7 +779,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // terminal).
             SemanticNodeData::Object(view) => {
                 if is_whole_surface_published(parent_context) {
-                    for member in view.members.iter() {
+                    for member in view.positive_members().iter() {
                         stack.push(ReduceFrame::descend(member.value, parent_context));
                     }
                     for sig in view.call_signatures.iter() {
@@ -794,6 +794,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                     if let Some(ks) = view.keyspace {
                         stack.push(ReduceFrame::descend(ks, parent_context));
+                    }
+                    if let Some(operands) = view.open_spread_operands() {
+                        for operand in operands.as_slice() {
+                            stack.push(ReduceFrame::descend(*operand, parent_context));
+                        }
                     }
                 }
             }
@@ -1767,8 +1772,8 @@ fn rebuild_object(
     };
     let mut changed = false;
     let new_members: Arc<[SurfaceMember]> = {
-        let mut out: Vec<SurfaceMember> = Vec::with_capacity(view.members.len());
-        for m in view.members.iter() {
+        let mut out: Vec<SurfaceMember> = Vec::with_capacity(view.positive_members().len());
+        for m in view.positive_members().iter() {
             let new_value = mapping.get(&(m.value, context)).copied().unwrap_or(m.value);
             if new_value != m.value {
                 changed = true;
@@ -1802,16 +1807,24 @@ fn rebuild_object(
         }
         Arc::from(out.into_boxed_slice())
     };
+    let new_completeness = view.completeness_with_mapped_operands(|operand| {
+        let mapped = mapping.get(&(operand, context)).copied().unwrap_or(operand);
+        if mapped != operand {
+            changed = true;
+        }
+        mapped
+    });
     if !changed {
         return Some(node);
     }
-    let new_view = SurfaceView {
+    let new_view = crate::semantic_query::surface_view! {
         members: new_members,
         call_signatures: new_calls,
         construct_signatures: new_constructs,
         index_signatures: view.index_signatures.clone(),
         keyspace: view.keyspace,
-        has_index_signature: view.has_index_signature,
+        has_index_signature: view.has_known_index_signature(),
+        completeness: new_completeness,
     };
     Some(
         dispatch
@@ -3990,6 +4003,9 @@ impl<'a> OpenWalk<'a> {
             // generic nested in a member value / function parameter /
             // element type.
             SemanticNodeData::Object(view) => {
+                if view.is_open_spread() {
+                    return true;
+                }
                 if view
                     .index_signatures
                     .iter()
@@ -3999,7 +4015,10 @@ impl<'a> OpenWalk<'a> {
                 }
                 (self.role.descend_value_surfaces()
                     || self.position == OperandPosition::ValueSensitive)
-                    && (view.members.iter().any(|m| self.node_is_open(ctx, m.value))
+                    && (view
+                        .positive_members()
+                        .iter()
+                        .any(|m| self.node_is_open(ctx, m.value))
                         || view
                             .call_signatures
                             .iter()
@@ -5055,9 +5074,7 @@ mod tests {
     /// would return `true` for the closed cases too and fail this test.
     #[test]
     fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
-        use crate::semantic_query::{
-            DeclIdentity, HashValue, SemanticNodeData, SurfaceView, TupleElement,
-        };
+        use crate::semantic_query::{DeclIdentity, HashValue, SemanticNodeData, TupleElement};
 
         let host = VerterHost::new_standalone(Default::default());
         let dispatch = ProjectSemanticDispatch::new(&host);
@@ -5159,14 +5176,17 @@ mod tests {
         );
 
         // CLOSED: a finite object surface domain.
-        let closed_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }));
+        let closed_object = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ));
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
                 &dispatch,
@@ -5227,7 +5247,7 @@ mod tests {
     fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         use crate::semantic_query::{
             DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
-            SemanticNodeData, SurfaceView,
+            SemanticNodeData,
         };
 
         let host = VerterHost::new_standalone(Default::default());
@@ -5243,14 +5263,17 @@ mod tests {
         let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
         // CONCRETE object, OPEN type-param key.
-        let concrete_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }));
+        let concrete_object = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ));
         let open_key = graph.intern_node(SemanticNodeData::TypeParam {
             decl: DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -5341,7 +5364,7 @@ mod tests {
     fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
         use crate::semantic_query::{
             DeclIdentity, HashValue, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
-            SemanticNodeData, SemanticNodeId, SurfaceView,
+            SemanticNodeData, SemanticNodeId,
         };
 
         let host = VerterHost::new_standalone(Default::default());
@@ -5356,14 +5379,17 @@ mod tests {
         };
         let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
-        let concrete_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }));
+        let concrete_object = graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+                completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
+            },
+        ));
         let concrete_key =
             graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
         // The mapper's OWN binder `K` (bound) vs the open OUTER `T`.

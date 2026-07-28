@@ -468,6 +468,13 @@ fn normalize_object(
                     idx.readonly,
                 )));
             }
+            // Spread position is semantic (the fold depends on where the
+            // spread sits between direct members) — PRESERVED, never sorted.
+            ObjectMember::Spread(spread) => {
+                ordered.push(ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                    normalize_node(&spread.ty, mode, scope)?,
+                )));
+            }
             ObjectMember::CallSignature(f) => {
                 ordered.push(ObjectMember::CallSignature(normalize_function(
                     f, mode, scope,

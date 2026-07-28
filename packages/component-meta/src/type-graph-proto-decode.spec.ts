@@ -63,3 +63,48 @@ describe("decodeTypedComponentMetaPayload", () => {
     expect(result.origin!.metaStrings[0]).toBe('SubstitutedParam("T")');
   });
 });
+
+describe("object-literal spread member wire decode", () => {
+  it("decodes a spread member (kind 6) instead of throwing", async () => {
+    const { buildTestComponentMetaProtoPayload } = await import("./type-graph.test-utils.js");
+    const init = buildTestComponentMetaProtoPayload({
+      filePath: "/spread.vue",
+      props: [
+        {
+          name: "p",
+          type: {
+            kind: "object",
+            properties: [{ name: "a", type: { kind: "primitive", name: "number" } }],
+          },
+        },
+      ],
+    });
+    // Append a pre-fold SPREAD entry (kind 6) to the object node's members —
+    // its operand rides the member's typeNodeId slot (reuse the existing
+    // property's type node).
+    const nodes = (init.typeGraph!.nodes ?? []) as Array<{
+      kind?: { case?: string; value?: { members?: Array<Record<string, unknown>> } };
+    }>;
+    const objectNode = nodes.find((node) => node.kind?.case === "object");
+    expect(objectNode).toBeDefined();
+    const members = objectNode!.kind!.value!.members!;
+    const operandNodeId = members[0].typeNodeId as number;
+    members.push({
+      kind: 6,
+      nameId: 0,
+      typeNodeId: operandNodeId,
+      optional: false,
+      readonly: false,
+      keyNameId: 0,
+      keyTypeNodeId: 0,
+      valueTypeNodeId: 0,
+      functionNodeId: 0,
+    });
+
+    const payload = create(ComponentMetaPayloadSchema, init);
+    const bytes = toBinary(ComponentMetaPayloadSchema, payload);
+
+    const result = decodeTypedComponentMetaPayload(bytes);
+    expect(result.props).toHaveLength(1);
+  });
+});

@@ -149,11 +149,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             alg.tuple(folded, *readonly)
         }
         SemanticNodeData::Object(surface) => {
-            if surface.members.is_empty()
-                && surface.call_signatures.is_empty()
-                && surface.construct_signatures.is_empty()
-                && !surface.has_index_signature
-            {
+            if surface.closed().is_some_and(|closed| closed.is_empty()) {
                 alg.empty_object()
             } else {
                 fold_surface_view(alg, dispatch, surface)
@@ -436,6 +432,39 @@ fn fold_optional_slot<A: RaisedShapeAlgebra>(
     }
 }
 
+fn push_surface_member<A: RaisedShapeAlgebra>(
+    alg: &mut A,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    members: &mut Vec<A::Member>,
+    member: &crate::semantic_query::SurfaceMember,
+) {
+    let mut active = FxHashSet::default();
+    let ty = fold_node(alg, dispatch, member.value, &mut active)
+        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember));
+    if member.is_method {
+        if let Some(function) = alg.out_as_function(&ty) {
+            members.push(alg.member_method(
+                member.name.as_ref().to_string(),
+                function,
+                member.optional,
+                member.visibility,
+                member.excess_origin,
+                member.spans,
+            ));
+            return;
+        }
+    }
+    members.push(alg.member_property(
+        member.name.as_ref().to_string(),
+        ty,
+        member.optional,
+        member.readonly,
+        member.visibility,
+        member.excess_origin,
+        member.spans,
+    ));
+}
+
 /// Reconstruct an Object from a [`SurfaceView`] — the non-empty `Object` arm.
 /// Each member / signature value folds through the core with a FRESH cycle set
 /// (matching the materializer's fresh-per-member `active`). A member whose
@@ -462,37 +491,28 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
     // Single-call-signature fast path: a surface with no members, no construct
     // signatures, no index signature, and exactly one call signature IS that
     // call signature's value (not wrapped in an object).
-    if surface.members.is_empty()
+    if surface.closed().is_some()
+        && surface.positive_members().is_empty()
         && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
+        && !surface.has_known_index_signature()
         && surface.call_signatures.len() == 1
     {
         return Some(fold_member(alg, dispatch, surface.call_signatures[0]));
     }
 
     let mut members: Vec<A::Member> = Vec::new();
-    for member in surface.members.iter() {
-        let ty = fold_member(alg, dispatch, member.value);
-        if member.is_method {
-            if let Some(function) = alg.out_as_function(&ty) {
-                members.push(alg.member_method(
-                    member.name.as_ref().to_string(),
-                    function,
-                    member.optional,
-                    member.visibility,
-                    member.spans,
-                ));
-                continue;
-            }
+    // The operand-only marker retains encounter order, while the positive
+    // map is the authoritative final state. Emit operands first and the final
+    // positive evidence last: exact later writes retain their override, and
+    // members tainted by a later open operand remain conservative.
+    if let Some(operands) = surface.open_spread_operands() {
+        for operand in operands.as_slice() {
+            let ty = fold_member(alg, dispatch, *operand);
+            members.push(alg.member_spread(ty));
         }
-        members.push(alg.member_property(
-            member.name.as_ref().to_string(),
-            ty,
-            member.optional,
-            member.readonly,
-            member.visibility,
-            member.spans,
-        ));
+    }
+    for member in surface.positive_members().iter() {
+        push_surface_member(alg, dispatch, &mut members, member);
     }
 
     // Signatures that do not raise to a Function are dropped from the
@@ -537,7 +557,7 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
     // OPEN (`has_index_signature` set, no concrete signature carried). Typed
     // degradation: the sidecar carries `QueryError::OpenSurface`; the compat
     // tree keeps the legacy `projectedOpenSurface` spelling.
-    if surface.has_index_signature && surface.index_signatures.is_empty() {
+    if surface.has_known_index_signature() && surface.index_signatures.is_empty() {
         let key_type = alg.primitive(PrimitiveName::String);
         let value_type = alg.opaque_sentinel(&QueryError::OpenSurface);
         members.push(alg.member_index_signature(

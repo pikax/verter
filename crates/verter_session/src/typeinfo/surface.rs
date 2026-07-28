@@ -215,6 +215,8 @@ pub struct TypeInfoIndexSignature {
 pub struct TypeInfoSurface {
     /// Named members in declaration order.
     pub members: Arc<[TypeInfoSurfaceMember]>,
+    /// Whether `members` is the complete named-member domain.
+    pub members_complete: bool,
     /// Call signatures in declaration order.
     pub call_signatures: Arc<[TypeInfoSurfaceSignature]>,
     /// Construct signatures in declaration order.
@@ -237,6 +239,7 @@ impl TypeInfoSurface {
     pub fn empty() -> Self {
         Self {
             members: Arc::from(Vec::new().into_boxed_slice()),
+            members_complete: true,
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -255,7 +258,7 @@ impl TypeInfoSurface {
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
         let members: Vec<TypeInfoSurfaceMember> = view
-            .members
+            .positive_members()
             .iter()
             .map(|member| build_member(graph, member))
             .collect();
@@ -276,11 +279,12 @@ impl TypeInfoSurface {
             .collect();
         Self {
             members: Arc::from(members.into_boxed_slice()),
+            members_complete: view.closed().is_some(),
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),
             construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace: view.keyspace,
-            has_index_signature: view.has_index_signature,
+            has_index_signature: view.has_known_index_signature(),
         }
     }
 

@@ -3,7 +3,7 @@
 
 use super::support::*;
 use crate::VerterHost;
-use verter_type_expr::LiteralValue;
+use verter_type_expr::{LiteralValue, ObjectMember};
 
 const SYNTHETIC_FLOW_VALUES_PACKAGE_JSON: &str = r#"{
   "name": "synthetic-flow-values",
@@ -1186,9 +1186,21 @@ catalog_contract!(
     flow_return_ob02_materializes_spread_override_order,
     "OB02",
     |expr| {
-        let props = assert_object_has_props(expr, &["a", "b"]);
-        assert_number_literal(&props["a"].ty, 1.0);
-        assert_string_literal(&props["b"].ty, "y");
+        let TypeExpr::Object(object) = expr else {
+            panic!("OB02 must materialize as an object, got {expr:?}");
+        };
+        let [ObjectMember::Spread(base), ObjectMember::Property(override_b)] =
+            object.properties.as_slice()
+        else {
+            panic!(
+                "OB02 must retain the open spread before the authoritative override, got {expr:?}"
+            );
+        };
+        let base_props = assert_object_has_props(&base.ty, &["a", "b"]);
+        assert_number_literal(&base_props["a"].ty, 1.0);
+        assert_string_literal(&base_props["b"].ty, "x");
+        assert_eq!(override_b.name, "b");
+        assert_string_literal(&override_b.ty, "y");
     }
 );
 

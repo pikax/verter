@@ -2840,6 +2840,9 @@ fn push_type_expr_children<'a>(expr: &'a TypeExpr, pending: &mut Vec<&'a TypeExp
                     verter_type_expr::ObjectMember::Method(method) => {
                         push_function(&method.function, pending);
                     }
+                    verter_type_expr::ObjectMember::Spread(spread) => {
+                        pending.push(&spread.ty);
+                    }
                 }
             }
         }

@@ -34,13 +34,14 @@ fn open_project() -> Arc<MetaProject> {
 }
 
 fn empty_surface() -> SurfaceView {
-    SurfaceView {
+    crate::semantic_query::surface_view! {
         members: Arc::from(Vec::new()),
         call_signatures: Arc::from(Vec::new()),
         construct_signatures: Arc::from(Vec::new()),
         index_signatures: Arc::from(Vec::new()),
         keyspace: None,
         has_index_signature: false,
+        completeness: crate::semantic_query::MemberSurfaceCompleteness::Closed,
     }
 }
 

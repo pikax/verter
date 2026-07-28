@@ -1,6 +1,6 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 3;
+export const GRAPH_FORMAT_VERSION = 4;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;
@@ -38,6 +38,9 @@ export const MEMBER_INDEX_SIGNATURE = 2;
 export const MEMBER_CALL_SIGNATURE = 3;
 export const MEMBER_CONSTRUCT_SIGNATURE = 4;
 export const MEMBER_METHOD = 5;
+// Object-literal spread entry (pre-fold ordered IR); the operand rides the
+// member's typeNodeId slot.
+export const MEMBER_SPREAD = 6;
 
 export const ROOT_REACHABILITY_NO_FALLTHROUGH = 1;
 export const ROOT_REACHABILITY_BRANCHES = 2;

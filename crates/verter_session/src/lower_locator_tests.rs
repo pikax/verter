@@ -25,14 +25,14 @@ use verter_type_expr::locators::{
     TypeParamBoundPosition,
 };
 use verter_type_expr::TopLevelOwnerId;
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, SpreadMember, TypeExpr};
 
 use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
 use crate::project_semantic_dispatch::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    MemberMergeRole, NodeScopeId, ProjectionMode, ProjectionReductionContext, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
+    MemberMergeRole, MemberSurfaceCompleteness, NodeScopeId, ProjectionMode,
+    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
@@ -145,11 +145,11 @@ fn lower_locator_distinguishes_same_named_module_and_instance_declarations() {
     let module_surface = object_surface(&host, module);
     let instance_surface = object_surface(&host, instance);
     assert!(module_surface
-        .members
+        .positive_members()
         .iter()
         .any(|member| member.name.as_ref() == "moduleOnly"));
     assert!(instance_surface
-        .members
+        .positive_members()
         .iter()
         .any(|member| member.name.as_ref() == "instanceOnly"));
     assert_eq!(
@@ -213,7 +213,7 @@ fn object_surface(host: &VerterHost, node: SemanticNodeId) -> crate::semantic_qu
 
 fn member_value(surface: &crate::semantic_query::SurfaceView, name: &str) -> SemanticNodeId {
     surface
-        .members
+        .positive_members()
         .iter()
         .find(|m| m.name.as_ref() == name)
         .unwrap_or_else(|| panic!("member `{name}` must be present"))
@@ -402,27 +402,86 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     let stamped_surface = object_surface(&host, stamped);
     assert!(
-        stamped_surface.members[0].declared_in_macro_type_arg.get(),
+        stamped_surface.positive_members()[0]
+            .declared_in_macro_type_arg
+            .get(),
         "control: the OLD path under a macro-own-body context stamps \
          declared_in_macro_type_arg"
     );
     assert_eq!(
-        stamped_surface.members[0].merge_role,
+        stamped_surface.positive_members()[0].merge_role,
         MemberMergeRole::OwnBody,
         "control: the OLD path stamps the caller merge role"
     );
 
     let role_free_surface = object_surface(&host, role_free);
     assert!(
-        !role_free_surface.members[0]
+        !role_free_surface.positive_members()[0]
             .declared_in_macro_type_arg
             .get(),
         "the locator-shape entry must NOT stamp declared_in_macro_type_arg"
     );
     assert_eq!(
-        role_free_surface.members[0].merge_role,
+        role_free_surface.positive_members()[0].merge_role,
         MemberMergeRole::Authored,
         "the locator-shape entry must carry the neutral merge role"
+    );
+}
+
+#[test]
+fn locator_spread_shape_is_one_open_object_with_ordered_operands() {
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(OWNER_ID),
+        owner: TopLevelOwnerId::ordinary_file(),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+    let property = |name: &str| {
+        ObjectMember::Property(ObjectProperty::synthetic_public(
+            name.to_string(),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            false,
+            false,
+        ))
+    };
+    let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![
+            property("a"),
+            ObjectMember::Spread(SpreadMember::new(TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            })),
+            property("x"),
+        ],
+    }));
+    let binders = Vec::<LocatorBinderFrame>::new();
+    let context = LocatorShapeCtx::new(&scope, &binders, None, None);
+    let node = dispatch.lower_type_expr_for_locator_shape(&expr, &context);
+    let surface = object_surface(&host, node);
+    let MemberSurfaceCompleteness::OpenSpread(operands) = &surface.completeness() else {
+        panic!("locator spread must be one open Object");
+    };
+    assert_eq!(operands.len(), 1);
+    assert!(matches!(
+        host.project_type_store()
+            .semantic_graph()
+            .node_data(operands.as_slice()[0])
+            .as_deref(),
+        Some(SemanticNodeData::BareRef(_))
+    ));
+    assert_eq!(
+        surface
+            .positive_members()
+            .iter()
+            .map(|member| member.name.as_ref())
+            .collect::<Vec<_>>(),
+        ["a", "x"]
     );
 }
 
@@ -710,7 +769,11 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
         other => panic!("the typedef locator must lower, got {other:?}"),
     };
     let surface = object_surface(&host, node);
-    let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    let mut names: Vec<&str> = surface
+        .positive_members()
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -1072,7 +1135,7 @@ fn lower_locator_constraint_binds_full_sibling_frame() {
     };
     for (member_name, expected_display, expected_ordinal) in [("x", "T", 0u16), ("y", "U", 1u16)] {
         let member = view
-            .members
+            .positive_members()
             .iter()
             .find(|member| member.name.as_ref() == member_name)
             .unwrap_or_else(|| panic!("member `{member_name}` must exist on Bar's body"));

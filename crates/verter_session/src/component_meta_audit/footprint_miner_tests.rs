@@ -331,6 +331,50 @@ fn structural_hash_is_stable_for_identical_carriers() {
     );
 }
 
+#[test]
+fn structural_hash_discriminates_open_operand_identity() {
+    use crate::semantic_query::{
+        MacroOwnBodyStamp, MemberSurfaceCompleteness, MergeRoleStamp, OpenSpreadOperands,
+        SurfaceMember,
+    };
+
+    let graph = empty_graph();
+    let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    let member = SurfaceMember {
+        name: Arc::from("a"),
+        value,
+        optional: true,
+        readonly: false,
+        is_method: false,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        spans: verter_type_expr::MemberSpans::default(),
+        declaration_origin: None,
+        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+        merge_role: MergeRoleStamp::NEUTRAL,
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
+    };
+    let other_operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+    let data = |operand| {
+        SemanticNodeData::Object(crate::semantic_query::surface_view! {
+            members: Arc::from([member.clone()]),
+            call_signatures: Arc::from([]),
+            construct_signatures: Arc::from([]),
+            index_signatures: Arc::from([]),
+            keyspace: None,
+            has_index_signature: false,
+            completeness: MemberSurfaceCompleteness::OpenSpread(
+                OpenSpreadOperands::new(Arc::from([operand])),
+            ),
+        })
+    };
+    assert_ne!(
+        structural_hash_of(&graph, &data(operand)),
+        structural_hash_of(&graph, &data(other_operand)),
+        "open operand identity is part of the footprint structural fingerprint"
+    );
+}
+
 /// The discriminating signal must be the carrier ARGUMENT, not merely the
 /// carrier HEAD. `Foo<A>` and `Foo<B>` share an identical head (`Foo` /
 /// `Global`), so a head-only fingerprint would make them equal; this test

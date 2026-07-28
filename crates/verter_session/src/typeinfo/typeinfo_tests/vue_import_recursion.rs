@@ -136,7 +136,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
-                .members
+                .positive_members()
                 .iter()
                 .map(|m| m.name.as_ref().to_string())
                 .collect();
@@ -190,7 +190,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
             let mut names: Vec<String> = view
-                .members
+                .positive_members()
                 .iter()
                 .map(|m| m.name.as_ref().to_string())
                 .collect();
@@ -463,7 +463,7 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
         !matches!(
             crate::project_semantic_dispatch::node_data_for(&host_ctx, node).as_deref(),
             Some(SemanticNodeData::Object(view))
-                if view.members.iter().any(|member| member.name.as_ref() == "$props")
+                if view.positive_members().iter().any(|member| member.name.as_ref() == "$props")
         ),
         "a Module(0) slot must not reuse the Instance(0) synthesized default body"
     );

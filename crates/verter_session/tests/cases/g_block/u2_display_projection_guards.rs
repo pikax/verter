@@ -44,9 +44,9 @@ use verter_session::semantic_query::demand::{
 };
 use verter_session::semantic_query::{
     DeclIdentity, DeclarationAnalysisValue, FunctionParam, IndexKey, LiteralValue, MapperKey,
-    MapperKind, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, ReadonlyMod, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceMember, SurfaceView,
-    TypeParamDecl, ValueRootKey,
+    MapperKind, MemberMergeRole, MemberSurfaceCompleteness, NodeScopeId, OptionalityMod,
+    PrimitiveKind, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryValue,
+    SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
 };
 
 /// A `Demand` that is `Expanded` on every semantic axis and carries `dn` as its
@@ -278,6 +278,7 @@ fn func_node(
 /// `is_method`).
 fn member(name: &str, value: SemanticNodeId, is_method: bool) -> SurfaceMember {
     SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
         value,
@@ -313,14 +314,15 @@ fn object(
     call_signatures: Vec<SemanticNodeId>,
     construct_signatures: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    store.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-        construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }))
+    store.intern_node(SemanticNodeData::Object(SurfaceView::new(
+        Arc::from(members.into_boxed_slice()),
+        Arc::from(call_signatures.into_boxed_slice()),
+        Arc::from(construct_signatures.into_boxed_slice()),
+        Arc::from(Vec::new().into_boxed_slice()),
+        None,
+        false,
+        MemberSurfaceCompleteness::Closed,
+    )))
 }
 
 // ----------------------------------------------------------------------

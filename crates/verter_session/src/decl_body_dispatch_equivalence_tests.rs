@@ -400,7 +400,7 @@ fn barrel_imported_alias_materializes_at_the_final_defining_canonical() {
         panic!("A must materialise to Node's Object body through the barrel");
     };
     let label = surface
-        .members
+        .positive_members()
         .iter()
         .find(|member| member.name.as_ref() == "label")
         .expect("Node's `label` member must materialise");

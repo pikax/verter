@@ -116,7 +116,11 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
         ),
     };
 
-    let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+    let names: Vec<&str> = view
+        .positive_members()
+        .iter()
+        .map(|m| m.name.as_ref())
+        .collect();
     assert!(
         names.contains(&"msg"),
         "Transit-Shallow Publication — synthesised surface MUST contain `msg` (one \
