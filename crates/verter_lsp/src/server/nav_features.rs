@@ -310,69 +310,38 @@ pub(super) async fn handle_hover(
                         after.replace('\n', "↵"),
                     );
                 }
-                match tp.get_hover(&captured_ctx.tsx_path, tsx_offset).await {
-                    Ok(hover) => {
-                        tracing::info!(
-                            "hover type provider result: {}",
-                            if hover.is_some() {
-                                hover
-                                    .as_ref()
-                                    .map(|h| h.contents.as_str())
-                                    .unwrap_or("Some(empty)")
-                            } else {
-                                "None"
-                            }
-                        );
-                        (hover, captured_ctx)
+                // No-silent-empty (D7): a FAILED provider hover must never
+                // surface as a vanishing tooltip. Route the query through the
+                // ONE shared bounded recovery (resync + retry once + the retry
+                // identity fence) that definition and type-definition also run
+                // — see `provider_recovery`. Fail-closed-on-persistent is the
+                // INTENDED semantics: after the bounded retry the handler
+                // returns `None` (no tooltip), never a fabrication and never a
+                // spin. A persistently failing provider is a provider
+                // sync/health concern, not something hover may paper over with
+                // invented content.
+                let outcome =
+                    super::provider_recovery::provider_query_with_bounded_recovery(
+                        "hover",
+                        position,
+                        captured_ctx,
+                        tsx_offset,
+                        |tsx_path: String, offset: u32| async move {
+                            tp.get_hover(&tsx_path, offset).await
+                        },
+                        || server.ensure_current_file_synced(uri),
+                        || server.type_provider_context(uri),
+                    )
+                    .await;
+                tracing::info!(
+                    "hover type provider result: {}",
+                    match &outcome.value {
+                        Some(Some(hover)) => hover.contents.as_str(),
+                        Some(None) => "None",
+                        None => "unrecovered provider error",
                     }
-                    Err(e) => {
-                        // No-silent-empty (D7): a FAILED provider hover must
-                        // never surface as a vanishing tooltip. Resync the
-                        // current file and retry exactly once against the
-                        // freshly captured surface; a second failure fails
-                        // closed. Provider-neutral — this sits above the
-                        // per-route provider trait.
-                        //
-                        // Fail-closed-on-persistent is the INTENDED semantics:
-                        // after the bounded retry the handler returns `None`
-                        // (no tooltip), never a fabrication and never a spin.
-                        // A persistently failing provider is a provider
-                        // sync/health concern, not something hover may paper
-                        // over with invented content.
-                        tracing::warn!(
-                            "hover type provider error: {} — resyncing and retrying once",
-                            e
-                        );
-                        server.ensure_current_file_synced(uri).await;
-                        match server.type_provider_context(uri) {
-                            Some(retry_ctx) => {
-                                let retry_offset = merge::carrier_position_to_tsx_offset_validated(
-                                    position,
-                                    &retry_ctx.carrier_line_index,
-                                    &retry_ctx.mapper,
-                                    &retry_ctx.tsx_line_index,
-                                );
-                                match retry_offset {
-                                    Some(retry_offset) => {
-                                        match tp.get_hover(&retry_ctx.tsx_path, retry_offset).await
-                                        {
-                                            Ok(hover) => (hover, retry_ctx),
-                                            Err(e2) => {
-                                                tracing::warn!(
-                                                    "hover type provider retry failed: {}",
-                                                    e2
-                                                );
-                                                (None, retry_ctx)
-                                            }
-                                        }
-                                    }
-                                    None => (None, retry_ctx),
-                                }
-                            }
-                            None => (None, captured_ctx),
-                        }
-                    }
-                }
+                );
+                (outcome.value.flatten(), outcome.ctx)
             } else {
                 tracing::info!(
                     "hover: carrier_to_tsx validation failed for {}:{} — position is in synthetic TSX region",

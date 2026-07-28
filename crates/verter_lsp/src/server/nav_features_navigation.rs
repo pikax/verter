@@ -21,6 +21,7 @@ use crate::type_provider::merge;
 
 use super::child_prop_rename::{ChildPropDeclarationProof, ChildPropRenameClass};
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
+use super::provider_recovery::provider_query_with_bounded_recovery;
 use super::rename_plan::{
     rename_request_admission, RenameAdmission, RenameTargetResolution, SameFileProof,
 };
@@ -276,218 +277,231 @@ pub(super) async fn handle_goto_definition(
     // to blocking the request behind publication.
     // Extract all context synchronously — no DashMap guard held across await.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
+        if let Some(initial_ctx) = server.repaired_type_provider_context(uri).await {
             // Use validated mapping to avoid querying TSGO at synthetic TSX
             // positions (e.g., <div> → generated JSX) which can crash it.
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+            if let Some(initial_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
+                &initial_ctx.carrier_line_index,
+                &initial_ctx.mapper,
+                &initial_ctx.tsx_line_index,
             ) {
-                tracing::debug!(
-                    "definition: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                // Pin the FOREIGN carrier IDE surfaces BEFORE the query, so a
-                // returned foreign location maps through the generation the
-                // request began against (never the merge-time current one).
-                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                let foreign_api_set = server
-                    .documents
-                    .provider_surfaces()
-                    .capture_current_carrier_api_set();
-                match tp.get_definition(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_defs) => {
-                        // Post-await validation: a response produced against a
-                        // surface that no longer matches must be DROPPED (fail
-                        // closed), never mapped through a superseded context.
-                        if !server.provider_context_still_valid(uri, &ctx) {
-                            tracing::debug!(
-                                "definition: dropping provider locations — captured surface \
+                // No-silent-empty (D7), definition half: a FAILED provider query
+                // must never surface as a silently dead CTRL+CLICK. Route the
+                // query through the ONE shared bounded recovery (resync + retry
+                // once + the retry identity fence) that hover and
+                // type-definition also run — see `provider_recovery`. Without
+                // it, any provider perturbation leaves member positions empty
+                // (object/interface members have no native definition leg)
+                // while hover at the same cursor self-heals: the user-visible
+                // "hover shows the type but the property never navigates"
+                // asymmetry.
+                let outcome = provider_query_with_bounded_recovery(
+                    "definition",
+                    position,
+                    initial_ctx,
+                    initial_offset,
+                    |tsx_path: String, offset: u32| async move {
+                        // Pin the FOREIGN carrier IDE surfaces BEFORE the query
+                        // (per attempt — a retry re-pins under the surface it
+                        // queries), so a returned foreign location maps through
+                        // the generation the attempt began against (never the
+                        // merge-time current one).
+                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                        let foreign_api_set = server
+                            .documents
+                            .provider_surfaces()
+                            .capture_current_carrier_api_set();
+                        let type_defs = tp.get_definition(&tsx_path, offset).await?;
+                        Ok((type_defs, foreign_ide_set, foreign_api_set))
+                    },
+                    || server.ensure_current_file_synced(uri),
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                if let Some((type_defs, foreign_ide_set, foreign_api_set)) = outcome.value {
+                    // Post-await validation: a response produced against a
+                    // surface that no longer matches must be DROPPED (fail
+                    // closed), never mapped through a superseded context.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "definition: dropping provider locations — captured surface \
                                  no longer valid"
-                            );
-                            return Ok(verter_result);
-                        }
-                        tracing::debug!(
-                            "definition: type provider returned {} locations",
-                            type_defs.len()
                         );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        let barrel_resolver =
-                            |path: &str, start: u32, end: u32| -> Option<Location> {
-                                server.resolve_barrel_type_provider_location(path, start, end)
-                            };
-                        let negotiated_encoding = server.position_encoding.read().clone();
-                        let api_resolver = |api_path: &str| {
-                            crate::provider_surface_store::classify_captured_api_surface(
-                                &foreign_api_set,
-                                api_path,
-                                negotiated_encoding.clone(),
+                        return Ok(verter_result);
+                    }
+                    tracing::debug!(
+                        "definition: type provider returned {} locations",
+                        type_defs.len()
+                    );
+                    let carrier_source_exists =
+                        |p: &str| server.documents.host().get_source(p).is_some();
+                    let barrel_resolver = |path: &str, start: u32, end: u32| -> Option<Location> {
+                        server.resolve_barrel_type_provider_location(path, start, end)
+                    };
+                    let negotiated_encoding = server.position_encoding.read().clone();
+                    let api_resolver = |api_path: &str| {
+                        crate::provider_surface_store::classify_captured_api_surface(
+                            &foreign_api_set,
+                            api_path,
+                            negotiated_encoding.clone(),
+                        )
+                    };
+                    let provider_had_defs = !type_defs.is_empty();
+                    // GlobalComponents fallback-const NAV PROBE offsets for
+                    // any same-file synthetic targets, located through the
+                    // compiler-owned emission-contract reader BEFORE the
+                    // merge consumes the response (fail-closed `None` for
+                    // every non-fallback-const target).
+                    let nav_probe_offsets: Vec<u32> = type_defs
+                        .iter()
+                        .filter(|d| d.path == ctx.tsx_path)
+                        .filter_map(|d| {
+                            verter_session::global_component_nav_probe_offset(
+                                &ctx.tsx_content,
+                                d.start,
+                                d.end,
                             )
-                        };
-                        let provider_had_defs = !type_defs.is_empty();
-                        // GlobalComponents fallback-const NAV PROBE offsets for
-                        // any same-file synthetic targets, located through the
-                        // compiler-owned emission-contract reader BEFORE the
-                        // merge consumes the response (fail-closed `None` for
-                        // every non-fallback-const target).
-                        let nav_probe_offsets: Vec<u32> = type_defs
-                            .iter()
-                            .filter(|d| d.path == ctx.tsx_path)
-                            .filter_map(|d| {
-                                verter_session::global_component_nav_probe_offset(
-                                    &ctx.tsx_content,
-                                    d.start,
-                                    d.end,
-                                )
+                        })
+                        .collect();
+                    let merged = merge::merge_definitions_with_barrel_resolver(
+                        verter_result,
+                        type_defs,
+                        &ctx.tsx_path,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                        Some(&|ide_path: &str| {
+                            server.foreign_ide_context(&foreign_ide_set, ide_path)
+                        }),
+                        Some(&api_resolver),
+                        uri,
+                        &carrier_source_exists,
+                        Some(&barrel_resolver),
+                        negotiated_encoding.clone(),
+                        &|p: &str| {
+                            block_in_place_if_available(|| {
+                                server.documents.host().workspace_read().read_file(p)
                             })
-                            .collect();
-                        let merged = merge::merge_definitions_with_barrel_resolver(
-                            verter_result,
-                            type_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            Some(&api_resolver),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
-                            negotiated_encoding.clone(),
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        );
-                        // If the type provider resolved to a barrel file, follow
-                        // re-exports to the terminal declaration.
-                        let resolved = server.resolve_barrel_locations(merged);
+                        },
+                    );
+                    // If the type provider resolved to a barrel file, follow
+                    // re-exports to the terminal declaration.
+                    let resolved = server.resolve_barrel_locations(merged);
 
-                        // Synthetic-target fallback: the provider RESOLVED the
-                        // identifier, but every returned declaration was dropped
-                        // by the fail-closed merge — the targets live in
-                        // unmapped generated text. When those targets are
-                        // GlobalComponents fallback consts (a template tag whose
-                        // binding is a synthesized const), re-issue `definition`
-                        // at the const's NAV PROBE member — the
-                        // (augmentation-merged) `GlobalComponents` interface
-                        // member — so the tag jumps to the user's real
-                        // registration declaration. An unregistered tag has no
-                        // member symbol: the probe yields nothing and the result
-                        // stays fail-closed EMPTY. Positions whose definition
-                        // the provider could not resolve at all (`type_defs`
-                        // empty) never enter this branch.
-                        let resolved_is_empty = match &resolved {
-                            None => true,
-                            Some(GotoDefinitionResponse::Array(locs)) => locs.is_empty(),
-                            Some(GotoDefinitionResponse::Link(links)) => links.is_empty(),
-                            Some(GotoDefinitionResponse::Scalar(_)) => false,
-                        };
-                        if !(provider_had_defs && resolved_is_empty) {
-                            return Ok(resolved);
-                        }
-                        tracing::debug!(
-                            "definition: all provider targets were synthetic — retrying {} \
+                    // Synthetic-target fallback: the provider RESOLVED the
+                    // identifier, but every returned declaration was dropped
+                    // by the fail-closed merge — the targets live in
+                    // unmapped generated text. When those targets are
+                    // GlobalComponents fallback consts (a template tag whose
+                    // binding is a synthesized const), re-issue `definition`
+                    // at the const's NAV PROBE member — the
+                    // (augmentation-merged) `GlobalComponents` interface
+                    // member — so the tag jumps to the user's real
+                    // registration declaration. An unregistered tag has no
+                    // member symbol: the probe yields nothing and the result
+                    // stays fail-closed EMPTY. Positions whose definition
+                    // the provider could not resolve at all (`type_defs`
+                    // empty) never enter this branch.
+                    let resolved_is_empty = match &resolved {
+                        None => true,
+                        Some(GotoDefinitionResponse::Array(locs)) => locs.is_empty(),
+                        Some(GotoDefinitionResponse::Link(links)) => links.is_empty(),
+                        Some(GotoDefinitionResponse::Scalar(_)) => false,
+                    };
+                    if !(provider_had_defs && resolved_is_empty) {
+                        return Ok(resolved);
+                    }
+                    tracing::debug!(
+                        "definition: all provider targets were synthetic — retrying {} \
                              GlobalComponents nav probe(s)",
-                            nav_probe_offsets.len()
-                        );
-                        let mut probe_defs = Vec::new();
-                        for probe_offset in nav_probe_offsets {
-                            match tp.get_definition(&ctx.tsx_path, probe_offset).await {
-                                Ok(defs) => probe_defs.extend(defs),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "definition: GlobalComponents nav-probe query error: {e}"
-                                    );
-                                }
+                        nav_probe_offsets.len()
+                    );
+                    let mut probe_defs = Vec::new();
+                    for probe_offset in nav_probe_offsets {
+                        match tp.get_definition(&ctx.tsx_path, probe_offset).await {
+                            Ok(defs) => probe_defs.extend(defs),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "definition: GlobalComponents nav-probe query error: {e}"
+                                );
                             }
                         }
-                        // Post-await validation (fail closed), same as above.
-                        if !server.provider_context_still_valid(uri, &ctx) {
-                            return Ok(None);
+                    }
+                    // Post-await validation (fail closed), same as above.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        return Ok(None);
+                    }
+                    if probe_defs.is_empty() {
+                        return Ok(None);
+                    }
+                    // A provider may follow the augmentation member THROUGH
+                    // `typeof C` to the component's synthesized API carrier
+                    // (`{name}.vue.verter.ts`) — a virtual path whose byte
+                    // offsets the fail-closed merge cannot map. Resolve that
+                    // leg natively: normalize the carrier path back to its
+                    // REAL source file and take the component's
+                    // default-export declaration span from the host's export
+                    // tables. Unresolvable legs drop (fail closed).
+                    let mut native_locations: Vec<Location> = Vec::new();
+                    probe_defs.retain(|d| {
+                        let normalized =
+                            merge::normalize_carrier_path_owned(&d.path, &carrier_source_exists);
+                        if normalized == d.path {
+                            return true;
                         }
-                        if probe_defs.is_empty() {
-                            return Ok(None);
+                        if let Some(loc) = host_export_location(server, &normalized, "default") {
+                            native_locations.push(loc);
                         }
-                        // A provider may follow the augmentation member THROUGH
-                        // `typeof C` to the component's synthesized API carrier
-                        // (`{name}.vue.verter.ts`) — a virtual path whose byte
-                        // offsets the fail-closed merge cannot map. Resolve that
-                        // leg natively: normalize the carrier path back to its
-                        // REAL source file and take the component's
-                        // default-export declaration span from the host's export
-                        // tables. Unresolvable legs drop (fail closed).
-                        let mut native_locations: Vec<Location> = Vec::new();
-                        probe_defs.retain(|d| {
-                            let normalized = merge::normalize_carrier_path_owned(
-                                &d.path,
-                                &carrier_source_exists,
-                            );
-                            if normalized == d.path {
-                                return true;
-                            }
-                            if let Some(loc) = host_export_location(server, &normalized, "default")
-                            {
-                                native_locations.push(loc);
-                            }
-                            false
-                        });
-                        if probe_defs.is_empty() {
-                            return Ok(if native_locations.is_empty() {
-                                None
-                            } else {
-                                Some(GotoDefinitionResponse::Array(native_locations))
-                            });
-                        }
-                        let merged = merge::merge_definitions_with_barrel_resolver(
-                            None,
-                            probe_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            Some(&api_resolver),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
-                            negotiated_encoding.clone(),
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        );
-                        let mut locations = match server.resolve_barrel_locations(merged) {
-                            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
-                            Some(GotoDefinitionResponse::Array(locs)) => locs,
-                            Some(GotoDefinitionResponse::Link(links)) => links
-                                .into_iter()
-                                .map(|link| Location {
-                                    uri: link.target_uri,
-                                    range: link.target_selection_range,
-                                })
-                                .collect(),
-                            None => Vec::new(),
-                        };
-                        locations.extend(native_locations);
-                        return Ok(if locations.is_empty() {
+                        false
+                    });
+                    if probe_defs.is_empty() {
+                        return Ok(if native_locations.is_empty() {
                             None
                         } else {
-                            Some(GotoDefinitionResponse::Array(locations))
+                            Some(GotoDefinitionResponse::Array(native_locations))
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("definition: type provider error: {e}");
-                    }
+                    let merged = merge::merge_definitions_with_barrel_resolver(
+                        None,
+                        probe_defs,
+                        &ctx.tsx_path,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                        Some(&|ide_path: &str| {
+                            server.foreign_ide_context(&foreign_ide_set, ide_path)
+                        }),
+                        Some(&api_resolver),
+                        uri,
+                        &carrier_source_exists,
+                        Some(&barrel_resolver),
+                        negotiated_encoding.clone(),
+                        &|p: &str| {
+                            block_in_place_if_available(|| {
+                                server.documents.host().workspace_read().read_file(p)
+                            })
+                        },
+                    );
+                    let mut locations = match server.resolve_barrel_locations(merged) {
+                        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+                        Some(GotoDefinitionResponse::Array(locs)) => locs,
+                        Some(GotoDefinitionResponse::Link(links)) => links
+                            .into_iter()
+                            .map(|link| Location {
+                                uri: link.target_uri,
+                                range: link.target_selection_range,
+                            })
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    locations.extend(native_locations);
+                    return Ok(if locations.is_empty() {
+                        None
+                    } else {
+                        Some(GotoDefinitionResponse::Array(locations))
+                    });
                 }
             } else {
                 tracing::debug!(
@@ -596,79 +610,87 @@ pub(super) async fn handle_goto_type_definition(
     // phase. Capture-only readiness above heals missing dependencies in the
     // background; it never delays this provider query.
     if let Some(tp) = server.type_provider.as_ref() {
-        if let Some(ctx) = server.repaired_type_provider_context(uri).await {
-            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+        if let Some(initial_ctx) = server.repaired_type_provider_context(uri).await {
+            if let Some(initial_offset) = merge::carrier_position_to_tsx_offset_validated(
                 position,
-                &ctx.carrier_line_index,
-                &ctx.mapper,
-                &ctx.tsx_line_index,
+                &initial_ctx.carrier_line_index,
+                &initial_ctx.mapper,
+                &initial_ctx.tsx_line_index,
             ) {
-                tracing::debug!(
-                    "type_definition: querying type provider at tsx offset {}",
-                    tsx_offset
-                );
-                // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
-                // handle_goto_definition).
-                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                let foreign_api_set = server
-                    .documents
-                    .provider_surfaces()
-                    .capture_current_carrier_api_set();
-                match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
-                    Ok(type_defs) => {
-                        // Post-await validation: a response produced against a
-                        // surface that no longer matches must be DROPPED (fail
-                        // closed), never mapped through a superseded context.
-                        if !server.provider_context_still_valid(uri, &ctx) {
-                            tracing::debug!(
-                                "type_definition: dropping provider locations — captured \
-                                 surface no longer valid"
-                            );
-                            return Ok(None);
-                        }
+                // The governing surface principle names definition AND
+                // type-definition: both run the SAME shared bounded recovery
+                // (resync + retry once + the retry identity fence) — see
+                // `provider_recovery`.
+                let outcome = provider_query_with_bounded_recovery(
+                    "type_definition",
+                    position,
+                    initial_ctx,
+                    initial_offset,
+                    |tsx_path: String, offset: u32| async move {
+                        // Pin the FOREIGN carrier IDE surfaces BEFORE the query
+                        // (per attempt — see handle_goto_definition).
+                        let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                        let foreign_api_set = server
+                            .documents
+                            .provider_surfaces()
+                            .capture_current_carrier_api_set();
+                        let type_defs = tp.get_type_definition(&tsx_path, offset).await?;
+                        Ok((type_defs, foreign_ide_set, foreign_api_set))
+                    },
+                    || server.ensure_current_file_synced(uri),
+                    || server.type_provider_context(uri),
+                )
+                .await;
+                let ctx = outcome.ctx;
+                if let Some((type_defs, foreign_ide_set, foreign_api_set)) = outcome.value {
+                    // Post-await validation: a response produced against a
+                    // surface that no longer matches must be DROPPED (fail
+                    // closed), never mapped through a superseded context.
+                    if !server.provider_context_still_valid(uri, &ctx) {
                         tracing::debug!(
-                            "type_definition: type provider returned {} locations",
-                            type_defs.len()
+                            "type_definition: dropping provider locations — captured \
+                                 surface no longer valid"
                         );
-                        let carrier_source_exists =
-                            |p: &str| server.documents.host().get_source(p).is_some();
-                        let barrel_resolver =
-                            |path: &str, start: u32, end: u32| -> Option<Location> {
-                                server.resolve_barrel_type_provider_location(path, start, end)
-                            };
-                        let negotiated_encoding = server.position_encoding.read().clone();
-                        let api_resolver = |api_path: &str| {
-                            crate::provider_surface_store::classify_captured_api_surface(
-                                &foreign_api_set,
-                                api_path,
-                                negotiated_encoding.clone(),
-                            )
-                        };
-                        return Ok(merge::merge_definitions_with_barrel_resolver(
-                            None,
-                            type_defs,
-                            &ctx.tsx_path,
-                            &ctx.tsx_line_index,
-                            &ctx.mapper,
-                            &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| {
-                                server.foreign_ide_context(&foreign_ide_set, ide_path)
-                            }),
-                            Some(&api_resolver),
-                            uri,
-                            &carrier_source_exists,
-                            Some(&barrel_resolver),
+                        return Ok(None);
+                    }
+                    tracing::debug!(
+                        "type_definition: type provider returned {} locations",
+                        type_defs.len()
+                    );
+                    let carrier_source_exists =
+                        |p: &str| server.documents.host().get_source(p).is_some();
+                    let barrel_resolver = |path: &str, start: u32, end: u32| -> Option<Location> {
+                        server.resolve_barrel_type_provider_location(path, start, end)
+                    };
+                    let negotiated_encoding = server.position_encoding.read().clone();
+                    let api_resolver = |api_path: &str| {
+                        crate::provider_surface_store::classify_captured_api_surface(
+                            &foreign_api_set,
+                            api_path,
                             negotiated_encoding.clone(),
-                            &|p: &str| {
-                                block_in_place_if_available(|| {
-                                    server.documents.host().workspace_read().read_file(p)
-                                })
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!("type_definition: type provider error: {e}");
-                    }
+                        )
+                    };
+                    return Ok(merge::merge_definitions_with_barrel_resolver(
+                        None,
+                        type_defs,
+                        &ctx.tsx_path,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                        Some(&|ide_path: &str| {
+                            server.foreign_ide_context(&foreign_ide_set, ide_path)
+                        }),
+                        Some(&api_resolver),
+                        uri,
+                        &carrier_source_exists,
+                        Some(&barrel_resolver),
+                        negotiated_encoding.clone(),
+                        &|p: &str| {
+                            block_in_place_if_available(|| {
+                                server.documents.host().workspace_read().read_file(p)
+                            })
+                        },
+                    ));
                 }
             } else {
                 tracing::debug!(

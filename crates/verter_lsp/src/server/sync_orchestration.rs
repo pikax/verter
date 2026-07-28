@@ -888,12 +888,26 @@ impl VerterLanguageServer {
 
     /// Flush the active file's IDE TSX to the type provider.
     ///
-    /// Lifecycle-owned current-file surface repair: `did_open` (per the open
-    /// policy) and the residual hover/completion dirty-surface heal run it.
-    /// Navigation handlers (definition / typeDefinition / rename) never start
-    /// it — they CAPTURE the committed surface (fail closed) and gate their
-    /// dependency needs through the DependencyReady receipt instead. Only syncs
-    /// the IDE path (TSX) — API (.vue.ts) sync is deferred to the coordinator.
+    /// The single current-file surface repair. Its production invokers:
+    /// - `did_open` (per the open policy);
+    /// - [`Self::repaired_type_provider_context`] — EVERY provider-backed
+    ///   interactive request (hover, completion, definition, type-definition,
+    ///   references, prepare-rename, rename) repairs INLINE through it when
+    ///   `didChange` has advanced past the committed snapshot, BEFORE
+    ///   capturing the request surface — so navigation DOES reach this on its
+    ///   request path for a dirty buffer;
+    /// - rename's unconditional interactive consistency boundary
+    ///   (`handle_rename` repairs even a clean buffer before capturing);
+    /// - the shared bounded transient-error recovery (`provider_recovery`) —
+    ///   ONE resync when a hover / definition / typeDefinition provider query
+    ///   returns `Err`, before its single identity-fenced retry.
+    ///
+    /// What navigation never does is JOIN dependency publication: every
+    /// invocation above is a current-FILE repair (recompile + provider sync of
+    /// THIS buffer), and cross-file dependency needs stay gated through the
+    /// capture-only DependencyReady receipt — no import-set/barrel walk runs
+    /// inline. Only syncs the IDE path (TSX) — API (.vue.ts) sync is deferred
+    /// to the coordinator.
     ///
     /// Runs when:
     /// - File is in `needs_ide_sync`, OR

@@ -167,6 +167,15 @@ mod inner {
         /// recovery contract: a failed provider hover must resync+retry,
         /// never vanish silently.
         fail_next_hovers: usize,
+        /// As `fail_next_hovers`, for `get_definition`: while > 0, each call
+        /// RECORDS itself and returns `Err` (a transient provider/transport
+        /// failure), decrementing the counter. Pins the definition handler's
+        /// resync+retry-once recovery — the same no-silent-empty contract
+        /// hover holds, without which a member-position CTRL+CLICK vanishes
+        /// while hover at the same cursor recovers.
+        fail_next_definitions: usize,
+        /// As `fail_next_definitions`, for `get_type_definition`.
+        fail_next_type_definitions: usize,
         /// When `true`, `get_definition` RECORDS its call and then returns a
         /// future that NEVER resolves, simulating a wedged type provider (a
         /// managed tsgo stuck in a busy dispatch loop). Drives the handler
@@ -303,6 +312,22 @@ mod inner {
         pub fn fail_next_hovers(&self, count: usize) {
             let mut state = self.state.lock().unwrap();
             state.fail_next_hovers = count;
+        }
+
+        /// Script the next `count` `get_definition` calls to fail with `Err`
+        /// (transient provider/transport failure) before normal responses
+        /// resume.
+        pub fn fail_next_definitions(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_definitions = count;
+        }
+
+        /// Script the next `count` `get_type_definition` calls to fail with
+        /// `Err` (transient provider/transport failure) before normal
+        /// responses resume.
+        pub fn fail_next_type_definitions(&self, count: usize) {
+            let mut state = self.state.lock().unwrap();
+            state.fail_next_type_definitions = count;
         }
 
         /// Make every subsequent `get_definition` RECORD its call and then hang
@@ -1152,12 +1177,18 @@ mod inner {
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let (result, on_query, hang) = {
+            let (result, on_query, fail, hang) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::GetDefinition {
                     path: path.to_string(),
                     offset,
                 });
+                let fail = if state.fail_next_definitions > 0 {
+                    state.fail_next_definitions -= 1;
+                    true
+                } else {
+                    false
+                };
                 let result = state
                     .definition_responses
                     .iter()
@@ -1170,7 +1201,7 @@ mod inner {
                     }
                     _ => None,
                 };
-                (result, on_query, state.hang_definition)
+                (result, on_query, fail, state.hang_definition)
             };
             if hang {
                 // A wedged provider: never resolves. The handler must fail closed
@@ -1182,7 +1213,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient definition failure".to_string(),
+                    ));
+                }
+                Ok(result)
+            })
         }
 
         fn get_type_definition(
@@ -1195,13 +1233,26 @@ mod inner {
                 path: path.to_string(),
                 offset,
             });
+            let fail = if state.fail_next_type_definitions > 0 {
+                state.fail_next_type_definitions -= 1;
+                true
+            } else {
+                false
+            };
             let result = state
                 .type_definition_responses
                 .iter()
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            Box::pin(async move {
+                if fail {
+                    return Err(TypeProviderError::new(
+                        "scripted transient type-definition failure".to_string(),
+                    ));
+                }
+                Ok(result)
+            })
         }
 
         fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {

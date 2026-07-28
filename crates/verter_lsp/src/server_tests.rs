@@ -9285,6 +9285,483 @@ const persistentFailureTarget: string = "ok"
     }
 }
 
+/// Shared fixture for the definition transient-recovery pair: a member access
+/// (`foo.bar`) whose receiver the native path could resolve but whose MEMBER
+/// only the provider can — the exact asymmetry of the reported defect ("`foo`
+/// works (sometimes) but `bar` NEVER works" while hover at the same cursor
+/// shows the correct type). Returns `(uri, member_position, expected_decl_range)`
+/// with the provider scripted to answer the member's declaration span inside
+/// the generated TSX (copied authored text), so the full carrier-IDE reverse
+/// map runs on recovery.
+fn seed_member_definition_fixture(
+    server: &VerterLanguageServer,
+    provider: &MockTypeProvider,
+    path: &str,
+) -> (Uri, Position, Range) {
+    let app_source = r#"<script setup lang="ts">
+const foo = { bar: 1 }
+</script>
+<template><div>{{ foo.bar }}</div></template>
+"#;
+    let app_uri = open_test_vue(server, path, app_source);
+    let vue_li = crate::documents::line_index::LineIndex::new_utf16(app_source);
+
+    // Cursor: the MEMBER `bar` in the template `{{ foo.bar }}`.
+    let usage_off = app_source.find("{{ foo.bar }}").expect("member usage") + "{{ foo.".len();
+    let member_position = vue_li
+        .offset_to_position(usage_off as u32)
+        .expect("usage position");
+
+    // Expected result: the authored `bar` in `const foo = { bar: 1 }`.
+    let decl_off = app_source.find("{ bar: 1 }").expect("member decl") + "{ ".len();
+    let expected_decl_range = Range {
+        start: vue_li
+            .offset_to_position(decl_off as u32)
+            .expect("decl start"),
+        end: vue_li
+            .offset_to_position((decl_off + "bar".len()) as u32)
+            .expect("decl end"),
+    };
+
+    // Script the provider: definition AND type-definition at the member's
+    // generated offset answer the declaration's span INSIDE the generated TSX
+    // (copied authored script text — the shape a real engine returns for a
+    // local object member). Both tables are scripted so the same fixture backs
+    // the definition and type-definition recovery pairs.
+    let ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let usage_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("member usage should map into the generated TSX");
+    let tsx_decl_off = ctx
+        .tsx_content
+        .find("{ bar: 1 }")
+        .expect("authored decl is copied into the TSX")
+        + "{ ".len();
+    let decl_location = crate::type_provider::protocol::TypeLocation {
+        path: ctx.tsx_path.clone(),
+        start: tsx_decl_off as u32,
+        end: (tsx_decl_off + "bar".len()) as u32,
+    };
+    provider.set_definitions(&ctx.tsx_path, usage_tsx_offset, vec![decl_location.clone()]);
+    provider.set_type_definitions(&ctx.tsx_path, usage_tsx_offset, vec![decl_location]);
+    (app_uri, member_position, expected_decl_range)
+}
+
+fn definition_params(uri: &Uri, position: Position) -> GotoDefinitionParams {
+    GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    }
+}
+
+fn definition_locations_of(resp: Option<GotoDefinitionResponse>) -> Vec<Location> {
+    match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|link| Location {
+                uri: link.target_uri,
+                range: link.target_selection_range,
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// No-silent-empty for CTRL+CLICK: a transient provider failure on a MEMBER
+/// definition must resync + retry once — the navigation recovers instead of
+/// silently returning nothing. This is the definition half of the hover
+/// contract above (`hover_recovers_with_resync_and_retry_after_transient_
+/// provider_error`): without it, the same perturbed provider state that hover
+/// self-heals through leaves every member CTRL+CLICK dead (members have no
+/// native fallback), which is exactly the reported "`bar` NEVER works while
+/// hover shows the correct type" asymmetry.
+#[tokio::test]
+async fn definition_recovers_with_resync_and_retry_after_transient_provider_error() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        // ONE transient failure, then the provider answers normally.
+        provider.fail_next_definitions(1);
+
+        let locs = definition_locations_of(
+            server
+                .goto_definition(definition_params(&app_uri, member_position))
+                .await
+                .expect("definition request should succeed"),
+        );
+        assert!(
+            !locs.is_empty(),
+            "{kind}: a transient provider error must recover to the member definition, got empty"
+        );
+        assert!(
+            locs.iter()
+                .any(|l| l.uri == app_uri && l.range == expected_decl_range),
+            "{kind}: the recovered member definition must land on the authored `bar` declaration \
+             {expected_decl_range:?}, got: {locs:?}"
+        );
+        let definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetDefinition { .. }))
+            .count();
+        assert_eq!(
+            definition_calls, 2,
+            "{kind}: exactly one retry after the transient failure, got {definition_calls} \
+             definition calls"
+        );
+    }
+}
+
+/// Fail-closed bound for the definition retry: a PERSISTENT provider failure
+/// retries exactly once after a resync and then returns the native result
+/// (None for a member — never a fabricated location, never a spin).
+#[tokio::test]
+async fn definition_fails_closed_after_bounded_retry_when_provider_keeps_failing() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, _expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        provider.fail_next_definitions(16);
+
+        let resp = server
+            .goto_definition(definition_params(&app_uri, member_position))
+            .await
+            .expect("definition request must not error to the client");
+        assert!(
+            definition_locations_of(resp).is_empty(),
+            "{kind}: a persistent provider error fails closed after the bounded retry"
+        );
+        let definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetDefinition { .. }))
+            .count();
+        assert_eq!(
+            definition_calls, 2,
+            "{kind}: retries are bounded to exactly one resync+retry, got {definition_calls} \
+             definition calls"
+        );
+    }
+}
+
+/// The type-definition twin of the transient-recovery contract: the governing
+/// surface principle names definition AND type-definition, and the same router
+/// `NotReady`/restart/IPC perturbation must heal identically for Go to Type
+/// Definition on a member position.
+#[tokio::test]
+async fn type_definition_recovers_with_resync_and_retry_after_transient_provider_error() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        // ONE transient failure, then the provider answers normally.
+        provider.fail_next_type_definitions(1);
+
+        let locs = definition_locations_of(
+            server
+                .goto_type_definition(definition_params(&app_uri, member_position))
+                .await
+                .expect("type-definition request should succeed"),
+        );
+        assert!(
+            !locs.is_empty(),
+            "{kind}: a transient provider error must recover to the member type definition, \
+             got empty"
+        );
+        assert!(
+            locs.iter()
+                .any(|l| l.uri == app_uri && l.range == expected_decl_range),
+            "{kind}: the recovered member type definition must land on the authored `bar` \
+             declaration {expected_decl_range:?}, got: {locs:?}"
+        );
+        let type_definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetTypeDefinition { .. }))
+            .count();
+        assert_eq!(
+            type_definition_calls, 2,
+            "{kind}: exactly one retry after the transient failure, got {type_definition_calls} \
+             type-definition calls"
+        );
+    }
+}
+
+/// Fail-closed bound for the type-definition retry: a PERSISTENT provider
+/// failure retries exactly once after a resync and then returns None — never a
+/// fabricated location, never a spin.
+#[tokio::test]
+async fn type_definition_fails_closed_after_bounded_retry_when_provider_keeps_failing() {
+    for kind in [
+        crate::TypeProviderKind::Tsserver,
+        crate::TypeProviderKind::Tsgo,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_with_kind(type_provider, kind);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let (app_uri, member_position, _expected_decl_range) =
+            seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+
+        provider.fail_next_type_definitions(16);
+
+        let resp = server
+            .goto_type_definition(definition_params(&app_uri, member_position))
+            .await
+            .expect("type-definition request must not error to the client");
+        assert!(
+            definition_locations_of(resp).is_empty(),
+            "{kind}: a persistent provider error fails closed after the bounded retry"
+        );
+        let type_definition_calls = provider
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, MockCall::GetTypeDefinition { .. }))
+            .count();
+        assert_eq!(
+            type_definition_calls, 2,
+            "{kind}: retries are bounded to exactly one resync+retry, got {type_definition_calls} \
+             type-definition calls"
+        );
+    }
+}
+
+/// The RETRY IDENTITY FENCE: a concurrent edit landing between the two
+/// attempts can put a DIFFERENT token at the same coordinates (`foo.bar` →
+/// `fyy.baz`), and a fence-less retry would return a coherent-but-WRONG
+/// definition for the original request (the recomputed offset validates only
+/// that the coordinate maps within the NEW surface). The shared recovery owner
+/// must refuse the retry when the recaptured surface's carrier source differs
+/// from the initial capture — fail closed, and never issue the second query.
+#[tokio::test]
+async fn provider_retry_is_fenced_on_carrier_source_identity() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // v2 is byte-shape-identical to v1 (same lengths, same coordinates), so the
+    // member position still MAPS in v2 — the fence, not offset validation, must
+    // be what blocks the retry.
+    let v2_source = r#"<script setup lang="ts">
+const fyy = { baz: 1 }
+</script>
+<template><div>{{ fyy.baz }}</div></template>
+"#;
+
+    let (app_uri, member_position, _expected_decl_range) =
+        seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+    let initial_ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let initial_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &initial_ctx.carrier_line_index,
+        &initial_ctx.mapper,
+        &initial_ctx.tsx_line_index,
+    )
+    .expect("member usage maps into the generated TSX");
+
+    // A poison answer the retry WOULD return if the fence let it through:
+    // `baz`'s declaration in the v2 surface, coherent with the fresh context.
+    let poison = crate::type_provider::protocol::TypeLocation {
+        path: initial_ctx.tsx_path.clone(),
+        start: 0,
+        end: 3,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = calls.clone();
+
+    let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+        "definition",
+        &member_position,
+        initial_ctx,
+        initial_offset,
+        |_tsx_path: String, _offset: u32| {
+            let n = calls_in.fetch_add(1, Ordering::SeqCst);
+            let poison = poison.clone();
+            async move {
+                if n == 0 {
+                    Err(crate::type_provider::protocol::TypeProviderError::new(
+                        "scripted transient failure".to_string(),
+                    ))
+                } else {
+                    Ok(vec![poison])
+                }
+            }
+        },
+        || async {
+            // The concurrent edit lands while the handler is resyncing.
+            let _ = server.documents.did_change(&app_uri, 2, v2_source);
+        },
+        // The post-resync surface describes the EDITED document (v2).
+        || Some(synced_type_provider_context_surface_only(server, &app_uri)),
+    )
+    .await;
+
+    assert!(
+        outcome.value.is_none(),
+        "a retry against an edited carrier source must FAIL CLOSED — it would answer a \
+         different request than the one asked"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the identity fence must refuse the SECOND query outright, not launder a \
+         cross-revision answer"
+    );
+}
+
+/// The fence keys on SOURCE identity, not surface generation: a resync that
+/// re-records the SAME carrier source under a fresh generation/stamp must
+/// still retry (an over-strict generation fence would turn every recovery
+/// into a fail-closed miss and reintroduce the dead-CTRL+CLICK defect).
+#[tokio::test]
+async fn provider_retry_proceeds_when_carrier_source_is_unchanged_across_regeneration() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let (app_uri, member_position, _expected_decl_range) =
+        seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+    let initial_ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let initial_generation = initial_ctx.snapshot.stamp.generation;
+    let initial_source_hash = initial_ctx.snapshot.source_hash;
+    let initial_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &initial_ctx.carrier_line_index,
+        &initial_ctx.mapper,
+        &initial_ctx.tsx_line_index,
+    )
+    .expect("member usage maps into the generated TSX");
+
+    let answer = crate::type_provider::protocol::TypeLocation {
+        path: initial_ctx.tsx_path.clone(),
+        start: 7,
+        end: 10,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = calls.clone();
+    // The stamp/source identity of the surface the recapture actually served,
+    // recorded so the discrimination preconditions below assert on the REAL
+    // retry context rather than on what this test hoped it built.
+    let recaptured = Arc::new(std::sync::Mutex::new(
+        None::<(u64, crate::provider_surface_store::ContentHash)>,
+    ));
+    let recaptured_in = recaptured.clone();
+
+    let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+        "definition",
+        &member_position,
+        initial_ctx,
+        initial_offset,
+        |_tsx_path: String, _offset: u32| {
+            let n = calls_in.fetch_add(1, Ordering::SeqCst);
+            let answer = answer.clone();
+            async move {
+                if n == 0 {
+                    Err(crate::type_provider::protocol::TypeProviderError::new(
+                        "scripted transient failure".to_string(),
+                    ))
+                } else {
+                    Ok(vec![answer])
+                }
+            }
+        },
+        || async {},
+        || {
+            // Mint a genuinely FRESH surface generation over byte-identical
+            // source: re-record the same provider content (every record
+            // advances the store generation), then recapture. Without this,
+            // the recapture would serve the INITIAL snapshot back and a
+            // generation-equality fence would pass this test vacuously —
+            // exactly what it exists to rule out.
+            let canonical_id = server
+                .documents
+                .get_canonical_id(&app_uri)
+                .expect("canonical id");
+            let ide = server.documents.get_ide(&app_uri).expect("IDE output");
+            let tsx_path = server
+                .active_ide_path_for_uri(&app_uri)
+                .expect("live IDE path");
+            server.record_carrier_ide_snapshot(&canonical_id, &tsx_path, &ide.code, None);
+            let ctx = server.type_provider_context(&app_uri)?;
+            *recaptured_in.lock().unwrap() =
+                Some((ctx.snapshot.stamp.generation, ctx.snapshot.source_hash));
+            Some(ctx)
+        },
+    )
+    .await;
+
+    // Discrimination preconditions: the retry surface really was a DIFFERENT
+    // generation over the SAME source — so a generation-equality fence fails
+    // this test while the source-identity fence passes it.
+    let (retry_generation, retry_source_hash) = recaptured
+        .lock()
+        .unwrap()
+        .expect("the recovery must have recaptured a retry surface");
+    assert!(
+        retry_generation > initial_generation,
+        "precondition: the recapture must serve a genuinely ADVANCED surface generation \
+         (initial {initial_generation}, retry {retry_generation})"
+    );
+    assert_eq!(
+        retry_source_hash, initial_source_hash,
+        "precondition: the regenerated surface must describe byte-identical carrier source"
+    );
+
+    assert!(
+        outcome.value.is_some_and(|locs| locs.len() == 1),
+        "an identical-source retry must proceed and recover the provider answer"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the retry must actually re-query when the carrier source is unchanged"
+    );
+}
+
 // @ai-generated - Guards canonical child resolution across sequential parent sync/query state.
 #[tokio::test]
 async fn component_tag_hover_keeps_analysis_resolved_child_across_two_parents() {
