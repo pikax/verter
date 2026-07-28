@@ -1,8 +1,8 @@
 //! Svelte reference-drift hermetic guards.
 //!
 //! These guards run in the DEFAULT canonical suite and are FULLY HERMETIC:
-//! they read only committed files (the goldens + the lockfile + the generator
-//! pin constant). They NEVER shell `node`, NEVER load the live svelte
+//! they read only committed files (the goldens + the generator pin constant).
+//! They NEVER shell `node`, NEVER load the live svelte
 //! compiler, and NEVER require `pnpm install` — the default run
 //! (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`)
 //! must stay node-free and compiler-free.
@@ -20,11 +20,10 @@
 //!   native-Svelte runtime codegen can rely on the goldens being loadable. A
 //!   missing / corrupt / structurally-invalid golden fails the guard. Pure
 //!   file reads — no node, no live compiler.
-//! - `svelte_lockfile_matches_oracle_pin` — asserts the resolved `svelte`
-//!   version in `pnpm-lock.yaml` EQUALS the `SVELTE_ORACLE_VERSION` pin
-//!   declared in `scripts/svelte-golden-lib.mjs` (the single JS pin authority
-//!   every Svelte golden generator imports). A `svelte` bump without a
-//!   re-pin (+ golden regen) fails — silent drift is impossible.
+//!
+//! The legacy native-codegen oracle may intentionally remain on an older
+//! Svelte patch than the rsvelte production backend. Its version is therefore
+//! tied to every committed golden, not to the application's runtime lock.
 
 use std::path::{Path, PathBuf};
 
@@ -65,28 +64,6 @@ fn oracle_pin_version(lib_src: &str) -> String {
         }
     }
     panic!("SVELTE_ORACLE_VERSION pin constant not found in svelte-golden-lib.mjs");
-}
-
-/// Extract the resolved `svelte` version from `pnpm-lock.yaml`. The lockfile
-/// `packages:` section lists `  svelte@<version>:` for the resolved version.
-/// We take the FIRST such entry (there is exactly one resolved `svelte`).
-fn lockfile_svelte_version(lock_src: &str) -> Option<String> {
-    for line in lock_src.lines() {
-        // Match a `  svelte@<version>:` package key. Guard against
-        // `@sveltejs/...` and scoped names by requiring the line (trimmed) to
-        // start with `svelte@`.
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("svelte@") {
-            if let Some(version) = rest.strip_suffix(':') {
-                // A bare resolved package key has no parenthesised peer suffix
-                // and no `/` (which a path-style entry would carry).
-                if !version.contains('(') && !version.contains('/') && !version.is_empty() {
-                    return Some(version.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -582,29 +559,6 @@ fn committed_svelte_goldens_are_structurally_valid() {
 }
 
 #[test]
-fn svelte_lockfile_matches_oracle_pin() {
-    let root = workspace_root();
-
-    let lib_src = std::fs::read_to_string(root.join("scripts/svelte-golden-lib.mjs"))
-        .expect("read svelte-golden-lib.mjs");
-    let pin = oracle_pin_version(&lib_src);
-
-    let lock_src =
-        std::fs::read_to_string(root.join("pnpm-lock.yaml")).expect("read pnpm-lock.yaml");
-    let resolved = lockfile_svelte_version(&lock_src)
-        .expect("a resolved `svelte@<version>:` entry in pnpm-lock.yaml");
-
-    assert_eq!(
-        resolved, pin,
-        "the resolved `svelte` version in pnpm-lock.yaml ({resolved}) does NOT equal \
-         the oracle pin SVELTE_ORACLE_VERSION ({pin}) in svelte-golden-lib.mjs. A \
-         `svelte` bump is a reviewed oracle delta: re-pin SVELTE_ORACLE_VERSION, \
-         bump the lockfile, run `node scripts/gen-svelte-goldens.mjs`, and review \
-         the golden diff."
-    );
-}
-
-#[test]
 fn committed_svelte_goldens_match_oracle_pin() {
     let root = workspace_root();
     let lib_src = std::fs::read_to_string(root.join("scripts/svelte-golden-lib.mjs"))
@@ -705,39 +659,6 @@ fn version_stamp_guard_discriminates_a_mismatched_oracle_version() {
 fn oracle_pin_parser_extracts_the_declared_version() {
     let src = "// header\nexport const SVELTE_ORACLE_VERSION = \"9.9.9\";\nconst x = 1;\n";
     assert_eq!(oracle_pin_version(src), "9.9.9");
-}
-
-#[test]
-fn lockfile_parser_extracts_the_bare_resolved_version() {
-    // A realistic snippet: the package key is the bare `svelte@<version>:`,
-    // while scoped + peer-suffixed entries must NOT be mistaken for it.
-    let lock = "\
-  '@sveltejs/acorn-typescript@1.0.10(acorn@8.16.0)':
-    resolution: {integrity: sha512-aaa==}
-  oxfmt@0.52.0(svelte@5.56.3):
-    resolution: {integrity: sha512-bbb==}
-  svelte@5.56.3:
-    resolution: {integrity: sha512-ccc==}
-";
-    assert_eq!(
-        lockfile_svelte_version(lock).as_deref(),
-        Some("5.56.3"),
-        "must extract the bare resolved svelte version, ignoring peer-suffixed entries"
-    );
-}
-
-#[test]
-fn lockfile_guard_discriminates_a_version_bump() {
-    // If the lockfile resolves a DIFFERENT version than the pin, the equality
-    // the guard asserts must NOT hold — proving a bump fails the guard.
-    let bumped_lock = "  svelte@5.99.0:\n    resolution: {integrity: sha512-zzz==}\n";
-    let resolved = lockfile_svelte_version(bumped_lock).expect("resolved version");
-    let pin = oracle_pin_version("export const SVELTE_ORACLE_VERSION = \"5.56.3\";\n");
-    assert_ne!(
-        resolved, pin,
-        "a lockfile svelte bump (5.99.0) must NOT equal the pin (5.56.3) — \
-         the guard would fail, as required"
-    );
 }
 
 #[test]

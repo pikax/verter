@@ -106,13 +106,12 @@ flowchart LR
 
 ## Experimental Svelte compiler
 
-Verter includes an experimental native Svelte client compiler tested against
-the pinned `svelte@5.56.3` runtime. It is not presented as a general drop-in
-replacement for the official compiler: supported client behavior is covered by
-runtime and official-oracle tests, while unsupported runtime or server-output
-surfaces fail closed with typed diagnostics. Published benchmark evidence is
-limited to its explicit, equal-work fixture corpus and is not a general speed
-or memory claim.
+Verter delegates Svelte client and server runtime compilation to the pinned
+rsvelte Rust toolchain targeting `svelte@5.56.8`. Verter continues to own the
+IDE projection, cache, and host/session integration. Compiler failures fail
+closed with typed diagnostics; they are never replaced by a successful empty
+module. This integration remains experimental until its public hydration and
+real-world application gates are established.
 
 ## Next Steps
 

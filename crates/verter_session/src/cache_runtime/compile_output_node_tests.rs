@@ -47,7 +47,7 @@ fn value(semantic_hash: Hash16) -> CompileOutputValue {
         None,
         None,
         None,
-        false,
+        None,
     )
 }
 
@@ -64,7 +64,7 @@ fn value_with_css_override(semantic_hash: Hash16, css_override: &str) -> Compile
         None,
         None,
         None,
-        false,
+        None,
     )
 }
 
@@ -482,7 +482,7 @@ fn session_peek_output_returns_per_kind_pair() {
         None,
         None,
         None,
-        false,
+        None,
     );
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value, 0);

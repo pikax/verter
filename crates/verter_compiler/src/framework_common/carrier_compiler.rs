@@ -315,9 +315,8 @@ pub struct RuntimeCustomBlock {
 /// the framework-owned main body (when the carrier emits one directly), the
 /// block side-files, styles + custom blocks, the scope id, the IDE artifact
 /// (when requested in the same pass), template facts, and diagnostics. A
-/// carrier that cannot produce a runtime module (Svelte today) returns the
-/// bundle with `main.body_code = None` AND no block side-files — the host
-/// detects the absence of a runtime surface and populates only the IDE slot.
+/// carrier that cannot produce a runtime module returns the bundle with
+/// `main.body_code = None` and no block side-files.
 ///
 /// Not `Clone` — `RawTemplateData` is move-only, and the bundle is consumed
 /// once by the host's virtual-file population.
@@ -325,7 +324,7 @@ pub struct RuntimeCustomBlock {
 pub struct RuntimeCompileOutput {
     /// The framework-owned main module (body / map / lang). `body_code`
     /// `None` ⇒ the host assembles from the block fields (Vue) OR there is
-    /// no runtime surface (Svelte).
+    /// no runtime surface.
     pub main: RuntimeMainModule,
     /// The compiled `<script>` block, when present.
     pub script: Option<RuntimeScriptBlock>,
@@ -346,17 +345,15 @@ pub struct RuntimeCompileOutput {
     /// Diagnostics emitted during the runtime compile. The host lifts these
     /// into its `DiagnosticsSnapshot`; an error here fails the compile.
     pub diagnostics: Vec<RuntimeDiagnostic>,
-    /// Whether the carrier REFUSED to produce a runtime surface for an
-    /// unsupported construct (a fail-closed runtime outcome), DISTINCT from
+    /// The typed reason the carrier REFUSED to produce a runtime surface for
+    /// an unsupported construct (a fail-closed runtime outcome), distinct from
     /// "no runtime surface was requested / this carrier is IDE-only". A
     /// consumer REQUESTING the runtime artifact reads this to distinguish a
-    /// genuine unsupported-runtime refusal (no `Main`, the precise reason in
-    /// `diagnostics`) from a clean compile — so it cannot mistake an absent
-    /// `Main` for a successful runtime compile. The matching IDE artifact is
-    /// still produced (type-checking survives); the refusal diagnostics stay
-    /// NON-FATAL (`has_errors()` is false) so the IDE compile is not killed.
-    /// A carrier that emits a runtime surface (Vue) leaves this `false`.
-    pub runtime_surface_refused: bool,
+    /// genuine unsupported-runtime refusal from a clean compile without
+    /// parsing a framework-specific diagnostic code. The same diagnostic is
+    /// also present in [`Self::diagnostics`] for normal diagnostics delivery.
+    /// A carrier that emits a runtime surface leaves this `None`.
+    pub runtime_refusal: Option<RuntimeDiagnostic>,
     /// Whether the render function was inlined into `setup()` (Vue production
     /// topology). When true, `script` contains the complete component and
     /// `template` is `None` — host assembly must NOT attach a standalone
@@ -386,15 +383,18 @@ impl RuntimeCompileOutput {
             .any(|d| d.severity == RuntimeDiagnosticSeverity::Error)
     }
 
-    /// Whether the carrier REFUSED a runtime surface for an unsupported
-    /// construct (a fail-closed runtime outcome). A runtime-requesting consumer
-    /// uses this — together with `has_runtime_surface() == false` — to treat the
-    /// outcome as a runtime refusal rather than a successful compile, while the
-    /// IDE artifact (`tsx`) and the non-fatal diagnostics keep type-checking
-    /// alive. NEVER true on a clean compile (a refusal sets it AND omits `Main`).
+    /// Whether the carrier refused a runtime surface for an unsupported
+    /// construct.
     #[must_use]
     pub fn runtime_surface_refused(&self) -> bool {
-        self.runtime_surface_refused
+        self.runtime_refusal.is_some()
+    }
+
+    /// The framework-neutral refusal reason, when runtime compilation failed
+    /// closed.
+    #[must_use]
+    pub fn runtime_refusal(&self) -> Option<&RuntimeDiagnostic> {
+        self.runtime_refusal.as_ref()
     }
 }
 
@@ -463,10 +463,10 @@ pub trait CarrierCompiler: Send + Sync {
     /// The carrier owns the typed downcast and native compile and returns a
     /// neutral [`RuntimeCompileOutput`] re-expressing every field the host's
     /// runtime assembly + virtual-file population needs. A carrier that
-    /// cannot yet produce a runtime module for the requested target returns
-    /// a typed [`CompileUnsupported`]. A carrier whose framework projects
-    /// ONLY an IDE surface (Svelte today) returns a bundle whose `main`
-    /// body is absent and that carries the IDE artifact when `want_ide`.
+    /// cannot produce a runtime module for the requested target returns a
+    /// typed [`CompileUnsupported`]. A carrier that projects only an IDE
+    /// surface returns a bundle whose `main` body is absent and carries the
+    /// IDE artifact when `want_ide`.
     ///
     /// The adapter's codegen owns its own `CodeTransform` (the single
     /// source of truth for generated-code edits); the returned `code` /

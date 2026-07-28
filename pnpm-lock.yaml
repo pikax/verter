@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  svelte: 5.56.8
+
 importers:
 
   .:
@@ -16,7 +19,7 @@ importers:
         version: 3.5.34
       oxfmt:
         specifier: 0.52.0
-        version: 0.52.0(svelte@5.56.3)
+        version: 0.52.0(svelte@5.56.8)
     devDependencies:
       '@bufbuild/buf':
         specifier: 1.70.0
@@ -52,8 +55,8 @@ importers:
         specifier: 0.4.0
         version: 0.4.0
       svelte:
-        specifier: 5.56.3
-        version: 5.56.3
+        specifier: 5.56.8
+        version: 5.56.8
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -118,8 +121,8 @@ importers:
         specifier: ^0.30.21
         version: 0.30.21
       svelte:
-        specifier: 5.56.3
-        version: 5.56.3
+        specifier: 5.56.8
+        version: 5.56.8
       tinybench:
         specifier: ^6.0.2
         version: 6.0.2
@@ -416,8 +419,8 @@ importers:
   packages/svelte-jsx:
     dependencies:
       svelte:
-        specifier: '>=5.0.0'
-        version: 5.56.3
+        specifier: 5.56.8
+        version: 5.56.8
 
   packages/svelte-runtime-tests:
     devDependencies:
@@ -428,8 +431,8 @@ importers:
         specifier: ^20.9.0
         version: 20.9.0
       svelte:
-        specifier: 5.56.3
-        version: 5.56.3
+        specifier: 5.56.8
+        version: 5.56.8
       vitest:
         specifier: ^4.1.7
         version: 4.1.7(@types/node@25.9.1)(@vitest/coverage-v8@4.1.7)(happy-dom@20.9.0)(vite@8.0.14(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(less@4.6.4)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.8.2))
@@ -593,8 +596,8 @@ importers:
         specifier: ^4.0.0
         version: 4.0.0(webpack@5.107.2)
       svelte:
-        specifier: 5.56.3
-        version: 5.56.3
+        specifier: 5.56.8
+        version: 5.56.8
       tailwindcss:
         specifier: 4.3.0
         version: 4.3.0
@@ -6840,6 +6843,14 @@ packages:
       '@typescript-eslint/types':
         optional: true
 
+  esrap@2.2.12:
+    resolution: {integrity: sha512-On0QbLyaiAkVC4eXtgnXK9Kh2opit+3rcUSOc45DqJ2s/X2eXAHsGOKRSJ6IDagQEW5vPyivANfXUiqgXC67Rw==}
+    peerDependencies:
+      '@typescript-eslint/types': ^8.2.0
+    peerDependenciesMeta:
+      '@typescript-eslint/types':
+        optional: true
+
   esrecurse@4.3.0:
     resolution: {integrity: sha512-KmfKL3b6G+RXvP8N1vr3Tq1kL/oCFgn2NYXEtqP8/L3pKapUA4G8cFVaoF3SU323CD4XypR/ffioHmkti6/Tag==}
     engines: {node: '>=4.0'}
@@ -10219,8 +10230,8 @@ packages:
     resolution: {integrity: sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w==}
     engines: {node: '>= 0.4'}
 
-  svelte@5.56.3:
-    resolution: {integrity: sha512-w7JvrM5IFl5cmfbY0TLik9o7mjRUJmRMhOR51tBPu708Gr/MjbGs7VnJnr/B0CaXeI4vtnOh7RKxDr0cwhMdDA==}
+  svelte@5.56.8:
+    resolution: {integrity: sha512-PY8LOw7xP6c8IOiVqdo0sbbZVYhXRSfklOQLAUyGBKqjTX0wx/z4l/9J+PmBpmlLnxzEb1NqltxQ5/wZme/Cmg==}
     engines: {node: '>=18'}
 
   svgo@2.8.2:
@@ -17644,6 +17655,10 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
+  esrap@2.2.12:
+    dependencies:
+      '@jridgewell/sourcemap-codec': 1.5.5
+
   esrecurse@4.3.0:
     dependencies:
       estraverse: 5.3.0
@@ -19864,7 +19879,7 @@ snapshots:
       magic-regexp: 0.10.0
       oxc-parser: 0.112.0
 
-  oxfmt@0.52.0(svelte@5.56.3):
+  oxfmt@0.52.0(svelte@5.56.8):
     dependencies:
       tinypool: 2.1.0
     optionalDependencies:
@@ -19887,7 +19902,7 @@ snapshots:
       '@oxfmt/binding-win32-arm64-msvc': 0.52.0
       '@oxfmt/binding-win32-ia32-msvc': 0.52.0
       '@oxfmt/binding-win32-x64-msvc': 0.52.0
-      svelte: 5.56.3
+      svelte: 5.56.8
 
   p-filter@2.1.0:
     dependencies:
@@ -21567,7 +21582,7 @@ snapshots:
 
   supports-preserve-symlinks-flag@1.0.0: {}
 
-  svelte@5.56.3:
+  svelte@5.56.8:
     dependencies:
       '@jridgewell/remapping': 2.3.5
       '@jridgewell/sourcemap-codec': 1.5.5
@@ -21580,7 +21595,7 @@ snapshots:
       clsx: 2.1.1
       devalue: 5.8.1
       esm-env: 1.2.2
-      esrap: 2.2.11
+      esrap: 2.2.12
       is-reference: 3.0.3
       locate-character: 3.0.0
       magic-string: 0.30.21

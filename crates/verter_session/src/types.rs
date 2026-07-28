@@ -2003,8 +2003,7 @@ pub enum HostError {
     RuntimeSurfaceRefused {
         /// The canonical id of the refused file.
         canonical_id: String,
-        /// The machine-stable refusal diagnostic code (e.g.
-        /// `svelte-runtime-unsupported-block`).
+        /// The carrier's machine-stable refusal diagnostic code.
         diagnostic_code: String,
         /// The human-readable refusal reason.
         message: String,
@@ -2400,10 +2399,17 @@ pub(crate) struct CompileSlot {
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
     pub(crate) fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature,
-    /// Whether the carrier fail-closed on an unsupported runtime surface (the typed
-    /// runtime-refusal signal). Survives a warm hit so a runtime-requesting consumer
-    /// reads the refusal from this flag, not a diagnostic-code prefix.
-    pub(crate) runtime_surface_refused: bool,
+    /// Framework-neutral runtime-refusal reason. Survives a warm hit so a
+    /// runtime-requesting consumer receives the exact typed reason without
+    /// parsing a framework-specific diagnostic code.
+    pub(crate) runtime_refusal: Option<RuntimeRefusal>,
+}
+
+/// The framework-neutral reason a carrier failed closed on runtime emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeRefusal {
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,

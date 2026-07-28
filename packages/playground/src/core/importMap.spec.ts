@@ -40,7 +40,7 @@ describe("getDefaultImportMap", () => {
 
   it("pins every Svelte runtime entry used by emitted client and server modules", () => {
     const map = getDefaultImportMap();
-    const base = "https://cdn.jsdelivr.net/npm/svelte@5.56.3";
+    const base = "https://cdn.jsdelivr.net/npm/svelte@5.56.8";
 
     expect(map.imports.svelte).toBe(`${base}/src/index-client.js`);
     expect(map.imports["svelte/internal/client"]).toBe(`${base}/src/internal/client/index.js`);

@@ -9,7 +9,8 @@
 //!
 //! It performs NO type lowering (the thin-adapters guard). The IDE TSX
 //! projection ([`ide`]) is a pure syntactic transform via `CodeTransform` —
-//! never type resolution.
+//! never type resolution. Runtime compilation crosses the private
+//! [`rsvelte_bridge`] and returns only framework-neutral carrier DTOs.
 
 /// The shared Svelte `bind:` contract table — the SOURCE OF TRUTH for the wide
 /// binding family, consumed by BOTH the IDE projection ([`ide`]) and the runtime
@@ -23,6 +24,7 @@ mod bind_contract_tests;
 pub mod carrier;
 pub mod ide;
 pub mod parser;
+mod rsvelte_bridge;
 pub mod runtime;
 pub mod template_facts;
 

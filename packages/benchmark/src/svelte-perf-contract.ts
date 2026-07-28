@@ -1,6 +1,6 @@
 import type { SvelteCompilerFixture } from "./svelte-perf-fixtures";
 
-export const PINNED_OFFICIAL_SVELTE_VERSION = "5.56.3";
+export const PINNED_OFFICIAL_SVELTE_VERSION = "5.56.8";
 export const SVELTE_COMPILER_WALL_THRESHOLD = 1.1;
 export const SVELTE_COMPILER_RSS_THRESHOLD = 1.1;
 export const MIN_SVELTE_PERF_ITERATIONS = 50;

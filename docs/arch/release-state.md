@@ -33,15 +33,15 @@ and fixture disposition are recorded in
 - **Editors:** VS Code is the primary packaged integration. Neovim, Helix,
   Zed, and Lapce adapters use the shared native client and LSP contracts, with
   each adapter's packaging limitations documented alongside its implementation.
-- **Svelte (experimental):** native **client** compilation is experimental and
-  pinned to `svelte@5.56.3`; it is usable for the in-scope covered fixtures,
-  whose behavior is protected by runtime, conformance, and official-oracle
-  tests. **SSR and hydration are not shipped** — they are post-merge follow-ups
-  (the CSR/SSR hydration round-trip gate is a plan target, not a current
-  status). Unsupported runtime features and unavailable server output fail
-  closed with typed diagnostics; they do not return successful placeholder
-  modules. See the [unplugin API](../api/unplugin.md) and the forward-looking
-  [Svelte compiler program plan](./svelte-native-compiler-plan.md).
+- **Svelte (experimental):** runtime compilation delegates to rsvelte's pinned
+  Rust toolchain, targeting `svelte@5.56.8`. Client and server modules, external
+  scoped CSS, source maps, and compiler diagnostics cross one private neutral
+  bridge; compiler failures fail closed and never produce successful
+  placeholder modules. Verter still owns the IDE projection and host/session
+  architecture. Hydration remains experimental and requires the public
+  end-to-end gate described in the
+  [rsvelte runtime integration decision](./rsvelte-runtime-integration.md).
+  See also the [unplugin API](../api/unplugin.md).
 
 Verter remains beta software. The public [guide](../guide/index.md) is the
 authority for user-facing maturity and installation expectations.

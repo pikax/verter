@@ -200,10 +200,14 @@ implements, exposing EXACTLY four compiler-domain ops:
   `VerterCompileResult` INTERNALLY then re-expresses it neutrally
   (`vue_result_to_runtime_bundle`); it leaves `main.body_code = None` so the
   host assembles the `_sfc_main` module from the block fields
-  (`assemble_vue_main_module`). A carrier that projects ONLY an IDE surface
-  (Svelte today) returns a bundle with no runtime surface
-  (`has_runtime_surface() == false`) carrying just the `tsx` — the host
-  populates `CachedTsx` and emits NO `Main` virtual node. Framework-PRIVATE
+  (`assemble_vue_main_module`). Svelte delegates runtime parse/analyze/emit to
+  the pinned `rsvelte_core::toolchain` facade through the private
+  `svelte::rsvelte_bridge`; the bridge returns rsvelte's self-contained ESM in
+  `main.body_code` for client or server targets and translates CSS, maps,
+  warnings, and failures into neutral carrier DTOs. rsvelte types never cross
+  the bridge, and a runtime failure carries a typed `runtime_refusal` reason
+  while the independent Verter IDE projection still completes.
+  Framework-PRIVATE
   resolved inputs (Vue's `external_types` / `prop_constness` /
   `style_v_bind_vars`) ride OPAQUELY on `RuntimeCompileOptions.framework_extras`
   (`Arc<dyn Any>`, downcast to `vue_bridge::VueRuntimeCompileExtras`) so Vue's
@@ -287,8 +291,8 @@ the shared compile produces the WHOLE artifact set (every virtual node + the
 IDE `CachedTsx`) in one pass, and the demand is checked AFTER the shared result
 (warm-hit + cold). `ensure_ide_compiled(canonical, profile) -> Result<bool>`
 is the EXPLICIT IDE-ensure path: it resolves through `CompileDemand::Ide`
-(NEVER requests `VirtualNodeKind::Main`), so a Main-less carrier (Svelte)
-populates its `CachedTsx` and succeeds without a runtime `Main`. `get_ide`
+(NEVER requests `VirtualNodeKind::Main`), so IDE production is not coupled to
+runtime-module availability. `get_ide`
 stays a PURE cached read (`peek_tsx`) — it NEVER computes on read. Both pinned
 by the static guards `get_ide_is_a_pure_cached_read_no_compute` and
 `ensure_ide_compiled_never_requests_virtual_node_main`. Exposed on WASM + NAPI

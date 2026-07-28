@@ -149,7 +149,7 @@
     "sass-embedded": "1.100.0",
     "sass-loader": "^17.0.0",
     "sirv-cli": "^3.0.1",
-    "svelte": "5.56.3",
+    "svelte": "5.56.8",
     "style-loader": "^4.0.0",
     "tailwindcss": "4.3.0",
     "tsdown": "^0.22.0",

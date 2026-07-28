@@ -2,7 +2,7 @@
 //
 // Behavioral smoke for the native Svelte client Block-5a surface (dynamic
 // attributes + boolean DOM props + class/style). It mounts Verter's EMITTED
-// modules against the REAL pinned `svelte@5.56.3` client runtime and asserts the
+// modules against the REAL pinned `svelte@5.56.8` client runtime and asserts the
 // observable DOM behavior reacts to `$state` changes:
 //   - a dynamic `id={…}` attribute, a dynamic `class={…}` (via `$.clsx`), and a
 //     `style:color={…}` directive (merged with a static `style` base) all update on

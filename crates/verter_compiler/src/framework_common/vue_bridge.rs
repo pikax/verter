@@ -597,7 +597,7 @@ pub fn vue_result_to_runtime_bundle(
         diagnostics,
         // Vue always emits a runtime surface (or a genuine compile error); it never
         // fails closed on an unsupported runtime surface the way Svelte does.
-        runtime_surface_refused: false,
+        runtime_refusal: None,
         // The RESOLVED inline topology — the compiler already merged the
         // render into `setup()` when true, so host assembly takes the inline
         // branch (no render attach, no setup-return filter).

@@ -764,7 +764,7 @@ fn invalidate_nodes_removes_last_good() {
             tsx: None,
             template_analysis: None,
             fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-            runtime_surface_refused: false,
+            runtime_refusal: None,
         },
     );
 
@@ -3634,7 +3634,7 @@ mod upsert_compile_cache_tests {
                     tsx: None,
                     template_analysis: None,
                     fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
-                    runtime_surface_refused: false,
+                    runtime_refusal: None,
                 },
             );
         }

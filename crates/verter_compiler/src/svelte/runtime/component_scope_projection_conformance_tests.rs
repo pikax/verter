@@ -45,6 +45,7 @@ use crate::svelte::runtime::{compile_client, ClientCompileError, SvelteRuntimeOp
 use oxc_ast::ast::{BindingPattern, ObjectPropertyKind, Program, PropertyKey};
 use oxc_span::Span;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "svelte-oracle")]
 use std::path::PathBuf;
 
 /// The vendored svelte transformation source, embedded HERMETICALLY (no filesystem
@@ -393,6 +394,7 @@ const HANDLER_COVERAGE: &[HandlerCoverage] = &[
 ];
 
 /// The workspace root (`CARGO_MANIFEST_DIR` is `crates/verter_compiler`).
+#[cfg(feature = "svelte-oracle")]
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1176,50 +1178,8 @@ fn declared_roots_characterization_is_stable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// (5) Oracle-version anchor + no-soft-carrier rail (kept verbatim).
+// (5) Legacy-oracle provenance + no-soft-carrier rail.
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Every `svelte@<version>` package KEY in `pnpm-lock.yaml` (a 2-space-indented
-/// `svelte@<version>:` line, distinct from `svelte-check@…` / `@sveltejs/…`; a peer-
-/// dependency suffix `svelte@<version>(…)` is stripped).
-fn locked_svelte_versions(lock: &str) -> Vec<String> {
-    let mut versions = Vec::new();
-    for line in lock.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("svelte@") || !trimmed.ends_with(':') {
-            continue;
-        }
-        let rest = &trimmed["svelte@".len()..];
-        let Some(end) = rest.find(['(', ':']) else {
-            continue;
-        };
-        let version = rest[..end].to_string();
-        if !versions.contains(&version) {
-            versions.push(version);
-        }
-    }
-    versions
-}
-
-#[test]
-fn oracle_version_matches_locked_svelte() {
-    let lock_path = workspace_root().join("pnpm-lock.yaml");
-    let lock = std::fs::read_to_string(&lock_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", lock_path.display()));
-    let locked = locked_svelte_versions(&lock);
-    assert!(
-        !locked.is_empty(),
-        "no `svelte@<version>` package key found in pnpm-lock.yaml — cannot verify the scope-view \
-         oracle pin"
-    );
-    assert!(
-        locked.iter().all(|v| v == SVELTE_ORACLE_VERSION),
-        "Svelte scope-view drift: SVELTE_ORACLE_VERSION = {SVELTE_ORACLE_VERSION:?} does NOT match \
-         the svelte version(s) pinned in pnpm-lock.yaml ({locked:?}). A svelte bump requires re-\
-         verifying the projection against the new release, re-vendoring the source, regenerating \
-         the name-parity corpus, and bumping this anchor + the vendored fixture name."
-    );
-}
 
 /// OPTIONAL provenance rail (gated under the `svelte-oracle` feature): the vendored
 /// `.js` matches the installed svelte source (LF-normalized). The DEFAULT run consumes
