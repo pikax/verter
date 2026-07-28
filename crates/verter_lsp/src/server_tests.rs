@@ -29418,17 +29418,29 @@ fn ingress_measurement_server(
 /// does not move the rail, and a FAILED compile does) rather than provider
 /// updates.
 ///
-/// The count is a pre/post delta around the serve loop. The positive control at
-/// the end is what stops zero from passing vacuously: it proves the counter
-/// moves when a compile runs, and — because it compiles the exact revision the
-/// burst just committed — proves the burst genuinely left that work undone
-/// rather than having quietly done it.
+/// It asserts BOTH halves of the contract, and both are deterministic:
 ///
-/// Nothing here is a wall-clock threshold. The fence is the LAST revision's text
-/// being committed, polled with a generous deadline — the client stream stays
-/// open for the whole test, so `serve` never sees EOF and is aborted at the end.
-/// Waiting longer can only let MORE compiles land, so the fence can never turn a
-/// real per-notification compile into a pass.
+///   * **Zero while the burst is in flight.** The test holds a
+///     [`ChangeInFlight`] ticket for this canonical id across the whole burst.
+///     A document with a change in flight is excluded from the coordinator's
+///     deadline computation AND its dispatch set, so the coordinator provably
+///     cannot dispatch while that ticket is alive. Any compile counted here
+///     therefore came from the notification-handling path — the #96 bug.
+///     Without the ticket this measurement is a race: the debounce is measured
+///     from handler RECEIPT, so a 24-edit backlog that takes longer than
+///     `DEBOUNCE_MS` to commit leaves the window already elapsed the moment the
+///     last handler finishes, and the legitimate debounced compile can land
+///     before the sample.
+///
+///   * **Exactly one after quiescence.** Dropping the ticket lets the file go
+///     quiet; the coordinator then owes exactly one refresh for the settled
+///     revision — the debt the commit path no longer pays. This doubles as the
+///     positive control: it proves the rail is live, so the zero above is not a
+///     dead counter, and it proves the burst's work was DEFERRED rather than
+///     silently skipped.
+///
+/// One is the whole point of the design: 24 notifications, one compile. A
+/// per-notification compile reads 24 at the first assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notification() {
     const BURST: usize = 24;
@@ -29444,8 +29456,13 @@ async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notificat
         "precondition: the OPEN must have produced the carrier's IDE TSX, so the \
          burst below starts from an established projection rather than bootstrapping one"
     );
+    let coordinator = service.inner().sync_coordinator.clone();
 
     let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+
+    // Pin the document non-quiescent for the whole burst. This is what makes
+    // the in-flight measurement a fact rather than a race.
+    let ticket = coordinator.change_received(canonical_id.clone());
 
     // Baseline taken AFTER the session is initialized, so nothing the handshake
     // does is attributed to the burst.
@@ -29461,8 +29478,9 @@ async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notificat
     }
 
     // Fence on the LAST revision being committed. Waiting longer can only let
-    // MORE compiles land, so this can never turn a real per-notification
-    // compile into a pass.
+    // MORE commit-path compiles land, and the held ticket keeps the debounced
+    // one off, so this can never turn a real per-notification compile into a
+    // pass.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
         assert!(
@@ -29473,11 +29491,11 @@ async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notificat
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let burst = cold_compile_runs(&host) - before;
+    let in_flight = cold_compile_runs(&host) - before;
 
     assert_eq!(
-        burst, 0,
-        "{BURST} didChange notifications started {burst} cold compile run(s) on the \
+        in_flight, 0,
+        "{BURST} didChange notifications started {in_flight} cold compile run(s) on the \
          notification-handling path. `tower-lsp-server` polls handler futures inline \
          and each one runs from entry through commit without pending, so a compile in \
          the commit is a serialized queue as long as the user's typing burst — the ~9s \
@@ -29485,20 +29503,47 @@ async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notificat
          demands it"
     );
 
-    // Positive control + proof the burst left the work undone.
-    let before_control = cold_compile_runs(&host);
-    let served = host
-        .ensure_ide_compiled(&canonical_id, &profile)
-        .expect("the committed carrier must have an IDE surface");
-    let control = cold_compile_runs(&host) - before_control;
-    assert!(served, "a .vue carrier must project an IDE surface");
-    assert!(
-        control > 0,
-        "compiling the burst's final revision must start a cold run: the rail has to \
-         be live (or the zero above is vacuous), and the ingress must not have already \
-         produced this TSX"
+    // Release the ticket: the file may now go quiet, and the coordinator owes
+    // exactly one compile for the settled revision.
+    drop(ticket);
+    let settled = await_settled_cold_compiles(&host, before).await;
+    assert_eq!(
+        settled, 1,
+        "after the burst went quiet the debounced coordinator must compile the \
+         settled revision EXACTLY once ({settled} observed). Zero means the \
+         deferred work is never done — Verter's own diagnostics would go empty \
+         and stay empty, which is the regression this pairs with. More than one \
+         means the refresh is no longer coalesced onto the quiet window"
     );
     serve.abort();
+}
+
+/// Wait for the cold-compile rail to reach a value and STAY there, then return
+/// the delta from `before`.
+///
+/// The debounced refresh is asynchronous, so a bare sleep either flakes short or
+/// pads every run. This polls for the first movement, then requires the rail to
+/// hold still across a full debounce window — so a per-notification storm cannot
+/// be sampled mid-flight and read as a small number.
+async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let quiet_for = std::time::Duration::from_millis(crate::sync_coordinator::DEBOUNCE_MS * 3);
+    loop {
+        let observed = cold_compile_runs(host) - before;
+        if observed > 0 {
+            tokio::time::sleep(quiet_for).await;
+            let again = cold_compile_runs(host) - before;
+            if again == observed {
+                return observed;
+            }
+            continue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the debounced coordinator never compiled the settled revision"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// Frame `count` full-document `didChange` notifications carrying revisions that
@@ -29563,8 +29608,13 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
         "precondition: the fixture must fail to project, or this burst runs the \
          established-projection path the sibling test already covers"
     );
+    let coordinator = service.inner().sync_coordinator.clone();
 
     let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    // Same deterministic pin as the sibling test: the coordinator cannot
+    // dispatch for a canonical id with a change in flight, so the in-flight
+    // count below is attributable to the notification path alone.
+    let ticket = coordinator.change_received(canonical_id.clone());
     let before = cold_compile_runs(&host);
     let (frames, final_source) = invalid_did_change_burst_frames(&uri, 2, BURST);
     {
@@ -29577,8 +29627,8 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
     }
 
     // Fence on the LAST revision being committed. Waiting longer can only let
-    // more compiles land, so it cannot turn a real per-notification compile into
-    // a pass.
+    // more commit-path compiles land, so it cannot turn a real per-notification
+    // compile into a pass.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while host.get_source(&canonical_id).as_deref() != Some(final_source.as_str()) {
         assert!(
@@ -29589,12 +29639,12 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let burst = cold_compile_runs(&host) - before;
+    let in_flight = cold_compile_runs(&host) - before;
 
     assert_eq!(
-        burst, 0,
+        in_flight, 0,
         "{BURST} malformed didChange notifications on a projection-less carrier \
-         started {burst} cold compile run(s). Compiling while no projection exists \
+         started {in_flight} cold compile run(s). Compiling while no projection exists \
          never terminates — the compile fails, no projection is installed, and the \
          next keystroke repeats it. That is the serialized queue of issue #96, \
          reachable by ordinary typing"
@@ -29605,8 +29655,27 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
          compile ran somewhere the rail did not attribute to this burst"
     );
 
+    // Release the ticket. Exactly one debounced compile must follow — the
+    // failing revision still owes its DIAGNOSTICS, which the failure arm stores
+    // before returning `Err`, and that is the only reason the editor shows the
+    // parse errors at all. A `Never` here is the empty-diagnostics regression;
+    // a per-notification count is #96.
+    drop(ticket);
+    let settled = await_settled_cold_compiles(&host, before).await;
+    assert_eq!(
+        settled, 1,
+        "after the burst went quiet the debounced coordinator must compile the \
+         settled (still malformed) revision EXACTLY once ({settled} observed)"
+    );
+    assert!(
+        service_projection_still_absent(&host, &canonical_id),
+        "the settled revision still does not compile, so the debounced refresh must \
+         install NO projection — a projection here means the fixture stopped being \
+         malformed and the burst asserted nothing"
+    );
+
     // Positive control: the rail moves for this document once a valid revision is
-    // compiled on demand, so the zero above is not a dead counter.
+    // compiled on demand, so the counts above are not a dead counter.
     let before_control = cold_compile_runs(&host);
     let _ = host.upsert(verter_session::UpsertRequest {
         canonical_id: Some(canonical_id.clone()),
@@ -29624,6 +29693,131 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
         cold_compile_runs(&host) > before_control,
         "compiling this document on demand must start a cold run — otherwise the zero \
          above is vacuous"
+    );
+    serve.abort();
+}
+
+/// A STYLE-ONLY edit must not silently erase the file's diagnostics.
+///
+/// This is the one edit shape that clears without arming anything. The host
+/// upsert clears `latest_diagnostics` on any semantic change, and a style slice
+/// is one — verified here rather than assumed, by asserting the errors are
+/// present before the edit and that the edit really did classify as style-only
+/// (the template text is byte-identical across it). But `handle_did_change`
+/// skipped the whole coordinator block for a style-only edit, because none of
+/// what it does — provider sync, hover-cache invalidation, dependency-frontier
+/// refresh, import republication — is owed for a CSS tweak.
+///
+/// The result was the branch's own regression in a narrower window, reached with
+/// no race at all: change a colour, and every template error in the file stops
+/// being reported. Worse than merely going quiet, the republish that follows
+/// pushes the emptiness to the editor.
+///
+/// The invariant this pins is the general one — anything that clears
+/// `latest_diagnostics` must arm the recompute that refills it — checked at the
+/// shape that violated it. Driven through the real `Server::serve` ingress so it
+/// covers `handle_did_change`'s wiring, not a hand-staged signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_style_only_edit_does_not_erase_the_files_diagnostics() {
+    // A template whose STRUCTURE parses (so the upsert can diff slices and
+    // classify the edit as style-only at all) but whose directive expression does
+    // not compile, held BYTE-IDENTICAL across the edit, plus a style block that
+    // is the only thing that moves. A template broken badly enough to fail
+    // parsing is NOT usable here: slice diffing cannot classify it, the upsert
+    // reports no change, and nothing is cleared — the test would pass vacuously.
+    let revision = |color: &str| {
+        format!(
+            "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+             <template>\n  <div v-if=\"count ===\">{{{{ count }}}}</div>\n</template>\n\
+             <style scoped>\n.a {{ color: {color}; }}\n</style>\n"
+        )
+    };
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let (service, socket) = ingress_measurement_server(&host);
+    let uri = open_test_vue(
+        service.inner(),
+        "/workspace/src/Styled.vue",
+        &revision("red"),
+    );
+    let canonical_id = crate::documents::uri_to_canonical_id(&uri);
+    let profile = service.inner().documents.tsx_profile.read().clone();
+
+    let opened = host
+        .get_diagnostics(&canonical_id, &profile)
+        .map(|snapshot| snapshot.diagnostics.len())
+        .unwrap_or(0);
+    assert!(
+        opened > 0,
+        "precondition: the malformed template must report Verter's own parse \
+         errors at open, or this test has nothing to lose"
+    );
+    let cached_verter_diags = Arc::clone(&service.inner().cached_verter_diags);
+
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    let styled = revision("blue");
+    {
+        use tokio::io::AsyncWriteExt;
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri.as_str(), "version": 2 },
+                "contentChanges": [ { "text": styled } ],
+            },
+        }))
+        .expect("didChange frame serializes");
+        client_to_server
+            .write_all(format!("Content-Length: {}\r\n\r\n{}", body.len(), body).as_bytes())
+            .await
+            .expect("the edit must reach the server");
+        client_to_server.flush().await.expect("flush the edit");
+    }
+
+    // Wait for the debounced republish stamped with the edited version.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let published = loop {
+        if let Some(entry) = cached_verter_diags.get(uri.as_str()) {
+            if entry.0 == 2 {
+                break entry.2.clone();
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the style-only edit never produced a republish for v2; cached version: \
+             {:?}",
+            cached_verter_diags.get(uri.as_str()).map(|entry| entry.0)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+
+    let parse_errors = published
+        .iter()
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.code.as_ref(),
+                Some(NumberOrString::String(code)) if code.starts_with('X')
+            )
+        })
+        .count();
+    assert!(
+        parse_errors > 0,
+        "a style-only edit erased the file's template errors: the host cleared \
+         `latest_diagnostics` for it and nothing was armed to recompute them, so \
+         the republish pushed an empty set for a file whose template still does \
+         not parse. Published: {:?}",
+        published
+            .iter()
+            .map(|diagnostic| diagnostic.code.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // The edit really was style-only: a template change would make this test
+    // pass through the ordinary edit path and prove nothing about the skip.
+    assert!(
+        host.get_source(&canonical_id)
+            .as_deref()
+            .is_some_and(|source| source.contains("color: blue")),
+        "precondition: the styled revision must be the committed one"
     );
     serve.abort();
 }

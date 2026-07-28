@@ -106,6 +106,40 @@ impl SyncCoordinatorHandle {
         let _ = self.wake_tx.try_send(());
     }
 
+    /// Signal that a file needs a debounced REPUBLISH but no provider sync.
+    ///
+    /// The edit that motivates this is the style-only one: it needs no provider
+    /// sync, no dependency-frontier refresh and no import republication — but
+    /// the host still CLEARED the file's diagnostics for it, and a clear that
+    /// arms no recompute leaves the editor showing nothing. The debounced tick
+    /// recompiles for every revision it is about to publish, so asking it to
+    /// publish is what refills them.
+    ///
+    /// Merges rather than overwrites: it must never downgrade a pending
+    /// `requires_sync` deposited by a real edit for the same quiet window.
+    pub fn signal_diagnostics_only(
+        &self,
+        canonical_id: String,
+        uri_str: String,
+        received_at: Instant,
+    ) {
+        self.pending
+            .lock()
+            .entry(canonical_id)
+            .and_modify(|pending| {
+                pending.uri = uri_str.clone();
+                pending.force_diagnostics = true;
+                pending.received_at = pending.received_at.max(received_at);
+            })
+            .or_insert(PendingSignal {
+                uri: uri_str,
+                requires_sync: false,
+                force_diagnostics: true,
+                received_at,
+            });
+        let _ = self.wake_tx.try_send(());
+    }
+
     /// Record that a change to `canonical_id` has been RECEIVED.
     ///
     /// Call this at `did_change` handler ENTRY, before the global commit mutex
@@ -164,6 +198,13 @@ impl ChangeInFlight {
     pub fn signal(&self, uri_str: String) {
         self.handle
             .signal(self.canonical_id.clone(), uri_str, self.received_at);
+    }
+
+    /// Deposit a REPUBLISH-only signal for this change, stamped with the same
+    /// receipt instant. See [`SyncCoordinatorHandle::signal_diagnostics_only`].
+    pub fn signal_diagnostics_only(&self, uri_str: String) {
+        self.handle
+            .signal_diagnostics_only(self.canonical_id.clone(), uri_str, self.received_at);
     }
 }
 
@@ -233,7 +274,7 @@ pub struct SyncCoordinatorDeps {
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
-const DEBOUNCE_MS: u64 = 300;
+pub(crate) const DEBOUNCE_MS: u64 = 300;
 
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
@@ -426,9 +467,24 @@ async fn coordinator_loop(
                 for (canonical_id, signal) in ready {
                     pending_files.remove(&canonical_id);
                     let mut publish_diagnostics = signal.force_diagnostics;
-                    if signal.requires_sync
-                        && deps.needs_provider_sync.remove(&canonical_id).is_some()
-                    {
+                    let will_sync = signal.requires_sync
+                        && deps.needs_provider_sync.remove(&canonical_id).is_some();
+
+                    // The carrier's IDE surface is owed by THIS tick, for every
+                    // settled revision it is about to sync or publish — not by
+                    // the provider sync it used to sit inside. A revision can
+                    // need the recompile without needing any provider work at
+                    // all: a style-only edit clears the file's diagnostics and
+                    // asks only for a republish, and publishing without first
+                    // recompiling would publish the emptiness the clear left
+                    // behind. Skipped when this tick will do neither, so a
+                    // signal whose work bit an interactive sync already consumed
+                    // compiles nothing.
+                    if will_sync || publish_diagnostics {
+                        refresh_carrier_ide_surface(&deps, &canonical_id);
+                    }
+
+                    if will_sync {
                         let sync_version = signal.uri
                             .parse::<Uri>()
                             .ok()
@@ -474,20 +530,82 @@ async fn coordinator_loop(
     }
 }
 
+/// Refresh the carrier's IDE surface for the revision the debounce just
+/// settled on: load it, recompile it, and install a provider projection if the
+/// document has none.
+///
+/// This is the debounced tick's COMPILE half, called from the tick itself
+/// rather than from the provider sync, and gated ONLY on the document still
+/// being open. The document commit owes only the document's text — it stopped
+/// compiling per keystroke, which is
+/// https://github.com/pikax/verter/issues/96 — so this tick is what owes the
+/// IDE surface for the settled revision.
+///
+/// That debt belongs to the REVISION, not to the provider and not to the sync:
+/// `upsert` clears the file's `latest_diagnostics` on any semantic change, and
+/// `get_diagnostics` is a pure cached read that never compiles, so without this
+/// compile Verter's OWN template and parse diagnostics go EMPTY and stay empty.
+/// Nothing about that involves a type provider — the shipping default route has
+/// none (`--type-provider=editor-tsserver` installs no local provider; the
+/// editor's own tsserver serves TypeScript) — and nothing about it requires a
+/// provider sync either, which is why a style-only edit, whose whole point is
+/// that it needs no provider work, still reaches this.
+///
+/// Carrier-agnostic: `ensure_ide_compiled` answers `Ok(false)` for anything
+/// with no IDE surface, so a self-file document (rune module, plain script)
+/// pays a source lookup and nothing else, while Vue and Svelte carriers refresh
+/// identically.
+///
+/// Bounded by the debounce, never by keystroke: one quiet window, one compile.
+fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
+    // Nothing is owed for a document that is no longer open. `did_change`
+    // leaves a pending signal behind and `did_close` does not cancel it, so an
+    // edit-then-close lands here after the close has already removed the
+    // document AND evicted the host source. Without this gate `ensure_loaded`
+    // would RESURRECT the file from disk and pull its dependency closure in
+    // for a buffer nobody is looking at — and the publication that follows
+    // finds no document and drops the result anyway. This is the open-document
+    // check the recovery helper this replaced performed first.
+    //
+    // `sync_file`'s provider arm is deliberately NOT gated on it, and keeps its
+    // own `ensure_ide_compiled`: retracting or clearing a closed carrier's
+    // provider state is work a close still owes, and that arm also syncs
+    // carriers that were never open (a workspace file whose `.tsx` an importer
+    // needs).
+    if deps.documents.canonical_id_to_uri(canonical_id).is_none() {
+        return;
+    }
+    // The compile below reads the file and the dependency closure this loads.
+    // A fast path for an already-loaded open document, which is every document
+    // reaching this tick.
+    deps.documents.host().ensure_loaded(canonical_id);
+    let profile = deps.documents.tsx_profile.read().clone();
+    let compiled = crate::server::block_in_place_guarded(|| {
+        deps.documents
+            .host
+            .ensure_ide_compiled(canonical_id, &profile)
+    });
+    if !compiled.unwrap_or(false) {
+        return;
+    }
+    // A carrier whose open-time compile FAILED has no provider projection and
+    // fails closed downstream forever; the foreground repair declines to build
+    // one by design. Cache read only — the compile just above already ran — and
+    // a no-op once a projection exists, so it never disturbs the steady-state
+    // carry.
+    deps.documents
+        .install_missing_carrier_projection(canonical_id);
+}
+
 /// Perform the actual sync: sync TSX/DTS to the type provider.
 ///
-/// A provider-less route (`deps.project_sync == None`) has nothing to sync —
-/// the caller still publishes Verter-owned diagnostics afterwards.
+/// The carrier's IDE surface is NOT this function's job — the tick refreshes it
+/// through [`refresh_carrier_ide_surface`] before calling here, because a
+/// revision can owe that recompile without owing any provider work. A
+/// provider-less route (`deps.project_sync == None`) therefore has nothing to
+/// do here at all; the tick still publishes Verter-owned diagnostics
+/// afterwards.
 async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
-    // BEFORE every early return below. A carrier whose open-time compile failed
-    // has no provider projection and fails closed downstream forever, and this
-    // debounced tick is one of the few paths that runs for it at all — but the
-    // provider-sync arm returns early on a provider-less route and before a
-    // resolver snapshot is published, which is exactly when a fresh workspace is
-    // still settling. The recovery needs neither: it compiles and reads the host
-    // cache, and it is a no-op once a projection exists.
-    deps.documents
-        .recover_missing_carrier_projection(canonical_id);
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return;
     };
@@ -512,7 +630,6 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             .insert(canonical_id.to_string());
         return;
     };
-    deps.documents.host().ensure_loaded(canonical_id);
 
     // A self-file document (a `.svelte.ts` / `.svelte.js` rune module OR a
     // plain TS-family script) is NOT a carrier — it serves its OWN-path
@@ -554,6 +671,13 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     // Sync IDE (TSX) output to type provider. IDE-sync: drive the IDE/TSX
     // surface (not the runtime `Main`) so a Main-less carrier (Svelte)
     // populates its `CachedTsx` before the `get_ide` read below.
+    //
+    // Kept even though `refresh_carrier_ide_surface` ran above, and NOT folded
+    // into it: that refresh serves the OPEN document, while the provider arm
+    // also syncs carriers with no open document at all (a workspace file whose
+    // `.tsx` an importer needs). For an open document this is a warm hit on the
+    // slot the refresh just filled — the same profile, so the same normalized
+    // slot — and a warm hit starts no cold run.
     let profile = deps.documents.tsx_profile.read().clone();
     let _ = tokio::task::block_in_place(|| {
         deps.documents

@@ -875,6 +875,25 @@ pub(super) async fn handle_did_change(
             // split: no provider I/O, project loading, or diagnostics can retain a
             // `didChange` handler or build an unbounded per-keystroke queue.
         }
+    } else if let Some(canonical_id) = canonical_id {
+        // A style-only edit needs none of the above — no provider sync, no
+        // hover-cache invalidation, no dependency-frontier refresh, no import
+        // republication. It DOES need the debounced tick, because the host
+        // upsert just CLEARED this file's `latest_diagnostics` for it (the
+        // clear fires on any semantic change, and a style slice is one), and
+        // `get_diagnostics` never recompiles. Skipping the tick entirely leaves
+        // the template errors the user can still see in their file reported
+        // nowhere — the same empty-and-never-refilled state this whole change
+        // exists to prevent, reached without any race.
+        //
+        // Anything that clears `latest_diagnostics` must arm the recompute that
+        // refills it. This is that arming, and it asks for the REPUBLISH only:
+        // the tick recompiles for every revision it is about to publish, so the
+        // provider work this branch exists to avoid stays avoided.
+        if let Some(change) = change_in_flight.as_ref() {
+            change.signal_diagnostics_only(uri.as_str().to_string());
+        }
+        let _ = canonical_id;
     }
 
     tracing::info!("did_change EXIT v{version}");

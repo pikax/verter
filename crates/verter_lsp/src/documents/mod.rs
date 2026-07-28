@@ -371,11 +371,13 @@ impl DocumentRegistry {
         // an edge case. That reinstates exactly the serialized per-keystroke
         // queue this method exists to avoid. A missing projection is instead made
         // recovered on the paths that already compile for open documents — the
-        // debounced coordinator tick and the pending-snapshot drain, via
-        // `recover_missing_carrier_projection`. Deliberately NOT the foreground
-        // repair: `current_file_needs_inline_type_provider_sync` still declines a
-        // projection-less document, because that repair loads the dependency
-        // closure and would cold-load children on ordinary interactive requests.
+        // debounced coordinator tick and the pending-snapshot drain, each of
+        // which follows its compile with
+        // [`Self::install_missing_carrier_projection`]. Deliberately NOT the
+        // foreground repair: `current_file_needs_inline_type_provider_sync` still
+        // declines a projection-less document, because that repair loads the
+        // dependency closure and would cold-load children on ordinary interactive
+        // requests.
         let new_line_index = LineIndex::new(&source, self.encoding());
 
         // Rebuild the document's provider projection.
@@ -517,46 +519,6 @@ impl DocumentRegistry {
     /// the projection discriminant).
     pub fn get_projection(&self, uri: &Uri) -> Option<DocumentProviderProjection> {
         self.documents.get(uri.as_str())?.projection.clone()
-    }
-
-    /// Recover a carrier that has NO provider projection: compile its IDE
-    /// surface, then install the projection from it.
-    ///
-    /// A document with no projection fails closed downstream — every
-    /// provider-backed feature refuses it, and the foreground repair
-    /// deliberately declines to build one (that path loads the dependency
-    /// closure, so it must not run for a carrier whose compile is failing). So
-    /// recovery has to happen on the paths that already compile for open
-    /// documents, and it has to happen on ALL of them: the debounced
-    /// coordinator tick returns early on a provider-less route or before a
-    /// resolver snapshot is published, and the pending-snapshot drain compiles
-    /// on a different path entirely.
-    ///
-    /// Bounded by the MISSING projection, never by keystroke: it is a no-op the
-    /// moment one exists, and the document-commit path never calls it.
-    pub fn recover_missing_carrier_projection(&self, canonical_id: &str) {
-        let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
-            return;
-        };
-        if self
-            .documents
-            .get(uri.as_str())
-            .is_none_or(|document| document.projection.is_some())
-        {
-            return;
-        }
-        // `ensure_ide_compiled` answers `Ok(false)` for a non-carrier without
-        // compiling, so this costs nothing for a document that has no IDE
-        // surface to build.
-        let profile = self.tsx_profile.read().clone();
-        if !self
-            .host
-            .ensure_ide_compiled(canonical_id, &profile)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        self.install_missing_carrier_projection(canonical_id);
     }
 
     /// Install a carrier's provider projection from the host's CACHED IDE

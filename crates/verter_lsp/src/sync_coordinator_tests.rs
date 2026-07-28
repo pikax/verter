@@ -2886,13 +2886,16 @@ async fn the_coordinator_installs_a_projection_the_failed_open_compile_never_bui
          the coordinator and the per-keystroke compile is back"
     );
 
-    sync_file(&deps, &recovered_id, uri.as_str()).await;
-
-    assert!(
-        documents.get_projection(&uri).is_some(),
-        "the debounced sync must install the projection the failed open never built; \
-         without it the document fails closed downstream forever"
-    );
+    let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+    await_projection_via_coordinator(
+        deps,
+        &needs_provider_sync,
+        &documents,
+        &recovered_id,
+        &uri,
+        "failed open compile",
+    )
+    .await;
 }
 
 /// Recovery must not depend on the provider-sync arm being reachable.
@@ -2975,13 +2978,432 @@ async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
             ));
         }
 
-        sync_file(&deps, &canonical_id, uri.as_str()).await;
+        let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
+        await_projection_via_coordinator(
+            deps,
+            &needs_provider_sync,
+            &documents,
+            &canonical_id,
+            &uri,
+            case,
+        )
+        .await;
+    }
+}
 
+/// Drive the REAL coordinator for one settled revision and wait for the
+/// document's provider projection to appear.
+///
+/// The refresh belongs to the tick, not to `sync_file`, so a recovery test has
+/// to go through the tick to exercise it — which is also the wiring that would
+/// break if a future change stopped arming it.
+async fn await_projection_via_coordinator(
+    deps: SyncCoordinatorDeps,
+    needs_provider_sync: &Arc<DashSet<String>>,
+    documents: &Arc<DocumentRegistry>,
+    canonical_id: &str,
+    uri: &Uri,
+    case: &str,
+) {
+    let handle = spawn_sync_coordinator(deps);
+    needs_provider_sync.insert(canonical_id.to_string());
+    handle.signal(
+        canonical_id.to_string(),
+        uri.as_str().to_string(),
+        Instant::now(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while documents.get_projection(uri).is_none() {
         assert!(
-            documents.get_projection(&uri).is_some(),
-            "{case}: the debounced tick must recover the projection even though the \
-             provider-sync arm returns early — otherwise the document is stranded \
-             with no IDE features until an unrelated later edit happens to fix it"
+            Instant::now() < deadline,
+            "{case}: the debounced tick must install the projection the failed open \
+             never built; without it the document fails closed downstream forever"
         );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Build a provider-less coordinator (`project_sync: None`, `type_provider:
+/// None`) — the shipping default: `--type-provider=editor-tsserver` installs no
+/// LOCAL provider (`editor_tsserver_topology` returns `provider: None`), and
+/// `--type-provider=off` is the same code path.
+fn make_provider_less_deps(documents: &Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
+    SyncCoordinatorDeps {
+        documents: Arc::clone(documents),
+        project_sync: None,
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::new(DashMap::new()),
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+        carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
+    }
+}
+
+/// A Vue SFC whose template is either well-formed or carries a close tag that
+/// closed no open element — a template parse error Verter reports on its OWN,
+/// with no type provider involved.
+fn vue_carrier_source(broken: bool) -> String {
+    let rows: String = (0..8)
+        .map(|i| format!("    <div>{{{{ {i} }}}}</div>\n"))
+        .collect();
+    let bad = if broken {
+        "    <div><span></div>\n"
+    } else {
+        ""
+    };
+    format!(
+        "<script setup lang=\"ts\">\nconst a = 1\n</script>\n\n\
+         <template>\n  <section>\n{rows}{bad}  </section>\n</template>\n"
+    )
+}
+
+/// A Svelte component whose markup is either well-formed or carries a close tag
+/// that closed no open element (Verter's `element_invalid_closing_tag`, the
+/// Svelte analogue of Vue's "Invalid end tag.").
+///
+/// Svelte is first-class on this path: the debounced refresh is carrier-
+/// agnostic, so it must recover Svelte exactly as it recovers Vue.
+fn svelte_carrier_source(broken: bool) -> String {
+    let rows: String = (0..8).map(|i| format!("  <div>{i}</div>\n")).collect();
+    let bad = if broken { "</span>\n" } else { "" };
+    format!("<script lang=\"ts\">\n  const a = 1;\n</script>\n\n{rows}{bad}")
+}
+
+/// The diagnostic codes each carrier's BROKEN revision must produce — the
+/// Verter-owned parse errors for a close tag that closed no open element.
+///
+/// Named codes, not counts: a count assertion passes for any unrelated set of
+/// the same size, and it was exactly a count-shaped observation ("diagnostics
+/// are there") that let this regression ship.
+const VUE_BROKEN_CODE: &str = "XInvalidEndTag";
+const SVELTE_BROKEN_CODE: &str = "svelte-official-reject-element-invalid-closing-tag";
+
+/// Every diagnostic in `diagnostics` as `(code, range)`, sorted — a stable,
+/// order-independent identity for a published set.
+///
+/// Codes AND ranges, never a count: a count passes for any unrelated set of the
+/// same size, and it was exactly a count-shaped observation ("diagnostics are
+/// there") that let this regression ship. The range half is compared against
+/// what the SAME revision produces when opened, so it pins that the debounced
+/// refresh maps positions exactly as the open path does — without asserting a
+/// property a carrier does not have today (Svelte's structural-reject
+/// diagnostics carry a collapsed 0:0 span at the producer, on the open path
+/// too; Vue's carry real spans).
+fn diagnostic_identities(diagnostics: &[Diagnostic]) -> Vec<(String, u32, u32, u32, u32)> {
+    let mut identities: Vec<(String, u32, u32, u32, u32)> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let code = match diagnostic.code.as_ref() {
+                Some(NumberOrString::String(code)) => code.clone(),
+                Some(NumberOrString::Number(code)) => code.to_string(),
+                None => String::new(),
+            };
+            (
+                code,
+                diagnostic.range.start.line,
+                diagnostic.range.start.character,
+                diagnostic.range.end.line,
+                diagnostic.range.end.character,
+            )
+        })
+        .collect();
+    identities.sort();
+    identities
+}
+
+/// Just the codes, for the preconditions.
+fn codes_of(identities: &[(String, u32, u32, u32, u32)]) -> Vec<String> {
+    let mut codes: Vec<String> = identities.iter().map(|(code, ..)| code.clone()).collect();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+/// Verter's OWN diagnostics must keep tracking the document after an edit on a
+/// provider-less route — the shipping `--type-provider=editor-tsserver` default,
+/// where `project_sync` is `None`.
+///
+/// The regression (a live one, on `main`): the document commit deliberately
+/// stopped compiling (issue #96), and the host's `upsert` clears
+/// `latest_diagnostics`, so after an edit `get_diagnostics` — documented as NOT
+/// triggering compilation — answers an empty snapshot. The one debounced path
+/// that recompiles, `sync_file`, reached its `ensure_ide_compiled` only AFTER
+/// `let Some(project_sync) = … else { return }`. So on a provider-less route
+/// nothing ever recompiled and the diagnostics went EMPTY and never came back:
+/// the identical broken text yields errors when OPENED and none when the same
+/// breakage arrives as an edit.
+///
+/// This drives the REAL coordinator: a spawned `spawn_sync_coordinator` loop,
+/// fed exactly what `handle_did_change` feeds it — a `needs_provider_sync`
+/// insert plus a `signal` — and observed through the publish path's own diagnostic
+/// cache. Calling `sync_file` directly would leave production's
+/// `requires_sync && needs_provider_sync` dispatch gate uncovered, and a future
+/// "skip `sync_file` when `project_sync` is None" optimisation would then
+/// re-break the shipping VS Code route with this test still green.
+///
+/// It asserts the diagnostic CODES for each revision, against the codes that
+/// same revision produces when OPENED — the control that showed the diagnostics
+/// went empty rather than stale. The repair legs are what make it discriminating
+/// in both directions: a "fix" that merely stopped clearing diagnostics would
+/// pass the broken legs and fail the repaired ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn verter_diagnostics_track_edits_on_a_provider_less_route() {
+    for (carrier, uri_str, language_id, source, broken_code) in [
+        (
+            "vue",
+            "file:///workspace/src/Cycle.vue",
+            "vue",
+            vue_carrier_source as fn(bool) -> String,
+            VUE_BROKEN_CODE,
+        ),
+        (
+            "svelte",
+            "file:///workspace/src/Cycle.svelte",
+            "svelte",
+            svelte_carrier_source as fn(bool) -> String,
+            SVELTE_BROKEN_CODE,
+        ),
+    ] {
+        let when_opened_valid = identities_when_opened(uri_str, language_id, &source(false)).await;
+        let when_opened_broken = identities_when_opened(uri_str, language_id, &source(true)).await;
+        assert!(
+            !codes_of(&when_opened_valid).contains(&broken_code.to_string()),
+            "{carrier} precondition: the valid revision must NOT report {broken_code} \
+             when opened (got {:?})",
+            codes_of(&when_opened_valid)
+        );
+        assert!(
+            codes_of(&when_opened_broken).contains(&broken_code.to_string()),
+            "{carrier} precondition: the broken revision must report {broken_code} \
+             when opened (got {:?}) — if it does not, the rest of this test proves \
+             nothing",
+            codes_of(&when_opened_broken)
+        );
+
+        let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+            HostConfig::default(),
+        ))));
+        let uri: Uri = uri_str.parse().expect("uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: language_id.to_string(),
+            version: 1,
+            text: source(true),
+        });
+        let canonical_id = documents
+            .get_canonical_id(&uri)
+            .expect("the open document has a canonical id");
+
+        // The real coordinator, wired exactly as the server wires it on a
+        // provider-less route.
+        let needs_provider_sync = Arc::new(DashSet::new());
+        let cached_verter_diags = Arc::new(DashMap::new());
+        let mut deps = make_provider_less_deps(&documents);
+        deps.needs_provider_sync = Arc::clone(&needs_provider_sync);
+        deps.cached_verter_diags = Arc::clone(&cached_verter_diags);
+        // A read-only twin of the coordinator's own dependencies, so the
+        // assertion reads the COMPLETE Verter-owned set through the same
+        // function the open-side control uses. The coordinator's diagnostic
+        // cache holds only the version-cached DOCUMENT half; the state-derived
+        // categories (`verter(project)` ownership, the Svelte install check)
+        // are recomputed on every publish and never enter it.
+        let observer = deps.clone();
+        let handle = spawn_sync_coordinator(deps);
+
+        // Repair, break, repair, break. Each leg is one edit announced to the
+        // coordinator the way `handle_did_change` announces it, then a wait for
+        // the publish path's own recomputation for THAT document version.
+        for (version, broken) in [(2, false), (3, true), (4, false), (5, true)] {
+            let _ = documents.did_change(&uri, version, &source(broken));
+            needs_provider_sync.insert(canonical_id.clone());
+            handle.signal(
+                canonical_id.clone(),
+                uri.as_str().to_string(),
+                Instant::now(),
+            );
+
+            await_publish_for_version(&cached_verter_diags, uri.as_str(), version, carrier).await;
+            let published =
+                diagnostic_identities(&compute_verter_diagnostics(&observer, &canonical_id, &uri));
+            let expected = if broken {
+                &when_opened_broken
+            } else {
+                &when_opened_valid
+            };
+            assert_eq!(
+                &published, expected,
+                "{carrier} v{version} (broken={broken}): the debounced coordinator must \
+                 publish exactly what OPENING this same revision publishes. Anything \
+                 else is the #96 regression: after the first edit the diagnostics went \
+                 empty and never returned, because the only debounced recompile sat \
+                 behind the `project_sync` gate on a route that has no provider"
+            );
+        }
+    }
+}
+
+/// The Verter-owned diagnostics a revision produces when it is OPENED, as
+/// `(code, range)`, in a fresh registry. `did_open` compiles; the document
+/// commit deliberately does not, which is the whole asymmetry under test.
+async fn identities_when_opened(
+    uri_str: &str,
+    language_id: &str,
+    text: &str,
+) -> Vec<(String, u32, u32, u32, u32)> {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let uri: Uri = uri_str.parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: language_id.to_string(),
+        version: 1,
+        text: text.to_string(),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("the open document has a canonical id");
+    let deps = make_provider_less_deps(&documents);
+    diagnostic_identities(&compute_verter_diagnostics(&deps, &canonical_id, &uri))
+}
+
+/// Wait for the coordinator's publish path to recompute THIS document version.
+///
+/// The cache entry is written by the publish path itself and is stamped with the
+/// document version it was computed for, so waiting on `version` observes the
+/// real debounced publish rather than sleeping for one. The caller then compares
+/// the complete Verter-owned set, ranges included, against the open-path control.
+async fn await_publish_for_version(
+    cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
+    uri_str: &str,
+    version: i32,
+    carrier: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(entry) = cached_verter_diags.get(uri_str) {
+            if entry.0 == version {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{carrier}: the coordinator never published diagnostics for v{version}; \
+             cached entry: {:?}",
+            cached_verter_diags.get(uri_str).map(|entry| entry.0)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// An edit followed by a CLOSE before the quiet window elapses must not make
+/// the debounced tick reach into the host for the file at all.
+///
+/// `did_change` leaves a pending coordinator signal behind and `did_close` does
+/// not cancel it, so the tick still runs for a canonical id whose document is
+/// gone and whose host source the close EVICTED. An ungated refresh then calls
+/// `ensure_loaded`, which for an evicted canonical is no longer a cache lookup:
+/// it submits a load that RESURRECTS the file from disk and pulls its
+/// dependency closure in, to compile a buffer nobody is looking at — and the
+/// publication that follows finds no document and drops the result anyway.
+/// Pure waste, on the shared coordinator actor, ahead of every other file's
+/// tick.
+///
+/// Driven through the real spawned coordinator, so it covers the wiring and not
+/// just the helper. Measured on `ensure_loaded_calls` rather than on the compile
+/// rail: the resurrect IS the load, and asserting the load never happens holds
+/// whether or not the reloaded file would go on to compile (in a fixture with no
+/// file on disk it would not, which makes a compile-count assertion vacuous
+/// here).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/Closed.vue".parse().expect("uri");
+    let needs_provider_sync = Arc::new(DashSet::new());
+    let mut deps = make_provider_less_deps(&documents);
+    deps.needs_provider_sync = Arc::clone(&needs_provider_sync);
+    let handle = spawn_sync_coordinator(deps);
+
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_carrier_source(false),
+    });
+    let canonical_id = documents
+        .get_canonical_id(&uri)
+        .expect("the open document has a canonical id");
+
+    // The user edits, then closes the tab before the debounce fires. The close
+    // evicts the host source exactly as `handle_did_close` does — and, exactly
+    // as `handle_did_close` does, it leaves the signal in place.
+    let _ = documents.did_change(&uri, 2, &vue_carrier_source(true));
+    needs_provider_sync.insert(canonical_id.clone());
+    handle.signal(
+        canonical_id.clone(),
+        uri.as_str().to_string(),
+        Instant::now(),
+    );
+    documents.did_close(&uri);
+    host.evict(&canonical_id);
+
+    let before = host.provenance_snapshot().ensure_loaded_calls;
+    // Well past the debounce, so the tick has certainly run.
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    let loads = host.provenance_snapshot().ensure_loaded_calls - before;
+
+    assert_eq!(
+        loads, 0,
+        "the tick for a CLOSED document asked the host to load it {loads} time(s): \
+         for an evicted canonical that is a disk reload plus dependency prefetch, \
+         done for a buffer that no longer exists"
+    );
+
+    // Positive control: the identical tick for an OPEN document DOES load and
+    // DOES compile. Without this the zero above passes for a refresh that never
+    // runs at all — which is the regression this branch exists to fix.
+    let open_uri: Uri = "file:///workspace/src/Open.vue".parse().expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: open_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: vue_carrier_source(false),
+    });
+    let open_id = documents
+        .get_canonical_id(&open_uri)
+        .expect("the open document has a canonical id");
+    let _ = documents.did_change(&open_uri, 2, &vue_carrier_source(true));
+    let before_open = host.provenance_snapshot();
+    needs_provider_sync.insert(open_id.clone());
+    handle.signal(
+        open_id.clone(),
+        open_uri.as_str().to_string(),
+        Instant::now(),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let now = host.provenance_snapshot();
+        if now.ensure_loaded_calls > before_open.ensure_loaded_calls
+            && now.compile_cold_runs > before_open.compile_cold_runs
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the tick for an OPEN document must still reach the host AND compile — \
+             otherwise the closed-file zero above is vacuous and Verter's own \
+             diagnostics never refresh"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

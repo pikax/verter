@@ -1127,6 +1127,12 @@ impl VerterHost {
             /// compile slot is stored with the semantic_hash that was
             /// current when we decided to compile.
             semantic_hash: Hash16,
+            /// The full-content identity of that same snapshot. The
+            /// `latest_diagnostics` write is fenced on it: diagnostics
+            /// describe bytes, so any content movement — a style-only edit
+            /// included — makes this compile's set stale for the live
+            /// buffer.
+            whole_hash: Hash16,
             /// The mode classification, computed once from this request's
             /// effective eligibility surface. The classifier is the sole
             /// authority for the mode decision and gates the warm-hit
@@ -1502,6 +1508,7 @@ impl VerterHost {
                     fallback_last_good,
                     meta: effective_meta,
                     semantic_hash: parse.semantic_hash,
+                    whole_hash: parse.whole_hash,
                     classification,
                     content_publish_stamp,
                 }
@@ -1513,6 +1520,7 @@ impl VerterHost {
             fallback_last_good,
             meta,
             semantic_hash: captured_semantic_hash,
+            whole_hash: captured_whole_hash,
             classification,
             content_publish_stamp,
         } = cache_miss;
@@ -1690,7 +1698,12 @@ impl VerterHost {
                 (outputs, diagnostics, false, tsx, tpl, refused)
             }
             Err(diagnostics) => {
-                self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
+                self.store_latest_diagnostics_if_source_unmoved(
+                    &canonical_id,
+                    profile_hash,
+                    captured_whole_hash,
+                    diagnostics.clone(),
+                );
                 let policy = self.config.compile_error_policy;
                 // `fallback_last_good` is session-published output. A
                 // `Stateless` compile bypasses ALL host cache reads —
@@ -1765,12 +1778,15 @@ impl VerterHost {
         // The `latest_diagnostics` + generation bump runs for EVERY mode
         // so compile errors / warnings surface regardless of caching.
         // This is observable diagnostic state, not a compile-output
-        // cache entry.
-        if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-            cc.latest_diagnostics
-                .insert(profile_hash, diagnostics.clone());
-            cc.diagnostics_generation += 1;
-        }
+        // cache entry — which is exactly why it is fenced on the source
+        // identity these diagnostics were computed from rather than
+        // written blind (see the writer's contract).
+        self.store_latest_diagnostics_if_source_unmoved(
+            &canonical_id,
+            profile_hash,
+            captured_whole_hash,
+            diagnostics.clone(),
+        );
 
         // Test-only seam: the compute→publish window. Fence tests land
         // an env / project mutation here to prove the mode-routed
@@ -2591,17 +2607,69 @@ impl VerterHost {
         }))
     }
 
-    /// Store diagnostics from a failed compile without triggering recompilation.
-    pub(crate) fn store_latest_diagnostics(
+    /// Store a compile's diagnostics ONLY while the live source is still the
+    /// exact revision that compile read.
+    ///
+    /// `latest_diagnostics` is observable state a reader trusts as describing
+    /// the CURRENT buffer: `get_diagnostics` is a pure cached read, and its LSP
+    /// consumers stamp what they read with the document version they captured.
+    /// An upsert clears the slot precisely because the old diagnostics no
+    /// longer describe the file. So a compile that finishes AFTER a newer edit
+    /// must not write into the state that edit just cleared — v2's parse errors
+    /// landing over v3's cleared slot are then indistinguishable from v3's own,
+    /// and a concurrent publisher that captured v3, read the slot and passed
+    /// its own document-identity fence will publish them stamped `v3`.
+    ///
+    /// This mirrors the `Content`-mode publish decline: compare the live
+    /// identity against the one captured with the compiled bytes and write only
+    /// on a match. `whole_hash` is the right grain — ANY byte moving makes these
+    /// diagnostics describe text no longer in the buffer, including a
+    /// style-only edit that leaves `semantic_hash` alone.
+    ///
+    /// Refusing is safe and never strands a file without diagnostics: every
+    /// path that moves the source also schedules a fresh compile for the
+    /// revision that moved it (the document commit signals the coordinator,
+    /// whose debounced tick compiles), so the newest revision always writes its
+    /// own. A vanished live source declines the same way.
+    ///
+    /// Returns whether the write landed.
+    pub(crate) fn store_latest_diagnostics_if_source_unmoved(
         &self,
         canonical_id: &str,
         profile_hash: u64,
+        compiled_whole_hash: Hash16,
         diagnostics: DiagnosticsSnapshot,
-    ) {
-        if let Some(mut cc) = self.compile_cache().get_mut(canonical_id) {
-            cc.latest_diagnostics.insert(profile_hash, diagnostics);
-            cc.diagnostics_generation += 1;
+    ) -> bool {
+        // The identity check runs INSIDE the compile-cache entry guard, with
+        // the write, and that is what makes it a fence rather than a hint.
+        // Checked before acquiring the entry it would be TOCTOU: this compile
+        // could observe its own revision, the upserting edit could then take
+        // the entry and clear, and this write would land after that clear.
+        //
+        // Holding the entry across both closes it because the two orderings
+        // inside `upsert` are fixed: the scheduler source commits
+        // (`submit_batch_atomic` + `wait_batch`) BEFORE the compile-cache
+        // clear takes this same entry. So under this guard, "the scheduler
+        // still reports the compiled hash" implies the clear for any newer
+        // revision has not run yet — and it necessarily runs after this write,
+        // which erases it. The only other order, the clear having already run,
+        // means the scheduler moved first and the check declines.
+        let Some(mut cc) = self.compile_cache().get_mut(canonical_id) else {
+            return false;
+        };
+        let live_whole_hash = self
+            .scheduler
+            .try_get_source(canonical_id)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|live_hd| live_hd.parse.whole_hash)
+            });
+        if live_whole_hash != Some(compiled_whole_hash) {
+            return false;
         }
+        cc.latest_diagnostics.insert(profile_hash, diagnostics);
+        cc.diagnostics_generation += 1;
+        true
     }
 
     #[allow(clippy::type_complexity)]
